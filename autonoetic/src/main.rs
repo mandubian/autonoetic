@@ -185,8 +185,11 @@ async fn main() -> anyhow::Result<()> {
             cli::common::AgentCommands::List => {
                 cli::agent::handle_agent_list(&config_path).await?;
             }
-            cli::common::AgentCommands::Bootstrap { from, overwrite } => {
+            cli::common::AgentCommands::Bootstrap { from, overwrite, refresh_models } => {
                 cli::agent::handle_agent_bootstrap(&config_path, from.as_deref(), *overwrite)?;
+                if *refresh_models {
+                    cli::run::refresh_models(&config_path).await?;
+                }
             }
             cli::common::AgentCommands::Alias { command } => {
                 cli::agent::handle_agent_alias(&config_path, command)?;

@@ -22,7 +22,7 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
 
-    let (provider, original_entry, model) = super::model_discovery::interactive_select(&client).await?;
+    let (provider, _original_entry, model, base_url) = super::model_discovery::interactive_select(&client).await?;
 
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(config_dir)?;
@@ -30,9 +30,9 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
     let agents_dir = config_dir.join("agents");
     let agents_dir_str = agents_dir.to_string_lossy();
 
-    let base_url_line = match original_entry.as_str() {
-        "llamacpp" => "\n    base_url: \"http://localhost:8080/v1/chat/completions\"".to_string(),
-        _ => String::new(),
+    let base_url_line = match base_url {
+        Some(ref url) => format!("\n    base_url: \"{}\"", url),
+        None => String::new(),
     };
 
     let config_content = format!(
@@ -121,6 +121,102 @@ fn ensure_bootstrap(config_path: &Path, overwrite: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let agents_dir = &config.agents_dir;
+    anyhow::ensure!(
+        agents_dir.exists(),
+        "Agents directory not found at {}. Run `autonoetic run` first.",
+        agents_dir.display()
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let (provider, original_entry, model, base_url) = match super::model_discovery::interactive_select(&client).await {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("  Model selection skipped ({}). Using current config.", e);
+            return Ok(());
+        }
+    };
+
+    let current = std::fs::read_to_string(config_path).unwrap_or_default();
+
+    let re_provider = regex::Regex::new(r#"(provider:\s*)"[^"]*""#).unwrap();
+    let re_model = regex::Regex::new(r#"(model:\s*)"[^"]*""#).unwrap();
+    let re_base_url = regex::Regex::new(r#"(base_url:\s*)"[^"]*""#).unwrap();
+
+    let mut updated = current.clone();
+    if let Some(cap) = re_provider.captures(&updated) {
+        updated = updated.replacen(&cap[0], &format!("provider: \"{}\"", provider), 1);
+    }
+    if let Some(cap) = re_model.captures(&updated) {
+        updated = updated.replacen(&cap[0], &format!("model: \"{}\"", model), 1);
+    }
+    match (&base_url, re_base_url.captures(&updated)) {
+        (Some(url), Some(cap)) => {
+            updated = updated.replacen(&cap[0], &format!("base_url: \"{}\"", url), 1);
+        }
+        (Some(url), None) => {
+            if let Some(re) = regex::Regex::new(r#"(model:\s*"[^"]*"\s*\n)"#).ok() {
+                updated = re.replace(&updated, format!("${{1}}    base_url: \"{}\"\n", url)).to_string();
+            }
+        }
+        (None, Some(_)) => {}
+        (None, None) => {}
+    }
+    if updated != current {
+        std::fs::write(config_path, &updated)?;
+        eprintln!("  Config updated: provider={}, model={}", provider, model);
+    } else {
+        eprintln!("  Config unchanged: provider={}, model={}", provider, model);
+    }
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+
+    let mut patched = 0usize;
+    let mut unchanged = 0usize;
+    for entry in std::fs::read_dir(&config.agents_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let skill_path = entry.path().join("SKILL.md");
+        if !skill_path.exists() {
+            continue;
+        }
+        let agent_dir_name = entry.file_name().to_string_lossy().to_string();
+        let content = std::fs::read_to_string(&skill_path)?;
+        if let Some(patched_content) = super::agent::apply_llm_preset_to_skill(
+            &content, &config, &agent_dir_name,
+        ) {
+            std::fs::write(&skill_path, &patched_content)?;
+            patched += 1;
+            eprintln!("  Patched model for '{}'", agent_dir_name);
+        } else {
+            unchanged += 1;
+        }
+    }
+
+    if patched > 0 {
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+        let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
+        eprintln!(
+            "  Models refreshed: {} patched, {} unchanged, {} new revisions.",
+            patched, unchanged, activated
+        );
+    } else {
+        eprintln!(
+            "  All agents already use the configured model ({} checked).",
+            patched + unchanged
+        );
+    }
+    Ok(())
+}
+
 pub async fn handle_run(
     config_override: Option<&str>,
     args: &super::common::RunArgs,
@@ -132,6 +228,9 @@ pub async fn handle_run(
 
     ensure_config(&config_path).await?;
     ensure_bootstrap(&config_path, args.overwrite)?;
+    if args.refresh_models {
+        refresh_models(&config_path).await?;
+    }
 
     if std::env::var("AUTONOETIC_SHARED_SECRET").is_err() {
         let secret = uuid::Uuid::new_v4().to_string();
