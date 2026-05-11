@@ -178,7 +178,11 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
                 updated = re.replace(&updated, format!("${{1}}    base_url: \"{}\"\n", url)).to_string();
             }
         }
-        (None, Some(_)) => {}
+        (None, Some(_)) => {
+            if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\s*\n?"#).ok() {
+                updated = re.replace(&updated, "").to_string();
+            }
+        }
         (None, None) => {}
     }
     if updated != current {
