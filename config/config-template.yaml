@@ -242,6 +242,18 @@ retention:
   execution_traces_days: 30
   causal_events_days: 90
 
+# ── Resource Reclamation ──────────────────────────────────────────────
+# Idempotent garbage collection for content blobs, old revisions,
+# expired memories, orphaned sessions, and stale scheduled jobs.
+# Disabled by default; enable with caution.
+#reclamation:
+#  enabled: true
+#  min_interval_secs: 86400              # daily at most
+#  content_blob_max_age_days: 90
+#  archived_revision_max_age_days: 180
+#  orphaned_session_max_age_days: 30
+#  stale_job_max_age_days: 60
+
 # ── Post-Session Digest ───────────────────────────────────────────────
 # LLM summarization + memory extraction after sessions complete.
 # Uncomment to enable.

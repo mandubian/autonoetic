@@ -21,6 +21,7 @@ pub mod decision;
 pub mod eval_runner;
 pub mod gateway_store;
 pub mod hooks;
+pub mod reclamation;
 pub mod runner;
 pub mod signal;
 pub mod store;
@@ -250,6 +251,24 @@ async fn run_scheduler_tick_at(
     // Orphan-child reaper: cancel children of terminated parent sessions (R+12)
     if let Err(e) = reap_orphaned_sessions(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to reap orphaned sessions");
+    }
+
+    // Resource reclamation sweep: garbage collect content blobs, old revisions,
+    // expired memories, orphaned sessions, and stale scheduled jobs.
+    if let Some(store) = execution.gateway_store() {
+        let reclamation_cfg = &config.reclamation;
+        if reclamation_cfg.enabled {
+            let gateway_dir = crate::execution::gateway_root_dir(&config);
+            let now = Utc::now();
+            if let Err(e) = crate::scheduler::reclamation::run_reclamation_sweep(
+                &gateway_dir,
+                store.as_ref(),
+                reclamation_cfg,
+                &now,
+            ) {
+                tracing::warn!(error = %e, "Resource reclamation sweep failed");
+            }
+        }
     }
 
     // Resume standalone sessions whose user interaction has been answered

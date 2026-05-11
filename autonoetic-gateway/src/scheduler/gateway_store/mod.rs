@@ -13,6 +13,7 @@ mod messages;
 mod migrate;
 mod notifications;
 mod observability;
+pub(crate) mod reclamation;
 mod row_decode;
 mod runtime_control;
 mod scheduled_jobs;
