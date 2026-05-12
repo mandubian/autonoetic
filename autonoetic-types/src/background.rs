@@ -561,6 +561,27 @@ pub struct BackgroundState {
     pub processed_approval_request_ids: Vec<String>,
 }
 
+/// A code excerpt from an artifact file shown in an approval card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CodeExcerpt {
+    pub file_name: String,
+    pub content: String,
+    pub language: String,
+    pub size_bytes: usize,
+    pub truncated: bool,
+    pub truncated_from_bytes: Option<usize>,
+}
+
+/// Risk summary derived from RemoteAccessAnalyzer + auditor record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RiskSummary {
+    pub host_count: usize,
+    pub protocol_mix: Vec<String>,
+    pub dangerous_patterns: Vec<String>,
+    pub auditor_verdict: Option<String>,
+    pub auditor_findings_link: Option<String>,
+}
+
 /// A request for human approval. The `action` describes what is being approved: either a
 /// schedulable action (WriteFile, SandboxExec) that the scheduler will run after approval, or
 /// an approval-only subject (AgentInstall) where the actual install is done by the caller
@@ -606,6 +627,14 @@ pub struct ApprovalRequest {
     pub min_dwell_ms: Option<i64>,
     #[serde(default)]
     pub confirm_phrase: Option<String>,
+    /// Code excerpts from the artifact being approved (Phase 1 operator inspection).
+    /// Populated when the approval is for a sandbox/artifact exec with an artifact ref.
+    /// Empty for approvals where no artifact is involved.
+    #[serde(default)]
+    pub code_excerpts: Option<Vec<CodeExcerpt>>,
+    /// Risk summary derived from RemoteAccessAnalyzer + auditor promotion record.
+    #[serde(default)]
+    pub risk_summary: Option<RiskSummary>,
 }
 
 impl ApprovalRequest {

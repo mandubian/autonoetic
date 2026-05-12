@@ -451,6 +451,51 @@ pub async fn handle_gateway_approvals(
                             }
                         }
                     }
+
+                    // Code excerpts for operator inspection.
+                    if let Some(ref excerpts) = a.code_excerpts {
+                        println!("\n--- Code Excerpts ({} file(s)) ---", excerpts.len());
+                        for exc in excerpts {
+                            println!("  File: {}  ({} bytes{})",
+                                exc.file_name,
+                                exc.size_bytes,
+                                if exc.truncated {
+                                    format!(", truncated from {}", exc.truncated_from_bytes.unwrap_or(0))
+                                } else { String::new() },
+                            );
+                            if exc.content.len() <= 1500 {
+                                println!("  ```{}", exc.language);
+                                for ln in exc.content.lines() {
+                                    println!("  {}", ln);
+                                }
+                                println!("  ```");
+                            } else {
+                                println!("  (content too large, use the interactive TUI to view)");
+                            }
+                            println!();
+                        }
+                    }
+                    if let Some(ref risk) = a.risk_summary {
+                        println!("--- Risk Summary ---");
+                        if risk.host_count > 0 {
+                            println!("  Remote hosts: {}", risk.host_count);
+                        }
+                        if !risk.protocol_mix.is_empty() {
+                            println!("  Protocols: {}", risk.protocol_mix.join(", "));
+                        }
+                        if !risk.dangerous_patterns.is_empty() {
+                            println!("  Dangerous patterns:");
+                            for p in &risk.dangerous_patterns {
+                                println!("    - {}", p);
+                            }
+                        }
+                        if let Some(ref v) = risk.auditor_verdict {
+                            println!("  Auditor verdict: {}", v);
+                        }
+                        if let Some(ref link) = risk.auditor_findings_link {
+                            println!("  Auditor findings: {}", link);
+                        }
+                    }
                 }
             }
         }
@@ -694,6 +739,7 @@ async fn run_interactive_approvals(
 
     let mut items: Vec<ApprovalRequest> = approvals;
     let mut state = ListState::default();
+    let mut show_code_fullscreen = false;
     state.select(Some(0));
     let mut status_msg = String::new();
     let mut done = false;
@@ -744,7 +790,7 @@ async fn run_interactive_approvals(
                 .split(area);
 
             let title = format!(
-                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  ?: ask  m: note  A: ask-agent  q: quit ",
+                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  ?: ask  m: note  A: ask-agent  c: code  q: quit ",
                 items.len()
             );
             let title_bar = Paragraph::new(Line::from(Span::styled(
@@ -1166,6 +1212,56 @@ async fn run_interactive_approvals(
                     }
                 }
 
+                // Code excerpts for operator inspection.
+                if let Some(ref excerpts) = items[idx].code_excerpts {
+                    if !excerpts.is_empty() {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            format!("Code Excerpts ({} file(s)) — press C to toggle", excerpts.len()),
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        )));
+                        for exc in excerpts {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {} ({} bytes{})",
+                                    exc.file_name,
+                                    exc.size_bytes,
+                                    if exc.truncated {
+                                        format!(", truncated from {}", exc.truncated_from_bytes.unwrap_or(0))
+                                    } else { String::new() },
+                                ),
+                                Style::default().fg(Color::Yellow),
+                            )));
+                            // Show code inline if small; otherwise note the C keybinding.
+                            if exc.content.len() <= 500 {
+                                for ln in exc.content.lines() {
+                                    lines.push(Line::from(Span::raw(format!("    {}", ln))));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(ref risk) = items[idx].risk_summary {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "Risk Summary:",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )));
+                    if risk.host_count > 0 {
+                        lines.push(Line::from(format!("  Hosts: {}", risk.host_count)));
+                    }
+                    if !risk.dangerous_patterns.is_empty() {
+                        for p in &risk.dangerous_patterns {
+                            lines.push(Line::from(Span::styled(
+                                format!("  ⚠ {}", p),
+                                Style::default().fg(Color::Red),
+                            )));
+                        }
+                    }
+                    if let Some(ref v) = risk.auditor_verdict {
+                        lines.push(Line::from(format!("  Auditor: {}", v)));
+                    }
+                }
+
                 let selected_id = items[idx].request_id.clone();
                 if last_selected != Some(idx) {
                     if let Ok(msgs) = gateway_store.get_gate_messages(&selected_id) {
@@ -1215,6 +1311,43 @@ async fn run_interactive_approvals(
                 .wrap(Wrap { trim: false });
             f.render_widget(detail, chunks[2]);
 
+            // Fullscreen code view overlay (toggled with C).
+            if show_code_fullscreen {
+                if let Some(idx) = state.selected() {
+                    if let Some(ref excerpts) = items[idx].code_excerpts {
+                        let mut code_lines: Vec<Line> = Vec::new();
+                        code_lines.push(Line::from(Span::styled(
+                            "Code View (press C to close)",
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        )));
+                        code_lines.push(Line::from(""));
+                        for exc in excerpts {
+                            code_lines.push(Line::from(Span::styled(
+                                format!("── {} ({} bytes{}) ──",
+                                    exc.file_name,
+                                    exc.size_bytes,
+                                    if exc.truncated {
+                                        format!(", truncated from {}", exc.truncated_from_bytes.unwrap_or(0))
+                                    } else { String::new() },
+                                ),
+                                Style::default().fg(Color::Yellow),
+                            )));
+                            for ln in exc.content.lines() {
+                                code_lines.push(Line::from(Span::raw(format!("  {}", ln))));
+                            }
+                            code_lines.push(Line::from(""));
+                        }
+                        let code_widget = Paragraph::new(code_lines)
+                            .block(Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Magenta))
+                                .title(" Code "))
+                            .wrap(Wrap { trim: false });
+                        f.render_widget(code_widget, f.area());
+                    }
+                }
+            }
+
             let status = if tui_mode == TuiMode::AskQuestion {
                 // Show the question input prompt in the status bar
                 let cursor_input = format!("{}_", question_input);
@@ -1239,7 +1372,7 @@ async fn run_interactive_approvals(
                 ])
             } else if status_msg.is_empty() {
                 Line::from(Span::styled(
-                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  ?: ask  m: note  A: ask-agent  q: quit",
+                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  ?: ask  m: note  A: ask-agent  c: code  q: quit",
                     Style::default().fg(Color::DarkGray),
                 ))
             } else {
@@ -1416,6 +1549,14 @@ async fn run_interactive_approvals(
                             tui_mode = TuiMode::AskAgent;
                             ask_agent_input.clear();
                             ask_agent_status.clear();
+                            status_msg.clear();
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        show_code_fullscreen = !show_code_fullscreen;
+                        if show_code_fullscreen {
+                            status_msg = "Code fullscreen — press c to close".to_string();
+                        } else {
                             status_msg.clear();
                         }
                     }

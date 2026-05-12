@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 31;
+const SCHEMA_VERSION_LATEST: i64 = 32;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -516,6 +516,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_user_interaction_resume_claim_v30(conn)?;
 
     apply_gate_messages_v31(conn)?;
+    apply_approval_code_excerpts_v32(conn)?;
 
     Ok(())
 }
@@ -1753,6 +1754,32 @@ fn apply_gate_messages_v31(conn: &mut Connection) -> Result<()> {
         params![
             31_i64,
             "gate_messages",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_approval_code_excerpts_v32(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 32 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE approvals ADD COLUMN code_excerpts TEXT;
+         ALTER TABLE approvals ADD COLUMN risk_summary TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            32_i64,
+            "approval_code_excerpts",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

@@ -426,7 +426,21 @@ impl NativeTool for ArtifactPrepareTool {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
+
+        // Populate code excerpts + risk summary for operator inspection.
+        request.code_excerpts =
+            crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
+        let artifact_store_ref = crate::ArtifactStore::new(gw_dir).ok();
+        request.risk_summary =
+            crate::runtime::code_excerpts::build_risk_summary(
+                Some(&targets),
+                None,
+                &artifact_id,
+                artifact_store_ref.as_ref(),
+            );
 
         store.create_approval(&mut request)?;
 

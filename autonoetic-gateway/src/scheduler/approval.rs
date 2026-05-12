@@ -1303,6 +1303,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut req).unwrap();
 
@@ -1349,6 +1351,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store
             .create_approval(&mut req("apr-a", "root-a/coder-1"))
@@ -1401,6 +1405,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store
             .create_approval(&mut req("apr-second", "2020-01-02T00:00:00Z"))
@@ -1435,6 +1441,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut install).unwrap();
 
@@ -1659,6 +1667,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut request).unwrap();
 
@@ -1779,6 +1789,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut request).unwrap();
 
@@ -1850,6 +1862,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut request).unwrap();
 

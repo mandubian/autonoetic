@@ -623,6 +623,8 @@ impl GateService {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
 
         self.store.create_approval(&mut approval_req)?;
@@ -673,6 +675,8 @@ impl GateService {
                 similarity_score: None,
                 min_dwell_ms: None,
                 confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
             },
             kind_label,
             req.summary.clone(),
@@ -889,6 +893,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
 
         assert!(svc.host_level_covers(&approval, &["localhost".to_string()]));
@@ -921,6 +927,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
 
         assert!(svc.exact_payload_covers(&approval, &action));
@@ -1096,6 +1104,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut approval)?;
         store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
@@ -1160,6 +1170,8 @@ mod tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut approval)?;
         store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;

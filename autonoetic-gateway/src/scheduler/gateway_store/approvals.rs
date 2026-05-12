@@ -33,13 +33,21 @@ impl GatewayStore {
         }
 
         let action_payload = serde_json::to_string(&request.action)?;
+        let code_excerpts_json = request
+            .code_excerpts
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let risk_summary_json = request
+            .risk_summary
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         conn.execute(
             "INSERT INTO approvals (
                 request_id, agent_id, session_id, root_session_id, workflow_id, task_id,
                 action_type, action_payload, reason, evidence_ref, status, created_at,
                 approval_level, similar_to_request_id, similarity_score,
-                min_dwell_ms, confirm_phrase
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                min_dwell_ms, confirm_phrase, code_excerpts, risk_summary
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 request.request_id,
                 request.agent_id,
@@ -58,7 +66,27 @@ impl GatewayStore {
                 request.similarity_score,
                 request.min_dwell_ms,
                 request.confirm_phrase,
+                code_excerpts_json,
+                risk_summary_json,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_approval_code_excerpts(
+        &self,
+        request_id: &str,
+        code_excerpts: Option<&[autonoetic_types::background::CodeExcerpt]>,
+        risk_summary: Option<&autonoetic_types::background::RiskSummary>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let code_json = code_excerpts
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let risk_json = risk_summary
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        conn.execute(
+            "UPDATE approvals SET code_excerpts = ?1, risk_summary = ?2 WHERE request_id = ?3",
+            params![code_json, risk_json, request_id],
         )?;
         Ok(())
     }
@@ -83,7 +111,7 @@ impl GatewayStore {
         request_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         conn.query_row(
-            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, similar_to_request_id, similarity_score, min_dwell_ms, confirm_phrase FROM approvals WHERE request_id = ?1",
+            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, similar_to_request_id, similarity_score, min_dwell_ms, confirm_phrase, code_excerpts, risk_summary FROM approvals WHERE request_id = ?1",
             params![request_id],
             |row| {
                 let action_payload: String = row.get(3)?;
@@ -99,6 +127,12 @@ impl GatewayStore {
                 })?;
                 let level_str: String = row.get(13)?;
                 let approval_level: ApprovalLevel = serde_json::from_str(&level_str).unwrap_or(ApprovalLevel::Operator);
+                let code_excerpts_json: Option<String> = row.get(19)?;
+                let risk_summary_json: Option<String> = row.get(20)?;
+                let code_excerpts = code_excerpts_json
+                    .and_then(|s| serde_json::from_str::<Vec<autonoetic_types::background::CodeExcerpt>>(&s).ok());
+                let risk_summary = risk_summary_json
+                    .and_then(|s| serde_json::from_str::<autonoetic_types::background::RiskSummary>(&s).ok());
                 Ok(ApprovalRequest {
                     request_id: row.get(0)?,
                     agent_id: row.get(1)?,
@@ -119,6 +153,8 @@ impl GatewayStore {
                     similarity_score: row.get(16)?,
                     min_dwell_ms: row.get(17)?,
                     confirm_phrase: row.get(18)?,
+                    code_excerpts,
+                    risk_summary,
                 })
             },
         ).optional().map_err(Into::into)

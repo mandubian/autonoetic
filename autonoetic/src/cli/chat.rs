@@ -4275,6 +4275,37 @@ fn format_store_approval_card(
             }
         }
     }
+    if let Some(ref excerpts) = req.code_excerpts {
+        if !excerpts.is_empty() {
+            lines.push(String::new());
+            lines.push(format!("Code files ({}):", excerpts.len()));
+            for exc in excerpts {
+                let size = if exc.truncated {
+                    format!(" ({} bytes, truncated)", exc.size_bytes)
+                } else {
+                    format!(" ({} bytes)", exc.size_bytes)
+                };
+                lines.push(format!("  {}{}", exc.file_name, size));
+            }
+            lines.push("  (use `gateway approvals show <id>` or the interactive TUI to view code)".to_string());
+        }
+    }
+    if let Some(ref risk) = req.risk_summary {
+        let mut risk_parts: Vec<String> = Vec::new();
+        if risk.host_count > 0 {
+            risk_parts.push(format!("{} host(s)", risk.host_count));
+        }
+        if !risk.dangerous_patterns.is_empty() {
+            risk_parts.push(format!("{} risk(s)", risk.dangerous_patterns.len()));
+        }
+        if let Some(ref v) = risk.auditor_verdict {
+            risk_parts.push(format!("auditor: {}", v));
+        }
+        if !risk_parts.is_empty() {
+            lines.push(String::new());
+            lines.push(format!("Risk: {}", risk_parts.join(" | ")));
+        }
+    }
     let inferred_rules = infer_rules_for_action(&req.action);
     if !inferred_rules.is_empty() {
         lines.push(String::new());

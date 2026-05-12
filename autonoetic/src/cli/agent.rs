@@ -527,6 +527,7 @@ fn admin_revision_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+        sandbox_network: Default::default(),
     }
 }
 
@@ -1779,6 +1780,7 @@ pub fn handle_agent_import_skill(
         allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
         agentskills_import,
         compression: parsed_manifest.compression.clone(),
+        sandbox_network: parsed_manifest.sandbox_network,
     };
 
     let agents_dir = config_path

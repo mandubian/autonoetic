@@ -180,6 +180,8 @@ pub async fn handle_due_wake(
                     similarity_score: None,
                     min_dwell_ms: None,
                     confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
                 };
                 crate::scheduler::approval_hardening::enrich_request(&mut request);
                 if let Some(store) = execution.gateway_store() {

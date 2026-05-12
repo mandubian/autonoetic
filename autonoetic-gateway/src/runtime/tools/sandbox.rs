@@ -1629,6 +1629,8 @@ impl NativeTool for SandboxExecTool {
                                         similarity_score: None,
                                         min_dwell_ms: None,
                                         confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
                                     },
                                     "sandbox_exec",
                                     summary.clone(),
@@ -1685,6 +1687,8 @@ impl NativeTool for SandboxExecTool {
                                         similarity_score: None,
                                         min_dwell_ms: None,
                                         confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
                                     },
                                     "sandbox_exec",
                                     summary.clone(),
@@ -1722,6 +1726,16 @@ impl NativeTool for SandboxExecTool {
                                     "approval": approval
                                 }))
                                 .map_err(Into::into);
+
+                                // Populate code excerpts for operator inspection (Phase 1).
+                                if let Some(ref art_id) = explicit_mount_artifact_id {
+                                    if let Some(gw_dir) = gateway_dir {
+                                        let excerpts = crate::runtime::code_excerpts::build_code_excerpts(art_id, gw_dir);
+                                        let _ = store.set_approval_code_excerpts(
+                                            &gate_id, excerpts.as_deref(), None,
+                                        );
+                                    }
+                                }
                             }
                             other => {
                                 tracing::warn!(
@@ -2004,6 +2018,8 @@ impl NativeTool for SandboxExecTool {
                                                 similarity_score: None,
                                                 min_dwell_ms: None,
                                                 confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
                                             },
                                             "layer_mount",
                                             summary.clone(),
@@ -2779,6 +2795,8 @@ mod approval_binding_tests {
             similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         assert!(approved_requests_cover_targets(
             &[req.clone()],

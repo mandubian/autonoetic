@@ -608,7 +608,22 @@ impl NativeTool for ArtifactExecTool {
                         similarity_score: None,
                         min_dwell_ms: None,
                         confirm_phrase: None,
+            code_excerpts: None,
+                        risk_summary: None,
                     };
+                    // Populate code excerpts + risk summary for operator inspection.
+                    if let Some(gw_dir) = gateway_dir {
+                        request.code_excerpts =
+                            crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
+                        let artifact_store = crate::ArtifactStore::new(gw_dir).ok();
+                        request.risk_summary =
+                            crate::runtime::code_excerpts::build_risk_summary(
+                                Some(&concrete_targets),
+                                None,
+                                &artifact_id,
+                                artifact_store.as_ref(),
+                            );
+                    }
                     if let Some(store) = &gateway_store {
                         store.create_approval(&mut request)?;
                     } else {

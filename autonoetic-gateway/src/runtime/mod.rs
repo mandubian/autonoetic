@@ -10,6 +10,7 @@ pub mod artifact;
 pub mod budget_tracker;
 pub mod capability_inference;
 pub mod checkpoint;
+pub mod code_excerpts;
 pub mod compression;
 pub mod compression_quality;
 pub mod content_store;
