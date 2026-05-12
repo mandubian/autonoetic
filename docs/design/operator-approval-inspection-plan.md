@@ -4,7 +4,7 @@
 phases that can ship independently.
 
 **Refs:**
-- Issue to track this work (TBD on creation).
+- Tracking issue: **#186**.
 - Constitution: `R-2.1`, `R-2.18`, `R-2.19`, `R++4`, `Ri-0.1`,
   `Ri-0.5`.
 - `docs/design/human-gate-unification-plan.md` (gate enrichment
