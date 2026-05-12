@@ -2084,6 +2084,7 @@ impl NativeTool for SandboxExecTool {
             .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
 
         let mut layer_python_paths: Vec<String> = Vec::new();
+        let mut artifact_fixture_root: Option<std::path::PathBuf> = None;
         let session_content_mounts = if let Some(artifact_id) = effective_artifact_id {
             let Some(gw_dir) = gateway_dir else {
                 return Err(tagged::Tagged::resource(anyhow::anyhow!(
@@ -2099,6 +2100,7 @@ impl NativeTool for SandboxExecTool {
                 .join("autonoetic_artifact")
                 .join(artifact_id.replace('/', "_"));
             std::fs::create_dir_all(&temp_base)?;
+            artifact_fixture_root = Some(temp_base.clone());
 
             for (name, content) in resolved_files {
                 let temp_file = temp_base.join(&name);
@@ -2259,6 +2261,23 @@ impl NativeTool for SandboxExecTool {
 
         let root_session_id = session_id.map(crate::runtime::content_store::root_session_id);
 
+        // RFC scope 5.2c-advisory: sealed-network proxy for sandbox_exec.
+        // Same wiring as artifact_exec — when the agent's manifest declares
+        // sandbox_network = Sealed/Recording, start the proxy so HTTP clients
+        // inside the sandbox route through it. Uses the artifact's temp dir
+        // as the fixture root when an artifact is mounted; otherwise falls
+        // back to the agent dir (no fixtures → all requests get
+        // unfixtured_target).
+        let sealed_proxy_fixture_root = artifact_fixture_root
+            .unwrap_or_else(|| std::path::PathBuf::from(agent_dir_str));
+        let sealed_proxy =
+            crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
+                manifest.sandbox_network,
+                sealed_proxy_fixture_root,
+                &mut extra_env,
+                &mut overrides,
+            )?;
+
         // Merge runtime.lock mounts into session content mounts
         let mut all_mounts = session_content_mounts;
         if !runtime_lock_mounts.is_empty() {
@@ -2295,6 +2314,7 @@ impl NativeTool for SandboxExecTool {
 
         let _sandbox_pid_guard = sandbox_exec_pid_guard(&runner, run_context);
         let output = runner.process.wait_with_output()?;
+        crate::runtime::sealed_network_proxy::shutdown_sealed_proxy(sealed_proxy);
         let ok = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

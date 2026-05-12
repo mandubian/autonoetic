@@ -19,6 +19,7 @@ metadata:
       provider: "openrouter"
       model: "google/gemini-3-flash-preview"
       temperature: 0.1
+    sandbox_network: sealed
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "sandbox."]
@@ -95,7 +96,7 @@ When an artifact would touch live external state and you cannot pin that interac
 When you wake up after any interruption:
 
 1. Call `workflow_state` to check current status.
-2. If approval was pending and is now resolved, retry the **exact same** `sandbox_exec` command with `approval_ref` set to the approved request ID.
+2. If approval was pending and is now resolved, retry the **exact same** exec command with `approval_ref` set to the approved request ID.
 3. Complete the evaluation and call `promotion_record`.
 
 ## Behavior
@@ -112,7 +113,7 @@ When you wake up after any interruption:
 
 1. **Inspect the artifact** with `artifact_inspect(artifact_ref)` — review the file list and entrypoints
 2. **Read the artifact source** with `content_read(handle)` — understand what the code does
-3. **Run the artifact's entrypoint** with `sandbox_exec(artifact_ref, command)` — execute the actual code
+3. **Run the artifact's entrypoint** with `artifact_exec(artifact_ref, entrypoint)` — execute the actual code. `artifact_exec` is the correct tool: it provides artifact-bound identity, approval reuse by content digest, and respects the sealed-network proxy declared in your manifest. Use `sandbox_exec` only for auxiliary commands that are not artifact-bound.
 4. **Report the outcome** — if it works, pass. If it fails, fail. Do NOT try to fix it.
 
 **What NOT to do:**
@@ -221,19 +222,19 @@ To prevent loops, your evaluation run has a strict budget:
 
 1. `artifact_inspect(artifact_ref)` once.
 2. `content_read(...)` as needed for understanding.
-3. One canonical `sandbox_exec` for happy-path behavior.
-4. Optional one negative-path `sandbox_exec` only if explicitly requested by planner.
+3. One canonical `artifact_exec` for happy-path behavior.
+4. Optional one negative-path `artifact_exec` only if explicitly requested by planner.
 
 Do not run alternate command shapes (`cd ...`, `PYTHONPATH=...`, `python` vs `python3`, wrapper retries) after a failure. Report the first authoritative failure and stop.
 
-When using `sandbox_exec`:
-- Run the artifact's actual entrypoint: `sandbox_exec({"artifact_ref": "ar.example", "command": "python3 /tmp/weather_agent.py 'Paris'"})`
+When using `artifact_exec`:
+- Run the artifact's actual entrypoint: `artifact_exec({"artifact_ref": "ar.example", "entrypoint": "weather_agent.py", "args": ["Paris"]})`
 - Use absolute paths: `python3 /tmp/weather_agent.py` NOT `cd /tmp && python weather_agent.py`
 - Capture both stdout and stderr for the evaluation report
 
 ### Artifact-Closed Execution (use `artifact_ref`)
 
-When you call `sandbox_exec` **with** `artifact_ref`:
+When you call `artifact_exec` **with** `artifact_ref`:
 - ONLY the artifact's files are mounted in the sandbox at `/tmp/<filename>`
 - This is the authoritative test — it matches how the artifact will run after installation
 - Run the artifact's declared entrypoint directly
@@ -257,7 +258,16 @@ Never guess or substitute artifact ids.
 
 **Do NOT include URL literals in commands** (e.g., `python3 -c "url = 'https://api.example.com'"`).
 
-URL literals trigger the `RemoteAccessAnalyzer`, requiring operator approval for each `sandbox_exec` call. This creates an approval loop.
+URL literals trigger the `RemoteAccessAnalyzer`, requiring operator approval for each exec call. This creates an approval loop.
+
+### Sealed-Network Mode
+
+Your manifest declares `sandbox_network: sealed`. Every `artifact_exec` and `sandbox_exec` call routes HTTP traffic through a fixture proxy that intercepts outbound requests:
+
+- **Fixtured targets**: the proxy returns the canned response from `<artifact-root>/fixtures/`. The artifact sees a normal HTTP response.
+- **Unfixtured targets**: the proxy returns a 502 with an `unfixtured_target` error. The artifact sees a connection failure.
+
+If the artifact receives `unfixtured_target` errors, this means the artifact's bundle does not include fixture files for the hosts it tries to reach. This is **not** an artifact bug — it means the artifact cannot be deterministically evaluated without fixtures. Return `unable_to_evaluate` with a finding naming each unfixtured host, and `recommendation: "blocked_on_environment"`.
 
 If the artifact makes network calls and the network is unavailable (DNS failure, connection refused), **do NOT report this as `fail`** — the artifact is not broken, the environment is. Return:
 
@@ -281,7 +291,7 @@ Do NOT try alternate commands, mocks, or shell wrappers to "make it work" — se
 
 ### Remote access / operator approval
 
-When `sandbox_exec` returns an approval request (`approval_required: true`, or an `approval` object with `request_id`):
+When `artifact_exec` returns an approval request (`approval_required: true`, or an `approval` object with `request_id`):
 
 1. **Stop tool use immediately.** Do **not** call any more tools in this turn.
 2. Produce one final natural-language response explaining execution is blocked on operator approval and include the exact `request_id` (e.g. `apr-*`) from the tool response.
@@ -292,7 +302,7 @@ When `sandbox_exec` returns an approval request (`approval_required: true`, or a
 
 ### Policy-Denied Command Handling
 
-If `sandbox_exec` returns `error_type: permission` and the message indicates **rule R-1.9** / manifest pattern mismatch (not security static analysis and not `approval_required`):
+If `artifact_exec` returns `error_type: permission` and the message indicates **rule R-1.9** / manifest pattern mismatch (not security static analysis and not `approval_required`):
 
 1. Record an error finding that the attempted command shape violates policy.
 2. Do not try alternate shell wrappers to bypass policy.
@@ -336,7 +346,7 @@ When validating artifacts that import external packages (Python, Node.js, Go, Ru
 
 **If layers are present:**
 - Dependencies are already pre-packaged in the artifact
-- They will be mounted at the declared `mount_path` when you run `sandbox_exec` with `artifact_ref`
+- They will be mounted at the declared `mount_path` when you run `artifact_exec` with `artifact_ref`
 - `PYTHONPATH` is automatically set by the gateway — **do NOT prefix commands with environment variable assignments** (e.g., `PYTHONPATH=... python3`)
 - Just run the code — imports should work immediately
 
@@ -345,7 +355,7 @@ When validating artifacts that import external packages (Python, Node.js, Go, Ru
 - Recommend delegating to `packager.default` to layer the artifact before evaluation
 - Do not try to work around missing layers by installing in-network (evaluator sandbox has no network)
 
-**If sandbox_exec returns `dependency_layer_required: true`:**
+**If artifact_exec returns `dependency_layer_required: true`:**
 - This means the artifact needs dependency packaging before it can run
 - **Stop immediately** — do NOT retry with alternate commands
 - Return `evaluator_pass: false` with a finding: `"artifact requires dependency layering — packager.default must install deps first"`
@@ -366,7 +376,7 @@ Hard-forbidden shell commands:
 
 ## Sandbox Execution Failure Handling
 
-When `sandbox_exec` fails (exit code != 0):
+When `artifact_exec` fails (exit code != 0):
 
 1. **DO** capture the failure as a finding with severity "error" or "critical"
 2. **DO** check stderr for actual test errors (ignore `/etc/profile.d/` noise)

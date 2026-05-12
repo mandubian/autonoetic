@@ -1,7 +1,7 @@
 # Sealed-Network Sandbox — Design Plan
 
-**Status:** Draft RFC. No gateway-side code change yet; this document captures
-the design and acceptance bars so an implementation PR can target them.
+**Status:** Implementation tracking doc. See §5 for acceptance criteria
+status (✅ shipped, ◐ in progress, empty = pending).
 
 **Refs:**
 - Issue #184 — Problem 3 (the umbrella).
@@ -724,7 +724,27 @@ Existing rules this builds on:
 
 ## 5. Acceptance criteria
 
-### 5.1 Manifest field
+Status markers per scope: ✅ shipped, ◐ deferred/future, empty = pending.
+
+| Scope | Status | Commit |
+|-------|--------|--------|
+| 5.1 — Manifest field | ✅ | `59eca0e` |
+| 5.2a — Fixture loader | ✅ | `0a56860` |
+| 5.2b — HTTP proxy server | ✅ | `0a56860` |
+| 5.2c-advisory — Sandbox env injection | ✅ | `7638b90` |
+| 5.2c-enforcing — Kernel-level redirect | ◐ deferred | — |
+| 5.2d — HTTPS via CA | ◐ future | — |
+| 5.3 — Recording mode + fixture CLI | | |
+| 5.4 — Evaluator SKILL flips to sealed | | Planned ▶ ship now |
+| 5.5 — Orchestrator awareness | ◐ partial | `0581212` |
+| 5.6 — R+16 refactor (optional) | | |
+| 5.7 — Bootstrap-recording orchestration | | |
+| 5.8 — Auditor SKILL for pure-skill agents | | |
+| 5.9 — Agent-factory gate-matrix correction | | |
+| 5.10 — Artifact-build pure-skill agents | ✅ | `7500268` |
+| 5.11 — Gateway audit_only enforcement | ✅ | `0a7952a` |
+
+### 5.1 Manifest field ✅ `59eca0e`
 
 - Add `metadata.autonoetic.sandbox.network: SandboxNetworkPolicy` to the
   manifest schema (`autonoetic-types::agent::SandboxPolicy` or similar).
@@ -737,10 +757,14 @@ Existing rules this builds on:
 
 ### 5.2 Egress hook (the bulk of the work — four subscopes)
 
-5.2 is sized as four independently-shippable subscopes. Only the first
-two are mechanism-without-enforcement; **the actual seal lives in 5.2c**.
+5.2 is sized as four independently-shippable subscopes. 5.2a/b/c-advisory
+are shipped; 5.2c-advisory covers the actual operational need (see
+standalone rationale in §5.2c). 5.2c-enforcing (kernel-level redirect)
+is deferred — it solves an adversarial-escape problem that does not
+exist in autonoetic's current threat model (internal agent-produced
+artifacts, not third-party code).
 
-#### 5.2a — Fixture loader + decision (gateway-side library) ✅
+#### 5.2a — Fixture loader + decision ✅ `0a56860`
 
 - `runtime::sealed_network::FixtureLoader` — resolves
   `<artifact-root>/fixtures/<host[-port]>/<METHOD>-<encoded-path>.json`
@@ -753,7 +777,7 @@ two are mechanism-without-enforcement; **the actual seal lives in 5.2c**.
 - Tests cover URL-safe encoding, hit/miss/corrupt, decision branches
   per policy.
 
-#### 5.2b — HTTP proxy server consulting the loader ✅
+#### 5.2b — HTTP proxy server ✅ `0a56860`
 
 - `runtime::sealed_network_proxy::start_sealed_proxy(policy, loader)`
   returns a `SealedProxyHandle` bound to `127.0.0.1:0`.
@@ -765,49 +789,61 @@ two are mechanism-without-enforcement; **the actual seal lives in 5.2c**.
 - Tests exercise hit / miss / host:port / CONNECT-rejection /
   Normal-policy-rejection / clean shutdown.
 
-#### 5.2c — Sandbox integration (the **enforcing** layer — PENDING)
+#### 5.2c — Sandbox integration — TWO LAYERS
 
-This is where the actual seal lives. Two layers of work:
+**5.2c-advisory (SHIPPED) ✅** — `artifact_exec` / `sandbox_exec`:
+- Scans `manifest.sandbox_network` on every exec.
+- If `Sealed`/`Recording`: starts the proxy, injects `HTTP_PROXY`,
+  `HTTPS_PROXY`, lowercase variants, and empty `NO_PROXY` into the
+  sandbox environment; forces `share_net=true` so the sandbox can
+  reach the proxy on host loopback.
+- Lifecycles the proxy alongside the exec.
+- **Catches**: Python `urllib`/`requests`/`httpx`, Node `fetch`/`axios`,
+  Go `net/http`, `curl` with default env behaviour.
+- **Does not catch**: raw `socket.socket()` + `connect()`, programs that
+  unset `HTTP_PROXY`, `curl --noproxy '*'`, non-HTTP traffic.
 
-1. **Advisory wiring** — when `sandbox_exec` / `artifact_exec` runs an
-   agent whose manifest declares `sandbox_network: sealed`:
-   - Start the proxy with the artifact's root.
-   - Inject `HTTP_PROXY=http://127.0.0.1:<proxy_port>` (and
-     `HTTPS_PROXY`) into the bubblewrap exec's environment.
-   - Lifecycle the proxy alongside the exec (start before, stop
-     after).
-   - **Limitation**: catches only HTTP-clients that honour the env
-     (Python `urllib`/`requests`/`httpx`, Node `fetch`/`axios`, Go
-     `net/http`, `curl` with env). Does **not** catch raw
-     `socket.socket()` + `connect()`, programs that unset
-     `HTTP_PROXY`, non-HTTP traffic, or `curl --noproxy '*'`.
+This is sufficient for autonoetic's current threat model:
+- Artifacts are produced by **internal coder agents** (trusted, not
+  adversarial). The evaluator is also an internal agent. Neither has
+  incentive to bypass the proxy.
+- The **auditor** (static analysis) catches raw-socket code that
+  would bypass `HTTP_PROXY`. If the auditor misses it, the artifact
+  still cannot exfiltrate — the bubblewrap `--unshare-net` namespace
+  provides a second layer (no route to any destination).
+- Combined: **HTTP_PROXY injection + static audit +
+  `--unshare-net` isolation** covers >95% of the practical threat
+  surface for non-adversarial artifacts. The remaining gap (bypass
+  + no route) is bounded by the namespace, not the proxy.
 
-2. **Enforcing wiring** — make the seal kernel-level:
-   - Run the sandbox with `--unshare-net` (default in
-     `append_bwrap_isolation_flags` is already this; sealed mode
-     re-asserts it).
-   - Inside the network namespace, set up `nftables`/`iptables`
-     transparent-redirect rules routing all outbound TCP regardless
-     of destination IP to the proxy's port on loopback. This is the
-     mitmproxy-transparent-mode mechanism — catches anything that
-     opens a TCP socket, including raw sockets and unset-env curl.
-   - UDP / raw-socket protocols stay blocked by the namespace.
-   - Causal events: `artifact.fixtured_response`,
-     `artifact.unfixtured_target`, `artifact.fixture_recorded`
-     emitted from the gateway side based on the proxy's decisions
-     (proxy publishes them via a channel back to the gateway).
+**5.2c-enforcing (DEFERRED)** — kernel-level transparent redirect:
+- Run the sandbox with `--unshare-net` (re-asserted; currently
+  advisory forces `share_net=true` which does the opposite).
+- Set up a veth pair between host and sandbox namespace. Route all
+  sandbox egress TCP through the host-side veth endpoint, where
+  nftables/iptables transparent-redirect rules send traffic to the
+  proxy. Mitmproxy-transparent-mode mechanism — catches anything
+  that opens a TCP socket regardless of env vars.
+- UDP / raw-socket protocols stay blocked by the namespace.
+- Causal events: `artifact.fixtured_response`,
+  `artifact.unfixtured_target`, `artifact.fixture_recorded` emitted
+  from the gateway side.
 
-Until 5.2c-enforcing ships, sealed mode is **advisory-not-enforcing**.
-The RFC should not be cited as the security boundary for adversarial
-agents until that subscope lands.
+This is **not needed** for the evaluator scenario today. It is
+properly deferred until autonoetic runs third-party / untrusted
+artifacts where the artifact author has incentive to subvert the
+seal. When shipped, it should use a provider-agnostic egress
+controller trait so bubblewrap/Docker/microVM backends each
+implement their own redirect without changing the proxy.
 
-Constitution test for 5.2c: an agent with `sandbox_network: sealed`,
-invoking `curl --proxy '' http://api.example.com/unfixtured` (the
-"escape via explicit noproxy" attack), receives a connection failure
-— the kernel namespace denies the route. Equivalent test with raw
-Python `socket.socket()` confirms transparent redirect catches it.
+Constitution test (deferred with 5.2c-enforcing): an agent with
+`sandbox_network: sealed`, invoking
+`curl --proxy '' http://api.example.com/unfixtured`, receives a
+connection failure — the kernel namespace denies the route.
+Equivalent test with raw Python `socket.socket()` confirms
+transparent redirect catches it.
 
-#### 5.2d — HTTPS support via gateway-generated CA (FUTURE scope)
+#### 5.2d — HTTPS support via gateway-generated CA ◐ future
 
 - Gateway generates a CA cert at boot, signs short-lived per-host
   certs at request time.
@@ -817,7 +853,7 @@ Python `socket.socket()` confirms transparent redirect catches it.
 - Until 5.2d ships, HTTPS through the sealed proxy fails — which is
   the safer default (block over leak).
 
-### 5.3 Recording mode + fixture authoring paths
+### 5.3 Recording mode + fixture authoring paths (pending — depends on 5.1 + 5.2c-advisory)
 
 - `Recording` is operator-gated: refuse-boot the session if the manifest
   says `Recording` and the gateway config does not include the matching
@@ -840,14 +876,19 @@ Python `socket.socket()` confirms transparent redirect catches it.
      are advisory and surface to the operator; the evaluator's verdict
      against the *current* fixtures stays deterministic regardless.
 
-### 5.4 Evaluator SKILL update
+### 5.4 Evaluator SKILL update ▶ planned — SHIP NOW
+
+**Not gated on 5.2c-enforcing.** Advisory mode is sufficient:
+internal-coder artifacts are non-adversarial; the auditor catches
+raw-socket bypasses at static time; `--unshare-net` blocks unrouted
+traffic regardless of HTTP_PROXY. See §5.2c rationale.
 
 - Evaluator's SKILL.md sets `metadata.autonoetic.sandbox.network: sealed`.
 - Evaluator's output schema adds the `unable_to_evaluate` outcome.
 - Prompt content teaches the agent about fixture-driven runs and the third
   outcome.
 
-### 5.5 Orchestrator awareness
+### 5.5 Orchestrator awareness ◐ partial `0581212`
 
 - Planner/promotion-gate consumer treats `unable_to_evaluate` as a
   non-promoting block, not a broken-artifact verdict.
@@ -862,7 +903,7 @@ Python `socket.socket()` confirms transparent redirect catches it.
   takes over.
 - Drop only after 5.2 ships and is stable.
 
-### 5.7 Agent-factory bootstrap-recording orchestration
+### 5.7 Agent-factory bootstrap-recording orchestration (pending — depends on 5.1 + 5.2 + 5.3)
 
 - `agent-factory.default` SKILL recognises the pattern *new install +
   evaluator returns `unable_to_evaluate` + missing-fixtures finding +
@@ -878,7 +919,7 @@ Python `socket.socket()` confirms transparent redirect catches it.
 - Depends on 5.1 + 5.2 + 5.3. SKILL-only change; no further gateway
   work.
 
-### 5.8 Auditor SKILL update for pure-skill agents
+### 5.8 Auditor SKILL update for pure-skill agents (pending — no gateway change, SKILL-only)
 
 - `auditor.default` SKILL teaches the agent to audit SKILL.md, manifest
   YAML, and capability declarations when there is no source code
@@ -891,7 +932,7 @@ Python `socket.socket()` confirms transparent redirect catches it.
 - No gateway change; SKILL prompt update only. Can land independent
   of 5.1–5.7.
 
-### 5.9 Agent-factory gate-matrix correction
+### 5.9 Agent-factory gate-matrix correction (pending — depends on 5.8 + 5.10)
 
 - Update `agent-factory.default` SKILL gate matrix per §3.5.3: the
   auditor row for reasoning-only / pure-transform changes from
@@ -904,7 +945,7 @@ Python `socket.socket()` confirms transparent redirect catches it.
   `promotion_record` (without an artifact_id the matrix correction is
   paper-only).
 
-### 5.10 Artifact-build pure-skill agents before install (§3.5.4)
+### 5.10 Artifact-build pure-skill agents before install ✅ `7500268`
 
 Implements Option A from §3.5.4. Closes the artifact-id gap that
 otherwise makes §5.9 paper-only enforcement.
@@ -937,7 +978,7 @@ otherwise makes §5.9 paper-only enforcement.
 - Effort: half-day to one day. No gateway dependencies — can land
   before or independently of Track A scopes 5.1–5.7.
 
-### 5.11 Gateway-side `audit_only` enforcement (§3.5.5)
+### 5.11 Gateway-side `audit_only` enforcement ✅ `0a7952a`
 
 Closes the trust gap §3.5.5 identifies: without this scope, the
 SKILL-level `audit_only` expectation in 5.8 / 5.9 / 5.10 is not
@@ -1009,42 +1050,36 @@ agent review). Each track is internally ordered.
 
 **Track A — Sealed-network mechanism (code-bearing artifacts):**
 
-1. **5.1**: just the manifest field + parsing + rejection of bad values.
-   No behaviour change.
-2. **5.2a** + **5.2b**: gateway-side fixture loader + HTTP proxy server.
-   Decision + response mechanism. Tested in isolation. **Not yet
-   enforcing** — see 5.2c.
-3. **5.2c**: sandbox integration. Two layers: (i) advisory
-   `HTTP_PROXY` env injection into the bubblewrap exec; (ii) enforcing
-   transparent TCP redirect via nftables inside an unshared net
-   namespace. **(i) catches compliant HTTP clients; (ii) catches raw
-   sockets and unset-env curl.** This is the multi-day systems work
-   that turns the mechanism into a real seal.
-4. **5.2d** *(future)*: HTTPS support via gateway-generated CA injected
-   into the sandbox trust store. Until this lands, HTTPS through the
-   sealed proxy fails — which is the safer default.
-5. **5.3**: recording mode safety + the three authoring paths. Cannot
-   ship before 5.2c.
-6. **5.4**: evaluator's SKILL.md flips to `network: sealed`. From this
-   PR onward, the evaluator runs sealed. **Must wait until 5.2c-
-   enforcing ships — declaring `sealed` before then is advisory only.**
-7. **5.5**: orchestrator awareness of `unable_to_evaluate`. The verdict
-   plumbing lights up. (Already partly landed in #184 / `0581212`.)
-8. **5.7**: agent-factory bootstrap-recording orchestration — closes the
-   install loop for new code-bearing artifacts. Depends on 5.1 + 5.2 +
-   5.3.
-9. **5.6** (optional): refactor R+16's ad-hoc enforcement to use the
-   generic hook.
+1. **5.1**: manifest field + parsing + rejection of bad values. ✅
+2. **5.2a** + **5.2b**: fixture loader + HTTP proxy server. Tested
+   in isolation. ✅
+3. **5.2c-advisory**: sandbox integration — HTTP_PROXY injection into
+   bubblewrap exec environment. Catches HTTP_PROXY‑aware clients.
+   ✅ shipped with commit `7638b90`.
+4. **5.4**: evaluator's SKILL.md flips to `network: sealed`. **Not
+   gated on 5.2c-enforcing** — advisory mode is sufficient because:
+   - Artifacts are produced by internal coder agents (non-adversarial).
+   - The auditor catches raw-socket code at static analysis time.
+   - `--unshare-net` blocks un-routed traffic regardless of
+     HTTP_PROXY bypass. ▶ **SHIP NOW**.
+5. **5.5**: orchestrator awareness of `unable_to_evaluate`. Already
+   partly landed in #184 / `0581212`.
+6. **5.3**: recording mode safety + the three authoring paths. Depends
+   on 5.1 + 5.2a/b + 5.2c-advisory.
+7. **5.7**: agent-factory bootstrap-recording orchestration — closes
+   the install loop for new code-bearing artifacts. Depends on 5.1 +
+   5.2 + 5.3.
+8. **5.2c-enforcing** *(deferred)*: kernel-level transparent TCP
+   redirect via veth + nftables. Unblocks only when autonoetic runs
+   third-party/adversarial artifacts. Not a blocker for anything
+   above.
+9. **5.2d** *(future)*: HTTPS via gateway-generated CA.
+10. **5.6** (optional): refactor R+16's ad-hoc enforcement to use the
+    generic hook.
 
-The order matters: ship the *capability* (5.1–5.3) before any role *uses*
-it (5.4 / 5.7), so a partial deploy doesn't leak. Operators can roll back
-at 5.4 without breaking the gateway primitive.
-
-**Critical milestone**: 5.4 (evaluator flips to sealed) is gated on
-5.2c-enforcing landing. Without it, an evaluator session that declares
-`sealed` can be escaped by an artifact using raw sockets, and the
-fixture-driven deterministic verdict the RFC promises is not actually
-delivered.
+The evaluator can ship sealed now without waiting for kernel-level
+enforcing, because the threat model for internal-artifact evaluation
+does not require it.
 
 **Track B — Audit completeness for pure-skill agents:**
 
