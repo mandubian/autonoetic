@@ -16,6 +16,7 @@
 //! Refs: docs/design/sealed-network-evaluation-plan.md §3.2.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
@@ -28,6 +29,8 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use autonoetic_types::agent::SandboxNetworkPolicy;
+
+use crate::sandbox::BwrapIsolationOverrides;
 
 use crate::runtime::sealed_network::{
     decide_egress, parse_host_port, unfixtured_envelope_body, EgressDecision, FixtureLoader,
@@ -302,4 +305,206 @@ fn unreachable_proxy_state() -> Response {
     .to_string();
     (StatusCode::INTERNAL_SERVER_ERROR, [("content-type", "application/json")], body)
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox-exec setup helper (RFC scope 5.2c — advisory layer)
+// ---------------------------------------------------------------------------
+//
+// Called by native tools that build a bubblewrap exec (`artifact_exec`,
+// `sandbox_exec`) before they spawn the sandbox. When the agent's manifest
+// declares `Sealed` or `Recording`:
+//
+// 1. Starts the proxy with a FixtureLoader rooted at `artifact_root`.
+// 2. Injects `HTTP_PROXY`, `HTTPS_PROXY`, lowercase variants, and empty
+//    `NO_PROXY` into the sandbox's environment so HTTP-clients route
+//    every request through the proxy.
+// 3. Forces `overrides.share_net = true` so the sandboxed process can
+//    reach the proxy on host loopback. (The enforcing seal — kernel
+//    netns + nftables transparent redirect — is a future scope; the
+//    advisory layer here only catches HTTP_PROXY-aware clients.)
+//
+// Returns the proxy handle. The caller MUST drop it (or call
+// `shutdown_sealed_proxy`) after the exec returns to free the listener.
+
+/// Async core. Use from async contexts directly.
+pub async fn setup_sealed_proxy_for_exec_async(
+    policy: SandboxNetworkPolicy,
+    artifact_root: PathBuf,
+    extra_env: &mut Vec<(String, String)>,
+    overrides: &mut BwrapIsolationOverrides,
+) -> anyhow::Result<Option<SealedProxyHandle>> {
+    if matches!(policy, SandboxNetworkPolicy::Normal) {
+        return Ok(None);
+    }
+    let loader = Arc::new(FixtureLoader::new(artifact_root));
+    let handle = start_sealed_proxy(policy, loader).await?;
+    let proxy_url = handle.proxy_url();
+
+    // Inject standard env vars (most HTTP clients respect at least one
+    // of these). The lowercase form is honoured by some libraries; the
+    // uppercase form by others. NO_PROXY is set empty so libs that
+    // default to bypassing localhost route everything through us.
+    extra_env.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+    extra_env.push(("HTTPS_PROXY".to_string(), proxy_url.clone()));
+    extra_env.push(("http_proxy".to_string(), proxy_url.clone()));
+    extra_env.push(("https_proxy".to_string(), proxy_url.clone()));
+    extra_env.push(("NO_PROXY".to_string(), String::new()));
+    extra_env.push(("no_proxy".to_string(), String::new()));
+
+    // The proxy lives on host loopback. The sandbox needs network
+    // sharing to reach it. (When 5.2c-enforcing lands, this is replaced
+    // by a private network namespace with a forwarded loopback so the
+    // proxy is the *only* reachable target.)
+    overrides.share_net = true;
+
+    tracing::info!(
+        target: "sealed_network_proxy",
+        policy = ?policy,
+        proxy_url = %proxy_url,
+        artifact_root = ?handle.addr(),
+        "advisory sealed-proxy setup complete; HTTP_PROXY injected into sandbox env"
+    );
+
+    Ok(Some(handle))
+}
+
+/// Sync wrapper for `NativeTool::execute` callers. Bridges to the
+/// existing tokio runtime via `block_on_http`'s pattern.
+pub fn setup_sealed_proxy_for_exec(
+    policy: SandboxNetworkPolicy,
+    artifact_root: PathBuf,
+    extra_env: &mut Vec<(String, String)>,
+    overrides: &mut BwrapIsolationOverrides,
+) -> anyhow::Result<Option<SealedProxyHandle>> {
+    if matches!(policy, SandboxNetworkPolicy::Normal) {
+        return Ok(None);
+    }
+    // We need a mutable-reference-safe block_on. Inline the pattern from
+    // `block_on_http` since we capture &mut.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| {
+            handle.block_on(setup_sealed_proxy_for_exec_async(
+                policy,
+                artifact_root,
+                extra_env,
+                overrides,
+            ))
+        })
+    } else {
+        tokio::runtime::Runtime::new()?.block_on(setup_sealed_proxy_for_exec_async(
+            policy,
+            artifact_root,
+            extra_env,
+            overrides,
+        ))
+    }
+}
+
+/// Tear down a proxy returned by `setup_sealed_proxy_for_exec`. Idempotent —
+/// passing `None` is a no-op.
+pub fn shutdown_sealed_proxy(handle: Option<SealedProxyHandle>) {
+    let Some(h) = handle else { return };
+    if let Ok(rt_handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| {
+            rt_handle.block_on(async move { h.shutdown().await })
+        });
+    } else if let Ok(rt) = tokio::runtime::Runtime::new() {
+        rt.block_on(async move { h.shutdown().await });
+    } else {
+        // Last resort: Drop's best-effort abort fires.
+        drop(h);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autonoetic_types::capability::Capability;
+    use tempfile::tempdir;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setup_returns_none_for_normal_policy() {
+        let dir = tempdir().unwrap();
+        let mut env = Vec::new();
+        let mut overrides = BwrapIsolationOverrides::from_capabilities(&[]);
+        let handle = setup_sealed_proxy_for_exec_async(
+            SandboxNetworkPolicy::Normal,
+            dir.path().to_path_buf(),
+            &mut env,
+            &mut overrides,
+        )
+        .await
+        .unwrap();
+        assert!(handle.is_none());
+        assert!(env.is_empty(), "normal policy must not touch env");
+        assert!(!overrides.share_net, "normal policy must not force share_net");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setup_injects_env_and_forces_share_net_for_sealed() {
+        let dir = tempdir().unwrap();
+        let mut env: Vec<(String, String)> = vec![("EXISTING".into(), "ok".into())];
+        let mut overrides =
+            BwrapIsolationOverrides::from_capabilities(&[Capability::ReadAccess {
+                scopes: vec!["self.*".into()],
+            }]);
+        let handle = setup_sealed_proxy_for_exec_async(
+            SandboxNetworkPolicy::Sealed,
+            dir.path().to_path_buf(),
+            &mut env,
+            &mut overrides,
+        )
+        .await
+        .unwrap()
+        .expect("sealed must return a handle");
+
+        // Existing env preserved.
+        assert!(env.iter().any(|(k, v)| k == "EXISTING" && v == "ok"));
+
+        // Proxy env vars injected for both case conventions.
+        for key in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            let v = env
+                .iter()
+                .find_map(|(k, v)| (k == key).then_some(v.as_str()))
+                .unwrap_or_else(|| panic!("expected {key} in env: {env:?}"));
+            assert!(v.starts_with("http://127.0.0.1:"), "{key} should be host-loopback URL: {v}");
+        }
+
+        // NO_PROXY explicitly empty so libs that auto-bypass localhost
+        // still route through the proxy.
+        for key in &["NO_PROXY", "no_proxy"] {
+            let v = env
+                .iter()
+                .find_map(|(k, v)| (k == key).then_some(v.as_str()));
+            assert_eq!(v, Some(""), "{key} should be set empty");
+        }
+
+        // share_net forced so the sandbox can reach host loopback.
+        assert!(overrides.share_net, "sealed mode must force share_net=true");
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setup_returns_handle_for_recording_too() {
+        // Recording mode shares the proxy mechanism with Sealed — the
+        // 5.3 differentiator (live capture on miss) is downstream of
+        // the proxy decision, not of the setup helper.
+        let dir = tempdir().unwrap();
+        let mut env = Vec::new();
+        let mut overrides = BwrapIsolationOverrides::from_capabilities(&[]);
+        let handle = setup_sealed_proxy_for_exec_async(
+            SandboxNetworkPolicy::Recording,
+            dir.path().to_path_buf(),
+            &mut env,
+            &mut overrides,
+        )
+        .await
+        .unwrap()
+        .expect("recording must return a handle");
+        assert!(env.iter().any(|(k, _)| k == "HTTP_PROXY"));
+        assert!(overrides.share_net);
+        handle.shutdown().await;
+    }
 }

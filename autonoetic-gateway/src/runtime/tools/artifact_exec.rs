@@ -816,6 +816,22 @@ impl NativeTool for ArtifactExecTool {
 
         let root_session_id = session_id.map(crate::runtime::content_store::root_session_id);
 
+        // RFC scope 5.2c-advisory: if the agent's manifest declares
+        // sandbox_network = Sealed/Recording, start the sealed proxy,
+        // inject HTTP_PROXY env vars, force share_net so the sandbox
+        // can reach the proxy on host loopback. Advisory only — catches
+        // HTTP_PROXY-aware clients (Python/Node/Go/curl-with-env). The
+        // enforcing seal (netns + nftables transparent redirect) is a
+        // future scope (5.2c-enforcing). Until then, raw-socket clients
+        // escape.
+        let sealed_proxy =
+            crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
+                manifest.sandbox_network,
+                temp_base.clone(),
+                &mut extra_env,
+                &mut overrides,
+            )?;
+
         let runner = SandboxRunner::spawn_with_session_content_and_env(
             driver,
             agent_dir_str,
@@ -828,6 +844,7 @@ impl NativeTool for ArtifactExecTool {
         )?;
 
         let output = runner.process.wait_with_output()?;
+        crate::runtime::sealed_network_proxy::shutdown_sealed_proxy(sealed_proxy);
         let ok = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1025,6 +1042,16 @@ fn execute_with_ticket(
 
     let command = build_command(&args.entrypoint, &args.args);
 
+    // RFC scope 5.2c-advisory: see the matching block in the main
+    // `artifact_exec` execute() path. Same wiring on the
+    // execute_with_ticket path (used for resumed approval flows).
+    let sealed_proxy = crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
+        manifest.sandbox_network,
+        temp_base.clone(),
+        &mut extra_env,
+        &mut overrides,
+    )?;
+
     let runner = SandboxRunner::spawn_with_session_content_and_env(
         driver,
         agent_dir_str,
@@ -1037,6 +1064,7 @@ fn execute_with_ticket(
     )?;
 
     let output = runner.process.wait_with_output()?;
+    crate::runtime::sealed_network_proxy::shutdown_sealed_proxy(sealed_proxy);
     let ok = output.status.success();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
