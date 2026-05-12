@@ -471,6 +471,25 @@ pub async fn handle_gateway_approvals(
                 }
             }
         }
+        super::common::GatewayApprovalCommands::Comment {
+            request_id,
+            message,
+        } => {
+            if message.trim().is_empty() {
+                eprintln!("Error: message must not be empty");
+                return Ok(());
+            }
+            if gateway_store.get_approval(request_id)?.is_none() {
+                eprintln!("Approval '{}' not found.", request_id);
+                return Ok(());
+            }
+            let redacted = autonoetic_gateway::log_redaction::redact_text_for_logs(message);
+            let id = gateway_store.add_gate_message(request_id, "operator", &redacted)?;
+            println!(
+                "Posted comment #{} on approval {}. Visible to the agent via approval.status.",
+                id, request_id
+            );
+        }
         super::common::GatewayApprovalCommands::Stats { agent, session, since } => {
             let since_ts = since.as_ref().map(|s| {
                 let secs = if s.ends_with('h') {
@@ -646,15 +665,17 @@ async fn run_interactive_approvals(
     let mut status_msg = String::new();
     let mut done = false;
 
-    // Q&A mode state
+    // Input mode state
     #[derive(PartialEq)]
     enum TuiMode {
         Navigate,
         AskQuestion,
+        WriteMessage,
     }
     let mut tui_mode = TuiMode::Navigate;
     let mut question_input = String::new();
     let mut question_answer = String::new();
+    let mut message_input = String::new();
 
     let mut enrichment_cache: std::collections::HashMap<String, Vec<autonoetic_gateway::runtime::human_gate::GateMessage>> =
         std::collections::HashMap::new();
@@ -687,7 +708,7 @@ async fn run_interactive_approvals(
                 .split(area);
 
             let title = format!(
-                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  ?: ask  q: quit ",
+                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  ?: ask  m: message  q: quit ",
                 items.len()
             );
             let title_bar = Paragraph::new(Line::from(Span::styled(
@@ -799,6 +820,11 @@ async fn run_interactive_approvals(
                     }
                     lines
                 }
+            } else if tui_mode == TuiMode::WriteMessage {
+                vec![Line::from(Span::styled(
+                    " Type a note to append to this approval's enrichment thread, then press Enter…",
+                    Style::default().fg(Color::DarkGray),
+                ))]
             } else if let Some(idx) = selected {
                 let req = &items[idx];
                 let mut lines = Vec::new();
@@ -1141,9 +1167,16 @@ async fn run_interactive_approvals(
                     Span::styled(cursor_input, Style::default().fg(Color::White)),
                     Span::styled("  [Enter: submit  Esc: cancel]", Style::default().fg(Color::DarkGray)),
                 ])
+            } else if tui_mode == TuiMode::WriteMessage {
+                let cursor_input = format!("{}_", message_input);
+                Line::from(vec![
+                    Span::styled(" \u{270D} Note: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(cursor_input, Style::default().fg(Color::White)),
+                    Span::styled("  [Enter: post  Esc: cancel]", Style::default().fg(Color::DarkGray)),
+                ])
             } else if status_msg.is_empty() {
                 Line::from(Span::styled(
-                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  ?: ask  q: quit",
+                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  ?: ask  m: message  q: quit",
                     Style::default().fg(Color::DarkGray),
                 ))
             } else {
@@ -1194,6 +1227,56 @@ async fn run_interactive_approvals(
                     continue;
                 }
 
+                // Message-write mode intercepts all keys for text input
+                if tui_mode == TuiMode::WriteMessage {
+                    match key.code {
+                        KeyCode::Esc => {
+                            tui_mode = TuiMode::Navigate;
+                            message_input.clear();
+                        }
+                        KeyCode::Enter => {
+                            let msg = message_input.trim().to_string();
+                            if !msg.is_empty() {
+                                if let Some(idx) = state.selected() {
+                                    let selected_id = items[idx].request_id.clone();
+                                    let redacted =
+                                        autonoetic_gateway::log_redaction::redact_text_for_logs(
+                                            &msg,
+                                        );
+                                    match gateway_store.add_gate_message(
+                                        &selected_id,
+                                        "operator",
+                                        &redacted,
+                                    ) {
+                                        Ok(_) => {
+                                            status_msg =
+                                                format!("\u{1F4AC} Note posted to {}", selected_id);
+                                            if let Ok(msgs) =
+                                                gateway_store.get_gate_messages(&selected_id)
+                                            {
+                                                enrichment_cache.insert(selected_id, msgs);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            status_msg = format!("\u{274C} Failed: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            tui_mode = TuiMode::Navigate;
+                            message_input.clear();
+                        }
+                        KeyCode::Backspace => {
+                            message_input.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            message_input.push(c);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         done = true;
@@ -1203,6 +1286,13 @@ async fn run_interactive_approvals(
                             tui_mode = TuiMode::AskQuestion;
                             question_input.clear();
                             question_answer.clear();
+                            status_msg.clear();
+                        }
+                    }
+                    KeyCode::Char('m') => {
+                        if state.selected().is_some() {
+                            tui_mode = TuiMode::WriteMessage;
+                            message_input.clear();
                             status_msg.clear();
                         }
                     }

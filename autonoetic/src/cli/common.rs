@@ -385,11 +385,26 @@ pub enum GatewayApprovalCommands {
     ///
     /// Answers questions like "what URL will it access?", "what code will run?",
     /// "why does this need approval?", "what dependencies does it install?", etc.
+    ///
+    /// Note: this uses the configured LLM to summarise stored approval fields.
+    /// It does *not* address the agent that requested the approval — for that
+    /// use `ask-agent` (Phase 5 enrichment, #172).
     Ask {
         /// Approval request identifier.
         request_id: String,
         /// The question to ask about this approval (e.g. "what URL?", "show me the code").
         question: String,
+    },
+    /// Append an operator note to the approval's enrichment thread (Phase 5, #172).
+    ///
+    /// Notes are visible to the agent (via `approval.status.enrichment_messages`)
+    /// and surfaced in `gateway approvals show`, the interactive TUI, and the
+    /// chat approval cards.
+    Comment {
+        /// Approval request identifier.
+        request_id: String,
+        /// The note to append (will be redacted before storage).
+        message: String,
     },
     /// Show approval statistics and analytics.
     Stats {
