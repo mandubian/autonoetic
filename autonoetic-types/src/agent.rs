@@ -172,6 +172,18 @@ pub struct AgentManifest {
     /// for this agent with optional overrides for threshold and LLM preset.
     #[serde(default)]
     pub compression: Option<CompressionConfig>,
+    /// Sandbox network egress policy (RFC scope 5.1). Default `Normal`.
+    ///
+    /// `Sealed` and `Recording` interact with the sandbox egress hook
+    /// (scopes 5.2 / 5.3) which is not yet implemented; declaring them
+    /// today parses cleanly and produces a refuse-boot for `Recording`
+    /// when `gateway.sandbox.allow_recording` is not set.
+    #[serde(default, skip_serializing_if = "is_default_sandbox_network_policy")]
+    pub sandbox_network: SandboxNetworkPolicy,
+}
+
+fn is_default_sandbox_network_policy(p: &SandboxNetworkPolicy) -> bool {
+    matches!(p, SandboxNetworkPolicy::Normal)
 }
 
 /// Agent-declared remote-access patterns used for deterministic gateway checks.
@@ -327,6 +339,35 @@ pub enum ToolTier {
     Workflow,
     /// Specialized: web search, promotion, advanced revision ops.
     Specialized,
+}
+
+/// Sandbox network egress policy — declared per agent in the SKILL.md
+/// frontmatter as `metadata.autonoetic.sandbox_network`. See the
+/// sealed-network sandbox design (RFC scope 5.1).
+///
+/// - `Normal` (default): outbound HTTP/DNS follow the existing capability
+///   checks and remote-access approval flow. No interception.
+/// - `Sealed`: every outbound HTTP/DNS attempt is intercepted at the
+///   sandbox egress layer and routed to a fixture responder. Hits return
+///   canned responses; misses return a structured `unfixtured_target`
+///   error. Live network is never reached.
+/// - `Recording`: like `Sealed`, but on a fixture miss the request is
+///   sent live and the response captured as a new fixture. This is a
+///   developer/operator-only mode and is **operator-gated** at the
+///   gateway: a session whose manifest declares `Recording` refuses to
+///   start unless `gateway.sandbox.allow_recording` is `true`.
+///
+/// `Sealed` and `Recording` are dormant until RFC scopes 5.2 (egress hook)
+/// and 5.3 (recording machinery) ship. Until then, declaring them in a
+/// manifest parses successfully but has no runtime effect beyond the
+/// refuse-boot guard on `Recording`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxNetworkPolicy {
+    #[default]
+    Normal,
+    Sealed,
+    Recording,
 }
 
 /// Session runtime state — declares the session's purpose at start and tracks

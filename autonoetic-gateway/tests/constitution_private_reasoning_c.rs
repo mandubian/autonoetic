@@ -53,6 +53,7 @@ fn manifest_with_reasoning_audit(targets: Vec<&str>) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 
@@ -87,6 +88,7 @@ fn manifest_without_audit() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 

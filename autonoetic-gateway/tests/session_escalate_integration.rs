@@ -89,6 +89,7 @@ fn test_manifest() -> AgentManifest {
         gateway_token: None,
         agentskills_import: None,
         compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 

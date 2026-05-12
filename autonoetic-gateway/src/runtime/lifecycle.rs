@@ -742,6 +742,30 @@ impl AgentExecutor {
         history: &mut Vec<Message>,
     ) -> anyhow::Result<TurnOutcome> {
         tracing::info!("Agent {} waking up...", self.manifest.agent.id);
+
+        // RFC scope 5.1 refuse-boot guard: a session whose manifest declares
+        // `sandbox_network: recording` cannot start unless the gateway config
+        // has explicitly enabled recording. This prevents an agent's manifest
+        // from silently switching on live-traffic capture.
+        if matches!(
+            self.manifest.sandbox_network,
+            autonoetic_types::agent::SandboxNetworkPolicy::Recording
+        ) {
+            let allowed = self
+                .config
+                .as_ref()
+                .map(|c| c.sandbox.allow_recording)
+                .unwrap_or(false);
+            anyhow::ensure!(
+                allowed,
+                "Session refused to start: manifest declares \
+                 sandbox_network: recording, but gateway config does not \
+                 enable recording (set gateway.sandbox.allow_recording: true \
+                 to permit fixture-capture sessions). Agent '{}'.",
+                self.manifest.agent.id
+            );
+        }
+
         self.guard = loop_guard_from_config_and_manifest(self.config.as_deref(), &self.agent_dir);
         self.llm_usage_last_run.clear();
         let session_id = self.ensure_session_id();
@@ -2452,6 +2476,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
 

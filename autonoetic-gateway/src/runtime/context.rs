@@ -622,6 +622,7 @@ mod agentskills_bridging_tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
 }

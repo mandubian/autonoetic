@@ -1299,6 +1299,20 @@ pub struct SandboxConfig {
     /// Env override is ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
     #[serde(default = "default_sandbox_dev_mode")]
     pub dev_mode: String,
+
+    /// Operator-level permission for sandbox recording mode (RFC scope
+    /// 5.1 / 5.3 — sealed-network sandbox).
+    ///
+    /// When `false` (default), any session whose manifest declares
+    /// `sandbox_network: recording` refuses to start. The flag exists so
+    /// recording — which captures live network responses as fixtures —
+    /// is never silently enabled by an agent's manifest declaration
+    /// alone. Operators must opt the gateway in explicitly.
+    ///
+    /// Until 5.3 ships, this flag has no effect beyond the refuse-boot
+    /// guard.
+    #[serde(default)]
+    pub allow_recording: bool,
 }
 
 impl Default for SandboxConfig {
@@ -1306,6 +1320,7 @@ impl Default for SandboxConfig {
         Self {
             share_net: false,
             dev_mode: default_sandbox_dev_mode(),
+            allow_recording: false,
         }
     }
 }

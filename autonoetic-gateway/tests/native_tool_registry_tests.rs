@@ -51,6 +51,7 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 

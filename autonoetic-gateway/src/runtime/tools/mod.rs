@@ -1098,6 +1098,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let unfiltered = registry.available_definitions(&manifest);
         let filtered = registry.available_definitions_filtered(&manifest, None);
@@ -1137,6 +1138,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let filter = ToolTierFilter::core_only();
         let filtered = registry.available_definitions_filtered(&manifest, Some(&filter));
@@ -1265,6 +1267,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let deps = Some(SandboxExecDependencies {
@@ -1310,6 +1313,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let plan = dependency_plan_from_args_or_lock(&manifest, temp_dir.path(), None).unwrap();

@@ -1243,6 +1243,7 @@ artifacts: "not_a_sequence"
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let rendered = render_skill_document(&manifest, "# Instructions").unwrap();
         assert!(rendered.starts_with("---\n"));
@@ -1429,6 +1430,7 @@ artifacts: "not_a_sequence"
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let rendered = render_skill_document(&manifest, "# Test").unwrap();
         assert!(

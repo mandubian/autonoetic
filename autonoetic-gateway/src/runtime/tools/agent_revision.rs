@@ -1320,6 +1320,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
 
         let canonical_skill = crate::runtime::install_contract::render_skill_document(
@@ -3029,6 +3030,7 @@ mod capability_lenient_deser_tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
 

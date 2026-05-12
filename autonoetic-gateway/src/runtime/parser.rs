@@ -59,6 +59,8 @@ struct AutonoeticMetadata {
     allowed_tool_tiers: Option<Vec<autonoetic_types::agent::ToolTier>>,
     #[serde(default)]
     compression: Option<CompressionConfig>,
+    #[serde(default)]
+    sandbox_network: Option<autonoetic_types::agent::SandboxNetworkPolicy>,
 }
 
 /// Parser for `SKILL.md` files.
@@ -158,6 +160,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
         agentskills_import,
         compression: meta.compression,
+        sandbox_network: meta.sandbox_network.unwrap_or_default(),
     }
 }
 

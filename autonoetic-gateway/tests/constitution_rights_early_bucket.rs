@@ -62,6 +62,7 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 
@@ -246,6 +247,7 @@ fn ri_0_7_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 
