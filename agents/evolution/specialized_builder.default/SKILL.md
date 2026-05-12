@@ -279,7 +279,7 @@ For `execution_mode: "script"` on `agent_revision_create_from_intent`, you MUST 
 }
 ```
 
-**When gating is `audit_only`** (pure-reasoning / pure-transform agents, agent-factory built an intent-only artifact bundle): require the **auditor**'s `promotion_record(pass=true)` for the same `artifact_ref` you are installing from. The evaluator record will be absent — that is correct for now and reflects the not-yet-implemented behavioural evaluation track. See `docs/design/sealed-network-evaluation-plan.md` §3.5.2.
+**When gating is `audit_only`** (pure-reasoning / pure-transform agents, agent-factory built an intent-only artifact bundle): require the **auditor**'s `promotion_record(pass=true)` for the same `artifact_ref` you are installing from. The evaluator record will be absent — that is correct for now and reflects the not-yet-implemented behavioural evaluation mechanism for pure-skill agents.
 
 The install request shape for `audit_only`:
 
@@ -295,7 +295,7 @@ The install request shape for `audit_only`:
     "auditor_pass": true,
     "evaluator_pass": null,
     "evaluator_status": "skipped",
-    "skip_reason": "behavioural_eval_not_implemented (RFC §3.5.2)"
+    "skip_reason": "behavioural_eval_not_implemented"
   }
 }
 ```

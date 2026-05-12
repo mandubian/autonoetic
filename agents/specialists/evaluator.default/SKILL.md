@@ -88,7 +88,7 @@ This has three consequences:
 
 3. **`fail` means the artifact is broken.** Reserve `fail` for cases where you ran the artifact under reproducible conditions and it produced a wrong result, errored, or violated its contract. A vacuous fail (e.g. `{"status":"fail", "tests_run": 0}`) is worse than `unable_to_evaluate` because it falsely accuses the coder.
 
-Forward direction: a sealed-network sandbox with fixture-driven egress is being designed in `docs/design/sealed-network-evaluation-plan.md`. Once it lands, fixture-driven runs become the standard path. Until then, when an artifact would touch live network, follow the guidance below.
+When an artifact would touch live external state and you cannot pin that interaction down deterministically (no fixtures, no stub layer, no sealed environment), follow the guidance below.
 
 ## Resumption
 

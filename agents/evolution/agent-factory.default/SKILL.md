@@ -116,8 +116,7 @@ intent-only artifact bundle from it, then hand the bundle's
 `artifact_ref` to `specialized_builder.default`. This makes the
 install **artifact-addressed** even for pure-skill agents — the audit
 target, the install source, and the R++2 capability-delta key all
-agree on one content-addressed identity. See
-`docs/design/sealed-network-evaluation-plan.md` §3.5.4.
+agree on one content-addressed identity.
 
 **1. Compose the SKILL body** as a single markdown string —
 `# <agent_id>\n\n<instructions derived from purpose + intended
@@ -194,7 +193,7 @@ Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the
 
 | Agent behavior | Evaluator | Auditor |
 |---|---|---|
-| Reasoning-only (no CodeExecution, no AgentSpawn) | Skip *for now* — see note below | **Required** (static SKILL audit per RFC §3.5.1) |
+| Reasoning-only (no CodeExecution, no AgentSpawn) | Skip *for now* — see note below | **Required** (static SKILL audit) |
 | Pure transform/utility (no I/O beyond self.*) | Skip *for now* — see note below | **Required** |
 | Artifact-backed with NetworkAccess | Required | Required |
 | File system writes (beyond self.*) | Required | Required |
@@ -207,17 +206,17 @@ privileges, and the prompt body shapes what the agent does at runtime
 with those privileges. A static audit of the SKILL body, the manifest
 YAML, and the declared capability scopes catches a wide class of
 issues (prompt injection susceptibility, capability overreach,
-dangerous tool combinations) and is fully deterministic. See
-`docs/design/sealed-network-evaluation-plan.md` §3.5 and the auditor's
-SKILL "Shape 2: Intent-only bundle" section.
+dangerous tool combinations) and is fully deterministic. The auditor
+detects an intent-only bundle by inspecting the artifact and switching
+to its SKILL-review protocol; no special signal is required from this
+agent.
 
 **Why evaluator is "Skip for now" for pure-skill agents:** behavioral
 evaluation of LLM-driven agents (canned scenarios + constraint
-testing) is a separate design surface described in
-`docs/design/sealed-network-evaluation-plan.md` §3.5.2 and is **not**
-implemented yet. When that mechanism lands, this matrix should flip
-the pure-skill rows to `Required | Required`. Until then, the auditor's
-static review is the only gate for pure-skill agents.
+testing) is a separate mechanism that is **not** implemented yet.
+When that mechanism lands, this matrix should flip the pure-skill rows
+to `Required | Required`. Until then, the auditor's static review is
+the only gate for pure-skill agents.
 
 If gates required:
 1. Call `agent_spawn` with `agent_id="auditor.default"`, `async=true`,

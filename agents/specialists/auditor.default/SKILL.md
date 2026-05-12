@@ -125,9 +125,9 @@ This is the established path. Review:
 
 If `artifact_inspect` shows the artifact contains **only** a
 `*.skill.md` file (no `script_entry`, no executable code), you are
-auditing a **pure-reasoning agent's identity bundle**. Created by
-`agent-factory.default` Step 2a per the sealed-network RFC §3.5.4 so
-audit evidence has a content-addressed target.
+auditing a **pure-reasoning agent's identity bundle** — an
+intent-only artifact built by the orchestrator so the audit has a
+content-addressed target.
 
 There is no code to read — the SKILL body **is** the executable
 contract. Audit it as such:
