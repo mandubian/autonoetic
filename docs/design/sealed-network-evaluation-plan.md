@@ -18,6 +18,74 @@ the design and acceptance bars so an implementation PR can target them.
 
 ---
 
+## 0. Terminology
+
+**Fixture** — a canned HTTP response stored on disk that the sealed
+sandbox's egress layer returns instead of letting the artifact's network
+call reach the live network. The deterministic stand-in for a live server.
+
+A fixture file is JSON, named by the URL components the artifact tries
+to reach, and lives alongside the artifact bundle:
+
+```
+<artifact-root>/
+  moltbook_agent.py
+  agent_instructions.md
+  fixtures/
+    localhost-9876/
+      POST-status.json
+      GET-feed.json
+```
+
+Each fixture file:
+
+```json
+{
+  "status": 200,
+  "headers": {"Content-Type": "application/json"},
+  "body": "{\"agents\": [...], \"pending_verifications\": []}"
+}
+```
+
+When the artifact runs `urllib.request.urlopen("http://localhost:9876/status")`,
+the egress hook intercepts the request, looks for
+`fixtures/localhost-9876/POST-status.json` (URL-safe encoding: `/` → `-`,
+host and port joined with `-`), and returns the canned response. The
+artifact thinks it talked to a real server. Same input today, same input
+tomorrow → same verdict.
+
+**Why this term:** the pattern is standard in testing — `VCR.py` and
+`VCR.rb` (record-and-replay HTTP interactions), `WireMock` (Java HTTP
+stubs), `MSW` / `nock` (JS fetch/XHR mocks), `httpretty` (Python). Each
+ecosystem calls these things slightly differently (cassettes, recordings,
+stubs, snapshots); this RFC uses **fixture** because it is the most
+general term and matches Rust/integration-test conventions.
+
+**What fixtures are:**
+
+- Files on disk, content-addressed and signed as part of the artifact
+  bundle. Tampering breaks the artifact's identity hash.
+- Static data — no logic, no templating in this RFC. (Future
+  extension if a real need appears.)
+- Network egress only in this RFC. Sealed filesystem (ramdisk), sealed
+  clock (`Utc::now()` frozen), sealed RNG (seeded) are listed as future
+  extensions of the same shape but out of scope here.
+- Read-only at evaluation time. Only Recording mode writes them
+  (§3.2.1), and Recording is operator-gated.
+
+**What fixtures are NOT:**
+
+- Not mocks of arbitrary Python/JS objects — those live inside the
+  artifact code.
+- Not test inputs to the artifact — those are still command-line args /
+  stdin / approval-flow inputs.
+- Not credentials — credentials still flow through `credential_setup`.
+  A fixture says "the server returned this body"; it does not say "use
+  this API key."
+- Not the artifact's configuration — that is the manifest / args.
+
+---
+
 ## 1. Problem statement
 
 When the evaluator role validates a candidate artifact, it must *execute* the
@@ -154,6 +222,72 @@ security-scanner, or just an operator running an artifact with
 learned one new rule: "manifest says sealed → route through the fixture
 responder."
 
+### 3.2.1 Fixture lifecycle — where fixtures come from
+
+Fixtures aren't conjured. Something has to record them at least once
+against a real environment. The evaluator never does this — it consumes
+fixtures, never produces them. So the chicken-and-egg: how do fixtures
+exist before the evaluator first runs?
+
+Answer: **fixtures are part of the artifact's contract**, shipped *with*
+the artifact bundle. The artifact's author is responsible for providing
+them, the same way a normal project ships its test data. There are three
+legitimate paths to recording, in roughly the order they happen during an
+artifact's life:
+
+1. **Author-recorded at design time (the common path).** The coder
+   developing the artifact runs it once against a real or staging
+   environment with `network: recording` on, captures the responses,
+   reviews them, and commits the resulting `fixtures/` directory as part
+   of the artifact bundle. The fixtures travel with the code; their hash
+   contributes to the artifact's content-addressed identity. By the time
+   the evaluator sees the artifact, the fixtures are already there.
+
+2. **Operator-recorded retrofit.** For artifacts that pre-date sealed
+   mode or that ship without fixtures, the operator runs
+   `autonoetic artifact record-fixtures <artifact_ref>` (CLI in
+   acceptance scope 5.3) against a real environment to seed fixtures
+   into an existing bundle. The fixtures land in a new artifact revision
+   so the integrity story stays intact.
+
+3. **Live_tester-refreshed (the drift-detection path).** The separate
+   `live_tester` role (advisory, §3.4) periodically runs the artifact
+   against real services with `network: recording`. If the captured
+   responses differ from the existing fixtures, a finding is raised
+   (contract drift). The operator decides whether to update the fixtures
+   (artifact revision) or fix the artifact.
+
+In all three paths, recording requires an explicit operator-level
+gateway config flag (acceptance scope 5.3); recording cannot happen
+silently.
+
+**What if no fixtures exist when the evaluator runs?**
+
+The evaluator returns `unable_to_evaluate` with `recommendation:
+blocked_on_environment` and a finding naming each unfixtured target.
+This is the structural fix for the vacuous-fail problem: an artifact
+that has not been fixtured is not a broken artifact — it is an
+unverified one. The orchestrator (planner / agent-factory) reads the
+finding and routes the work to whoever can supply fixtures: typically
+back to the coder during development, or to the operator for an
+established artifact missing coverage. The evaluator never coerces
+"missing fixtures" into "broken artifact."
+
+**Why this is sound:**
+
+- The evaluator's verdict stays a pure function of `(artifact, fixtures)`
+  — both signed inputs that travel with the artifact bundle. R++9
+  determinism property holds.
+- Recording is operator-gated and audited; live capture is never silent.
+- Drift between fixtures and the real world is *handled*, not ignored:
+  live_tester is the loop that catches it. But drift is a separate
+  signal from promotion-gate validity; the evaluator's verdict is not
+  affected by what the real server happens to be doing today.
+- This matches how serious test suites are run in normal software: the
+  developer ships test data alongside the code; CI runs against the
+  fixed data deterministically; a separate smoke-test channel hits real
+  services and surfaces drift to humans.
+
 ### 3.3 Verdict outcome (evaluator-side, **not** gateway-side)
 
 The evaluator's verdict shape grows a third outcome:
@@ -238,13 +372,28 @@ Existing rules this builds on:
   cannot reach a non-fixtured target via `sandbox_exec` or `artifact_exec`,
   regardless of declared `NetworkAccess`.
 
-### 5.3 Recording mode safety
+### 5.3 Recording mode + fixture authoring paths
 
 - `Recording` is operator-gated: refuse-boot the session if the manifest
   says `Recording` and the gateway config does not include the matching
   permission flag.
-- Recording mode emits a prominent causal event banner and is auditable.
+- Recording mode emits a prominent causal event banner (`artifact.fixture_recording_session_started`) and each capture emits `artifact.fixture_recorded`.
 - Constitution test pinning the refuse-boot path.
+- Three legitimate paths to populate fixtures (see §3.2.1), all of which
+  this scope must support:
+  1. **Author-recorded at design time** — coder runs the artifact under
+     `network: recording`, commits fixtures into the bundle as part of
+     the artifact's signed identity.
+  2. **Operator retrofit** — `autonoetic artifact record-fixtures
+     <artifact_ref>` CLI command runs the artifact under `recording`
+     against a real environment to seed fixtures into an existing
+     bundle. Output lands in a new artifact revision (integrity story
+     preserved).
+  3. **Live_tester refresh** — the `live_tester` role periodically runs
+     the artifact under `recording`; captured responses are diffed
+     against existing fixtures to detect contract drift. Drift findings
+     are advisory and surface to the operator; the evaluator's verdict
+     against the *current* fixtures stays deterministic regardless.
 
 ### 5.4 Evaluator SKILL update
 
@@ -293,19 +442,26 @@ it (5.4), so a partial deploy doesn't leak. Operators can roll back at
 ## 7. Open questions
 
 1. **Where do fixtures live for **agent bundles** vs. **library artifacts**?**
-   Natural answer: "next to the code, same artifact root." Agent bundles
-   already have constraints on their structure (SKILL.md, runtime.lock);
-   adding a `fixtures/` directory needs to play well with content-addressed
-   artifact identity and signing.
+   Natural answer (now adopted in §0 and §3.2.1): "next to the code, same
+   artifact root, signed as part of the bundle." Agent bundles already
+   have constraints on their structure (SKILL.md, runtime.lock); adding
+   a `fixtures/` directory needs to play well with content-addressed
+   artifact identity. The artifact's content-hash must include the
+   `fixtures/` tree so tampering breaks identity.
 
 2. **Fixture freshness.** A fixture captured in January may be stale by
    July. Possible answers: fixtures carry a `captured_at` and the evaluator
    surfaces age in the verdict; or a policy field `max_fixture_age: 30d` on
-   the consuming manifest.
+   the consuming manifest. Drift detection is the `live_tester` role's
+   job (§3.4); the evaluator's verdict itself remains deterministic
+   regardless of fixture age.
 
-3. **Partial fixtures.** If the artifact makes 3 HTTP calls and only 2 have
-   fixtures, what's the outcome? Probably `unable_to_evaluate` with the
-   missing-fixture set named — but this needs spec.
+3. **Partial fixtures.** If the artifact makes 3 HTTP calls and only 2
+   have fixtures, what's the outcome? Probably `unable_to_evaluate` with
+   the missing-fixture set named — but the boundary needs spec: is it
+   "any missing fixture → unable_to_evaluate" (strict), or "only required
+   targets must be fixtured; optional/best-effort calls can miss"
+   (lenient with declaration)?
 
 4. **Side effects on disk / filesystem / clock.** Sealed network is one
    axis; sealed filesystem (e.g. ramdisk-only writes), sealed clock (frozen
@@ -315,8 +471,10 @@ it (5.4), so a partial deploy doesn't leak. Operators can roll back at
    driver becomes the right place to add them.
 
 5. **Fixture authoring UX.** Hand-writing JSON fixtures is tedious.
-   Recording mode (5.3) covers seed creation. UX for subsequent updates
-   (drift detection, regeneration, diff review) is a follow-up.
+   Recording mode (§3.2.1, §5.3) covers seed creation through three
+   paths (author-recorded, operator-retrofit, live_tester drift refresh).
+   UX for subsequent updates (drift detection workflow, regeneration,
+   diff review when the live response shape changes) is a follow-up.
 
 6. **Should `R+16` be refactored or left as-is?** R+16's current
    enforcement is in promotion-gate-specific code. With this RFC the same
