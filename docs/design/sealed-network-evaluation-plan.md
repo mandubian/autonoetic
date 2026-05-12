@@ -588,6 +588,108 @@ minor cost; the symmetry gained is significant.
 
 Implementation lands as scope **5.10** (see §5).
 
+#### 3.5.5 Gating is gateway-computed, not orchestrator-declared
+
+The previous §3.5 subsections defined *what* the gate matrix should be.
+This subsection answers the security question: *who decides which row of
+the matrix applies to a given install, and what stops a compromised
+orchestrator from picking a lighter row?*
+
+**Today (pre-5.11), the gateway already enforces the principle for two
+of the three non-trivial rows.** `enforce_promotion_gate` in
+`autonoetic-gateway/src/runtime/tools/agent_revision.rs` computes the
+required evidence from the revision's **declared capabilities**, not
+from anything the orchestrator claims:
+
+```
+needs_artifact_gate := any capability ∈ {CodeExecution, AgentSpawn}
+has_high_risk      := any capability ∈ high-risk set (NetworkAccess, …)
+
+if needs_artifact_gate
+   → require artifact + auditor PASS + evaluator PASS
+else if has_high_risk AND artifact_id is_some
+   → require artifact + auditor PASS + evaluator PASS
+else
+   → direct promote (no promotion_record required)
+   "Capability enforcement on every tool call is the security gate."
+```
+
+This is the dumbness invariant (§14) in action and the operational
+form of R-2.8 ("High-risk promotion requires evaluator AND auditor
+pass") and R-2.16 (R++2 capability-delta gating). A malicious
+orchestrator cannot lie about gating mode — the gateway re-derives the
+requirement from the actual declared capabilities at promotion time.
+
+**The gap §3.5 / 5.10 opened**
+
+Pre-Track B, pure-skill agents had no `artifact_id`. They reached the
+`else` branch above and were "direct promote" — the runtime capability
+enforcement was the only gate, which was acceptable because there was
+no executable code to review.
+
+Track B (`7500268`) gave pure-skill agents an `artifact_id` (the
+intent-only bundle, §3.5.4). The expectation in the SKILL changes was
+that an auditor `promotion_record(pass=true)` would now be required for
+these installs (`audit_only` gating mode). But the gateway-side
+enforcement in `enforce_promotion_gate` was **not** updated. A
+pure-skill agent with only ReadAccess + WriteAccess still hits the
+`else` branch — the intent-only artifact_id is present, but there is no
+CodeExecution / AgentSpawn / high-risk capability, so the direct-promote
+path is still taken.
+
+**Concrete attack surface this leaves open until 5.11 ships:**
+
+1. A compromised agent-factory (or a planner that bypasses
+   agent-factory and calls specialized_builder directly) builds an
+   intent-only bundle in Step 2a.
+2. It skips the auditor spawn in Step 4.
+3. It tells specialized_builder `Gating: audit_only` with a forged
+   `promotion_gate.auditor_pass: true`.
+4. specialized_builder's SKILL says it should refuse — but if
+   specialized_builder is also compromised (or just ignoring its prompt)
+   it calls `agent_revision_create_from_intent` + `agent_revision_promote`.
+5. The gateway's promote check sees no high-risk capabilities, no
+   CodeExecution, so the `else` branch fires — direct promote
+   **succeeds**. The malicious SKILL is installed without independent
+   audit.
+
+The malicious agent's runtime damage is bounded by its declared
+capabilities (and R++2 prevents post-install broadening without
+operator approval). But the SKILL prompt content — the executable
+contract that the user's correction in §3.5 identified as the
+attack surface — has not been independently reviewed.
+
+**The corrected, four-branch enforcement (scope 5.11):**
+
+| Computed condition | Required evidence | Mode |
+|---|---|---|
+| `needs_artifact_gate` (CodeExecution / AgentSpawn) | auditor PASS + evaluator PASS | `full` |
+| `has_high_risk && artifact_id` | auditor PASS + evaluator PASS | `full` |
+| `artifact_id` only (pure-skill intent-only) | **auditor PASS** | `audit_only` (NEW) |
+| neither | direct promote | `direct` |
+
+The new third branch is the gateway-side enforcement of `audit_only`.
+It is a refinement of R-2.8 specific to the intent-only-bundle case;
+no new constitutional rule is required, only a more granular
+implementation. R-2.17 (distinct evaluator/auditor identity) still
+applies in the `full` mode; for `audit_only` it reduces to "the auditor
+identity must be distinct from the agent that proposed the install"
+(the agent-factory or planner, recorded in the revision's metadata).
+
+**Why this closes the loop**
+
+- The orchestrator's declared gating mode (`full` / `audit_only` /
+  `none`) becomes a **hint** for prompt logic, not a trust boundary.
+  Trust lives at the gateway check.
+- A pure-skill agent install with no auditor `promotion_record` is
+  mechanically rejected by `agent_revision_promote` — exactly the same
+  way a code-bearing install missing records is rejected today.
+- R-2.8's spirit ("promotion gate requirements derive from the
+  revision's content") extends to cover intent-only bundles.
+- A future constitutional amendment via `constitution_propose_amendment`
+  can canonicalise the four-branch matrix into the constitution text,
+  but is not blocking — the principle is already covered.
+
 ## 4. Constitutional alignment
 
 This RFC does **not** require a new constitutional rule. R+16 already
@@ -759,6 +861,68 @@ otherwise makes §5.9 paper-only enforcement.
 - Effort: half-day to one day. No gateway dependencies — can land
   before or independently of Track A scopes 5.1–5.7.
 
+### 5.11 Gateway-side `audit_only` enforcement (§3.5.5)
+
+Closes the trust gap §3.5.5 identifies: without this scope, the
+SKILL-level `audit_only` expectation in 5.8 / 5.9 / 5.10 is not
+mechanically enforced by the gateway, and a compromised orchestrator
+can install a pure-skill agent without audit.
+
+- **`autonoetic-gateway/src/runtime/tools/agent_revision.rs`** — extend
+  `enforce_promotion_gate` (and its callers in
+  `AgentRevisionPromoteTool::execute`) with a new branch:
+
+  ```
+  if needs_artifact_gate                            → full (existing)
+  else if has_high_risk && artifact_id is_some      → full (existing)
+  else if artifact_id is_some                       → audit_only (NEW)
+  else                                              → direct (existing)
+  ```
+
+- **`audit_only` mode** requires:
+  - An auditor `promotion_record(pass=true)` against the revision's
+    artifact_id; `record.auditor_pass` set; `record.auditor_id`
+    distinct from the revision's `created_by` (the agent that
+    proposed the install). R-2.17 reduces to "auditor identity ≠
+    proposer identity" because there is no evaluator to compare to.
+  - The revision's `content_digest` matches the auditor's record
+    `content_digest` (existing invariant — unchanged).
+- **Evaluator pass is NOT required** in `audit_only` mode. The
+  promotion record carries `evaluator_pass: false`, `evaluator_id:
+  None`, and a new `evaluator_status: "skipped"` field with reason
+  `"behavioural_eval_not_implemented"`. The status is informational;
+  the gating decision keys on the artifact-shape branch above.
+- **Existing `evaluator_pass` check** in `enforce_promotion_gate`
+  must be relaxed to "if mode = full, require evaluator_pass; if
+  mode = audit_only, allow evaluator_pass = false with skipped
+  status". Care must be taken not to weaken the existing `full`
+  enforcement.
+- **Causal event** on each promotion: emit
+  `revision.promotion_gate_enforced` with the computed mode
+  (`full | audit_only | direct`) so forensics can later check what
+  gate was actually applied to a given revision.
+- **Constitution test** `constitution_promotion_gate_audit_only.rs`:
+  - A pure-skill revision (intent-only artifact, no CodeExecution /
+    AgentSpawn / NetworkAccess) with no auditor record → promote
+    fails with `Promotion gate: no auditor promotion.record …`.
+  - With auditor `promotion_record(pass=true)` but no evaluator → 
+    promote **succeeds** (mode = audit_only).
+  - With auditor `promotion_record(pass=false)` → promote fails.
+  - Auditor identity equal to the proposer's identity → promote
+    fails (R-2.17 self-approval ban).
+  - A revision with NetworkAccess + intent-only artifact still
+    requires both evaluator and auditor (mode = full via has_high_risk
+    branch) — pin that 5.11 does not weaken the existing high-risk
+    enforcement.
+- Effort: half-day to one day. Gateway-side code change with constitution
+  test.
+
+**Order:** 5.11 should land **before** 5.10 is announced as
+operator-safe. Until 5.11 ships, the SKILL-level expectations in
+5.8 / 5.9 / 5.10 are aspirational. Operators should be aware that
+Track B `7500268` ships the SKILL changes but the gateway-side
+enforcement comes in 5.11.
+
 ## 6. Migration and rollout
 
 The scopes are sequenced so each PR is meaningful alone and does not enable
@@ -801,10 +965,19 @@ at 5.4 without breaking the gateway primitive.
 3. **5.9**: agent-factory gate matrix corrected to require auditor for
    pure-skill agents. Depends on 5.8 and 5.10 being ready — without
    5.10 the matrix correction is paper-only.
+4. **5.11**: gateway-side `audit_only` enforcement in
+   `enforce_promotion_gate`. **Closes the trust gap §3.5.5 identifies.**
+   Without 5.11 the SKILL-level expectations in 5.8 / 5.9 / 5.10 are
+   aspirational and a compromised orchestrator can install a pure-skill
+   agent without audit. (§3.5.5.)
 
-The Track B internal order is 5.10 → 5.8 → 5.9. Track B is independent
-of Track A and can land in either order. It is also lower-risk:
-SKILL-only changes, no gateway machinery.
+The Track B internal order is 5.10 → 5.8 → 5.9 → 5.11. The first three
+ship SKILL changes; 5.11 makes them mechanically enforced. Until 5.11
+ships, the SKILL changes from 5.8–5.10 are SKILL-level only.
+
+Track B is independent of Track A and can land in either order. It is
+lower-risk than Track A overall (most of Track B is SKILL changes), but
+5.11 is the gateway-code piece that gives the rest its teeth.
 
 ## 7. Open questions
 
