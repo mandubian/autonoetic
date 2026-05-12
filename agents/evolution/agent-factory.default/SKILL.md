@@ -175,9 +175,23 @@ Compose the install intent in the delegation message itself. Do NOT create itera
 - If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT attempt to fix errors yourself.
 - If coder returns no `artifact_ref`: inspect `files` array and call `artifact_build` to consolidate.
 - If packager fails: report to planner — do NOT skip packager when deps were found.
-- If evaluator/auditor fail functionally (no promotion_record): call `agent_spawn` with `coder.default` to fix, then re-run gates via `agent_spawn` with `evaluator.default`/`auditor.default`.
 - If `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.
 - After 2 retries on the same stage: report failure to planner and stop.
+
+### Evaluator and auditor outcomes — route by reported status
+
+Parse the gate agent's final reply JSON and inspect `status` (and `evaluator_pass` / `auditor_pass`). Each outcome routes differently. **Do not treat all `pass=false` outcomes the same** — the evaluator distinguishes a broken artifact from a broken evaluation environment.
+
+| `status` | Meaning | Route to |
+|---|---|---|
+| `pass` | Artifact behaved correctly under reproducible conditions. | Continue to `specialized_builder.default`. |
+| `fail` | Artifact ran but produced wrong output / errored / violated its contract. | `agent_spawn` `coder.default` with the failing findings; then re-run gates. |
+| `partial` | Some tests passed, some failed. | Same as `fail`. |
+| `unable_to_evaluate` | Gate **could not produce a deterministic verdict** because of the environment (live network unavailable, fixtures missing, sandbox degraded, dependency layers absent). The artifact is not necessarily broken. | **Do NOT route to coder.** Report `ok: false, stage: "gates", reason: "unable_to_evaluate"` to planner with the gate's findings. Planner decides whether to retry under a sound environment, escalate to operator, or accept the artifact without dynamic evidence. |
+| `clarification_needed` | Gate is asking for missing input from planner (test criteria, scenarios, thresholds). | Forward the `clarification_request` payload to planner verbatim — do not invent answers. |
+| _(no promotion_record at all)_ | Gate crashed before recording. | Treat as `fail`: route to `coder.default` once; if it recurs, escalate to planner. |
+
+When forwarding `unable_to_evaluate` or `clarification_needed` to planner, include the gate's `findings` array and `summary` so planner has the diagnostic context. Never silently coerce these to `fail` — that falsely accuses the coder.
 
 ## Resumption
 

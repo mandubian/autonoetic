@@ -297,6 +297,18 @@ When `workflow_wait` returns `any_failed: true`:
 - **Functional failure** (no promotion record, no results): Retry once with coder. After 2 retries, spawn `debugger.default` for root cause.
 - **`failed_task_count >= 2`**: Call `session_escalate(target: "human", urgency: "high")`. Do not spawn more tasks.
 
+### Evaluator / auditor reports `unable_to_evaluate` or `clarification_needed`
+
+These two outcomes are **not artifact failures**. Do not route them to `coder.default` or `debugger.default`.
+
+- **`unable_to_evaluate`**: the gate could not produce a deterministic verdict because of its environment — live network unavailable, fixtures missing, sandbox degraded, dependency layers absent. The artifact may or may not be broken; you do not know. Inspect the gate's `findings` array for the actual blocker:
+  - **Dependency layer missing** (`"requires dependency layering"`): Spawn `packager.default`, then re-run gates.
+  - **Live network required but unavailable** (`recommendation: "blocked_on_environment"` with a network finding): Do not coerce to fail. If the artifact's contract genuinely requires live external state to verify, this is a *coverage gap*, not an artifact bug. Either accept the artifact without dynamic evidence (only if operator policy allows), or call `session_escalate(target: "human", urgency: "normal")` describing the gap. Do not loop on retries.
+  - **Sandbox degraded** (R-7.18 in findings): The gate's session was degraded mid-evaluation. Spawn a fresh gate task on a clean session; if it recurs, escalate.
+- **`clarification_needed`**: the gate is asking *you* for missing inputs (test criteria, scenarios, thresholds). Read the `clarification_request` payload and either supply the missing context in a fresh `agent_spawn` of the same gate, or call `user_ask` to relay the question to the operator if you cannot answer it yourself. Never invent test criteria the gate did not have.
+
+Both outcomes count toward `failed_task_count` only when retried without addressing the underlying cause. Routing the right next agent (packager, escalate, user_ask) is *not* a failed task.
+
 ---
 
 ## Stuck Tasks
