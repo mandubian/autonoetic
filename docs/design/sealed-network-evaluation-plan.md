@@ -735,19 +735,87 @@ Existing rules this builds on:
 - Constitution test pinning that unknown / mis-spelled values are rejected
   at manifest load.
 
-### 5.2 Egress hook (the bulk of the work)
+### 5.2 Egress hook (the bulk of the work — four subscopes)
 
-- Sandbox driver hooks (bubblewrap / docker / microvm) recognise the
-  manifest field and route HTTP/DNS through the fixture responder when
-  `network` is sealed or recording.
-- Fixture loader: resolves `fixtures/<host[-port]>/<method>-<path>.json`
-  relative to the artifact root.
-- Causal events: `artifact.fixtured_response` for hits,
-  `artifact.unfixtured_target` for sealed misses,
-  `artifact.fixture_recorded` for recording-mode captures.
-- Constitution test: a session whose manifest declares `network: sealed`
-  cannot reach a non-fixtured target via `sandbox_exec` or `artifact_exec`,
-  regardless of declared `NetworkAccess`.
+5.2 is sized as four independently-shippable subscopes. Only the first
+two are mechanism-without-enforcement; **the actual seal lives in 5.2c**.
+
+#### 5.2a — Fixture loader + decision (gateway-side library) ✅
+
+- `runtime::sealed_network::FixtureLoader` — resolves
+  `<artifact-root>/fixtures/<host[-port]>/<METHOD>-<encoded-path>.json`
+  with URL-safe path encoding (`/` → `-`, leading `/` stripped, empty
+  path → `root`).
+- `EgressDecision { Allow, Fixture, Unfixtured { expected_path } }`
+  enum + `decide_egress` pure function.
+- `unfixtured_envelope_body` produces a structured error envelope
+  shaped like the gateway's existing `ToolError` envelopes.
+- Tests cover URL-safe encoding, hit/miss/corrupt, decision branches
+  per policy.
+
+#### 5.2b — HTTP proxy server consulting the loader ✅
+
+- `runtime::sealed_network_proxy::start_sealed_proxy(policy, loader)`
+  returns a `SealedProxyHandle` bound to `127.0.0.1:0`.
+- Axum-based fallback handler parses HTTP-proxy-protocol requests
+  (`GET http://host/path`), consults the loader, returns canned
+  responses on hit or 502 + `unfixtured_target` JSON on miss.
+- CONNECT (HTTPS) rejected with 502 + diagnostic — HTTPS support is
+  scope 5.2d.
+- Tests exercise hit / miss / host:port / CONNECT-rejection /
+  Normal-policy-rejection / clean shutdown.
+
+#### 5.2c — Sandbox integration (the **enforcing** layer — PENDING)
+
+This is where the actual seal lives. Two layers of work:
+
+1. **Advisory wiring** — when `sandbox_exec` / `artifact_exec` runs an
+   agent whose manifest declares `sandbox_network: sealed`:
+   - Start the proxy with the artifact's root.
+   - Inject `HTTP_PROXY=http://127.0.0.1:<proxy_port>` (and
+     `HTTPS_PROXY`) into the bubblewrap exec's environment.
+   - Lifecycle the proxy alongside the exec (start before, stop
+     after).
+   - **Limitation**: catches only HTTP-clients that honour the env
+     (Python `urllib`/`requests`/`httpx`, Node `fetch`/`axios`, Go
+     `net/http`, `curl` with env). Does **not** catch raw
+     `socket.socket()` + `connect()`, programs that unset
+     `HTTP_PROXY`, non-HTTP traffic, or `curl --noproxy '*'`.
+
+2. **Enforcing wiring** — make the seal kernel-level:
+   - Run the sandbox with `--unshare-net` (default in
+     `append_bwrap_isolation_flags` is already this; sealed mode
+     re-asserts it).
+   - Inside the network namespace, set up `nftables`/`iptables`
+     transparent-redirect rules routing all outbound TCP regardless
+     of destination IP to the proxy's port on loopback. This is the
+     mitmproxy-transparent-mode mechanism — catches anything that
+     opens a TCP socket, including raw sockets and unset-env curl.
+   - UDP / raw-socket protocols stay blocked by the namespace.
+   - Causal events: `artifact.fixtured_response`,
+     `artifact.unfixtured_target`, `artifact.fixture_recorded`
+     emitted from the gateway side based on the proxy's decisions
+     (proxy publishes them via a channel back to the gateway).
+
+Until 5.2c-enforcing ships, sealed mode is **advisory-not-enforcing**.
+The RFC should not be cited as the security boundary for adversarial
+agents until that subscope lands.
+
+Constitution test for 5.2c: an agent with `sandbox_network: sealed`,
+invoking `curl --proxy '' http://api.example.com/unfixtured` (the
+"escape via explicit noproxy" attack), receives a connection failure
+— the kernel namespace denies the route. Equivalent test with raw
+Python `socket.socket()` confirms transparent redirect catches it.
+
+#### 5.2d — HTTPS support via gateway-generated CA (FUTURE scope)
+
+- Gateway generates a CA cert at boot, signs short-lived per-host
+  certs at request time.
+- The CA is injected into the sandbox's trust store (`/etc/ssl/certs/`)
+  at exec start.
+- The proxy terminates TLS, decrypts, matches fixture, re-encrypts.
+- Until 5.2d ships, HTTPS through the sealed proxy fails — which is
+  the safer default (block over leak).
 
 ### 5.3 Recording mode + fixture authoring paths
 
@@ -943,23 +1011,40 @@ agent review). Each track is internally ordered.
 
 1. **5.1**: just the manifest field + parsing + rejection of bad values.
    No behaviour change.
-2. **5.2**: egress hook. With 5.1 + 5.2 the gateway *can* enforce sealed
-   mode for any manifest that declares it, but no real agent declares it
-   yet.
-3. **5.3**: recording mode safety + the three authoring paths. Cannot
-   ship before 5.2.
-4. **5.4**: evaluator's SKILL.md flips to `network: sealed`. From this PR
-   onward, the evaluator runs sealed.
-5. **5.5**: orchestrator awareness of `unable_to_evaluate`. The verdict
+2. **5.2a** + **5.2b**: gateway-side fixture loader + HTTP proxy server.
+   Decision + response mechanism. Tested in isolation. **Not yet
+   enforcing** — see 5.2c.
+3. **5.2c**: sandbox integration. Two layers: (i) advisory
+   `HTTP_PROXY` env injection into the bubblewrap exec; (ii) enforcing
+   transparent TCP redirect via nftables inside an unshared net
+   namespace. **(i) catches compliant HTTP clients; (ii) catches raw
+   sockets and unset-env curl.** This is the multi-day systems work
+   that turns the mechanism into a real seal.
+4. **5.2d** *(future)*: HTTPS support via gateway-generated CA injected
+   into the sandbox trust store. Until this lands, HTTPS through the
+   sealed proxy fails — which is the safer default.
+5. **5.3**: recording mode safety + the three authoring paths. Cannot
+   ship before 5.2c.
+6. **5.4**: evaluator's SKILL.md flips to `network: sealed`. From this
+   PR onward, the evaluator runs sealed. **Must wait until 5.2c-
+   enforcing ships — declaring `sealed` before then is advisory only.**
+7. **5.5**: orchestrator awareness of `unable_to_evaluate`. The verdict
    plumbing lights up. (Already partly landed in #184 / `0581212`.)
-6. **5.7**: agent-factory bootstrap-recording orchestration — closes the
-   install loop for new code-bearing artifacts. Depends on 5.1 + 5.2 + 5.3.
-7. **5.6** (optional): refactor R+16's ad-hoc enforcement to use the
+8. **5.7**: agent-factory bootstrap-recording orchestration — closes the
+   install loop for new code-bearing artifacts. Depends on 5.1 + 5.2 +
+   5.3.
+9. **5.6** (optional): refactor R+16's ad-hoc enforcement to use the
    generic hook.
 
 The order matters: ship the *capability* (5.1–5.3) before any role *uses*
 it (5.4 / 5.7), so a partial deploy doesn't leak. Operators can roll back
 at 5.4 without breaking the gateway primitive.
+
+**Critical milestone**: 5.4 (evaluator flips to sealed) is gated on
+5.2c-enforcing landing. Without it, an evaluator session that declares
+`sealed` can be escaped by an artifact using raw sockets, and the
+fixture-driven deterministic verdict the RFC promises is not actually
+delivered.
 
 **Track B — Audit completeness for pure-skill agents:**
 
