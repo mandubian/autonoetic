@@ -81,8 +81,16 @@ pub struct PromotionRecord {
 /// Arguments for the `promotion.record` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionRecordArgs {
-    /// Artifact ID being promoted.
-    pub artifact_id: String,
+    /// Artifact ID being promoted (e.g., 'art_a1b2c3d4'). Required if
+    /// `artifact_ref` is not set; when both are set they must resolve to
+    /// the same canonical ID.
+    #[serde(default)]
+    pub artifact_id: Option<String>,
+    /// Short artifact ref (e.g., 'ar.386f5b222421'). Alternative to
+    /// `artifact_id`; resolved server-side to the canonical `art_*` ID.
+    /// Prefer this when you only have the ref, e.g. from a spawn task.
+    #[serde(default)]
+    pub artifact_ref: Option<String>,
     /// SHA256 digest of the artifact (optional, for integrity verification).
     #[serde(default)]
     pub artifact_digest: Option<String>,

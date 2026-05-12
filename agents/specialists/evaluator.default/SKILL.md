@@ -20,6 +20,8 @@ metadata:
       model: "google/gemini-3-flash-preview"
       temperature: 0.1
     sandbox_network: sealed
+    remote_access:
+      approval_mode: preapproved
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "sandbox."]

@@ -39,7 +39,11 @@ impl NativeTool for PromotionRecordTool {
                 "properties": {
                     "artifact_id": {
                         "type": "string",
-                        "description": "Artifact ID being promoted (e.g., 'art_a1b2c3d4')"
+                        "description": "Canonical artifact ID (e.g., 'art_a1b2c3d4'). Alternative: use artifact_ref."
+                    },
+                    "artifact_ref": {
+                        "type": "string",
+                        "description": "Short artifact ref (e.g., 'ar.386f5b222421'). Resolved server-side to the canonical artifact_id. Alternative to artifact_id."
                     },
                     "artifact_digest": {
                         "type": "string",
@@ -75,7 +79,7 @@ impl NativeTool for PromotionRecordTool {
                         "description": "Human-readable summary of the validation result"
                     }
                 },
-                "required": ["artifact_id", "role", "pass"],
+                "required": ["role", "pass"],
                 "additionalProperties": false
             }),
         }
@@ -95,16 +99,37 @@ impl NativeTool for PromotionRecordTool {
         session_id: Option<&str>,
         turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: PromotionRecordArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        anyhow::ensure!(
-            args.artifact_id.starts_with("art_"),
-            "artifact_id must start with 'art_'"
-        );
+        // Resolve artifact_id from artifact_ref if needed.
+        let artifact_id = match (&args.artifact_id, &args.artifact_ref) {
+            (Some(id), _) if id.starts_with("art_") => id.clone(),
+            (_, Some(ref_id)) => {
+                let Some(gs) = gateway_store.as_ref() else {
+                    anyhow::bail!("promotion_record: artifact_ref requires GatewayStore");
+                };
+                let Some(sid) = session_id else {
+                    anyhow::bail!("promotion_record: artifact_ref requires a session_id");
+                };
+                let record = gs
+                    .resolve_artifact_ref_any_scope(ref_id, sid)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "promotion_record: artifact_ref '{}' not found, expired, or revoked",
+                            ref_id
+                        )
+                    })?;
+                record.artifact_id
+            }
+            _ => anyhow::bail!(
+                "promotion_record: either artifact_id (starting with 'art_') or artifact_ref is required"
+            ),
+        };
+
         anyhow::ensure!(
             args.content_digest.is_none(),
             "content_digest is gateway-owned and must not be provided to promotion.record"
@@ -206,7 +231,7 @@ impl NativeTool for PromotionRecordTool {
             Some(crate::log_redaction::RedactedPayload::from_raw(
                 serde_json::json!({
                     "arguments": {
-                        "artifact_id": args.artifact_id,
+                        "artifact_id": artifact_id,
                         "role": args.role.as_str(),
                         "pass": args.pass,
                     }
@@ -217,7 +242,7 @@ impl NativeTool for PromotionRecordTool {
         let store = PromotionStore::new(gw_dir)?;
 
         let record = store.record_promotion(
-            args.artifact_id.clone(),
+            artifact_id.clone(),
             args.artifact_digest.clone(),
             None,
             args.role.clone(),
