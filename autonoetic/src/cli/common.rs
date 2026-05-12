@@ -171,6 +171,9 @@ pub struct RunArgs {
     /// Stable conversation/session identifier.
     #[arg(long)]
     pub session_id: Option<String>,
+    /// Resume the most recent session instead of starting a new one.
+    #[arg(long)]
+    pub resume: bool,
     /// Re-copy bundled reference agents from the Autonoetic repo and re-bootstrap gateway revisions
     /// (equivalent to `autonoetic agent bootstrap --overwrite`). Use after upgrading the binary or when
     /// reference bundles changed (e.g. new `runtime.lock` or manifest fields).
@@ -775,6 +778,9 @@ pub struct ChatArgs {
     /// Stable conversation/session identifier.
     #[arg(long)]
     pub session_id: Option<String>,
+    /// Resume the most recent session instead of starting a new one.
+    #[arg(long)]
+    pub resume: bool,
     /// Suppress prompts and banners for deterministic scripted tests.
     #[arg(long)]
     pub test_mode: bool,

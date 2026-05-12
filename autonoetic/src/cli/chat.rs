@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use crossterm::{
-    cursor::Show,
+    cursor::{Hide, Show},
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -685,6 +685,32 @@ fn format_session_status(app: &App) -> String {
 
 fn generate_session_id() -> String {
     format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8])
+}
+
+fn resolve_latest_session(config_path: &Path, config: &GatewayConfig) -> String {
+    // Try trace files first (fast, no DB needed)
+    let sessions = load_known_sessions(config_path, "", "");
+    if let Some(entry) = sessions.into_iter().next() {
+        eprintln!("Resuming session: {}", entry.session_id);
+        return entry.session_id;
+    }
+
+    // Fallback: read the `.gateway/sessions/latest` symlink target
+    // The symlink is maintained by SessionReportWriter and points to the
+    // root session directory name (= session_id).
+    let latest_link = autonoetic_gateway::execution::gateway_root_dir(config)
+        .join("sessions")
+        .join("latest");
+    if let Ok(target) = std::fs::read_link(&latest_link) {
+        let session_id = target.to_string_lossy().to_string();
+        if !session_id.is_empty() {
+            eprintln!("Resuming session: {}", session_id);
+            return session_id;
+        }
+    }
+
+    eprintln!("No previous sessions found, starting a new session.");
+    generate_session_id()
 }
 
 fn load_known_sessions(
@@ -2854,10 +2880,11 @@ async fn handle_chat_test_mode(
 pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let target_hint = args.agent_id.as_deref().unwrap_or("planner.default");
-    let session_id = args
-        .session_id
-        .clone()
-        .unwrap_or_else(generate_session_id);
+    let session_id = match &args.session_id {
+        Some(sid) => sid.clone(),
+        None if args.resume => resolve_latest_session(config_path, &config),
+        None => generate_session_id(),
+    };
     let sender_id = args
         .sender_id
         .clone()
@@ -2898,7 +2925,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     // Setup terminal (only after prerequisites—early `?` must not leave raw mode / alt screen on)
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;

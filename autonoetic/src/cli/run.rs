@@ -283,6 +283,7 @@ pub async fn handle_run(
         sender_id: None,
         channel_id: None,
         session_id: args.session_id.clone(),
+        resume: args.resume,
         test_mode: false,
     };
 

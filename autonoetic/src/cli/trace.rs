@@ -1455,6 +1455,7 @@ pub async fn handle_trace_fork(
             session_id: Some(fork.new_session_id.clone()),
             sender_id: None,
             channel_id: None,
+            resume: false,
             test_mode: false,
         };
         super::chat::handle_chat(config_path, &chat_args).await?;
