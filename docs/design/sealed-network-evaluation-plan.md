@@ -500,6 +500,94 @@ The "Skip *for now*" entries should be annotated in the SKILL with a
 forward reference to §3.5.2 so a future implementation has a clear
 hook.
 
+#### 3.5.4 Promotion records for pure-skill agents — the artifact-id problem
+
+The gate-matrix correction (§3.5.3) is conceptually right but cannot
+work mechanically against the current promotion-record machinery
+because pure-skill agents do not have an `artifact_id`.
+
+Today's `promotion_record` tool (`autonoetic-gateway/src/runtime/tools/promotion.rs`):
+
+```rust
+"required": ["artifact_id", "role", "pass"],
+// args.artifact_id.starts_with("art_") is asserted at execute().
+```
+
+It **requires** an `art_*` ID. Pure-skill agents skip the coder and go
+straight from intent to `specialized_builder` via
+`agent_revision_create_from_intent` (see
+`agents/evolution/agent-factory.default/SKILL.md` Step 2a). No
+`artifact_build` runs; no `art_*` ID exists. So even after the auditor
+SKILL is extended to review SKILL.md / manifest / capability scopes
+(§5.8), the auditor cannot persist its findings via `promotion_record`,
+and `specialized_builder` cannot mechanically verify the audit
+occurred. The gate-matrix correction in §5.9 therefore has no enforcement
+unless this is solved.
+
+Three options considered:
+
+**Option A — Artifact-build every pure-skill agent before install.**
+`agent-factory.default` Step 2a inserts an `artifact_build` of the
+SKILL.md + manifest YAML + runtime.lock (and nothing else) into a
+minimal bundle. The resulting `art_*` ID is what the auditor records
+against, what `specialized_builder` installs from, and what R++2's
+capability-delta gating keys on. The bundle contains no executable
+code — just the agent's declared identity surface.
+
+- **Pros:** Every install is artifact-addressed. Audit and (future)
+  evaluation records work uniformly across agent types. R++2 already
+  works without special-casing. The SKILL becomes tamper-evident in
+  the same way executable artifacts are. Content-addressed identity
+  for *what was audited* matches *what gets installed*.
+- **Cons:** Adds a small `artifact_build` step to Step 2a, slightly
+  fattening the reasoning-only path. Requires a tiny extension to
+  `specialized_builder` to recognise intent-only bundles (no
+  `script_entry`, no executable files).
+- **Effort:** Half-day to one day. SKILL updates on agent-factory and
+  specialized_builder; no gateway-side type changes.
+
+**Option B — Extend `promotion_record` to accept `(agent_id, revision_id)` as an alternative target.**
+The tool's `artifact_id` field becomes polymorphic: `art_*` OR
+`(agent_id, revision_id)` pointing to a pending revision.
+
+- **Pros:** Smallest gateway change to the existing flow.
+- **Cons:** Promotion records now have two shapes; every consumer
+  (promotion gate, causal events, R++2 enforcement, audit forensics)
+  must handle both. The auditor doesn't have a `revision_id` when it
+  audits — that ID is created by `agent_revision_create_from_intent`,
+  which happens *after* the audit. Resolving this means either the
+  auditor records against `(agent_id, intent_hash)` (a third shape) or
+  re-audits after revision creation (a workflow inversion).
+- **Effort:** Multi-day. Type changes plus consumer updates across
+  promotion gate, causal events, and R++2.
+
+**Option C — A separate `audit_record_for_intent` tool.**
+Auditor calls `audit_record_for_intent(agent_id, intent_hash, role,
+pass, findings)` for pre-revision audit. `specialized_builder` checks
+*both* `promotion_record` (artifact-addressed) and
+`audit_record_for_intent` (intent-addressed) as alternative evidence
+shapes.
+
+- **Pros:** Clean separation between pre-revision and post-revision
+  evidence.
+- **Cons:** Two evidence-recording paths to maintain. Two storage
+  schemas. Two enforcement paths in promotion gate. Eternal duplication
+  for an asymmetry that doesn't otherwise exist.
+- **Effort:** Multi-day. New tool + new store + new enforcement
+  branch.
+
+**Recommendation: Option A.**
+
+Architecturally consistent: every agent install is artifact-addressed,
+regardless of whether the agent ships executable code. Audit and
+evaluation records work uniformly. R++2 capability-delta gating applies
+without special-casing. "This SKILL.md was the one audited" becomes a
+content-addressed fact pinned to the same artifact identity the install
+uses. The small `artifact_build` step in agent-factory Step 2a is a
+minor cost; the symmetry gained is significant.
+
+Implementation lands as scope **5.10** (see §5).
+
 ## 4. Constitutional alignment
 
 This RFC does **not** require a new constitutional rule. R+16 already
@@ -634,6 +722,42 @@ Existing rules this builds on:
   follow-up has a visible hook.
 - Depends on 5.8 landing first so the auditor is actually ready to
   run on pure-skill agents.
+- Depends on 5.10 landing first so the auditor can actually persist a
+  `promotion_record` (without an artifact_id the matrix correction is
+  paper-only).
+
+### 5.10 Artifact-build pure-skill agents before install (§3.5.4)
+
+Implements Option A from §3.5.4. Closes the artifact-id gap that
+otherwise makes §5.9 paper-only enforcement.
+
+- **agent-factory.default** Step 2a: insert an `artifact_build` call
+  before `agent_spawn specialized_builder.default`. The bundle
+  contains the agent's SKILL.md (composed from the install intent),
+  the manifest YAML, and runtime.lock. No executable files, no
+  `script_entry`. The resulting `art_*` ID is the audit target and
+  the install source.
+- **auditor.default**: per the §5.8 extension, audits the SKILL.md /
+  manifest / capability content of the new pure-skill artifact and
+  calls `promotion_record(artifact_id=<new_id>, role="auditor",
+  pass=...)` against it. No tool-side change; the existing
+  `promotion_record` accepts the artifact_id as-is.
+- **specialized_builder.default**: recognises intent-only bundles
+  (no `script_entry`, no executable code files) and installs them via
+  `agent_revision_create_from_intent` keyed on the bundled SKILL.md.
+  Validates the auditor's `promotion_record` exists against the
+  bundled artifact_id (the `audit_only` gating mode from §3.5.3 +
+  §5.9). The R++2 capability-delta check works unchanged because it
+  already keys on artifact_id.
+- **No gateway-side type change.** No `promotion_record` polymorphism.
+  No new audit-record tool. The work is entirely in agent-factory and
+  specialized_builder SKILLs.
+- Constitution test: install a pure-skill agent end-to-end. Auditor
+  finds and records against the intent-only artifact ID; install
+  refuses if the record is missing; install succeeds when it is
+  present.
+- Effort: half-day to one day. No gateway dependencies — can land
+  before or independently of Track A scopes 5.1–5.7.
 
 ## 6. Migration and rollout
 
@@ -667,14 +791,20 @@ at 5.4 without breaking the gateway primitive.
 
 **Track B — Audit completeness for pure-skill agents:**
 
-1. **5.8**: auditor SKILL teaches the agent to audit SKILL.md, manifest
-   YAML, and capability declarations when there is no source code.
-   Static analysis only. No gateway change.
-2. **5.9**: agent-factory gate matrix corrected to require auditor for
-   pure-skill agents. Depends on 5.8 being ready.
+1. **5.10**: agent-factory builds an intent-only artifact for pure-skill
+   agents before invoking specialized_builder, so audit findings have a
+   content-addressed target. SKILL-only changes on agent-factory and
+   specialized_builder; no gateway code change. (§3.5.4 Option A.)
+2. **5.8**: auditor SKILL teaches the agent to audit SKILL.md, manifest
+   YAML, and capability declarations. Now records against the
+   intent-only artifact ID produced by 5.10. Static analysis only.
+3. **5.9**: agent-factory gate matrix corrected to require auditor for
+   pure-skill agents. Depends on 5.8 and 5.10 being ready — without
+   5.10 the matrix correction is paper-only.
 
-Track B is independent of Track A and can land in either order. It is
-also lower-risk: SKILL-only changes, no gateway machinery.
+The Track B internal order is 5.10 → 5.8 → 5.9. Track B is independent
+of Track A and can land in either order. It is also lower-risk:
+SKILL-only changes, no gateway machinery.
 
 ## 7. Open questions
 
