@@ -226,9 +226,16 @@ fn ri_0_13c_execute_rejects_path_traversal() -> anyhow::Result<()> {
         Some(store.clone()),
         None,
     );
-    assert!(
-        result.is_err(),
+    let response = result.expect("registry returns structured envelope, not Rust Err");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).expect("envelope must be JSON");
+    assert_eq!(
+        parsed["ok"], false,
         "path traversal in session_id must be rejected"
+    );
+    assert_eq!(
+        parsed["error_type"], "validation",
+        "rejection must use the validation envelope (R-5.11)"
     );
 
     let result2 = tool.execute(
@@ -243,9 +250,16 @@ fn ri_0_13c_execute_rejects_path_traversal() -> anyhow::Result<()> {
         Some(store.clone()),
         None,
     );
-    assert!(
-        result2.is_err(),
+    let response2 = result2.expect("registry returns structured envelope, not Rust Err");
+    let parsed2: serde_json::Value =
+        serde_json::from_str(&response2).expect("envelope must be JSON");
+    assert_eq!(
+        parsed2["ok"], false,
         "path traversal in agent_id must be rejected"
+    );
+    assert_eq!(
+        parsed2["error_type"], "validation",
+        "rejection must use the validation envelope (R-5.11)"
     );
 
     Ok(())

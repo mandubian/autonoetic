@@ -159,22 +159,30 @@ fn ri_0_2_agent_without_read_access_cannot_use_observability() {
     );
 
     let args = serde_json::json!({"query": "anything"});
-    let result = registry.execute(
-        "observability_search",
-        &manifest,
-        &policy,
-        temp.path(),
-        Some(&gw_dir),
-        &args.to_string(),
-        None,
-        None,
-        None,
-        Some(store),
-        None,
+    let response = registry
+        .execute(
+            "observability_search",
+            &manifest,
+            &policy,
+            temp.path(),
+            Some(&gw_dir),
+            &args.to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("registry returns structured envelope, not Rust Err");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).expect("envelope must be JSON");
+    assert_eq!(
+        parsed["ok"], false,
+        "direct invocation must be refused without ReadAccess"
     );
-    assert!(
-        result.is_err(),
-        "direct invocation should fail without ReadAccess"
+    assert_eq!(
+        parsed["error_type"], "permission",
+        "refusal must use the permission envelope (R-5.11)"
     );
 }
 
