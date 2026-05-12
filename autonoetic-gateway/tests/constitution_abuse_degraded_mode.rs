@@ -1,4 +1,4 @@
-//! Constitution R++6 — Degraded session mode.
+//! Constitution R-7.18 — Degraded session mode.
 //!
 //! A `Degraded` session state sits between healthy and emergency-stopped.
 //! Tool-tier filter clamps to Core, `sandbox_exec`/`artifact_exec` are

@@ -108,7 +108,7 @@ impl LoopGuard {
     /// `max_loops_without_progress`, or any single tool failure count has
     /// reached 80% of `max_tool_failures`.
     ///
-    /// This is the trigger for R++6 degraded-mode entry via loop-guard
+    /// This is the trigger for R-7.18 degraded-mode entry via loop-guard
     /// sub-trip warnings.
     pub fn is_sub_trip_warning(&self) -> bool {
         let loop_threshold = ((self.max_loops_without_progress as u64 * 4 + 4) / 5) as u32;

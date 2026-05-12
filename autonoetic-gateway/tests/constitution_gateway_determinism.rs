@@ -278,6 +278,8 @@ fn evaluate_gateway_decision(input: &GatewayInput) -> GatewayDecisionSnapshot {
     let filter = ToolTierFilter {
         allowed_tiers: tier_vector_from_mask(input.allowed_tier_mask),
         always_include_approval_tools: input.allow_approval_exception,
+        always_include_inspection_tools: false,
+        clarification_read_only: false,
     };
     let session_state = if input.session_degraded {
         SessionState::Degraded

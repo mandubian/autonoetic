@@ -85,7 +85,7 @@ async fn ri_0_6_operator_degrade_emits_causal_event() {
         .iter()
         .find(|e| e.action == "session.degraded")
         .expect("degrade_session must emit session.degraded causal event");
-    assert!(degraded.enforced_rules.contains(&"R++6".to_string()));
+    assert!(degraded.enforced_rules.contains(&"R-7.18".to_string()));
     let payload: serde_json::Value =
         serde_json::from_str(degraded.payload.as_deref().unwrap_or("{}")).unwrap();
     assert_eq!(payload["source"], "operator");
@@ -118,7 +118,7 @@ async fn ri_0_6_operator_clear_degradation_emits_causal_event() {
         .iter()
         .find(|e| e.action == "session.degradation_cleared")
         .expect("clear must emit session.degradation_cleared causal event");
-    assert!(cleared.enforced_rules.contains(&"R++6".to_string()));
+    assert!(cleared.enforced_rules.contains(&"R-7.18".to_string()));
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn ri_0_6_core_only_filter_blocks_specialized_tools() {
 #[test]
 fn ri_0_6_capability_narrowing_only_via_declared_paths() {
     let declared_paths = vec![
-        ("degraded_mode", "R-7.18 / R++6"),
+        ("degraded_mode", "R-7.18"),
         ("operator_command", "session.degrade"),
     ];
     assert_eq!(

@@ -254,7 +254,7 @@ async fn ri_0_6_rule_driven_degrade_path_is_accepted() {
             category: "session".to_string(),
             action: "session.degraded".to_string(),
             status: "active".to_string(),
-            enforced_rules: vec!["R++6".to_string()],
+            enforced_rules: vec!["R-7.18".to_string()],
             target: None,
             payload: Some(
                 serde_json::json!({

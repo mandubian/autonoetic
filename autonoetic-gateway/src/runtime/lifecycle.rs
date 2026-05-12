@@ -1067,7 +1067,7 @@ impl AgentExecutor {
                         category: "session".to_string(),
                         action: "session.degraded".to_string(),
                         status: "active".to_string(),
-                        enforced_rules: vec!["R++6".to_string()],
+                        enforced_rules: vec!["R-7.18".to_string()],
                         target: None,
                         payload: Some(serde_json::json!({"reason": "loop_guard_sub_trip_warning"}).to_string()),
                         payload_ref: None,

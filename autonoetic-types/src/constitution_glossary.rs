@@ -27,7 +27,7 @@ pub fn rule_explanation(rule_id: &str) -> Option<&'static str> {
         // Execution safety (R-7.x)
         "R-7.15" => "Spawn-chain depth limit exceeded",
         "R-7.17" => "Approval flood cap — too many pending approvals per root session",
-        "R-7.18" => "Sandbox escape attempt degradation threshold reached",
+        "R-7.18" => "Degraded session mode — non-Core tools, network, and spawn revoked; reasoning retained",
 
         // Audit and attribution (R-8.x, R+++3)
         "R-8.19" => "Gate decisions carry decider attribution",

@@ -697,7 +697,7 @@ with correct phrase, standard no-phrase, persistence in store.
 
 ---
 
-### 2.11 `R++6` Degraded session mode — **ENFORCED** (now R-7.18)
+### 2.11 `R-7.18` Degraded session mode — **ENFORCED**
 
 **Threat.** The response to agent misbehaviour today is binary:
 healthy or emergency-stopped. A session showing loop-guard warnings
@@ -838,7 +838,7 @@ snapshot and compares turn N+1 against turn N. Narrowing is allowed only in
 degraded mode with `session.degraded` causal evidence; each narrowing writes
 `session.capability_narrowed` with path attribution (`operator_command` or
 `degraded_mode`). Tests also verify `degrade_session()` emits `session.degraded`
-with `source: "operator"` and `enforced_rules: ["R++6"]`, that
+with `source: "operator"` and `enforced_rules: ["R-7.18"]`, that
 `clear_session_degradation()` emits `session.degradation_cleared`, that degraded
 state clamps the tool tier filter to `core_only()` (blocking specialized tools),
 and that declared narrowing paths are enforced (`constitution_right_ri_0_6.rs`).

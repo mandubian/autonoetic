@@ -38,6 +38,12 @@ pub struct ToolTierFilter {
     /// When true, always include tools needed for approval interactions
     /// regardless of tier (e.g., approval.status, approval.answer).
     pub always_include_approval_tools: bool,
+    /// When true, always include inspection tools (observability_*,
+    /// knowledge_search/read/search_by_tags, constitution_read, content_read,
+    /// execution_search, digest_query) regardless of tier. Used by degraded
+    /// sessions so the agent can still diagnose its own state — an agent
+    /// that cannot see why it was degraded cannot recover (Ri-0.5 spirit).
+    pub always_include_inspection_tools: bool,
     /// When true, override all other rules with a strict read-only allowlist:
     /// only inspection tools (observability/knowledge/constitution/content_read
     /// /execution_search) pass. Used for clarification child sessions
@@ -53,6 +59,7 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![ToolTier::Core],
             always_include_approval_tools: false,
+            always_include_inspection_tools: false,
             clarification_read_only: false,
         }
     }
@@ -62,6 +69,7 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![ToolTier::Core, ToolTier::Workflow],
             always_include_approval_tools: false,
+            always_include_inspection_tools: false,
             clarification_read_only: false,
         }
     }
@@ -73,6 +81,7 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![ToolTier::Core, ToolTier::Workflow],
             always_include_approval_tools: true,
+            always_include_inspection_tools: false,
             clarification_read_only: false,
         }
     }
@@ -82,6 +91,21 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![],
             always_include_approval_tools: false,
+            always_include_inspection_tools: false,
+            clarification_read_only: false,
+        }
+    }
+
+    /// Filter for `SessionState::Degraded` (R-7.18): Core tier + inspection
+    /// tools. The agent has lost specialized capabilities but retains the
+    /// ability to read its own causal chain, look up the rule that degraded
+    /// it, and inspect what it was doing — so recovery and reporting are
+    /// possible.
+    pub fn degraded() -> Self {
+        Self {
+            allowed_tiers: vec![ToolTier::Core],
+            always_include_approval_tools: false,
+            always_include_inspection_tools: true,
             clarification_read_only: false,
         }
     }
@@ -94,6 +118,7 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![],
             always_include_approval_tools: false,
+            always_include_inspection_tools: false,
             clarification_read_only: true,
         }
     }
@@ -126,6 +151,9 @@ impl ToolTierFilter {
         if self.clarification_read_only {
             return Self::is_clarification_safe(tool_name);
         }
+        if self.always_include_inspection_tools && Self::is_clarification_safe(tool_name) {
+            return true;
+        }
         if self.allowed_tiers.is_empty() {
             return true;
         }
@@ -141,6 +169,9 @@ impl ToolTierFilter {
     pub fn allows_tool(&self, tool_name: &str, tier: ToolTier) -> bool {
         if self.clarification_read_only {
             return Self::is_clarification_safe(tool_name);
+        }
+        if self.always_include_inspection_tools && Self::is_clarification_safe(tool_name) {
+            return true;
         }
         if self.allowed_tiers.is_empty() {
             return true;
@@ -1013,6 +1044,7 @@ mod tests {
         let filter = ToolTierFilter {
             allowed_tiers: vec![ToolTier::Core],
             always_include_approval_tools: true,
+            always_include_inspection_tools: false,
             clarification_read_only: false,
         };
         assert!(!filter.allows("web_search"));

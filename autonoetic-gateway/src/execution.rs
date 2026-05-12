@@ -764,7 +764,7 @@ impl GatewayExecutionService {
                 category: "session".to_string(),
                 action: "session.degraded".to_string(),
                 status: "active".to_string(),
-                enforced_rules: vec!["R++6".to_string()],
+                enforced_rules: vec!["R-7.18".to_string()],
                 target: None,
                 payload: Some(
                     serde_json::json!({
@@ -816,7 +816,7 @@ impl GatewayExecutionService {
                 category: "session".to_string(),
                 action: "session.degradation_cleared".to_string(),
                 status: "active".to_string(),
-                enforced_rules: vec!["R++6".to_string()],
+                enforced_rules: vec!["R-7.18".to_string()],
                 target: None,
                 payload: None,
                 payload_ref: None,
