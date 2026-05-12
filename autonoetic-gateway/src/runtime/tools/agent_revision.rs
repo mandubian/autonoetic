@@ -337,9 +337,16 @@ fn parse_frontmatter_capabilities(
             "Promotion gate: failed to convert SKILL.md frontmatter to JSON for capability parsing: {e}"
         )
     })?;
+    // Canonical SKILL.md (composed via `render_skill_document`) nests
+    // capabilities under `metadata.autonoetic.capabilities`. Some hand-
+    // crafted SKILL.md files use a top-level `capabilities` field. Accept
+    // both, with the canonical location preferred.
     let caps_json = frontmatter_json
-        .get("capabilities")
+        .get("metadata")
+        .and_then(|m| m.get("autonoetic"))
+        .and_then(|a| a.get("capabilities"))
         .and_then(|v| v.as_array())
+        .or_else(|| frontmatter_json.get("capabilities").and_then(|v| v.as_array()))
         .cloned()
         .unwrap_or_default();
 
@@ -1917,7 +1924,24 @@ impl NativeTool for AgentRevisionPromoteTool {
             (artifact_required, high_risk)
         };
 
+        // Promotion gate mode — derived from the revision's capabilities and
+        // artifact shape, **not** from anything the orchestrator declares.
+        // See docs/design/sealed-network-evaluation-plan.md §3.5.5.
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        enum PromotionGateMode {
+            /// CodeExecution/AgentSpawn, or NetworkAccess + artifact:
+            /// auditor PASS + evaluator PASS, distinct identities.
+            Full,
+            /// Intent-only artifact (pure-reasoning agent) without
+            /// high-risk capabilities: auditor PASS, auditor identity
+            /// distinct from revision proposer. Evaluator skipped — the
+            /// behavioural-evaluation mechanism for pure-skill agents
+            /// is not yet implemented.
+            AuditOnly,
+        }
+
         let enforce_promotion_gate = |artifact_id: &str,
+                                      mode: PromotionGateMode,
                                       missing_record_message: &str|
          -> anyhow::Result<()> {
             let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
@@ -1930,49 +1954,61 @@ impl NativeTool for AgentRevisionPromoteTool {
             anyhow::ensure!(
                     record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
                     "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
-                     but revision requires '{}'. Re-run evaluator.default and auditor.default for this revision content.",
+                     but revision requires '{}'. Re-run gate roles for this revision content.",
                     artifact_id,
                     record_content_digest,
                     rev.content_digest
                 );
 
             anyhow::ensure!(
-                record.evaluator_pass,
-                "Promotion gate: evaluator did not pass for artifact '{}'. \
-                     Fix the evaluation findings and re-run evaluator.default.",
-                artifact_id
-            );
-            anyhow::ensure!(
                 record.auditor_pass,
                 "Promotion gate: auditor did not pass for artifact '{}'. \
                      Fix the audit findings and re-run auditor.default.",
                 artifact_id
             );
+            let audit_id = record.auditor_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Promotion gate: auditor identity missing for artifact '{}' (R-2.17). \
+                     Re-run auditor.default to record its identity.",
+                    artifact_id
+                )
+            })?;
 
-            // R-2.17 (formerly R++3) — Distinct evaluator/auditor identity.
-            // The evaluator and auditor must be different agent identities,
-            // not merely distinct sessions of the same agent.
-            {
-                let eval_id = record.evaluator_id.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Promotion gate: evaluator identity missing for artifact '{}' (R-2.17). \
-                         Re-run evaluator.default to record its identity.",
+            match mode {
+                PromotionGateMode::Full => {
+                    anyhow::ensure!(
+                        record.evaluator_pass,
+                        "Promotion gate: evaluator did not pass for artifact '{}'. \
+                         Fix the evaluation findings and re-run evaluator.default.",
                         artifact_id
-                    )
-                })?;
-                let audit_id = record.auditor_id.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Promotion gate: auditor identity missing for artifact '{}' (R-2.17). \
-                         Re-run auditor.default to record its identity.",
-                        artifact_id
-                    )
-                })?;
-                anyhow::ensure!(
-                    eval_id != audit_id,
-                    "Promotion gate: evaluator and auditor are the same agent '{}' (R-2.17). \
-                     A single agent cannot self-approve. Use distinct evaluator and auditor agents.",
-                    eval_id
-                );
+                    );
+                    let eval_id = record.evaluator_id.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Promotion gate: evaluator identity missing for artifact '{}' (R-2.17). \
+                             Re-run evaluator.default to record its identity.",
+                            artifact_id
+                        )
+                    })?;
+                    anyhow::ensure!(
+                        eval_id != audit_id,
+                        "Promotion gate: evaluator and auditor are the same agent '{}' (R-2.17). \
+                         A single agent cannot self-approve. Use distinct evaluator and auditor agents.",
+                        eval_id
+                    );
+                }
+                PromotionGateMode::AuditOnly => {
+                    // R-2.17 reduced: auditor must be a distinct identity
+                    // from the agent that proposed the install. With no
+                    // evaluator in this mode, the proposer is the relevant
+                    // counterparty for the self-approval ban.
+                    anyhow::ensure!(
+                        audit_id != rev.created_by_id,
+                        "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (R-2.17, audit-only). \
+                         A single agent cannot propose and audit. Use a distinct auditor identity.",
+                        audit_id,
+                        args.revision_id
+                    );
+                }
             }
 
             let has_unresolved = rev
@@ -1989,6 +2025,40 @@ impl NativeTool for AgentRevisionPromoteTool {
             Ok(())
         };
 
+        // Emit a causal event after each enforced promotion gate so forensics
+        // can confirm which mode was applied to a given revision.
+        let emit_gate_event = |mode: PromotionGateMode, artifact_id: Option<&str>| {
+            let event = autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("promote-gate-{}", uuid::Uuid::new_v4()),
+                agent_id: manifest.agent.id.clone(),
+                session_id: session_id.unwrap_or("").to_string(),
+                turn_id: None,
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "revision".to_string(),
+                action: "revision.promotion_gate_enforced".to_string(),
+                status: "active".to_string(),
+                enforced_rules: vec!["R-2.8".to_string(), "R-2.17".to_string()],
+                target: artifact_id.map(|s| s.to_string()),
+                payload: Some(
+                    serde_json::json!({
+                        "revision_id": &args.revision_id,
+                        "agent_id": &args.agent_id,
+                        "artifact_id": artifact_id,
+                        "mode": match mode {
+                            PromotionGateMode::Full => "full",
+                            PromotionGateMode::AuditOnly => "audit_only",
+                        },
+                    })
+                    .to_string(),
+                ),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            };
+            let _ = gateway_store.create_causal_event(&event);
+        };
+
         if needs_artifact_gate {
             // CodeExecution or AgentSpawn: must have artifact + full eval/audit gate.
             let artifact_id = rev.artifact_id.as_deref().ok_or_else(|| {
@@ -2000,6 +2070,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             })?;
             enforce_promotion_gate(
                 artifact_id,
+                PromotionGateMode::Full,
                 &format!(
                     "Promotion gate: no promotion.record found for artifact '{}'. \
                      Agents with CodeExecution/AgentSpawn require both \
@@ -2007,12 +2078,14 @@ impl NativeTool for AgentRevisionPromoteTool {
                     artifact_id
                 ),
             )?;
+            emit_gate_event(PromotionGateMode::Full, Some(artifact_id));
         } else if has_high_risk && rev.artifact_id.is_some() {
             // NetworkAccess without CodeExecution/AgentSpawn, but an artifact was provided.
             // Still apply the full eval+audit gate since code exists to review.
             let artifact_id = rev.artifact_id.as_deref().unwrap();
             enforce_promotion_gate(
                 artifact_id,
+                PromotionGateMode::Full,
                 &format!(
                     "Promotion gate: no promotion.record found for artifact '{}'. \
                      Agents with NetworkAccess and a code artifact require both \
@@ -2020,8 +2093,35 @@ impl NativeTool for AgentRevisionPromoteTool {
                     artifact_id
                 ),
             )?;
+            emit_gate_event(PromotionGateMode::Full, Some(artifact_id));
+        } else if rev.artifact_id.is_some() && !current_capabilities.is_empty() {
+            // Pure-skill intent-only bundle (no CodeExecution/AgentSpawn, no
+            // high-risk capabilities) that declares non-empty capabilities
+            // and ships an artifact. Audit_only mode — auditor pass required;
+            // evaluator skipped pending the behavioural-evaluation mechanism
+            // for pure-skill agents. See sealed-network RFC §3.5.5.
+            //
+            // The `!current_capabilities.is_empty()` guard preserves the
+            // existing direct-promote path for zero-capability sandboxed
+            // scripts: an agent that declares no capabilities cannot
+            // mutate gateway state via tool calls, and the audit surface
+            // for such an agent is trivial. Runtime capability enforcement
+            // on every tool call remains the security gate for that case.
+            let artifact_id = rev.artifact_id.as_deref().unwrap();
+            enforce_promotion_gate(
+                artifact_id,
+                PromotionGateMode::AuditOnly,
+                &format!(
+                    "Promotion gate: no auditor promotion.record found for artifact '{}'. \
+                     Pure-skill agents (reasoning-only with declared capabilities and an \
+                     intent-only artifact bundle) require an auditor pass record before \
+                     promotion.",
+                    artifact_id
+                ),
+            )?;
+            emit_gate_event(PromotionGateMode::AuditOnly, Some(artifact_id));
         }
-        // else: no artifact, no CodeExecution/AgentSpawn → direct promote.
+        // else: no artifact OR zero-capability sandboxed agent → direct promote.
         // Capability enforcement on every tool call is the security gate.
 
         if let Some(eval_run_id) = &args.required_eval_run_id {

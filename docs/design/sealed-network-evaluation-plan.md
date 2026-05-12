@@ -665,8 +665,16 @@ attack surface — has not been independently reviewed.
 |---|---|---|
 | `needs_artifact_gate` (CodeExecution / AgentSpawn) | auditor PASS + evaluator PASS | `full` |
 | `has_high_risk && artifact_id` | auditor PASS + evaluator PASS | `full` |
-| `artifact_id` only (pure-skill intent-only) | **auditor PASS** | `audit_only` (NEW) |
-| neither | direct promote | `direct` |
+| `artifact_id && !capabilities.is_empty()` (pure-skill intent-only with declared caps) | **auditor PASS** | `audit_only` (NEW) |
+| neither (zero-capability sandboxed agent, or no artifact) | direct promote | `direct` |
+
+The `!capabilities.is_empty()` guard preserves direct-promote for
+zero-capability sandboxed agents (no `ReadAccess` / `WriteAccess` /
+anything): such an agent cannot mutate gateway state via tool calls,
+and the audit surface is trivial. Runtime capability enforcement on
+every tool call remains the security gate for that case. As soon as
+*any* capability is declared (even a benign `ReadAccess scopes:
+[self.*]`), the audit gate applies.
 
 The new third branch is the gateway-side enforcement of `audit_only`.
 It is a refinement of R-2.8 specific to the intent-only-bundle case;
