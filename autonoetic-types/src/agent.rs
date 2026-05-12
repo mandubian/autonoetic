@@ -329,13 +329,21 @@ pub enum ToolTier {
     Specialized,
 }
 
-/// Session runtime state — tracks whether the session is healthy or degraded.
+/// Session runtime state — declares the session's purpose at start and tracks
+/// runtime health transitions.
+///
+/// `Clarification` is a first-class declared purpose, not a degradation:
+/// it is set at session start (typically by `spawn_clarification_for_approval`)
+/// and stays for the life of the session. Tool tier is clamped read-only by
+/// the tier filter — agents in clarification sessions can only inspect, never
+/// act. See `docs/design/human-gate-unification-plan.md` §Phase 5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     #[default]
     Normal,
     Degraded,
+    Clarification,
 }
 
 /// A stored credential record for agent-to-service authentication.

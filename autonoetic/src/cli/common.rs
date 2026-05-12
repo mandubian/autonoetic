@@ -406,6 +406,21 @@ pub enum GatewayApprovalCommands {
         /// The note to append (will be redacted before storage).
         message: String,
     },
+    /// Ask the agent that requested the approval a clarifying question
+    /// (Phase 5, #172).
+    ///
+    /// Spawns a read-only clarification child session of the same agent,
+    /// primed with the parent's digest and approval context, and captures
+    /// the reply as a `gate_message`. The parent session is untouched.
+    ///
+    /// This is distinct from `ask`, which is an ephemeral LLM Q&A on the
+    /// approval JSON only — `ask-agent` actually asks the agent.
+    AskAgent {
+        /// Approval request identifier.
+        request_id: String,
+        /// The question to ask the agent.
+        question: String,
+    },
     /// Show approval statistics and analytics.
     Stats {
         /// Filter by agent ID.

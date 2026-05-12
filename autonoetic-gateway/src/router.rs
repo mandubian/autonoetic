@@ -1197,6 +1197,62 @@ impl JsonRpcRouter {
                 }
             }
 
+            "approvals.ask_agent" => {
+                #[derive(Deserialize)]
+                struct AskAgentParams {
+                    request_id: String,
+                    question: String,
+                }
+
+                let params: AskAgentParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for approvals.ask_agent: {}", e),
+                        );
+                    }
+                };
+
+                if params.request_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "request_id must not be empty",
+                    );
+                }
+                if params.question.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "question must not be empty",
+                    );
+                }
+
+                match self
+                    .execution
+                    .spawn_clarification_for_approval(
+                        params.request_id.trim(),
+                        params.question.trim(),
+                    )
+                    .await
+                {
+                    Ok(outcome) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "child_session_id": outcome.child_session_id,
+                            "answer": outcome.answer,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Clarification spawn failed: {}", e),
+                    ),
+                }
+            }
+
             _ => JsonRpcResponse::error(req.id, -32601, "Method not found"),
         }
     }

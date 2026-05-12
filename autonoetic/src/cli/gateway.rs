@@ -490,6 +490,39 @@ pub async fn handle_gateway_approvals(
                 id, request_id
             );
         }
+        super::common::GatewayApprovalCommands::AskAgent {
+            request_id,
+            question,
+        } => {
+            if question.trim().is_empty() {
+                eprintln!("Error: question must not be empty");
+                return Ok(());
+            }
+            if gateway_store.get_approval(request_id)?.is_none() {
+                eprintln!("Approval '{}' not found.", request_id);
+                return Ok(());
+            }
+            println!("Q: {}", question);
+            println!();
+            let gateway_store_arc = std::sync::Arc::new(
+                autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+            );
+            let service = autonoetic_gateway::execution::GatewayExecutionService::new(
+                config.clone(),
+                Some(gateway_store_arc),
+            );
+            match service
+                .spawn_clarification_for_approval(request_id.trim(), question.trim())
+                .await
+            {
+                Ok(outcome) => {
+                    println!("{}", outcome.answer);
+                    println!();
+                    println!("(child session: {})", outcome.child_session_id);
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
         super::common::GatewayApprovalCommands::Stats { agent, session, since } => {
             let since_ts = since.as_ref().map(|s| {
                 let secs = if s.ends_with('h') {
@@ -671,11 +704,14 @@ async fn run_interactive_approvals(
         Navigate,
         AskQuestion,
         WriteMessage,
+        AskAgent,
     }
     let mut tui_mode = TuiMode::Navigate;
     let mut question_input = String::new();
     let mut question_answer = String::new();
     let mut message_input = String::new();
+    let mut ask_agent_input = String::new();
+    let mut ask_agent_status = String::new();
 
     let mut enrichment_cache: std::collections::HashMap<String, Vec<autonoetic_gateway::runtime::human_gate::GateMessage>> =
         std::collections::HashMap::new();
@@ -708,7 +744,7 @@ async fn run_interactive_approvals(
                 .split(area);
 
             let title = format!(
-                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  ?: ask  m: message  q: quit ",
+                " Pending Approvals ({})  \u{2191}\u{2193}: navigate  a: approve  r: reject  ?: ask  m: note  A: ask-agent  q: quit ",
                 items.len()
             );
             let title_bar = Paragraph::new(Line::from(Span::styled(
@@ -825,6 +861,26 @@ async fn run_interactive_approvals(
                     " Type a note to append to this approval's enrichment thread, then press Enter…",
                     Style::default().fg(Color::DarkGray),
                 ))]
+            } else if tui_mode == TuiMode::AskAgent {
+                if ask_agent_status.is_empty() {
+                    vec![Line::from(Span::styled(
+                        " Type a question for the agent that requested this approval, then press Enter…\n\
+                         (Spawns a read-only clarification child of the agent — see ask-agent in docs.)",
+                        Style::default().fg(Color::DarkGray),
+                    ))]
+                } else {
+                    let mut lines = vec![Line::from(vec![
+                        Span::styled(" Q: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled(ask_agent_input.clone(), Style::default().fg(Color::White)),
+                    ])];
+                    for ans_line in ask_agent_status.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!(" {}", ans_line),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                    lines
+                }
             } else if let Some(idx) = selected {
                 let req = &items[idx];
                 let mut lines = Vec::new();
@@ -1174,9 +1230,16 @@ async fn run_interactive_approvals(
                     Span::styled(cursor_input, Style::default().fg(Color::White)),
                     Span::styled("  [Enter: post  Esc: cancel]", Style::default().fg(Color::DarkGray)),
                 ])
+            } else if tui_mode == TuiMode::AskAgent {
+                let cursor_input = format!("{}_", ask_agent_input);
+                Line::from(vec![
+                    Span::styled(" \u{1F916} Ask agent: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(cursor_input, Style::default().fg(Color::White)),
+                    Span::styled("  [Enter: spawn clarification  Esc: cancel]", Style::default().fg(Color::DarkGray)),
+                ])
             } else if status_msg.is_empty() {
                 Line::from(Span::styled(
-                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  ?: ask  m: message  q: quit",
+                    " \u{2191}\u{2193}/j/k: navigate  a: approve  r: reject  R: refresh  ?: ask  m: note  A: ask-agent  q: quit",
                     Style::default().fg(Color::DarkGray),
                 ))
             } else {
@@ -1221,6 +1284,58 @@ async fn run_interactive_approvals(
                         KeyCode::Char(c) => {
                             question_input.push(c);
                             question_answer.clear();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Ask-agent mode intercepts all keys for text input
+                if tui_mode == TuiMode::AskAgent {
+                    match key.code {
+                        KeyCode::Esc => {
+                            tui_mode = TuiMode::Navigate;
+                            ask_agent_input.clear();
+                            ask_agent_status.clear();
+                        }
+                        KeyCode::Enter => {
+                            let q = ask_agent_input.trim().to_string();
+                            if !q.is_empty() {
+                                if let Some(idx) = state.selected() {
+                                    let selected_id = items[idx].request_id.clone();
+                                    let store_arc = std::sync::Arc::new(
+                                        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
+                                            &autonoetic_gateway::execution::gateway_root_dir(config),
+                                        ).map_err(|e| anyhow::anyhow!("{}", e))?,
+                                    );
+                                    let service = autonoetic_gateway::execution::GatewayExecutionService::new(
+                                        config.clone(),
+                                        Some(store_arc),
+                                    );
+                                    ask_agent_status = match service
+                                        .spawn_clarification_for_approval(&selected_id, &q)
+                                        .await
+                                    {
+                                        Ok(outcome) => {
+                                            if let Ok(msgs) =
+                                                gateway_store.get_gate_messages(&selected_id)
+                                            {
+                                                enrichment_cache.insert(selected_id, msgs);
+                                            }
+                                            outcome.answer
+                                        }
+                                        Err(e) => format!("\u{26a0} ask-agent failed: {e}"),
+                                    };
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            ask_agent_input.pop();
+                            ask_agent_status.clear();
+                        }
+                        KeyCode::Char(c) => {
+                            ask_agent_input.push(c);
+                            ask_agent_status.clear();
                         }
                         _ => {}
                     }
@@ -1293,6 +1408,14 @@ async fn run_interactive_approvals(
                         if state.selected().is_some() {
                             tui_mode = TuiMode::WriteMessage;
                             message_input.clear();
+                            status_msg.clear();
+                        }
+                    }
+                    KeyCode::Char('A') => {
+                        if state.selected().is_some() {
+                            tui_mode = TuiMode::AskAgent;
+                            ask_agent_input.clear();
+                            ask_agent_status.clear();
                             status_msg.clear();
                         }
                     }

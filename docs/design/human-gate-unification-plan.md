@@ -299,29 +299,78 @@ flowchart TD
 - Enrichment message thread management
 - Resume orchestration (inject answer/approval into execution context)
 
-### Approval Enrichment as Nested Clarification
+### Approval Enrichment: Two Orthogonal Axes
 
-The current `gateway approvals ask` is ephemeral LLM Q&A — not stored, not sent to the agent. With the unified gate, **enrichment becomes a first-class feature**:
+The current `gateway approvals ask` is ephemeral LLM Q&A — not stored, not sent to the agent. With the unified gate, **enrichment becomes a first-class feature** — but only when we separate two concerns that an earlier draft of this design conflated:
 
-When an approval is pending, the operator can:
-1. **Ask the agent**: Creates a nested `UserInput` gate on the same session, answered by the agent (not the user), providing context the operator needs to decide
-2. **Add notes**: Stored as a message thread on the gate row (new `gate_messages` table or JSON array column)
-3. **Request modification**: Operator sends back "change the URL to X" — agent sees this as a clarification answer and resubmits the gate with updated parameters
+1. **Gate state** (the *decision*) — handled by suspension, as today.
+2. **Gate context** (the *conversation around the decision*) — handled by a new clarification primitive.
+
+These two axes are orthogonal and must not be merged into a single mechanism.
+
+#### Axis 1 — Gate state: suspension-based (unchanged)
+
+A gate is a **decision atom**. The agent cannot proceed without the decision: `pending → approved | rejected | cancelled` is a state transition the agent's continuation depends on. The agent's session yields, the decider decides, the agent resumes with the result threaded back into its tool response.
+
+This applies uniformly to every `GateKind`:
+- `Approval` — operator says yes/no to a privileged tool call
+- `UserInput` — user provides the value the agent yielded waiting for
+- `Escalation` — operator approves a privilege bump
+
+In every case there is a single binary answer the agent literally cannot proceed without. Gates **must** be barriers; replacing this with "agent keeps running while the gate is pending" would let the agent reach intermediate states that depend on an unresolved decision, with no clean rollback if the answer is no.
+
+#### Axis 2 — Gate context: clarification child sessions
+
+The conversation around a pending gate is **information**, not state. It helps the decider decide. It does not transition the gate. It must not mutate the parent session's reasoning trajectory.
+
+When an approval is pending the operator can:
+
+1. **Leave a note** (`gateway approvals comment`, TUI `m` key) — stored as a `gate_message(sender="operator")`. No agent involvement.
+2. **Ask the agent** (`gateway approvals ask-agent`, TUI `A` key) — spawns a **clarification child session** of the same agent, primed with the parent's digest + approval context + the operator's question. The child runs one turn, answers, ends. Its answer is stored as `gate_message(sender="agent-clarif:<child_session_id>")`. The parent session is **untouched**.
+3. **Modification request** — the operator types something like "use api.example.com instead". With axes 1 and 2 in place this needs **no new mechanism**: the operator asks via `ask-agent`, the agent acknowledges in its clarification turn, then the operator rejects the gate with a reason. On rejection-resume the agent's parent session sees the full `gate_messages` thread plus the rejection reason and naturally re-issues the tool call with corrected arguments.
+
+#### Why a clarification child, not pause/resume of the parent
+
+An earlier draft proposed creating a nested `GateKind::UserInput` on the *parent* session and resuming the agent for a clarification turn while the original approval stays pending. We rejected this for the following reasons:
+
+| Concern | Pause/resume nested UserInput | **Clarification child session** |
+|---|---|---|
+| Pending gates on the parent | Two simultaneously — novel state, intricate resume choreography | One. Parent never moves. |
+| Agent reasoning trajectory | Branches: post-clarification turn may bias the post-approval action | Untouched. Clarification reasoning is in a separate causal chain. |
+| Budget attribution | Charged to the agent's main budget — surprising | Charged to the root-session tree per R-7.10, but as a distinct child line — honest. |
+| Tool safety during clarification | Agent retains full tools; operator probe could trigger side effects | Child is structurally clamped to `SessionState::Clarification` → read-only tier. |
+| Multiple operator questions | Nested UserInputs strain invariants | Each `ask-agent` is its own child. Trivially composable. |
+| Future deciders (security-reviewer agents, policy engines) | Special-cased pause/resume | Same child primitive works identically for any decider wanting to probe a requester. |
+| Audit story | Mixed: clarification reasoning intermingled with main reasoning | Clean: each clarification is its own session with its own causal chain, linked to the gate by `approval_id`. |
+
+The child-session model preserves the property that gates are *pure decision atoms* and conversations are *pure information atoms*; they compose via `gate_messages` rows on the gate without coupling.
+
+#### Constitutional notes on the clarification child
+
+- **`SessionState::Clarification`** is a new first-class session state, distinct from `Normal` and `Degraded`. It is **not** degradation — it is the declared purpose of the session from the start. Ri-0.6 (no silent capability reduction) is satisfied because the session begins in `Clarification`; capabilities are not narrowed mid-flight.
+- **Tool tier is clamped to read-only at filter time** — not by trust in the system prompt. Available native tools: `observability_*`, `knowledge_*`, `constitution_*`, `content_read`, `execution_search`. No exec, no network, no spawn, no agent revision, no scheduler.
+- **Ri-0.13 (private reasoning) applies** to the clarification child as to any agent. The reasoning hash is recorded; disclosure requires `ReasoningAudit`. The clarification *answer* (the assistant reply) is what surfaces as `gate_message`; the reasoning behind it stays private-under-law.
+- **R-7.10 root-session tree budget** applies — clarification spawns consume tokens against the parent's root-session budget. If the budget is exhausted, `ask-agent` returns an error rather than starving the parent.
+- **R-7.15 spawn-chain depth cap** applies — clarification children count as a normal spawn. Clarification children **cannot** spawn further children (their `AgentSpawn` capability is filtered out by the read-only tier).
+- **Causal chain integrity**: the clarification child's causal events live in its own session; the parent's chain records only that an operator triggered an `approval.ask_agent` event with the resulting child session ID. Forensics: "what did the agent say when asked X?" → query the child session by ID stored in the gate_message sender suffix.
 
 ```mermaid
 sequenceDiagram
-    participant Agent
+    participant Agent_Parent as Agent (parent session)
     participant Gateway
     participant Operator
+    participant Agent_Clarif as Agent (clarification child)
 
-    Agent->>Gateway: credential_setup(localhost)
+    Agent_Parent->>Gateway: credential_setup(localhost)
     Gateway->>Operator: Approval needed: access localhost
-    Operator->>Gateway: "Why does the agent need localhost?"
-    Gateway->>Agent: Nested clarification gate
-    Agent->>Gateway: "Moltbook API runs on localhost:9876"
-    Gateway->>Operator: Agent says: Moltbook API on localhost:9876
+    Note over Agent_Parent: Parent suspended on approval gate (axis 1)
+    Operator->>Gateway: ask-agent "Why localhost?"
+    Gateway->>Agent_Clarif: Spawn read-only child<br/>(manifest + parent digest + approval JSON + question)
+    Agent_Clarif->>Gateway: "Moltbook API runs on localhost:9876"
+    Gateway->>Operator: gate_message(sender=agent-clarif:&lt;child_id&gt;)
+    Note over Agent_Clarif: Child session ends. Parent untouched.
     Operator->>Gateway: approve --reason "Moltbook integration"
-    Gateway->>Agent: Resume with approval_ref
+    Gateway->>Agent_Parent: Resume with approval_ref
 ```
 
 ### Migration example
@@ -401,13 +450,45 @@ Replace the duplicated resume paths in `execution.rs`:
 
 ### Phase 5: Approval enrichment (operator-agent conversation thread)
 
-Add the enrichment conversation thread:
-- New `gate_messages` column/table: sequence of `(sender, timestamp, content)` tuples on a gate row
-- TUI: when a pending approval is displayed, show the enrichment thread; allow operator to type a message
-- Gateway: operator message on a pending approval either:
-  - Stores as enrichment note (if approval stays pending)
-  - Creates a nested `GateKind::UserInput` addressed to the agent (if operator wants agent to clarify)
-- CLI: `gateway approvals comment <id> "message"` to add enrichment; `gateway approvals ask-agent <id> "question"` to create nested clarification
+Add the enrichment conversation thread along the **two-axis split** above. Implementation is in three layers:
+
+**Layer A — storage & display (shipped)**
+- `gate_messages` table: `(gate_id, sender, content, created_at)` tuples on a gate row.
+- Auto-seed on gate creation (`approval`, `escalation`, `user_input`) — `sender="system"`.
+- JSON-RPC: `gate.add_message`, `gate.get_messages` (sender ∈ {operator, system, agent}, redaction applied).
+- Read surfaces: `gateway approvals show`, interactive approvals TUI detail panel, chat TUI approval cards.
+
+**Layer B — operator → gate (shipped: 811bd10)**
+Operator writes directly to the enrichment thread. No agent involvement.
+- `gateway approvals comment <id> "message"` — appends `gate_message(sender="operator")` with redaction.
+- Interactive approvals TUI: `m` key opens an inline `Note:` input that posts the message and refreshes the enrichment cache.
+
+**Layer C — operator → agent (this phase)**
+Operator asks the agent about the pending gate; the answer is captured without disturbing the parent session.
+
+1. **Types.** Add `SessionState::Clarification` to `autonoetic-types::agent`. Wire `runtime/tool_dispatch::determine_tool_tier_filter` to return a read-only tier filter when `session_state == Clarification`.
+2. **Spawn helper.** `GatewayExecutionService::spawn_clarification_for_approval(approval_id, question) -> ClarificationOutcome` looks up the approval to find `(parent_session_id, agent_id)`, builds a child session ID under the parent, composes the clarification message (approval JSON + operator question + a system reminder that this is a read-only clarification turn), spawns one turn via the existing `spawn_agent_once` with `SessionState::Clarification`, captures `SpawnResult::assistant_reply`.
+3. **Recording.** Around the spawn call: write `gate_message(operator, question)` first; on success write `gate_message("agent-clarif:<child_session_id>", reply)`; on failure write `gate_message(system, "clarification failed: <error>")`.
+4. **JSON-RPC.** `approvals.ask_agent { request_id, question } -> { child_session_id, answer }`.
+5. **CLI.** `gateway approvals ask-agent <id> "question"` — calls JSON-RPC, prints the question and the captured answer. **Distinct from `gateway approvals ask`** which remains an ephemeral LLM Q&A on the approval JSON only and is documented as such.
+6. **TUI.** Interactive approvals: bind `A` (uppercase, to avoid collision with `a`=approve) → enters `AskAgent` mode mirroring `WriteMessage` but routing through `spawn_clarification_for_approval`. Result populates the enrichment cache.
+
+**What `ask-agent` is and is not:**
+- It **is** a real spawn of the same agent (same manifest, same model, same system prompt), primed with the parent's session digest.
+- It **is** read-only by construction — the child's tool tier is clamped to observability/knowledge/constitution/content_read/execution_search.
+- It **is not** the parent agent's live reasoning state — the child is digest-primed, not memory-mapped.
+- It **is not** mind-reading — the child can only reason about what's in the approval JSON, the parent's digest, and its persistent memories.
+- It **is not** free — costs are charged to the parent's root-session tree budget per R-7.10.
+
+#### Acceptance criteria
+
+- [ ] `SessionState::Clarification` variant added; `determine_tool_tier_filter` returns read-only for it; existing tests still pass.
+- [ ] Spawning a clarification child with a high-privilege manifest (e.g. SandboxExec + NetworkAccess) yields a child whose `available_definitions_filtered` contains no `sandbox_*`, no `web_*`, no `agent_spawn`, no `agent_revision_*`, no `scheduler_*`, no `credential_*`.
+- [ ] `approvals.ask_agent` returns a structured response carrying `child_session_id` and the captured answer.
+- [ ] Question and answer are both visible via `gate.get_messages` and surface in `gateway approvals show` and the interactive TUI under "Enrichment:".
+- [ ] Clarification turn does not advance the parent session's turn counter or modify its checkpoint.
+- [ ] If the parent's root-session budget is exhausted, `ask-agent` returns a structured error and **does not** spawn.
+- [ ] Constitution test `constitution_clarification_child_read_only.rs` verifies the tool-tier clamp.
 
 ### Phase 6: Improve TUI surfacing
 

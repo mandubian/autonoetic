@@ -38,6 +38,13 @@ pub struct ToolTierFilter {
     /// When true, always include tools needed for approval interactions
     /// regardless of tier (e.g., approval.status, approval.answer).
     pub always_include_approval_tools: bool,
+    /// When true, override all other rules with a strict read-only allowlist:
+    /// only inspection tools (observability/knowledge/constitution/content_read
+    /// /execution_search) pass. Used for clarification child sessions
+    /// (SessionState::Clarification) so an operator probe via `ask-agent`
+    /// structurally cannot trigger any action — even if the agent's manifest
+    /// or the system prompt would allow it.
+    pub clarification_read_only: bool,
 }
 
 impl ToolTierFilter {
@@ -46,6 +53,7 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![ToolTier::Core],
             always_include_approval_tools: false,
+            clarification_read_only: false,
         }
     }
 
@@ -54,6 +62,7 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![ToolTier::Core, ToolTier::Workflow],
             always_include_approval_tools: false,
+            clarification_read_only: false,
         }
     }
 
@@ -64,6 +73,7 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![ToolTier::Core, ToolTier::Workflow],
             always_include_approval_tools: true,
+            clarification_read_only: false,
         }
     }
 
@@ -72,13 +82,50 @@ impl ToolTierFilter {
         Self {
             allowed_tiers: vec![],
             always_include_approval_tools: false,
+            clarification_read_only: false,
         }
+    }
+
+    /// Filter for `SessionState::Clarification` — read-only by construction.
+    /// Whitelist is name-prefix based so it survives manifests that declare
+    /// elevated tiers; the constitutional guarantee is that an operator probe
+    /// cannot trigger an action.
+    pub fn clarification() -> Self {
+        Self {
+            allowed_tiers: vec![],
+            always_include_approval_tools: false,
+            clarification_read_only: true,
+        }
+    }
+
+    /// True iff `tool_name` is on the clarification read-only allowlist.
+    ///
+    /// Tools are explicitly enumerated rather than prefix-matched so that a
+    /// newly-added action tool sharing a prefix (e.g. `constitution_propose_*`,
+    /// `observability_emit_*`) does not silently slip into the allowlist.
+    fn is_clarification_safe(tool_name: &str) -> bool {
+        matches!(
+            tool_name,
+            "observability_search"
+                | "observability_read"
+                | "observability_read_reasoning"
+                | "constitution_read"
+                | "knowledge_search"
+                | "knowledge_read"
+                | "knowledge_search_by_tags"
+                | "content_read"
+                | "execution_search"
+                | "digest_query"
+        )
     }
 
     /// Check if a tool with the given name passes this filter.
     /// Derives tier from the tool name prefix.
     /// Also respects always_include_approval_tools for approval-prefixed tools.
     pub fn allows(&self, tool_name: &str) -> bool {
+        if self.clarification_read_only {
+            return Self::is_clarification_safe(tool_name);
+        }
         if self.allowed_tiers.is_empty() {
             return true;
         }
@@ -92,6 +139,9 @@ impl ToolTierFilter {
     /// Use this when the tier is already known (e.g. from NativeTool::tier()).
     /// Also respects always_include_approval_tools for approval-prefixed tools.
     pub fn allows_tool(&self, tool_name: &str, tier: ToolTier) -> bool {
+        if self.clarification_read_only {
+            return Self::is_clarification_safe(tool_name);
+        }
         if self.allowed_tiers.is_empty() {
             return true;
         }
@@ -963,6 +1013,7 @@ mod tests {
         let filter = ToolTierFilter {
             allowed_tiers: vec![ToolTier::Core],
             always_include_approval_tools: true,
+            clarification_read_only: false,
         };
         assert!(!filter.allows("web_search"));
         assert!(filter.allows("approval_list"));

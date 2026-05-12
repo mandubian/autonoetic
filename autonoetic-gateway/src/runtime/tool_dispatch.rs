@@ -163,6 +163,9 @@ pub fn determine_tool_tier_filter(
     has_pending_approvals: bool,
     session_state: autonoetic_types::agent::SessionState,
 ) -> crate::runtime::tools::ToolTierFilter {
+    if session_state == autonoetic_types::agent::SessionState::Clarification {
+        return crate::runtime::tools::ToolTierFilter::clarification();
+    }
     if session_state == autonoetic_types::agent::SessionState::Degraded {
         return crate::runtime::tools::ToolTierFilter::core_only();
     }
@@ -171,6 +174,7 @@ pub fn determine_tool_tier_filter(
         return crate::runtime::tools::ToolTierFilter {
             allowed_tiers: manifest.allowed_tool_tiers.clone(),
             always_include_approval_tools: true,
+            clarification_read_only: false,
         };
     }
 
@@ -227,6 +231,7 @@ pub(crate) fn child_tool_tier_filter_for_manifest(
     crate::runtime::tools::ToolTierFilter {
         allowed_tiers,
         always_include_approval_tools: true,
+        clarification_read_only: false,
     }
 }
 

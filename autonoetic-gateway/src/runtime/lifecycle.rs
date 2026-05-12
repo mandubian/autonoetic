@@ -313,6 +313,18 @@ impl AgentExecutor {
         self
     }
 
+    /// Set the session's purpose state at creation. Use
+    /// `SessionState::Clarification` for ask-agent child spawns so the tool
+    /// tier is clamped read-only from the first turn — see
+    /// `docs/design/human-gate-unification-plan.md` §Phase 5.
+    pub fn with_initial_session_state(
+        mut self,
+        state: autonoetic_types::agent::SessionState,
+    ) -> Self {
+        self.session_state = state;
+        self
+    }
+
     fn ensure_session_id(&mut self) -> String {
         if let Some(id) = &self.session_id {
             return id.clone();

@@ -432,7 +432,24 @@ fn parse_skill_md_artifact(
     })
 }
 
-#[derive(Debug)]
+/// Outcome of a `spawn_clarification_for_approval` call. Carries the answer
+/// text (also persisted as a gate_message) and the child session ID so
+/// callers can attribute / link the audit record.
+#[derive(Clone)]
+pub struct ClarificationOutcome {
+    pub child_session_id: String,
+    pub answer: String,
+}
+
+impl std::fmt::Debug for ClarificationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClarificationOutcome")
+            .field("child_session_id", &self.child_session_id)
+            .field("answer_len", &self.answer.len())
+            .finish()
+    }
+}
+
 pub struct SpawnResult {
     pub agent_id: String,
     pub session_id: String,
@@ -2759,6 +2776,144 @@ impl GatewayExecutionService {
             suspended_for_approval,
             suspended_for_user_input,
         })
+    }
+
+    /// Spawn a clarification child session of the agent that requested a
+    /// pending approval, ask it the operator's question, capture its reply
+    /// as a `gate_message` on the original approval, and return the reply.
+    ///
+    /// See `docs/design/human-gate-unification-plan.md` §Phase 5 for the
+    /// design rationale (gate-state via suspension stays untouched; this
+    /// implements the orthogonal "gate-context" axis).
+    pub async fn spawn_clarification_for_approval(
+        &self,
+        approval_id: &str,
+        question: &str,
+    ) -> anyhow::Result<ClarificationOutcome> {
+        use crate::agent::AgentRepository;
+        use crate::llm::{build_driver, Message};
+        use crate::runtime::lifecycle::{AgentExecutor, TurnOutcome};
+        use crate::runtime::openrouter_catalog::OpenRouterCatalog;
+        use autonoetic_types::agent::SessionState;
+
+        anyhow::ensure!(
+            !question.trim().is_empty(),
+            "Clarification question must not be empty"
+        );
+
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore is required for ask-agent"))?;
+
+        let approval = store
+            .get_approval(approval_id)?
+            .ok_or_else(|| anyhow::anyhow!("Unknown approval '{}'", approval_id))?;
+
+        anyhow::ensure!(
+            !approval.session_id.trim().is_empty(),
+            "Approval '{}' has no parent session_id",
+            approval_id
+        );
+        let parent_session_id = approval.session_id.clone();
+        let agent_id = approval.agent_id.clone();
+
+        let short = uuid::Uuid::new_v4().to_string();
+        let short = &short[..8];
+        let child_session_id = format!("{}/{}-clarif-{}", parent_session_id, agent_id, short);
+
+        let gateway_dir = crate::execution::gateway_root_dir(&self.config);
+        let repo = AgentRepository::from_config(&self.config);
+        let loaded = repo
+            .get_sync_from_store(&agent_id, &gateway_dir, self.gateway_store.as_deref())
+            .map_err(|e| anyhow::anyhow!("Failed to load agent '{}': {}", agent_id, e))?;
+
+        let llm_config = loaded
+            .manifest
+            .llm_config
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
+        let driver = build_driver(llm_config, self.http_client.clone())?;
+
+        let redacted_question = crate::log_redaction::redact_text_for_logs(question);
+        store.add_gate_message(approval_id, "operator", &redacted_question)?;
+
+        let action_json = serde_json::to_string_pretty(&approval.action)
+            .unwrap_or_else(|_| "<action serialization failed>".to_string());
+        let approval_reason = approval.reason.as_deref().unwrap_or("(none provided)");
+
+        let message = format!(
+            "You are answering a clarification question from an operator who is \
+             reviewing a pending approval you requested. This is a read-only \
+             clarification turn — your tools have been clamped to inspection \
+             only and you cannot trigger any action from this session. The \
+             approval itself remains pending on your parent session ({parent}); \
+             your reply here does not approve or reject it.\n\n\
+             Pending approval ({approval_id}):\n```json\n{action}\n```\n\n\
+             Reason recorded on the request: {reason}\n\n\
+             Operator question: {question}\n\n\
+             Answer concisely and factually. If you cannot answer with the \
+             information available to you in this clarification session, say \
+             so plainly.",
+            parent = parent_session_id,
+            approval_id = approval_id,
+            action = action_json,
+            reason = approval_reason,
+            question = question,
+        );
+
+        let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
+        let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
+
+        let mut runtime = AgentExecutor::new(
+            loaded.manifest,
+            loaded.instructions,
+            driver,
+            loaded.dir,
+            crate::runtime::tools::default_registry(),
+            self.gateway_store.clone(),
+        )
+        .with_gateway_dir(self.config.agents_dir.join(".gateway"))
+        .with_config(self.config.clone())
+        .with_session_budget(Some(self.session_budget.clone()))
+        .with_root_session_budget(Some(self.root_session_budget.clone()))
+        .with_openrouter_catalog(Some(openrouter_catalog))
+        .with_middleware(middleware)
+        .with_initial_user_message(message)
+        .with_session_id(child_session_id.clone())
+        .with_active_executions(Some(self.active_executions.clone()))
+        .with_http_client(self.http_client.clone())
+        .with_degraded_sessions(Some(self.degraded_sessions.clone()))
+        .with_persona(self.persona.clone())
+        .with_initial_session_state(SessionState::Clarification);
+
+        let mut history: Vec<Message> = Vec::new();
+        let outcome = runtime.execute_with_history(&mut history).await;
+
+        match outcome {
+            Ok(TurnOutcome::Completed(reply)) => {
+                let answer = reply.unwrap_or_else(|| {
+                    "(agent produced no reply during the clarification turn)".to_string()
+                });
+                let sender = format!("agent-clarif:{}", child_session_id);
+                let redacted_answer = crate::log_redaction::redact_text_for_logs(&answer);
+                store.add_gate_message(approval_id, &sender, &redacted_answer)?;
+                Ok(ClarificationOutcome {
+                    child_session_id,
+                    answer,
+                })
+            }
+            Ok(other) => {
+                let detail = format!("clarification turn ended unexpectedly: {:?}", other);
+                store.add_gate_message(approval_id, "system", &detail)?;
+                anyhow::bail!("{}", detail);
+            }
+            Err(e) => {
+                let detail = format!("clarification turn failed: {}", e);
+                store.add_gate_message(approval_id, "system", &detail)?;
+                Err(e)
+            }
+        }
     }
 
     pub async fn execute_background_action(
