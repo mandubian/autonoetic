@@ -147,18 +147,46 @@ Activates the created revision.
 | Field | Description |
 |---|---|
 | `agent_id` | lowercase with hyphens |
-| `artifact_ref` | Required for script agents and agents with `CodeExecution`/`AgentSpawn`. Omit for pure reasoning agents. |
+| `artifact_ref` | **Required for every install** — every agent (including pure-reasoning) is now artifact-addressed. Script agents pass the coder's built artifact. Pure-reasoning agents pass the **intent-only bundle** the agent-factory built from the SKILL body (no executable files inside). See "Intent-only bundles" below. |
 | `summary` | optional note for the created revision |
 | `description` | required; gateway writes canonical metadata from this intent |
-| `instructions` | required; free-form markdown body provided by agent |
+| `instructions` | required; free-form markdown body provided by agent. **Must match the SKILL body that was bundled in the `artifact_ref`** for pure-reasoning installs — agent-factory ensures this. |
 | `capabilities` | declared capabilities for the agent |
 | `llm_config` | required when `execution_mode=reasoning`; **OMIT entirely for `execution_mode=script`** |
 
 ### Key Rules:
-1. **`artifact_ref` is required for code agents** — script agents and any agent with `CodeExecution`/`AgentSpawn` must have an artifact. Pure reasoning agents that only call existing tools do not need one.
-2. **Do not require `SKILL.md` or `runtime.lock` inside the artifact** on this path.
-3. Gateway writes canonical SKILL metadata and canonical runtime lock deterministically from the intent payload.
+1. **`artifact_ref` is required for every install.** Script agents: artifact contains executable code + `script_entry`. Pure-reasoning agents: intent-only bundle containing the SKILL body (no `script_entry`, no executable code).
+2. **Do not require additional `SKILL.md` or `runtime.lock` inside the artifact** on this path.
+3. Gateway writes canonical SKILL metadata and canonical runtime lock deterministically from the intent payload; the bundled SKILL body is the content-addressed identity input.
 4. If required intent fields are missing, report the gap to planner (do NOT invent values).
+
+### Intent-only bundles (pure-reasoning agents)
+
+For reasoning-only agents the `artifact_ref` points to a bundle that
+contains **only** the agent's SKILL body — no executable files, no
+`script_entry`. Agent-factory's Step 2a builds it via:
+
+1. `content_write` of the composed SKILL body as `<agent_id>.skill.md`.
+2. `artifact_build({"inputs": ["<agent_id>.skill.md"], "kind": "agent_bundle"})`.
+
+When you receive such a bundle:
+
+- Inspect it with `artifact_inspect(artifact_ref)`. Expected shape: one
+  file, the `.skill.md` body. No `script_entry`. No dependency layers.
+- Pass the `artifact_ref` straight to `agent_revision_create_from_intent`
+  alongside `execution_mode: "reasoning"` and the matching
+  `instructions` string. The gateway tool already accepts an
+  `artifact_ref` for reasoning-mode installs; no schema change.
+- The auditor (when §5.9 lands) will have recorded a `promotion_record`
+  against this same `artifact_ref` — that is the audit evidence
+  `specialized_builder` will check in the `audit_only` gating mode.
+
+If you receive a request that says "reasoning agent" but no
+`artifact_ref` is provided, report `ok: false, stage: "install",
+reason: "missing_intent_artifact"` to the spawner. Do not synthesize
+the artifact yourself — agent-factory owns the SKILL composition. The
+content-addressed identity invariant requires the same agent that
+audits also installs from the same bundle.
 
 ### Required: Capabilities
 
@@ -251,10 +279,33 @@ For `execution_mode: "script"` on `agent_revision_create_from_intent`, you MUST 
 }
 ```
 
-**When gates are NOT required** (pure transform/utility agents, no external I/O), the planner will specify `"gating: none"`. In this case:
+**When gating is `audit_only`** (pure-reasoning / pure-transform agents, agent-factory built an intent-only artifact bundle): require the **auditor**'s `promotion_record(pass=true)` for the same `artifact_ref` you are installing from. The evaluator record will be absent — that is correct for now and reflects the not-yet-implemented behavioural evaluation track. See `docs/design/sealed-network-evaluation-plan.md` §3.5.2.
+
+The install request shape for `audit_only`:
+
+```json
+{
+  "agent_id": "my-agent",
+  "artifact_ref": "ar.* (intent-only bundle from agent-factory Step 2a)",
+  "instructions": "<same SKILL body that was bundled>",
+  "capabilities": [...],
+  "execution_mode": "reasoning",
+  "llm_config": {...},
+  "promotion_gate": {
+    "auditor_pass": true,
+    "evaluator_pass": null,
+    "evaluator_status": "skipped",
+    "skip_reason": "behavioural_eval_not_implemented (RFC §3.5.2)"
+  }
+}
+```
+
+**When gates are NOT required** — the narrow operator-override case, NOT the default for pure-skill agents — the planner will specify `"gating: none"`. In this case:
 - Do NOT require `promotion_gate` evidence
 - The gateway's built-in code analysis on revision creation still validates capabilities and detects security threats
 - Proceed directly to `agent_revision_create_from_intent` + `agent_revision_promote`
+
+**Reject if you receive `"gating: none"` for a reasoning-only agent without an explicit operator-override flag.** Pure-skill agents should default to `audit_only`, not `none`. If the planner has not granted an operator override but the install nonetheless arrives with `gating: none`, report `ok: false, stage: "install", reason: "pure_skill_needs_audit"` back to the spawner — do not install on faith.
 
 #### remote_access_detected (CRITICAL)
 

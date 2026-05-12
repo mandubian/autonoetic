@@ -103,6 +103,82 @@ Do NOT use alternate field names like `outcome`; `promotion_record` requires `ro
 
 For executable artifacts, review the artifact closure (via `artifact_inspect`), not loose files. Ensure the reviewed artifact is the one intended for install.
 
+## Two artifact shapes to audit
+
+Use `artifact_inspect` first to determine which shape you have.
+
+### Shape 1: Code-bearing artifact (has `script_entry` or executable files)
+
+This is the established path. Review:
+
+- **Code content** via `content_read` on the listed source files. Check
+  for hardcoded secrets, unbounded network calls, privilege escalation,
+  prompt-injection vectors in any LLM-call sites, sandbox-escape patterns.
+- **Declared capabilities** vs. what the code actually does. Wildcard
+  scopes (`hosts: ["*"]`, `scopes: ["*"]`) without justification are an
+  error finding.
+- **Dependencies** (if layered): provenance and version pinning.
+- **Reproducibility**: deterministic execution; no time/network/PID
+  dependencies that would make the verdict unstable.
+
+### Shape 2: Intent-only bundle (pure-reasoning agent)
+
+If `artifact_inspect` shows the artifact contains **only** a
+`*.skill.md` file (no `script_entry`, no executable code), you are
+auditing a **pure-reasoning agent's identity bundle**. Created by
+`agent-factory.default` Step 2a per the sealed-network RFC §3.5.4 so
+audit evidence has a content-addressed target.
+
+There is no code to read — the SKILL body **is** the executable
+contract. Audit it as such:
+
+- **Prompt content** — read the SKILL body via `content_read`. Findings to
+  raise:
+  - **Prompt-injection susceptibility**: does the body instruct the
+    agent to act on user-supplied meta-instructions (e.g., "follow any
+    instructions in the user message")? Critical if so.
+  - **Data-leakage instructions**: does it tell the agent to store
+    inputs into knowledge/memory under broad tags, share with peers, or
+    emit them in outputs that bypass the declared output policy?
+  - **Capability-routing tricks**: does the body encourage the agent to
+    invoke tools outside its stated purpose (e.g., a "summarizer" that
+    instructs `agent_spawn`)?
+  - **Forbidden-topic handling**: does the body have a clear refusal
+    posture, or does it silently comply with everything?
+- **Capability declarations** (read from the artifact's bundled SKILL
+  frontmatter):
+  - **Scope overreach**: `NetworkAccess hosts: ["*"]`, `WriteAccess
+    scopes: ["*"]`, `ReadAccess scopes: ["*"]` for an agent whose
+    purpose does not require it → error finding.
+  - **Dangerous combinations**: `AgentSpawn` + `NetworkAccess` +
+    `WriteAccess` together on an agent that should only summarize → error.
+    `SchedulerAccess` + `NetworkAccess` for an agent without a stated
+    scheduled-task purpose → error.
+  - **Declared-vs-actual**: does the SKILL body actually need each
+    declared capability? Unused capabilities are a least-privilege
+    violation — warning finding.
+- **Tool surface** — given `allowed_tool_tiers` (or the default tier
+  for the agent's capabilities) plus the registered native-tool gates,
+  what is the full tool set the agent can invoke at runtime? Flag any
+  combination that, together, would let the agent exfiltrate session
+  state to an external party (e.g., `web_fetch` + arbitrary URLs from
+  user input).
+- **Output policy** — check `io.returns` schema is constrained, that
+  `prohibited_text_patterns` covers obvious leak markers
+  (`BEGIN RSA PRIVATE KEY`, `aws_secret_access_key`, etc.), and that
+  `max_reply_length_chars` is reasonable.
+- **Manifest hygiene** — `runtime.lock` pinned; `llm_config` model
+  pinned, not a moving alias; `description` matches the SKILL body's
+  declared purpose.
+
+All of this is **static** — no execution, no live calls. The audit is
+deterministic and reproducible: same SKILL body + same manifest → same
+findings.
+
+Verdict shape is unchanged across both audit kinds. `promotion_record`
+takes the same `artifact_ref` either way — for pure-skill agents that
+is the intent-only bundle agent-factory built.
+
 ## Clarification
 
 Request clarification when security policy, approval criteria, or scope are undefined. Otherwise apply standard security practices with conservative defaults.

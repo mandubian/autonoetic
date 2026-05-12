@@ -111,18 +111,66 @@ Skip this step for reasoning-only and simple single-file code agents.
 
 ### Step 2a: Reasoning-only install (no custom code)
 
-Skip coder. Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, delegating:
+Skip coder. Compose the agent's SKILL body in-place, build an
+intent-only artifact bundle from it, then hand the bundle's
+`artifact_ref` to `specialized_builder.default`. This makes the
+install **artifact-addressed** even for pure-skill agents — the audit
+target, the install source, and the R++2 capability-delta key all
+agree on one content-addressed identity. See
+`docs/design/sealed-network-evaluation-plan.md` §3.5.4.
+
+**1. Compose the SKILL body** as a single markdown string —
+`# <agent_id>\n\n<instructions derived from purpose + intended
+capabilities>`. Keep it focused; this is the only "code" the agent has.
+
+**2. Materialize it as named content** with `content_write`:
+
+```json
+{
+  "name": "<agent_id>.skill.md",
+  "content": "<the composed markdown body>",
+  "intent": "Compose intent-only SKILL body for pure-skill agent install"
+}
+```
+
+**3. Build the intent-only artifact** with `artifact_build`:
+
+```json
+{
+  "inputs": ["<agent_id>.skill.md"],
+  "kind": "agent_bundle",
+  "intent": "Pure-skill agent identity bundle: SKILL body only, no executable code"
+}
+```
+
+The result carries an `artifact_ref` (e.g. `ar.aabb1234ef56`). This is
+the **audited identity** of the agent — the content-addressed handle
+that the auditor (when §5.9 lands) records against and that
+`specialized_builder` installs from.
+
+**4. Delegate the install** to `specialized_builder.default`, passing
+the artifact_ref alongside the structured install intent:
+
 ```
 Install a new reasoning agent called '<agent_id>':
+- artifact_ref: <ar.* from step 3 — REQUIRED, the audited identity bundle>
 - Purpose: <purpose>
 - description: <purpose>
-- instructions: # <agent_id>\n\n<derived from purpose + intended capabilities>
+- instructions: <same markdown body that was bundled in step 1>
 - Capabilities: <intended_capabilities as capability objects>
 - Execution mode: reasoning
 - llm_config: { provider: "openrouter", model: "google/gemini-3-flash-preview", temperature: 0.2 }
 - Gating: none (reasoning-only, no CodeExecution/AgentSpawn)
 ```
 Then call `workflow_wait` with the returned `task_id`.
+
+**Why the bundled SKILL body matches the install intent's
+`instructions`:** specialized_builder uses the `instructions` field
+to compose the canonical SKILL.md server-side. The bundled artifact's
+SKILL body must match this string exactly — that is the property
+audit verifies in §5.8 and that R++2 keys on. Compose once, bundle
+once, pass the same string in `instructions`. Do not edit the body
+between steps 1 and 4.
 
 ### Step 2b: Code path — spawn coder
 
@@ -146,18 +194,52 @@ Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the
 
 | Agent behavior | Evaluator | Auditor |
 |---|---|---|
-| Reasoning-only (no CodeExecution, no AgentSpawn) | Skip | Skip |
+| Reasoning-only (no CodeExecution, no AgentSpawn) | Skip *for now* — see note below | **Required** (static SKILL audit per RFC §3.5.1) |
+| Pure transform/utility (no I/O beyond self.*) | Skip *for now* — see note below | **Required** |
 | Artifact-backed with NetworkAccess | Required | Required |
-| File system writes (beyond self.*) | Required | Skip |
-| Pure transform/utility (no I/O beyond self.*) | Skip | Skip |
+| File system writes (beyond self.*) | Required | Required |
 | CodeExecution or AgentSpawn | Required | Required |
 
-If gates required:
-1. Call `agent_spawn` with `agent_id="evaluator.default"`, `async=true`. Then call `workflow_wait` with the returned `task_id`.
-2. Call `agent_spawn` with `agent_id="auditor.default"`, `async=true`. Then call `workflow_wait` with the returned `task_id`.
-Both must call `promotion_record` with `pass=true`.
+**Why auditor is required for every install** — including pure-skill
+agents — even when there is no executable code: the SKILL.md *is* the
+agent's executable contract. Capability declarations grant real
+privileges, and the prompt body shapes what the agent does at runtime
+with those privileges. A static audit of the SKILL body, the manifest
+YAML, and the declared capability scopes catches a wide class of
+issues (prompt injection susceptibility, capability overreach,
+dangerous tool combinations) and is fully deterministic. See
+`docs/design/sealed-network-evaluation-plan.md` §3.5 and the auditor's
+SKILL "Shape 2: Intent-only bundle" section.
 
-If gates NOT required: tell specialized_builder `"Gating: none"`.
+**Why evaluator is "Skip for now" for pure-skill agents:** behavioral
+evaluation of LLM-driven agents (canned scenarios + constraint
+testing) is a separate design surface described in
+`docs/design/sealed-network-evaluation-plan.md` §3.5.2 and is **not**
+implemented yet. When that mechanism lands, this matrix should flip
+the pure-skill rows to `Required | Required`. Until then, the auditor's
+static review is the only gate for pure-skill agents.
+
+If gates required:
+1. Call `agent_spawn` with `agent_id="auditor.default"`, `async=true`,
+   passing the **artifact_ref of the intent-only bundle** built in
+   Step 2a (for pure-skill agents) or the **coder-built artifact_ref**
+   (for code-bearing agents). Then call `workflow_wait` with the
+   returned `task_id`.
+2. If the evaluator is required for this row, call `agent_spawn` with
+   `agent_id="evaluator.default"`, `async=true`, against the same
+   `artifact_ref`. Then call `workflow_wait`.
+3. Each required gate must call `promotion_record(artifact_id=<that
+   artifact>, role=..., pass=true)`. specialized_builder verifies these
+   records exist against the artifact_id that is being installed.
+
+If only the auditor is required (`audit_only` gating mode, pure-skill
+rows): tell specialized_builder `"Gating: audit_only"` and pass the
+auditor's `promotion_record` evidence in the delegation.
+
+If no gates are required (the narrow operator-override case, not the
+default for pure-skill agents): tell specialized_builder
+`"Gating: none"`. This is rare and should be justified by the
+operator's explicit intent.
 
 ### Step 5: Install via specialized_builder
 
