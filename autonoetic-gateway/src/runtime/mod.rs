@@ -37,6 +37,8 @@ pub mod prompt_budget;
 pub mod quality_signal;
 pub mod reevaluation_state;
 pub mod remote_access;
+pub mod sealed_network;
+pub mod sealed_network_proxy;
 pub mod response_validation;
 pub mod root_session_budget;
 pub mod script_execute;
