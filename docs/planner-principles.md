@@ -71,7 +71,9 @@ The planner knows these twelve agents by name. Each entry is one line: the role,
 | `executor.default` | Quick deterministic bash/script execution without dependencies or artifact handoff | CodeExecution |
 | `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | CodeExecution |
 | `architect.default` | Multi-file design, structural breakdown | — (design-only) |
-| `evaluator.default` | Behavioral validation, test execution | CodeExecution |
+| `sealed_evaluator.default` | Sealed-sandbox artifact evaluation (operator-invokable) | CodeExecution |
+| `static_evaluator.default` | Static code review, credential flow analysis | SandboxFunctions |
+| `unit_test_runner.default` | Runs artifact test suites in no-network sandbox | CodeExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
 | `packager.default` | Dependency installation for code agents | NetworkAccess (deps) |
 | `specialized_builder.default` | Final agent install (revision create + promote) | AgentRevision |

@@ -231,6 +231,35 @@ Controls when `agent_revision_promote` requires human approval before proceeding
 
 ---
 
+## Post-Promotion Review
+
+Controls the background review of promoted agents (Phase 4 Tier 1). Reviews operational drift daily: tool failure rates, authorization denials, suspension counts, and new sentinel findings.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `post_promotion_review.enabled` | bool | `true` | Enable daily post-promotion review |
+| `post_promotion_review.interval_secs` | u64 | `86400` | Review interval in seconds (default: 24 hours) |
+| `post_promotion_review.tool_failure_rate_warning` | f64 | `1.5` | Multiplier threshold for warning (current / previous) |
+| `post_promotion_review.tool_failure_rate_critical` | f64 | `3.0` | Multiplier threshold for critical escalation |
+| `post_promotion_review.sentinel_findings_warning` | u64 | `0` | Sentinel findings count for warning |
+| `post_promotion_review.sentinel_findings_critical` | u64 | `2` | Sentinel findings count for critical escalation |
+
+Example:
+
+```yaml
+post_promotion_review:
+  enabled: true
+  interval_secs: 86400
+  tool_failure_rate_warning: 1.5
+  tool_failure_rate_critical: 3.0
+  sentinel_findings_warning: 0
+  sentinel_findings_critical: 2
+```
+
+> Critical findings trigger an `EscalationMessage` visible in `autonoetic gateway escalations list`.
+
+---
+
 ## Schema Enforcement
 
 Validates `agent_spawn` payloads against declared input schemas in agent metadata.

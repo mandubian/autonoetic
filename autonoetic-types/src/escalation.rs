@@ -1,3 +1,4 @@
+use crate::background::CodeExcerpt;
 use crate::promotion::PromotionRole;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,42 @@ pub struct RoleVerdictSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_ref: Option<String>,
     pub recorded_at: String,
+}
+
+/// Category of escalation for channel routing and filtering.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationType {
+    /// New artifact needs operator promotion decision.
+    #[default]
+    PromotionReview,
+    /// Remote endpoints detected; operator asked whether to run sealed eval.
+    SealedEvalInquiry,
+    /// Background sentinel found post-promotion anomaly.
+    PostPromotionAnomaly,
+    /// Network recording session produced a fixture set.
+    RecordingComplete,
+}
+
+impl EscalationType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EscalationType::PromotionReview => "promotion_review",
+            EscalationType::SealedEvalInquiry => "sealed_eval_inquiry",
+            EscalationType::PostPromotionAnomaly => "post_promotion_anomaly",
+            EscalationType::RecordingComplete => "recording_complete",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "promotion_review" => Some(EscalationType::PromotionReview),
+            "sealed_eval_inquiry" => Some(EscalationType::SealedEvalInquiry),
+            "post_promotion_anomaly" => Some(EscalationType::PostPromotionAnomaly),
+            "recording_complete" => Some(EscalationType::RecordingComplete),
+            _ => None,
+        }
+    }
 }
 
 /// Status of a federation escalation.
@@ -83,6 +120,12 @@ pub struct EscalationMessage {
     /// Why the escalation was resolved this way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<String>,
+    /// Source code excerpts from the artifact for operator context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_excerpts: Option<Vec<CodeExcerpt>>,
+    /// Category of escalation for channel routing and filtering.
+    #[serde(default)]
+    pub escalation_type: EscalationType,
 }
 
 impl EscalationMessage {
@@ -109,6 +152,8 @@ impl EscalationMessage {
             status: EscalationStatus::Pending,
             decided_by: None,
             decision_reason: None,
+            code_excerpts: None,
+            escalation_type: EscalationType::default(),
         }
     }
 }

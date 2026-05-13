@@ -160,7 +160,8 @@ This protocol is implemented entirely through instruction changes:
 | `agents/lead/planner.default/SKILL.md` | "Handling Child Agent Clarification Requests" section |
 | `agents/specialists/coder.default/SKILL.md` | "Clarification Protocol" section |
 | `agents/specialists/architect.default/SKILL.md` | "Clarification Protocol" section |
-| `agents/specialists/evaluator.default/SKILL.md` | "Clarification Protocol" section |
+| `agents/specialists/sealed_evaluator.default/SKILL.md` | "Clarification Protocol" section |
+| `agents/specialists/static_evaluator.default/SKILL.md` | "Clarification Protocol" section |
 | `agents/specialists/auditor.default/SKILL.md` | "Clarification Protocol" section |
 | `agents/specialists/debugger.default/SKILL.md` | "Clarification Protocol" section |
 | `agents/specialists/researcher.default/SKILL.md` | "Clarification Protocol" section |

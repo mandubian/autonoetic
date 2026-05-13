@@ -93,6 +93,40 @@ autonoetic gateway approvals approve <request_id> --reason "Approved"
 autonoetic gateway approvals reject <request_id> --reason "Not needed"
 ```
 
+### `autonoetic gateway escalations`
+
+Manage federation escalation messages for promotion review.
+
+```bash
+# List pending escalations
+autonoetic gateway escalations list
+
+# Inspect a specific escalation
+autonoetic gateway escalations inspect <escalation_id>
+
+# Resolve an escalation (operator decision)
+autonoetic gateway escalations resolve <escalation_id> --status approved --decided-by "operator" --reason "All clear"
+```
+
+| Option | Description |
+|--------|-------------|
+| `--status <STATUS>` | Decision: `approved` or `rejected` (resolve, required) |
+| `--decided-by <ID>` | Decider identity (resolve, required) |
+| `--reason <TEXT>` | Decision reason (resolve, required) |
+
+### `autonoetic gateway grants`
+
+Manage session approval grants.
+
+```bash
+# List all grants
+autonoetic gateway grants list
+
+# Revoke a grant
+autonoetic gateway grants revoke --grant-id <grant_id>
+autonoetic gateway grants revoke --root-session <id> --host api.example.com
+```
+
 ---
 
 ## Agent
@@ -152,6 +186,7 @@ autonoetic agent run my-agent --headless
 |--------|-------------|
 | `-i, --interactive` | Persistent chat loop |
 | `--headless` | Boot without user interaction |
+| `--record-network` | Record HTTP traffic for fixture-based evaluation |
 
 ### `autonoetic agent list`
 
@@ -211,6 +246,87 @@ autonoetic agent credential rm cred_abc123
 | `put` | Store secret in vault + create credential record |
 | `list` | List credential metadata (never secret values) |
 | `rm` | Remove credential and its secret |
+
+---
+
+## Recording
+
+Record real HTTP traffic during agent execution for sealed evaluation replay.
+
+### `autonoetic recording start`
+
+Start a recording session for an agent.
+
+```bash
+autonoetic recording start --agent-id myagent.default --duration 5m
+autonoetic recording start --agent-id myagent.default --max-requests 50
+```
+
+| Option | Description |
+|--------|-------------|
+| `--agent-id <ID>` | Agent to record (required) |
+| `--duration <DURATION>` | Recording duration (e.g., `5m`, `1h`) |
+| `--max-requests <N>` | Max requests before stopping |
+
+### `autonoetic recording list`
+
+List recorded fixture sets.
+
+```bash
+autonoetic recording list
+autonoetic recording list --agent-id myagent.default
+```
+
+### `autonoetic recording inspect`
+
+Inspect a fixture set.
+
+```bash
+autonoetic recording inspect <fixture_set_ref>
+```
+
+---
+
+## Eval Sealed
+
+Run sealed-network evaluation against recorded fixtures.
+
+```bash
+autonoetic eval sealed --artifact-ref ar.xxx --fixture-set fs.yyy
+autonoetic eval sealed --artifact-ref ar.xxx --fixture-set fs.yyy --agent-id sealed_evaluator.default
+```
+
+| Option | Description |
+|--------|-------------|
+| `--artifact-ref <REF>` | Artifact to evaluate (required) |
+| `--fixture-set <REF>` | Fixture set for replay (required) |
+| `--agent-id <ID>` | Evaluator agent (default: `sealed_evaluator.default`) |
+
+---
+
+## Review
+
+Inspect post-promotion review results.
+
+```bash
+# Show review status for all agents
+autonoetic review status
+
+# Show review status for a specific agent
+autonoetic review status --agent-id myagent.default
+
+# Inspect a specific review
+autonoetic review inspect <review_id>
+
+# Show review history
+autonoetic review history --agent-id myagent.default --limit 10
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Show current review status per agent |
+| `inspect` | Full detail for a specific review |
+| `history` | Historical review results |
 
 ---
 

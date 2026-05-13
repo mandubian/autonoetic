@@ -156,9 +156,9 @@ fn evaluator_manifest() -> AgentManifest {
             runtime_lock: "runtime.lock".to_string(),
         },
         agent: AgentIdentity {
-            id: "evaluator.default".to_string(),
-            name: "evaluator.default".to_string(),
-            description: "Evaluator".to_string(),
+            id: "sealed_evaluator.default".to_string(),
+            name: "sealed_evaluator.default".to_string(),
+            description: "Sealed Evaluator".to_string(),
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
@@ -543,7 +543,7 @@ fn test_federation_positive_path_promote_succeeds_with_approved_escalation() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "static_evaluator",
         true,
     );
 
@@ -624,7 +624,7 @@ fn test_federation_blocks_without_approved_escalation() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "static_evaluator",
         true,
     );
 
@@ -690,7 +690,7 @@ fn test_federation_blocks_with_pending_escalation() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "static_evaluator",
         true,
     );
 
@@ -773,7 +773,7 @@ fn test_federation_blocks_when_role_shares_proposer_identity() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "static_evaluator",
         true,
     );
 
@@ -846,7 +846,7 @@ fn test_federation_blocks_when_roles_share_identity() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "static_evaluator",
         true,
     );
 
@@ -927,7 +927,7 @@ fn test_federation_legacy_regression_promote_without_federation_roles() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         true,
     );
 
@@ -987,7 +987,7 @@ fn test_federation_escalation_rejected_does_not_allow_promotion() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "static_evaluator",
         true,
     );
 

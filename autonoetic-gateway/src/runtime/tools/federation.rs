@@ -111,7 +111,7 @@ impl NativeTool for FederationEscalateTool {
         _manifest: &AgentManifest,
         _policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         _arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -144,6 +144,13 @@ impl NativeTool for FederationEscalateTool {
             args.root_session_id.clone(),
         );
         escalation.artifact_digest = args.artifact_digest;
+
+        if let (Some(gw_dir), artifact_id) = (gateway_dir, &args.artifact_id) {
+            if !artifact_id.is_empty() {
+                escalation.code_excerpts =
+                    crate::runtime::code_excerpts::build_code_excerpts(artifact_id, gw_dir);
+            }
+        }
 
         store.create_escalation(&mut escalation)?;
 

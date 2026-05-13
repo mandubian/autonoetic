@@ -18,11 +18,15 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Session Checkpoints, Continuations, and Forks](#session-checkpoints-continuations-and-forks)
 - [Queryable Event Store](#queryable-event-store)
 - [Live Digest](#live-digest)
+- [Observability Surface](#observability-surface)
+- [Hook System](#hook-system)
 - [Unified Gateway Database](#unified-gateway-database)
 - [Emergency Stop](#emergency-stop)
 - [Human Escalation](#human-escalation)
+- [Promotion Federation](#promotion-federation)
+- [Recording Mode](#recording-mode)
+- [Post-Promotion Review](#post-promotion-review)
 - [Scheduled Tasks](#scheduled-tasks)
-- [System Agents](#system-agents)
 - [Error Taxonomy](#error-taxonomy)
 - [Design Principles](#design-principles)
 
@@ -1006,9 +1010,11 @@ autonoetic gateway emergency-stop <root_session_id> --reason "Security incident"
 
 ## Human Escalation
 
-Mechanically enforced workflow suspension when an agent requests human guidance via `session_escalate(target="human")`.
+The gateway supports two escalation paths: **session escalation** (when an agent is stuck and needs human guidance during execution) and **federation escalation** (structured promotion review by the operator).
 
-### How It Works
+### Session Escalation (`session_escalate`)
+
+### How Session Escalation Works
 
 1. **Agent calls `session_escalate(target="human", reason, context, urgency, suggested_actions)`**
 2. **Gateway creates `ApprovalRequest`** with `ScheduledAction::SessionEscalate` — this is a blocking approval, not advisory
@@ -1018,7 +1024,7 @@ Mechanically enforced workflow suspension when an agent requests human guidance 
 6. **Gateway persists the operator's guidance** in the `decision_reason` column (separate from the agent's original `reason`)
 7. **Session resumes from checkpoint** — the operator's guidance note is injected as a system message into the conversation history
 
-### Authorization
+### Session Escalation Authorization
 
 | Target | Blocking? | Creates Approval? |
 |--------|-----------|-------------------|
@@ -1026,16 +1032,137 @@ Mechanically enforced workflow suspension when an agent requests human guidance 
 | `reasoning_llm` | No | No — advisory only |
 | `specialist` | No | No — advisory only |
 
-### Checkpoint Resume
+### Session Escalation Checkpoint Resume
 
 On checkpoint resume for `HumanEscalation`:
 - If approval is still pending → bail with "waiting for escalation approval"
 - If rejected/cancelled → bail with "escalation was rejected"
 - If approved → restore `LoopGuard` state, inject operator guidance as system message, resume execution
 
+### Federation Escalation (`federation.escalate`)
+
+Structured promotion review where the planner bundles verdicts from all federation roles into an `EscalationMessage` and submits them for operator decision:
+
+1. **Planner collects verdicts** from `static_evaluator`, `unit_test_runner`, `auditor` via `promotion_query`
+2. **Planner calls `federation.escalate`** with all role verdicts and a synthesis
+3. **Gateway persists `EscalationMessage`** in the `escalations` SQLite table with status `Pending`
+4. **Operator reviews** via `admin.escalation_list` / `admin.escalation_inspect`
+5. **Operator decides** via `admin.escalation_resolve(Approved | Rejected)` — `decided_by` and `decision_reason` recorded
+6. **Promotion gate (FullJury)** checks for an approved escalation before allowing promotion
+
+The operator may request additional evaluation (e.g., sealed evaluation) and the planner re-escalates with the new verdict. Unlike session escalation, federation escalation does not suspend the planner — it is an asynchronous operator review.
+
 ### Design Rationale
 
 This follows the **Separation of Powers** principle: the agent can request help, but only the gateway can unblock execution. The operator's guidance is mechanically injected — no agent interpretation or filtering.
+
+In addition to session-level escalation, the gateway supports **federation escalation** for structured promotion review — see [Promotion Federation](#promotion-federation) below.
+
+---
+
+## Promotion Federation
+
+The promotion gate uses a **federation of evaluation roles** — not a single evaluator — to produce promotion verdicts. Each role has a different methodology, produces independent verdicts, and the operator is the final arbiter.
+
+### Federation Roles
+
+| Role | Agent ID | Method | Network? |
+|------|----------|--------|----------|
+| **Auditor** | `auditor.default` | Security review, capability consistency, SKILL.md audit | No |
+| **Static Evaluator** | `static_evaluator.default` | Static code review: correctness, credential flow, URL patterns, behavioral contracts | No |
+| **Unit Test Runner** | `unit_test_runner.default` | Runs artifact's built-in test suite in a no-network sandbox | No |
+| **Sealed Evaluator** | `sealed_evaluator.default` | Dynamic execution in sealed sandbox with fixture-proxied HTTP | Sealed proxy only |
+
+The planner orchestrates federation: it inspects the artifact type, spawns the applicable roles in parallel, collects verdicts via `promotion_query`, and escalates the consolidated report to the operator.
+
+### FullJury Gate
+
+When federation roles (`static_evaluator` or `unit_test_runner`) have recorded verdicts for an artifact, the promotion gate mechanically enforces:
+
+1. **Distinct identity** (R-2.17): each federation role's agent ID must differ from the revision proposer and from every other federation role
+2. **Operator approval** (R-2.22): an approved `EscalationMessage` must exist for the artifact + revision pair
+3. **Legacy compatibility**: artifacts without federation verdicts continue through the existing Full/AuditOnly gate
+
+This is a fifth gate mode (`FullJury`) that activates on top of the legacy gate when federation verdicts are present. A compromised planner cannot bypass it — the gateway checks `has_federation_roles()` mechanically and refuses promotion without an approved escalation.
+
+### EscalationMessage
+
+The `EscalationMessage` type (`autonoetic-types/src/escalation.rs`) is a channel-agnostic structured payload that carries federation verdicts from the planner to the operator:
+
+```
+Planner collects verdicts → federation.escalate → EscalationMessage persisted
+Operator reviews → admin.escalation_list / admin.escalation_inspect
+Operator decides → admin.escalation_resolve(Approved | Rejected)
+Gate checks escalation status → promote or reject
+```
+
+Key properties:
+- **Capability-gated**: only agents with `AgentSpawn` can call `federation.escalate`
+- **Dedup**: a second escalation for the same (artifact, revision) is rejected while a previous one is `Pending`
+- **Audit trail**: `decided_by` and `decision_reason` recorded on resolution
+- **Admin routes**: `admin.escalation_list`, `admin.escalation_inspect`, `admin.escalation_resolve`
+
+---
+
+## Recording Mode
+
+The operator can run an agent with `--record-network` to capture real HTTP traffic as redacted fixture files. These fixtures then serve as reproducible baselines for sealed evaluation.
+
+### How It Works
+
+1. **Operator starts recording**: `autonoetic agent run <agent> --record-network --duration 5m`
+2. **Gateway sets `sandbox_network: recording`**: the HTTP proxy intercepts outbound requests
+3. **Proxy captures traffic**: each request/response pair is stored with mandatory redaction
+4. **Redaction is mechanical**: the `redact_fixture` function strips credentials, Authorization headers, cookies, API keys, bearer tokens, and sensitive query parameters before storage
+5. **Fixture sets are content-addressed**: each recording session produces a `FixtureSet` identified by SHA-256 digest, stored as an immutable artifact
+
+### Redaction Policy
+
+| Category | Fields redacted |
+|----------|----------------|
+| Request headers | `authorization`, `cookie`, `x-api-key`, `proxy-authorization` |
+| Response headers | `set-cookie`, `www-authenticate`, `proxy-authenticate` |
+| Query parameters | `token`, `api_key`, `apikey`, `secret`, `key`, `password`, `auth`, `signature`, `access_token`, `refresh_token` |
+| Body (regex) | `bearer <token>` → `bearer [REDACTED]` |
+
+### Sealed Evaluator Replay
+
+Recorded fixture sets can be used for deterministic sealed evaluation:
+
+```bash
+autonoetic eval sealed --artifact-ref ar.xxx --fixture-set fs.yyy
+```
+
+The sealed evaluator replays the artifact against recorded traffic via the fixture proxy. Every HTTP call is intercepted and served from the fixture set — no live network access.
+
+---
+
+## Post-Promotion Review
+
+After an agent is promoted and live, a background sentinel periodically reviews it for operational drift.
+
+### Tier 1: Observability Review (all agents)
+
+Runs daily for every promoted agent, regardless of whether fixtures exist:
+- **Causal event trends**: tool failure rate, authorization denials, suspension count — compared against the previous period
+- **Sentinel findings**: new security findings accumulated since last review
+- **Thresholds**: tool-failure-rate > 1.5× → warning; > 3.0× → critical; auth denials doubled → critical; suspensions doubled → critical
+- **Minor findings**: written to `security_findings` as advisory
+- **Critical findings**: escalate to operator via `EscalationMessage` with `EscalationType::PostPromotionAnomaly`
+
+### Tier 2: Fixture-Based Drift (deferred)
+
+For agents with recorded fixture sets, the review additionally:
+- Compares baseline (first recording) against current (latest recording) for endpoint drift
+- Runs sealed evaluator replay of baseline fixtures against the current revision to detect regressions
+
+Tier 2 is deferred pending wide adoption of the `--record-network` workflow.
+
+### Safety
+
+- **Advisory only**: the review never rolls back a revision automatically — the operator decides all remediation
+- **Same escalation channel**: reuses the same `EscalationMessage` type and `admin.escalation_list` as federation escalations
+- **Scheduled**: fires via the scheduler tick alongside sentinel sweeps; configurable interval
 
 ---
 

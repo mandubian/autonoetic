@@ -282,7 +282,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
     );
 
     // Same agent identity (evaluator.default) records both evaluator and auditor passes.
-    let same_agent = manifest_for("evaluator.default");
+    let same_agent = manifest_for("sealed_evaluator.default");
     let same_policy = PolicyEngine::new(same_agent.clone());
 
     record_promotion(
@@ -293,7 +293,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         &gateway_dir,
         &config,
         &artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         true,
         "session-eval",
     );
@@ -336,7 +336,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         "error should mention same agent: {err}"
     );
     assert!(
-        err.contains("evaluator.default"),
+        err.contains("sealed_evaluator.default"),
         "error should name the overlapping agent: {err}"
     );
 }
@@ -373,7 +373,7 @@ fn distinct_identities_allowed() {
         &artifact_id,
     );
 
-    let evaluator = manifest_for("evaluator.default");
+    let evaluator = manifest_for("sealed_evaluator.default");
     let eval_policy = PolicyEngine::new(evaluator.clone());
     record_promotion(
         &registry,
@@ -383,7 +383,7 @@ fn distinct_identities_allowed() {
         &gateway_dir,
         &config,
         &artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         true,
         "session-eval",
     );

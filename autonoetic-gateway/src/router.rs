@@ -1386,6 +1386,61 @@ impl JsonRpcRouter {
                 }
             }
 
+            "admin.escalation_ask_role" => {
+                #[derive(Deserialize)]
+                struct AskRoleParams {
+                    escalation_id: String,
+                    role_agent_id: String,
+                    question: String,
+                }
+                let params: AskRoleParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for admin.escalation_ask_role: {}", e),
+                        );
+                    }
+                };
+                if params.escalation_id.trim().is_empty() || params.role_agent_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "escalation_id and role_agent_id must not be empty",
+                    );
+                }
+                if params.question.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "question must not be empty",
+                    );
+                }
+                match self
+                    .execution
+                    .spawn_clarification_for_escalation(
+                        params.escalation_id.trim(),
+                        params.role_agent_id.trim(),
+                        params.question.trim(),
+                    )
+                    .await
+                {
+                    Ok(outcome) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "child_session_id": outcome.child_session_id,
+                            "answer": outcome.answer,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Clarification spawn failed: {}", e),
+                    ),
+                }
+            }
+
             _ => JsonRpcResponse::error(req.id, -32601, "Method not found"),
         }
     }

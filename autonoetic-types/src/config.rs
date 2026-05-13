@@ -561,11 +561,11 @@ impl Default for ConstitutionConfig {
 }
 
 fn default_constitution_source_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.05/constitution.md")
+    PathBuf::from("docs/constitution/versions/2026.05.13/constitution.md")
 }
 
 fn default_constitution_lock_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.05/gateway-constitution.lock.json")
+    PathBuf::from("docs/constitution/versions/2026.05.13/gateway-constitution.lock.json")
 }
 
 fn default_require_constitution_signature() -> bool {
@@ -742,6 +742,13 @@ pub struct GatewayConfig {
     /// Default: 50.
     #[serde(default = "default_max_pending_approvals_per_root")]
     pub max_pending_approvals_per_root: usize,
+
+    /// Maximum number of concurrent pending escalations per root_session_id.
+    /// When a new escalation would push the count above this cap, the insert is
+    /// rejected with `escalation_flood`. Set to 0 to disable.
+    /// Default: 50.
+    #[serde(default = "default_max_pending_escalations_per_root")]
+    pub max_pending_escalations_per_root: usize,
 
     /// Default TTL in seconds for auto-generated session approval grants.
     /// When an approval is resolved and a grant is auto-inserted without an
@@ -1557,6 +1564,10 @@ fn default_max_pending_approvals_per_root() -> usize {
     50
 }
 
+fn default_max_pending_escalations_per_root() -> usize {
+    50
+}
+
 fn default_grant_ttl_secs() -> u64 {
     86400
 }
@@ -1755,6 +1766,7 @@ impl Default for GatewayConfig {
             root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
+            max_pending_escalations_per_root: default_max_pending_escalations_per_root(),
             default_grant_ttl_secs: default_grant_ttl_secs(),
             escape_attempt_degrade_threshold: default_escape_attempt_degrade_threshold(),
             escape_attempt_emergency_threshold: default_escape_attempt_emergency_threshold(),

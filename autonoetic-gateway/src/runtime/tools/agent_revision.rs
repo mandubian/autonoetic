@@ -1984,18 +1984,25 @@ impl NativeTool for AgentRevisionPromoteTool {
             match mode {
                 PromotionGateMode::Full => {
                     anyhow::ensure!(
-                        record.evaluator_pass,
-                        "Promotion gate: evaluator did not pass for artifact '{}'. \
-                         Fix the evaluation findings and re-run evaluator.default.",
+                        record.evaluator_pass
+                            || record.sealed_evaluator_pass
+                            || record.static_evaluator_pass,
+                        "Promotion gate: no evaluator role passed for artifact '{}'. \
+                         Fix the evaluation findings and re-run sealed_evaluator.default or static_evaluator.default.",
                         artifact_id
                     );
-                    let eval_id = record.evaluator_id.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Promotion gate: evaluator identity missing for artifact '{}' (R-2.17). \
-                             Re-run evaluator.default to record its identity.",
-                            artifact_id
-                        )
-                    })?;
+                    let eval_id = record
+                        .evaluator_id
+                        .as_deref()
+                        .or(record.sealed_evaluator_id.as_deref())
+                        .or(record.static_evaluator_id.as_deref())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Promotion gate: evaluator identity missing for artifact '{}' (R-2.17). \
+                                 Re-run an evaluator role to record its identity.",
+                                artifact_id
+                            )
+                        })?;
                     anyhow::ensure!(
                         eval_id != audit_id,
                         "Promotion gate: evaluator and auditor are the same agent '{}' (R-2.17). \
@@ -2048,7 +2055,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                 category: "revision".to_string(),
                 action: "revision.promotion_gate_enforced".to_string(),
                 status: "active".to_string(),
-                enforced_rules: vec!["R-2.8".to_string(), "R-2.17".to_string()],
+                enforced_rules: vec!["R-2.8".to_string(), "R-2.17".to_string(), "R-2.22".to_string()],
                 target: artifact_id.map(|s| s.to_string()),
                 payload: Some(
                     serde_json::json!({

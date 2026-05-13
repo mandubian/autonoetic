@@ -24,12 +24,16 @@ pub enum FindingSeverity {
 
 /// Role that recorded the promotion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum PromotionRole {
+    #[serde(rename = "evaluator")]
     Evaluator,
+    #[serde(rename = "auditor")]
     Auditor,
+    #[serde(rename = "static_evaluator")]
     StaticEvaluator,
+    #[serde(rename = "unit_test_runner")]
     UnitTestRunner,
+    #[serde(rename = "sealed_evaluator")]
     SealedEvaluator,
 }
 
@@ -46,6 +50,11 @@ impl PromotionRole {
 }
 
 /// Promotion record linking validation results to an artifact.
+///
+/// TODO: When a 6th role is added, refactor to `HashMap<PromotionRole, RoleVerdict>`
+/// per plan §3.3. Custom `Deserialize` reads both old flat format and new map.
+/// On first write after upgrade, normalise to the new format. No data migration
+/// script needed; read-time migration only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionRecord {
     /// Artifact ID this promotion applies to (e.g., "art_a1b2c3d4").

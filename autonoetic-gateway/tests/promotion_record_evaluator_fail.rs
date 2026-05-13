@@ -39,8 +39,8 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
         bundle.artifact_id.clone(),
         Some(bundle.artifact_manifest_digest.clone()),
         None,
-        PromotionRole::Evaluator,
-        "evaluator.default",
+        PromotionRole::SealedEvaluator,
+        "sealed_evaluator.default",
         true,
         vec![],
         Some("Test auto-pass".to_string()),
@@ -109,8 +109,8 @@ fn evaluator_manifest() -> AgentManifest {
             runtime_lock: "runtime.lock".to_string(),
         },
         agent: AgentIdentity {
-            id: "evaluator.default".to_string(),
-            name: "evaluator.default".to_string(),
+            id: "sealed_evaluator.default".to_string(),
+            name: "sealed_evaluator.default".to_string(),
             description: "Evaluator".to_string(),
         },
         capabilities: vec![Capability::SandboxFunctions {
@@ -165,7 +165,7 @@ async fn test_promotion_evaluator_fail_rejected() {
 
     let eval_args = serde_json::json!({
         "artifact_id": artifact_id,
-        "role": "evaluator",
+        "role": "sealed_evaluator",
         "pass": false,  // Evaluator FAILED
         "findings": [
             {
@@ -203,7 +203,7 @@ async fn test_promotion_evaluator_fail_rejected() {
     let record = record.unwrap();
     assert_eq!(record.evaluator_pass, false, "evaluator should have failed");
     assert!(
-        !promotion_store.has_passed(&artifact_id, &PromotionRole::Evaluator),
+        !promotion_store.has_passed(&artifact_id, &PromotionRole::SealedEvaluator),
         "evaluator should NOT have passed"
     );
     assert!(
@@ -293,7 +293,7 @@ async fn test_promotion_auditor_fail_rejected() {
     let registry = default_registry();
     let eval_args = serde_json::json!({
         "artifact_id": artifact_id,
-        "role": "evaluator",
+        "role": "sealed_evaluator",
         "pass": true,
         "findings": [],
         "summary": "Tests passed"
@@ -385,7 +385,7 @@ async fn test_promotion_auditor_fail_rejected() {
     // --- Verify state: evaluator passed, auditor failed ---
     let store = PromotionStore::new(&gateway_dir).expect("promotion store should create");
     assert!(
-        store.has_passed(&artifact_id, &PromotionRole::Evaluator),
+        store.has_passed(&artifact_id, &PromotionRole::SealedEvaluator),
         "evaluator should have passed"
     );
     assert!(
@@ -465,7 +465,7 @@ fn test_promotion_record_rejects_agent_supplied_content_digest() {
     let args = serde_json::json!({
         "artifact_id": "art_digest_owner_test",
         "content_digest": "sha256:fake-from-agent",
-        "role": "evaluator",
+        "role": "sealed_evaluator",
         "pass": true,
         "findings": [],
         "summary": "should be rejected"

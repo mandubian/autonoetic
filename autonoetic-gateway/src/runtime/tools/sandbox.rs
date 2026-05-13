@@ -2294,6 +2294,8 @@ impl NativeTool for SandboxExecTool {
                 &mut overrides,
                 gateway_dir,
                 session_id,
+                gateway_store.clone(),
+                Some(&manifest.agent.id),
             )?;
 
         // Merge runtime.lock mounts into session content mounts

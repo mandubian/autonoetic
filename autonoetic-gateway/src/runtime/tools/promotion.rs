@@ -19,8 +19,7 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 fn is_promotion_agent(manifest: &AgentManifest) -> bool {
     matches!(
         manifest.agent.id.as_str(),
-        "evaluator.default"
-            | "sealed_evaluator.default"
+        "sealed_evaluator.default"
             | "auditor.default"
             | "static_evaluator.default"
             | "unit_test_runner.default"
@@ -37,7 +36,7 @@ impl NativeTool for PromotionRecordTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Records promotion status (evaluator/auditor/static_evaluator/unit_test_runner/sealed_evaluator validation result) for an artifact. Only authorized promotion agents can call this tool.".to_string(),
+            description: "Records promotion status (auditor/static_evaluator/unit_test_runner/sealed_evaluator validation result) for an artifact. Only authorized promotion agents can call this tool.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

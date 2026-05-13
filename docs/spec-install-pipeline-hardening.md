@@ -1,9 +1,11 @@
 # Spec: Install Pipeline Hardening
 
-**Status:** Ready for Implementation
-**Date:** 2026-04-07 (updated 2026-04-08)
+**Status:** Implemented (April 2026) — superseded by [Promotion Federation](design/promotion-federation-plan.md) for evaluation model
+**Date:** 2026-04-07 (updated 2026-04-08, federation note 2026-05-13)
 **Authors:** mandubian
-**Related:** [spec-implicit-artifacts-agent-evolution.md](spec-implicit-artifacts-agent-evolution.md), [approval-system.md](approval-system.md)
+**Related:** [design/promotion-federation-plan.md](design/promotion-federation-plan.md), [design/post-promotion-review-design.md](design/post-promotion-review-design.md)
+
+> **Federation update (2026-05-13):** This spec describes the pre-federation single-evaluator pipeline (`evaluator.default`). The promotion gate has since been extended with federation roles (`static_evaluator.default`, `unit_test_runner.default`, `sealed_evaluator.default`) and a FullJury gate requiring operator escalation. The mechanical hardening described here (capability delta, content digest binding, unresolved dependency check, promotion evidence validation, audit-only gating) was preserved and extended for federation. References to `evaluator.default` below reflect the pipeline as it existed when this spec was written.
 
 ---
 

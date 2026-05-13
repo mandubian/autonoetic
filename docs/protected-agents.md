@@ -154,7 +154,7 @@ If the gateway itself cannot start:
 The evolution-orchestrator already maintains an **exempt agents** list that prevents the automated evolution pipeline from modifying critical agents:
 
 ```
-planner.default, coder.default, evaluator.default, auditor.default,
+planner.default, coder.default, sealed_evaluator.default, static_evaluator.default, unit_test_runner.default, auditor.default,
 specialized_builder.default, agent-factory.default,
 evolution-orchestrator.default, memory-curator.default,
 evolution-steward.default, agent-adapter.default

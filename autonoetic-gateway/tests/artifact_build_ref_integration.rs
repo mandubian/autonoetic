@@ -241,8 +241,8 @@ fn reader_manifest() -> AgentManifest {
             runtime_lock: "runtime.lock".to_string(),
         },
         agent: AgentIdentity {
-            id: "evaluator.default".to_string(),
-            name: "evaluator".to_string(),
+            id: "sealed_evaluator.default".to_string(),
+            name: "sealed_evaluator".to_string(),
             description: "test".to_string(),
         },
         capabilities: vec![Capability::ReadAccess {

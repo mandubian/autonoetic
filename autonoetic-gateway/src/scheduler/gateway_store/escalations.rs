@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use autonoetic_types::escalation::{EscalationMessage, EscalationStatus};
+use autonoetic_types::escalation::{EscalationMessage, EscalationStatus, EscalationType};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::GatewayStore;
@@ -7,6 +7,13 @@ use super::GatewayStore;
 fn row_to_escalation(row: &rusqlite::Row) -> rusqlite::Result<EscalationMessage> {
     let status_str: String = row.get(10)?;
     let status = EscalationStatus::parse(&status_str).unwrap_or(EscalationStatus::Pending);
+    let code_excerpts_json: Option<String> = row.get(13)?;
+    let code_excerpts = code_excerpts_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let escalation_type_str: String = row.get(14)?;
+    let escalation_type =
+        EscalationType::parse(&escalation_type_str).unwrap_or(EscalationType::PromotionReview);
     Ok(EscalationMessage {
         escalation_id: row.get(0)?,
         artifact_id: row.get(1)?,
@@ -21,10 +28,17 @@ fn row_to_escalation(row: &rusqlite::Row) -> rusqlite::Result<EscalationMessage>
         status,
         decided_by: row.get(11)?,
         decision_reason: row.get(12)?,
+        code_excerpts,
+        escalation_type,
     })
 }
 
 impl GatewayStore {
+    pub fn set_escalation_flood_cap(&self, cap: usize) {
+        self.escalation_flood_cap
+            .store(cap, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn create_escalation(&self, escalation: &EscalationMessage) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
@@ -45,12 +59,38 @@ impl GatewayStore {
             );
         }
 
+        let root_sid = &escalation.root_session_id;
+        if !root_sid.is_empty() {
+            let cap = self
+                .escalation_flood_cap
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if cap > 0 {
+                let pending_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM escalations WHERE root_session_id = ?1 AND status = 'pending'",
+                    params![root_sid],
+                    |row| row.get(0),
+                )?;
+                if (pending_count as usize) >= cap {
+                    bail!(
+                        "escalation_flood: root session '{}' already has {} pending escalations (cap {})",
+                        root_sid,
+                        pending_count,
+                        cap
+                    );
+                }
+            }
+        }
+
         let role_verdicts = serde_json::to_string(&escalation.role_verdicts)?;
+        let code_excerpts_json = escalation
+            .code_excerpts
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         conn.execute(
             "INSERT INTO escalations (escalation_id, artifact_id, artifact_digest, agent_id,
              revision_id, role_verdicts, planner_synthesis, created_at, resolved_at,
-             root_session_id, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             root_session_id, status, code_excerpts, escalation_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 escalation.escalation_id,
                 escalation.artifact_id,
@@ -63,6 +103,8 @@ impl GatewayStore {
                 escalation.resolved_at,
                 escalation.root_session_id,
                 escalation.status.as_str(),
+                code_excerpts_json,
+                escalation.escalation_type.as_str(),
             ],
         )?;
         Ok(())
@@ -86,7 +128,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason
+             decided_by, decision_reason, code_excerpts, escalation_type
              FROM escalations WHERE escalation_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![escalation_id], row_to_escalation)?;
@@ -98,7 +140,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason
+             decided_by, decision_reason, code_excerpts, escalation_type
              FROM escalations WHERE status = 'pending' ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], row_to_escalation)?;
@@ -121,7 +163,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason
+             decided_by, decision_reason, code_excerpts, escalation_type
              FROM escalations
              WHERE artifact_id = ?1 AND revision_id = ?2 AND status = ?3
              ORDER BY created_at DESC LIMIT 1",

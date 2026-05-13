@@ -100,6 +100,8 @@ struct ProxyState {
     loader: Arc<FixtureLoader>,
     recording_dir: Option<PathBuf>,
     recording_session_id: Option<String>,
+    gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    causal_agent_id: Option<String>,
 }
 
 /// Start the proxy. Returns a handle once the listener is bound.
@@ -112,6 +114,8 @@ pub async fn start_sealed_proxy(
     loader: Arc<FixtureLoader>,
     recording_dir: Option<PathBuf>,
     recording_session_id: Option<String>,
+    gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    causal_agent_id: Option<String>,
 ) -> anyhow::Result<SealedProxyHandle> {
     anyhow::ensure!(
         !matches!(policy, SandboxNetworkPolicy::Normal),
@@ -123,6 +127,8 @@ pub async fn start_sealed_proxy(
         loader,
         recording_dir,
         recording_session_id,
+        gateway_store,
+        causal_agent_id,
     };
 
     let app = Router::new()
@@ -364,6 +370,31 @@ async fn forward_and_capture(
                 error = %e,
                 "failed to write recording fixture"
             );
+        } else if let (Some(ref store), Some(ref sid)) = (&state.gateway_store, &state.recording_session_id) {
+            let event = autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("rec-fxt-{}", uuid::Uuid::new_v4()),
+                agent_id: state.causal_agent_id.clone().unwrap_or_default(),
+                session_id: sid.clone(),
+                turn_id: None,
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "recording".to_string(),
+                action: "recording.fixture_captured".to_string(),
+                status: "active".to_string(),
+                enforced_rules: vec![],
+                target: Some(host.to_string()),
+                payload: Some(serde_json::json!({
+                    "recording_session_id": sid,
+                    "host": host,
+                    "method": method.to_uppercase(),
+                    "path": path,
+                    "redacted_count": redacted_fields.len(),
+                }).to_string()),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            };
+            let _ = store.create_causal_event(&event);
         }
     }
 
@@ -532,6 +563,8 @@ pub async fn setup_sealed_proxy_for_exec_async(
     overrides: &mut BwrapIsolationOverrides,
     gateway_dir: Option<&Path>,
     session_id: Option<&str>,
+    gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    agent_id: Option<&str>,
 ) -> anyhow::Result<Option<SealedProxyHandle>> {
     if matches!(policy, SandboxNetworkPolicy::Normal) {
         return Ok(None);
@@ -552,7 +585,14 @@ pub async fn setup_sealed_proxy_for_exec_async(
         };
 
     let loader = Arc::new(FixtureLoader::new(artifact_root));
-    let handle = start_sealed_proxy(policy, loader, recording_dir, recording_session_id).await?;
+    let handle = start_sealed_proxy(
+        policy,
+        loader,
+        recording_dir,
+        recording_session_id,
+        gateway_store,
+        agent_id.map(|s| s.to_string()),
+    ).await?;
     let proxy_url = handle.proxy_url();
 
     // Inject standard env vars (most HTTP clients respect at least one
@@ -592,6 +632,8 @@ pub fn setup_sealed_proxy_for_exec(
     overrides: &mut BwrapIsolationOverrides,
     gateway_dir: Option<&Path>,
     session_id: Option<&str>,
+    gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    agent_id: Option<&str>,
 ) -> anyhow::Result<Option<SealedProxyHandle>> {
     if matches!(policy, SandboxNetworkPolicy::Normal) {
         return Ok(None);
@@ -604,8 +646,6 @@ pub fn setup_sealed_proxy_for_exec(
         );
         return Ok(None);
     }
-    // We need a mutable-reference-safe block_on. Inline the pattern from
-    // `block_on_http` since we capture &mut.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         tokio::task::block_in_place(|| {
             handle.block_on(setup_sealed_proxy_for_exec_async(
@@ -615,6 +655,8 @@ pub fn setup_sealed_proxy_for_exec(
                 overrides,
                 gateway_dir,
                 session_id,
+                gateway_store,
+                agent_id,
             ))
         })
     } else {
@@ -625,6 +667,8 @@ pub fn setup_sealed_proxy_for_exec(
             overrides,
             gateway_dir,
             session_id,
+            gateway_store,
+            agent_id,
         ))
     }
 }
@@ -663,6 +707,8 @@ mod tests {
             &mut overrides,
             None,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -684,6 +730,8 @@ mod tests {
             dir.path().to_path_buf(),
             &mut env,
             &mut overrides,
+            None,
+            None,
             None,
             None,
         )
@@ -731,6 +779,8 @@ mod tests {
             dir.path().to_path_buf(),
             &mut env,
             &mut overrides,
+            None,
+            None,
             None,
             None,
         )

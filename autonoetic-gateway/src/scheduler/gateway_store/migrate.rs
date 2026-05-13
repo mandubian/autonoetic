@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 35;
+const SCHEMA_VERSION_LATEST: i64 = 36;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -520,6 +520,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_escalations_v33(conn)?;
     apply_recordings_v34(conn)?;
     apply_post_promotion_reviews_v35(conn)?;
+    apply_escalation_code_excerpts_v36(conn)?;
 
     Ok(())
 }
@@ -1927,6 +1928,32 @@ fn apply_post_promotion_reviews_v35(conn: &mut Connection) -> Result<()> {
         params![
             35_i64,
             "post_promotion_reviews",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_escalation_code_excerpts_v36(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 36 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE escalations ADD COLUMN code_excerpts TEXT;
+         ALTER TABLE escalations ADD COLUMN escalation_type TEXT NOT NULL DEFAULT 'promotion_review';",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            36_i64,
+            "escalation_code_excerpts",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

@@ -60,7 +60,9 @@ When a message arrives at the gateway:
 | **Executor** | `executor.default` | Runs quick deterministic shell/script tasks without durable artifact expectations |
 | **Coder** | `coder.default` | Produces runnable artifacts |
 | **Debugger** | `debugger.default` | Isolates root causes, proposes fixes |
-| **Evaluator** | `evaluator.default` | Validates behavior with tests/metrics |
+| **Evaluator** | `sealed_evaluator.default` | Validates behavior in sealed sandbox (operator-invokable) |
+| **Static Evaluator** | `static_evaluator.default` | Static code review, credential flow, behavioral contracts |
+| **Unit Test Runner** | `unit_test_runner.default` | Runs artifact test suites in no-network sandbox |
 | **Auditor** | `auditor.default` | Checks security, governance, reproducibility |
 | **Registrar** | `registration.default` | Onboards services via `credential_setup(skill_url)` — keeps secrets vault-side |
 | **Discovery** | `discovery.default` | Finds installed non-foundational agents that match a task intent |
@@ -785,7 +787,7 @@ Planner: "Create a weather agent"
 
 **Promotion evidence binding (high-risk capabilities):**
 
-- For revisions declaring `NetworkAccess`, `CodeExecution`, or `AgentSpawn`, promotion requires both evaluator and auditor pass records.
+- For revisions declaring `NetworkAccess`, `CodeExecution`, or `AgentSpawn`, promotion requires evaluator and auditor pass records (legacy gate) or federation verdicts + approved operator escalation (FullJury gate).
 - Evidence is validated against the revision's canonical `content_digest` (not by timestamp ordering against `created_at`).
 - Evaluator/auditor can run either:
   - **before** `create_from_intent` (artifact-first flow), or

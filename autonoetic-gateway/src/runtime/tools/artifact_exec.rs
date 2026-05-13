@@ -924,6 +924,8 @@ impl NativeTool for ArtifactExecTool {
                 &mut overrides,
                 Some(gw_dir),
                 session_id,
+                gateway_store.clone(),
+                Some(&manifest.agent.id),
             )?;
 
         let runner = SandboxRunner::spawn_with_session_content_and_env(
@@ -1187,6 +1189,8 @@ fn execute_with_ticket(
         &mut overrides,
         Some(gw_dir),
         session_id,
+        gateway_store.clone(),
+        Some(&manifest.agent.id),
     )?;
 
     let runner = SandboxRunner::spawn_with_session_content_and_env(

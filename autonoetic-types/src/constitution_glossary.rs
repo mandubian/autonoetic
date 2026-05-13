@@ -23,6 +23,7 @@ pub fn rule_explanation(rule_id: &str) -> Option<&'static str> {
         "R-2.19" => "Gate enrichment messages are auditable with sender attribution",
         "R-2.20" => "Agent-as-decider: agents may resolve gates for other agents",
         "R-2.21" => "Agent-decider must escalate to human when confidence is low",
+        "R-2.22" => "Operator approval required when any federation-role verdict is present (FullJury gate)",
 
         // Execution safety (R-7.x)
         "R-7.15" => "Spawn-chain depth limit exceeded",

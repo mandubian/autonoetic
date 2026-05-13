@@ -81,6 +81,7 @@ impl GatewayServer {
             &gateway_dir,
         )?);
         gateway_store.set_approval_flood_cap(self.config.max_pending_approvals_per_root);
+        gateway_store.set_escalation_flood_cap(self.config.max_pending_escalations_per_root);
 
         {
             let probe_result = crate::vault::probe_master_key(&self.config.agents_dir);

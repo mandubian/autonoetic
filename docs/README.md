@@ -72,6 +72,13 @@ This index links to all documentation under `docs/` and marks what is stable ref
 - [`design/protocols.md`](./design/protocols.md) - Protocol contracts and interactions.
 - [`design/cli_interface.md`](./design/cli_interface.md) - CLI interface design.
 - [`design/sandbox_sdk.md`](./design/sandbox_sdk.md) - Sandbox SDK design notes.
+- [`design/promotion-federation-plan.md`](./design/promotion-federation-plan.md) - Promotion federation: multi-role evaluation jury, operator escalation, FullJury gate.
+- [`design/promotion-federation-plan-review.md`](./design/promotion-federation-plan-review.md) - Independent review of Phase 1 federation implementation.
+- [`design/promotion-federation-followup-review.md`](./design/promotion-federation-followup-review.md) - Follow-up review covering Phases 2-4 federation work.
+- [`design/post-promotion-review-design.md`](./design/post-promotion-review-design.md) - Phase 4 post-promotion background review (observability + drift detection).
+- [`design/recording-mode-design.md`](./design/recording-mode-design.md) - Phase 2 recording mode for fixture capture.
+- [`design/sealed-evaluator-replay-design.md`](./design/sealed-evaluator-replay-design.md) - Phase 3 sealed evaluator replay from recorded fixtures.
+- [`design/operator-approval-inspection-plan.md`](./design/operator-approval-inspection-plan.md) - Code excerpts and risk summaries in approval cards.
 
 ## Archived Documents
 

@@ -112,7 +112,7 @@ When planner returns evaluator/auditor findings for your script:
 4. **DO NOT** claim success until findings are addressed.
 
 Expected response pattern:
-`Updated files saved and artifact rebuilt. New artifact: ar.example. Please re-run evaluator.default and auditor.default on this artifact.`
+`Updated files saved and artifact rebuilt. New artifact: ar.example. Please re-run the evaluation federation (static_evaluator.default, unit_test_runner.default, auditor.default) on this artifact.`
 
 ## Gateway Response Validation & Repair
 

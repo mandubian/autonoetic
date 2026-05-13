@@ -191,13 +191,13 @@ Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the
 
 **Gate matrix:**
 
-| Agent behavior | Evaluator | Auditor |
-|---|---|---|
-| Reasoning-only (no CodeExecution, no AgentSpawn) | Skip *for now* — see note below | **Required** (static SKILL audit) |
-| Pure transform/utility (no I/O beyond self.*) | Skip *for now* — see note below | **Required** |
-| Artifact-backed with NetworkAccess | Required | Required |
-| File system writes (beyond self.*) | Required | Required |
-| CodeExecution or AgentSpawn | Required | Required |
+| Agent behavior | Static Evaluator | Unit Test Runner | Auditor |
+|---|---|---|---|
+| Reasoning-only (no CodeExecution, no AgentSpawn) | Skip | Skip | **Required** (static SKILL audit) |
+| Pure transform/utility (no I/O beyond self.*) | Skip | Skip | **Required** |
+| Artifact-backed with NetworkAccess | **Required** | **Required** | **Required** |
+| File system writes (beyond self.*) | **Required** | **Required** | **Required** |
+| CodeExecution or AgentSpawn | **Required** | **Required** | **Required** |
 
 **Why auditor is required for every install** — including pure-skill
 agents — even when there is no executable code: the SKILL.md *is* the
@@ -211,12 +211,11 @@ detects an intent-only bundle by inspecting the artifact and switching
 to its SKILL-review protocol; no special signal is required from this
 agent.
 
-**Why evaluator is "Skip for now" for pure-skill agents:** behavioral
-evaluation of LLM-driven agents (canned scenarios + constraint
-testing) is a separate mechanism that is **not** implemented yet.
-When that mechanism lands, this matrix should flip the pure-skill rows
-to `Required | Required`. Until then, the auditor's static review is
-the only gate for pure-skill agents.
+**Why static_evaluator and unit_test_runner are "Skip" for pure-skill
+agents:** there is no code to statically review or tests to run. When
+the agent gains executable code (CodeExecution, AgentSpawn,
+NetworkAccess), both roles become mandatory to provide code-level
+evidence alongside the auditor's SKILL review.
 
 If gates required:
 1. Call `agent_spawn` with `agent_id="auditor.default"`, `async=true`,
@@ -224,10 +223,13 @@ If gates required:
    Step 2a (for pure-skill agents) or the **coder-built artifact_ref**
    (for code-bearing agents). Then call `workflow_wait` with the
    returned `task_id`.
-2. If the evaluator is required for this row, call `agent_spawn` with
-    `agent_id="sealed_evaluator.default"`, `async=true`, against the same
-   `artifact_ref`. Then call `workflow_wait`.
-3. Each required gate must call `promotion_record(artifact_id=<that
+2. If the static evaluator is required for this row, call `agent_spawn`
+   with `agent_id="static_evaluator.default"`, `async=true`, against the
+   same `artifact_ref`. Then call `workflow_wait`.
+3. If the unit test runner is required for this row, call `agent_spawn`
+   with `agent_id="unit_test_runner.default"`, `async=true`, against the
+   same `artifact_ref`. Then call `workflow_wait`.
+4. Each required gate must call `promotion_record(artifact_id=<that
    artifact>, role=..., pass=true)`. specialized_builder verifies these
    records exist against the artifact_id that is being installed.
 

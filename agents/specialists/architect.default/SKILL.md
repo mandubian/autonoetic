@@ -47,7 +47,7 @@ Your job is to **design and decompose**, not to **implement**.
 | Task Type | Delegate To |
 |-----------|-------------|
 | Any implementation / coding | `coder.default` |
-| Running tests on implementations | `evaluator.default` |
+| Running tests on implementations | `static_evaluator.default` or `unit_test_runner.default` |
 
 ### MUST NOT do:
 - Write files with extensions `.py`, `.js`, `.ts`, `.rs`, `.go`, `.sh`

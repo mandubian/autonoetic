@@ -181,9 +181,9 @@ fn evaluator_manifest() -> AgentManifest {
             runtime_lock: "runtime.lock".to_string(),
         },
         agent: AgentIdentity {
-            id: "evaluator.default".to_string(),
-            name: "evaluator.default".to_string(),
-            description: "Evaluator".to_string(),
+            id: "sealed_evaluator.default".to_string(),
+            name: "sealed_evaluator.default".to_string(),
+            description: "Sealed Evaluator".to_string(),
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
@@ -470,7 +470,7 @@ fn test_promote_succeeds_with_both_evaluator_and_auditor_pass() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         true,
     );
 
@@ -527,7 +527,7 @@ fn test_promote_rejects_when_evaluator_fails() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         false,
     );
 
@@ -560,7 +560,7 @@ fn test_promote_rejects_when_evaluator_fails() {
     assert!(result.is_err(), "promote should fail when evaluator fails");
     let err = result.unwrap_err();
     assert!(
-        err.contains("evaluator did not pass"),
+        err.contains("no evaluator role passed"),
         "error should mention evaluator failure: {err}"
     );
 }
@@ -583,7 +583,7 @@ fn test_promote_rejects_when_auditor_missing() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         true,
     );
 
@@ -710,7 +710,7 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
         &gateway_dir,
         &config,
         artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         true,
     );
 
@@ -892,7 +892,7 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &s.gateway_dir,
         &s.config,
         &artifact_id,
-        "evaluator",
+        "sealed_evaluator",
         true,
     );
 

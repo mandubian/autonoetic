@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::escalation::{EscalationMessage, RoleVerdictSummary};
+use autonoetic_types::escalation::{EscalationMessage, EscalationType, RoleVerdictSummary};
 
 /// Result of a single agent's post-promotion review.
 #[derive(Debug, Clone, Serialize)]
@@ -148,15 +148,24 @@ pub fn run_post_promotion_review(
                 critical_findings.iter().map(|f| f.message.as_str()).collect::<Vec<_>>().join("; "),
             );
 
+            let artifact_id = store
+                .get_agent_revision(revision_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.artifact_id)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default();
+
             let mut escalation = EscalationMessage::new(
                 format!("ppr_{:x}", uuid::Uuid::new_v4().as_u128()),
-                String::new(),
+                artifact_id,
                 agent_id.to_string(),
                 revision_id.to_string(),
                 verdicts,
                 synthesis,
                 "system".to_string(),
             );
+            escalation.escalation_type = EscalationType::PostPromotionAnomaly;
             let _ = store.create_escalation(&mut escalation);
             escalated = true;
         }

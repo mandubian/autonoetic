@@ -100,9 +100,9 @@ Non-repairs that will still fail:
 
 Concretely, the coder SKILL should state that output-policy repair has the same priority as tool error repair: the agent must modify files, artifacts, or reply text until the gateway contract passes.
 
-### `evaluator.default`
+### `sealed_evaluator.default`
 
-`evaluator.default` already produces a structured evaluation report and records promotion evidence. For response validation and repair, its operational rules should be:
+`sealed_evaluator.default` (formerly `evaluator.default`) produces a structured evaluation report and records promotion evidence. For response validation and repair, its operational rules should be:
 
 1. Ensure the final reply remains valid JSON when the evaluation report is expected to be machine-readable.
 2. Treat `promotion_record` as promotion evidence, but not as a substitute for output-policy constraints; if the contract requires files or bounded reply text, those constraints still apply.

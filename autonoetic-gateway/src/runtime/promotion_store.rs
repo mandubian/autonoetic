@@ -263,14 +263,15 @@ impl PromotionStore {
         }
     }
 
-    /// Returns true if any federation role (StaticEvaluator, UnitTestRunner,
-    /// SealedEvaluator) has recorded a verdict for this artifact.
+    /// Returns true if any federation-only role (StaticEvaluator,
+    /// UnitTestRunner) has recorded a verdict for this artifact.
+    /// SealedEvaluator is NOT included — it is the renamed legacy evaluator
+    /// and is covered by the legacy Full gate, not the FullJury gate.
     pub fn has_federation_roles(&self, artifact_id: &str) -> bool {
         let records = self.records.lock().unwrap();
         if let Some(record) = records.get(artifact_id) {
             record.static_evaluator_id.is_some()
                 || record.unit_test_runner_id.is_some()
-                || record.sealed_evaluator_id.is_some()
         } else {
             false
         }
@@ -278,6 +279,7 @@ impl PromotionStore {
 
     /// Returns the agent IDs of all federation roles that recorded a verdict,
     /// for distinct-identity enforcement (R-2.17 extension).
+    /// Includes StaticEvaluator, UnitTestRunner, and SealedEvaluator (if present).
     pub fn federation_agent_ids(&self, artifact_id: &str) -> Vec<String> {
         let records = self.records.lock().unwrap();
         let mut ids = Vec::new();
@@ -299,7 +301,10 @@ impl PromotionStore {
     pub fn is_fully_promoted(&self, artifact_id: &str) -> bool {
         let records = self.records.lock().unwrap();
         if let Some(record) = records.get(artifact_id) {
-            (record.evaluator_pass || record.sealed_evaluator_pass) && record.auditor_pass
+            (record.evaluator_pass
+                || record.sealed_evaluator_pass
+                || record.static_evaluator_pass)
+                && record.auditor_pass
         } else {
             false
         }

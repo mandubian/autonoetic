@@ -54,7 +54,7 @@ Always return deterministic output.
 async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let _api_key = EnvGuard::set(OPENAI_API_KEY_ENV, "test-key");
-    let agent_id = "evaluator.default";
+    let agent_id = "sealed_evaluator.default";
     let agent_dir = workspace.agents_dir.join(agent_id);
     install_deterministic_reply_agent(&agent_dir, agent_id)?;
 
@@ -76,7 +76,7 @@ async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<(
             Some(&serde_json::json!({
                 "require_promotion_record": true,
                 "promotion_artifact_id": "art_contract_missing",
-                "promotion_role": "evaluator"
+                "promotion_role": "sealed_evaluator"
             })),
             None,
             None,
@@ -98,7 +98,7 @@ async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<(
 async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let _api_key = EnvGuard::set(OPENAI_API_KEY_ENV, "test-key");
-    let agent_id = "evaluator.default";
+    let agent_id = "sealed_evaluator.default";
     let artifact_id = "art_contract_present";
     let agent_dir = workspace.agents_dir.join(agent_id);
     install_deterministic_reply_agent(&agent_dir, agent_id)?;
@@ -109,11 +109,11 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
         artifact_id.to_string(),
         None,
         None,
-        PromotionRole::Evaluator,
+        PromotionRole::SealedEvaluator,
         agent_id,
         true,
         vec![],
-        Some("pre-recorded evaluator pass".to_string()),
+        Some("pre-recorded sealed_evaluator pass".to_string()),
     )?;
 
     let config = workspace.gateway_config();
@@ -132,7 +132,7 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
             Some(&serde_json::json!({
                 "require_promotion_record": true,
                 "promotion_artifact_id": artifact_id,
-                "promotion_role": "evaluator"
+                "promotion_role": "sealed_evaluator"
             })),
             None,
             None,

@@ -16,8 +16,8 @@ fn evaluator_manifest() -> AgentManifest {
             runtime_lock: "runtime.lock".to_string(),
         },
         agent: AgentIdentity {
-            id: "evaluator.default".to_string(),
-            name: "evaluator.default".to_string(),
+            id: "sealed_evaluator.default".to_string(),
+            name: "sealed_evaluator.default".to_string(),
             description: "Evaluator".to_string(),
         },
         capabilities: vec![],
@@ -66,7 +66,7 @@ fn test_promotion_record_rejects_empty_finding_description() {
             Some(&gw),
             &serde_json::json!({
                 "artifact_id": "art_test123",
-                "role": "evaluator",
+                "role": "sealed_evaluator",
                 "pass": false,
                 "findings": [{"severity": "error", "description": ""}]
             })
@@ -107,7 +107,7 @@ fn test_promotion_record_accepts_valid_findings() {
             Some(&gw),
             &serde_json::json!({
                 "artifact_id": "art_test123",
-                "role": "evaluator",
+                "role": "sealed_evaluator",
                 "pass": true,
                 "findings": [{"severity": "info", "description": "All checks passed"}]
             })

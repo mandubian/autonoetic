@@ -106,6 +106,7 @@ pub fn default_gateway_host_id() -> String {
 pub struct GatewayStore {
     conn: std::sync::Mutex<Connection>,
     approval_flood_cap: std::sync::atomic::AtomicUsize,
+    escalation_flood_cap: std::sync::atomic::AtomicUsize,
     /// Weak ref avoids an `Arc` cycle with [`crate::scheduler::hooks::HookExecutor`], which may
     /// hold an `Arc<GatewayStore>` for other hooks.
     policy_hook_executor: Mutex<Option<Weak<crate::scheduler::hooks::HookExecutor>>>,
@@ -130,6 +131,7 @@ impl GatewayStore {
         let store = Self {
             conn: std::sync::Mutex::new(conn),
             approval_flood_cap: std::sync::atomic::AtomicUsize::new(0),
+            escalation_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             policy_hook_executor: Mutex::new(None),
         };
         {
