@@ -14,6 +14,7 @@ mod messages;
 mod migrate;
 mod notifications;
 mod observability;
+pub mod post_promotion_reviews;
 mod reclamation;
 mod recordings;
 mod row_decode;

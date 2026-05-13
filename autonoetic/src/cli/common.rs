@@ -165,6 +165,8 @@ pub enum Commands {
     Recording(RecordingArgs),
     /// Evaluate agents against recorded fixture sets
     Eval(EvalArgs),
+    /// Post-promotion review status
+    Review(ReviewArgs),
 }
 
 /// Arguments for the all-in-one `run` command.
@@ -1431,6 +1433,46 @@ pub enum EvalCommands {
         /// Max evaluation duration in seconds.
         #[arg(long, default_value = "300")]
         timeout: u64,
+    },
+}
+
+/// Arguments for `autonoetic review` subcommand.
+#[derive(Args)]
+pub struct ReviewArgs {
+    #[command(subcommand)]
+    pub command: ReviewCommands,
+}
+
+#[derive(Subcommand)]
+pub enum ReviewCommands {
+    /// Show post-promotion review status for all agents or a specific agent.
+    Status {
+        /// Filter by agent ID.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a specific post-promotion review.
+    Inspect {
+        /// Review ID.
+        review_id: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show post-promotion review history.
+    History {
+        /// Filter by agent ID.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Maximum results (default: 20).
+        #[arg(long, default_value = "20")]
+        limit: i64,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 

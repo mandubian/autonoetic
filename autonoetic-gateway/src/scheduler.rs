@@ -271,6 +271,14 @@ async fn run_scheduler_tick_at(
         }
     }
 
+    // Post-promotion background review (Phase 4, Tier 1).
+    // Runs daily per-agent: checks causal event trends, sentinel findings.
+    if let Some(store) = execution.gateway_store() {
+        if let Err(e) = crate::post_promotion_review::run_post_promotion_review(&store) {
+            tracing::warn!(error = %e, "Post-promotion review failed");
+        }
+    }
+
     // Resume standalone sessions whose user interaction has been answered
     if let Err(e) = resume_answered_standalone_interactions(execution).await {
         tracing::warn!(error = %e, "Failed to resume answered standalone interactions");

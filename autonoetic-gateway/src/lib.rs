@@ -17,6 +17,7 @@ pub mod layer_store;
 pub mod llm;
 pub mod log_redaction;
 pub mod policy;
+pub mod post_promotion_review;
 pub mod router;
 pub mod runtime;
 pub mod runtime_lock;

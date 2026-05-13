@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 34;
+const SCHEMA_VERSION_LATEST: i64 = 35;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -519,6 +519,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_approval_code_excerpts_v32(conn)?;
     apply_escalations_v33(conn)?;
     apply_recordings_v34(conn)?;
+    apply_post_promotion_reviews_v35(conn)?;
 
     Ok(())
 }
@@ -1887,6 +1888,45 @@ fn apply_recordings_v34(conn: &mut Connection) -> Result<()> {
         params![
             34_i64,
             "recording_sessions_and_fixture_sets",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_post_promotion_reviews_v35(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 35 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS post_promotion_reviews (
+            review_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            reviewed_at TEXT NOT NULL,
+            tool_failures INTEGER NOT NULL DEFAULT 0,
+            auth_denials INTEGER NOT NULL DEFAULT 0,
+            suspensions INTEGER NOT NULL DEFAULT 0,
+            sentinel_findings INTEGER NOT NULL DEFAULT 0,
+            findings_json TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS idx_post_promotion_reviews_agent
+            ON post_promotion_reviews(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_post_promotion_reviews_reviewed
+            ON post_promotion_reviews(reviewed_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            35_i64,
+            "post_promotion_reviews",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

@@ -487,6 +487,114 @@ async fn main() -> anyhow::Result<()> {
                 )?;
             }
         },
+        Commands::Review(args) => match &args.command {
+            cli::common::ReviewCommands::Status { agent, json } => {
+                // Simple inline handler
+                let config = autonoetic_gateway::config::load_config(&config_path)?;
+                let gateway_dir = config.agents_dir.join(".gateway");
+                let store = std::sync::Arc::new(
+                    autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+                );
+                if *json {
+                    let reviews = if let Some(aid) = agent {
+                        store.list_post_promotion_reviews(Some(aid), 1)?
+                    } else {
+                        store.list_post_promotion_reviews(None, 100)?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&reviews)?);
+                } else {
+                    let reviews = if let Some(aid) = agent {
+                        store.list_post_promotion_reviews(Some(aid), 1)?
+                    } else {
+                        store.list_post_promotion_reviews(None, 100)?
+                    };
+                    if reviews.is_empty() {
+                        eprintln!("No post-promotion reviews found.");
+                    } else {
+                        println!("{:<40} {:<20} {:<20} {:<10} {:<20}", "Review ID", "Agent", "Revision", "Findings", "Reviewed At");
+                        println!("{}", "-".repeat(110));
+                        for r in &reviews {
+                            let findings_count: usize =
+                                serde_json::from_str::<Vec<serde_json::Value>>(&r.findings_json)
+                                    .map(|v| v.len())
+                                    .unwrap_or(0);
+                            println!(
+                                "{:<40} {:<20} {:<20} {:<10} {:<20}",
+                                r.review_id,
+                                r.agent_id,
+                                &r.revision_id[..r.revision_id.len().min(20)],
+                                findings_count,
+                                &r.reviewed_at[..19],
+                            );
+                        }
+                    }
+                }
+            }
+            cli::common::ReviewCommands::Inspect { review_id, json } => {
+                let config = autonoetic_gateway::config::load_config(&config_path)?;
+                let gateway_dir = config.agents_dir.join(".gateway");
+                let store = std::sync::Arc::new(
+                    autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+                );
+                // Load the last review for each agent and find the matching one
+                let reviews = store.list_post_promotion_reviews(None, 1000)?;
+                let review = reviews.into_iter().find(|r| r.review_id == *review_id)
+                    .ok_or_else(|| anyhow::anyhow!("Review '{}' not found", review_id))?;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&review)?);
+                } else {
+                    println!("Review: {}", review.review_id);
+                    println!("  Agent:        {}", review.agent_id);
+                    println!("  Revision:     {}", review.revision_id);
+                    println!("  Reviewed At:  {}", review.reviewed_at);
+                    println!("  Tool failures: {}", review.tool_failures);
+                    println!("  Auth denials:  {}", review.auth_denials);
+                    println!("  Suspensions:   {}", review.suspensions);
+                    println!("  Sentinel:      {}", review.sentinel_findings);
+                    if let Ok(findings) =
+                        serde_json::from_str::<Vec<serde_json::Value>>(&review.findings_json)
+                    {
+                        for f in &findings {
+                            println!("  - [{}] {}", f["severity"], f["message"]);
+                        }
+                    }
+                }
+            }
+            cli::common::ReviewCommands::History {
+                agent,
+                limit,
+                json,
+            } => {
+                let config = autonoetic_gateway::config::load_config(&config_path)?;
+                let gateway_dir = config.agents_dir.join(".gateway");
+                let store = std::sync::Arc::new(
+                    autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+                );
+                let reviews =
+                    store.list_post_promotion_reviews(agent.as_deref(), *limit)?;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&reviews)?);
+                } else {
+                    if reviews.is_empty() {
+                        eprintln!("No review history found.");
+                    } else {
+                        println!("{:<40} {:<20} {:<10} {:<10} {:<10} {:<20}", "Review ID", "Agent", "Failures", "Denials", "Suspensions", "Reviewed At");
+                        println!("{}", "-".repeat(110));
+                        for r in &reviews {
+                            println!(
+                                "{:<40} {:<20} {:<10} {:<10} {:<10} {:<20}",
+                                r.review_id,
+                                r.agent_id,
+                                r.tool_failures,
+                                r.auth_denials,
+                                r.suspensions,
+                                &r.reviewed_at[..19],
+                            );
+                        }
+                    }
+                }
+            }
+        },
         Commands::Eval(args) => match &args.command {
             cli::common::EvalCommands::Sealed {
                 artifact_ref,
