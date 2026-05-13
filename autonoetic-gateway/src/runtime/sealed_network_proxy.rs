@@ -10,10 +10,13 @@
 //! - On fixture hit: returns the canned response.
 //! - On fixture miss (Sealed): returns a 502 with the structured
 //!   `unfixtured_target` envelope body.
+//! - On fixture miss (Recording): forwards the request live, redacts
+//!   credentials, writes the response as a new fixture, and serves the
+//!   live response back to the sandbox.
 //! - On CONNECT (HTTPS tunnelling): rejects with 502 + diagnostic. HTTPS
 //!   termination is a future scope — see follow-up RFC §7 open question 4.
 //!
-//! Refs: docs/design/sealed-network-evaluation-plan.md §3.2.
+//! Refs: docs/design/recording-mode-design.md §2.2.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -33,7 +36,9 @@ use autonoetic_types::agent::SandboxNetworkPolicy;
 use crate::sandbox::BwrapIsolationOverrides;
 
 use crate::runtime::sealed_network::{
-    decide_egress, parse_host_port, unfixtured_envelope_body, EgressDecision, FixtureLoader,
+    decide_egress, parse_host_port, redact_fixture, unfixtured_envelope_body,
+    write_recording_fixture, EgressDecision, FixtureLoader, FixtureRecord, RecordedRequest,
+    RecordedResponse,
 };
 
 /// Handle to a running sealed-network proxy. Drop the handle (or call
@@ -93,25 +98,32 @@ impl Drop for SealedProxyHandle {
 struct ProxyState {
     policy: SandboxNetworkPolicy,
     loader: Arc<FixtureLoader>,
+    recording_dir: Option<PathBuf>,
+    recording_session_id: Option<String>,
 }
 
 /// Start the proxy. Returns a handle once the listener is bound.
 ///
 /// Sessions in `Normal` mode should not call this — it's only meaningful
-/// for `Sealed` and `Recording`. Recording-on-miss live capture is not
-/// implemented here; this proxy treats miss in either mode the same
-/// (return `unfixtured_target`) and the 5.3 scope will extend the miss
-/// path for `Recording`.
+/// for `Sealed` and `Recording`. For `Recording`, `recording_dir` is the
+/// staging directory where captured fixtures are written.
 pub async fn start_sealed_proxy(
     policy: SandboxNetworkPolicy,
     loader: Arc<FixtureLoader>,
+    recording_dir: Option<PathBuf>,
+    recording_session_id: Option<String>,
 ) -> anyhow::Result<SealedProxyHandle> {
     anyhow::ensure!(
         !matches!(policy, SandboxNetworkPolicy::Normal),
         "sealed proxy is only meaningful for Sealed or Recording policies; got Normal"
     );
 
-    let state = ProxyState { policy, loader };
+    let state = ProxyState {
+        policy,
+        loader,
+        recording_dir,
+        recording_session_id,
+    };
 
     let app = Router::new()
         .fallback(handle_request)
@@ -193,19 +205,55 @@ async fn handle_request(State(state): State<ProxyState>, req: Request) -> Respon
             fixture_to_response(response)
         }
         Ok(EgressDecision::Unfixtured { expected_path }) => {
-            let body =
-                unfixtured_envelope_body(&host, port, &method, &path, &expected_path);
-            tracing::warn!(
-                target: "sealed_network_proxy",
-                host = %host,
-                port = ?port,
-                method = %method,
-                path = %path,
-                fixture = %expected_path,
-                "sealed-mode miss: returning unfixtured_target envelope"
-            );
-            (StatusCode::BAD_GATEWAY, [("content-type", "application/json")], body)
-                .into_response()
+            if matches!(state.policy, SandboxNetworkPolicy::Recording) {
+                // Recording mode: forward live, capture, redact, write fixture.
+                match forward_and_capture(
+                    req,
+                    &host,
+                    port,
+                    &method,
+                    &path,
+                    &state,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(e) => {
+                        tracing::error!(
+                            target: "sealed_network_proxy",
+                            host = %host,
+                            port = ?port,
+                            method = %method,
+                            path = %path,
+                            error = %e,
+                            "recording proxy failed to forward request"
+                        );
+                        let body = serde_json::json!({
+                            "ok": false,
+                            "error_type": "fatal",
+                            "message": format!("recording proxy forward error: {}", e),
+                        })
+                        .to_string();
+                        (StatusCode::BAD_GATEWAY, [("content-type", "application/json")], body)
+                            .into_response()
+                    }
+                }
+            } else {
+                // Sealed mode: return unfixtured error.
+                let body =
+                    unfixtured_envelope_body(&host, port, &method, &path, &expected_path);
+                tracing::warn!(
+                    target: "sealed_network_proxy",
+                    host = %host,
+                    port = ?port,
+                    method = %method,
+                    path = %path,
+                    fixture = %expected_path,
+                    "sealed-mode miss: returning unfixtured_target envelope"
+                );
+                (StatusCode::BAD_GATEWAY, [("content-type", "application/json")], body)
+                    .into_response()
+            }
         }
         Err(e) => {
             let body = serde_json::json!({
@@ -218,6 +266,155 @@ async fn handle_request(State(state): State<ProxyState>, req: Request) -> Respon
                 .into_response()
         }
     }
+}
+
+/// Forward a request to the live target, capture the response, redact it,
+/// write a fixture to the recording staging directory, and return the
+/// live response to the sandbox.
+async fn forward_and_capture(
+    req: Request,
+    host: &str,
+    port: Option<u16>,
+    method: &str,
+    path: &str,
+    state: &ProxyState,
+) -> anyhow::Result<Response> {
+    // Build the target URL.
+    let target_url = match port {
+        Some(p) => format!("http://{}:{}{}", host, p, path),
+        None => format!("http://{}{}", host, path),
+    };
+
+    // Extract headers before consuming the body.
+    let req_headers = build_request_header_map(req.headers());
+
+    // Read the request body.
+    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await?;
+    let body_str = if body_bytes.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&body_bytes).to_string())
+    };
+
+    // Forward the request using reqwest.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let mut req_builder = client.request(
+        reqwest::Method::from_bytes(method.as_bytes())?,
+        &target_url,
+    );
+
+    // Copy request headers (but not hop-by-hop or proxy headers).
+    for (name, value) in &req_headers {
+        req_builder = req_builder.header(name.as_str(), value.as_str());
+    }
+
+    if let Some(ref body) = body_str {
+        req_builder = req_builder.body(body.clone());
+    }
+
+    let resp = req_builder.send().await?;
+    let resp_status = resp.status().as_u16();
+
+    // Read the response headers and body.
+    let mut resp_headers = std::collections::BTreeMap::new();
+    for (name, value) in resp.headers() {
+        if let Ok(v) = value.to_str() {
+            resp_headers.insert(name.to_string(), v.to_string());
+        }
+    }
+    let resp_body = resp.text().await.unwrap_or_default();
+
+    // Build the fixture record.
+    let mut record = FixtureRecord {
+        request: RecordedRequest {
+            method: method.to_uppercase(),
+            url: target_url.clone(),
+            headers: req_headers,
+            body: body_str,
+        },
+        response: RecordedResponse {
+            status: resp_status,
+            headers: resp_headers,
+            body: resp_body.clone(),
+        },
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        redacted: Vec::new(),
+    };
+
+    // Redact credentials.
+    let redacted_fields = redact_fixture(&mut record);
+
+    // Write the fixture to the staging directory.
+    if let Some(ref staging_dir) = state.recording_dir {
+        if let Err(e) = write_recording_fixture(
+            staging_dir,
+            host,
+            port,
+            method,
+            path,
+            &record,
+        ) {
+            tracing::warn!(
+                target: "sealed_network_proxy",
+                host = %host,
+                path = %path,
+                error = %e,
+                "failed to write recording fixture"
+            );
+        }
+    }
+
+    if !redacted_fields.is_empty() {
+        tracing::info!(
+            target: "sealed_network_proxy",
+            host = %host,
+            path = %path,
+            redacted = ?redacted_fields,
+            "recorded and redacted fixture"
+        );
+    } else {
+        tracing::info!(
+            target: "sealed_network_proxy",
+            host = %host,
+            path = %path,
+            "recorded fixture (no redactions needed)"
+        );
+    }
+
+    // Build and return the live response to the sandbox.
+    let mut response = Response::new(axum::body::Body::from(resp_body));
+    *response.status_mut() = StatusCode::from_u16(resp_status).unwrap_or(StatusCode::OK);
+    for (name, value) in &record.response.headers {
+        if let (Ok(n), Ok(v)) = (
+            HeaderName::try_from(name.as_str()),
+            HeaderValue::try_from(value),
+        ) {
+            response.headers_mut().insert(n, v);
+        }
+    }
+    Ok(response)
+}
+
+/// Build a BTreeMap of request headers from the original request (excluding
+/// hop-by-hop headers that should not be forwarded).
+fn build_request_header_map(headers: &HeaderMap) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for (name, value) in headers {
+        let n = name.as_str().to_lowercase();
+        // Skip hop-by-hop and proxy headers.
+        match n.as_str() {
+            "host" | "connection" | "proxy-connection" | "keep-alive"
+            | "transfer-encoding" | "te" | "upgrade" | "proxy-authorization" => continue,
+            _ => {}
+        }
+        if let Ok(v) = value.to_str() {
+            map.insert(n, v.to_string());
+        }
+    }
+    map
 }
 
 /// Extract `(host, port, path)` from either the request URI (proxy form)
@@ -333,12 +530,14 @@ pub async fn setup_sealed_proxy_for_exec_async(
     artifact_root: PathBuf,
     extra_env: &mut Vec<(String, String)>,
     overrides: &mut BwrapIsolationOverrides,
+    recording_dir: Option<PathBuf>,
+    recording_session_id: Option<String>,
 ) -> anyhow::Result<Option<SealedProxyHandle>> {
     if matches!(policy, SandboxNetworkPolicy::Normal) {
         return Ok(None);
     }
     let loader = Arc::new(FixtureLoader::new(artifact_root));
-    let handle = start_sealed_proxy(policy, loader).await?;
+    let handle = start_sealed_proxy(policy, loader, recording_dir, recording_session_id).await?;
     let proxy_url = handle.proxy_url();
 
     // Inject standard env vars (most HTTP clients respect at least one
@@ -376,6 +575,8 @@ pub fn setup_sealed_proxy_for_exec(
     artifact_root: PathBuf,
     extra_env: &mut Vec<(String, String)>,
     overrides: &mut BwrapIsolationOverrides,
+    recording_dir: Option<PathBuf>,
+    recording_session_id: Option<String>,
 ) -> anyhow::Result<Option<SealedProxyHandle>> {
     if matches!(policy, SandboxNetworkPolicy::Normal) {
         return Ok(None);
@@ -397,6 +598,8 @@ pub fn setup_sealed_proxy_for_exec(
                 artifact_root,
                 extra_env,
                 overrides,
+                recording_dir,
+                recording_session_id,
             ))
         })
     } else {
@@ -405,6 +608,8 @@ pub fn setup_sealed_proxy_for_exec(
             artifact_root,
             extra_env,
             overrides,
+            recording_dir,
+            recording_session_id,
         ))
     }
 }
@@ -441,6 +646,8 @@ mod tests {
             dir.path().to_path_buf(),
             &mut env,
             &mut overrides,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -462,6 +669,8 @@ mod tests {
             dir.path().to_path_buf(),
             &mut env,
             &mut overrides,
+            None,
+            None,
         )
         .await
         .unwrap()
@@ -507,6 +716,8 @@ mod tests {
             dir.path().to_path_buf(),
             &mut env,
             &mut overrides,
+            None,
+            None,
         )
         .await
         .unwrap()

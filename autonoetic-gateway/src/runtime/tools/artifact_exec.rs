@@ -878,6 +878,8 @@ impl NativeTool for ArtifactExecTool {
                 temp_base.clone(),
                 &mut extra_env,
                 &mut overrides,
+                None,
+                None,
             )?;
 
         let runner = SandboxRunner::spawn_with_session_content_and_env(
@@ -1098,6 +1100,8 @@ fn execute_with_ticket(
         temp_base.clone(),
         &mut extra_env,
         &mut overrides,
+        None,
+        None,
     )?;
 
     let runner = SandboxRunner::spawn_with_session_content_and_env(

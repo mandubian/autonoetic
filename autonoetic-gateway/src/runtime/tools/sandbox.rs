@@ -2292,6 +2292,8 @@ impl NativeTool for SandboxExecTool {
                 sealed_proxy_fixture_root,
                 &mut extra_env,
                 &mut overrides,
+                None,
+                None,
             )?;
 
         // Merge runtime.lock mounts into session content mounts

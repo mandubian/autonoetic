@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 33;
+const SCHEMA_VERSION_LATEST: i64 = 34;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -518,6 +518,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_gate_messages_v31(conn)?;
     apply_approval_code_excerpts_v32(conn)?;
     apply_escalations_v33(conn)?;
+    apply_recordings_v34(conn)?;
 
     Ok(())
 }
@@ -1824,6 +1825,68 @@ fn apply_escalations_v33(conn: &mut Connection) -> Result<()> {
         params![
             33_i64,
             "escalations_table",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_recordings_v34(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 34 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS recording_sessions (
+            session_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            root_session_id TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            stopped_at TEXT,
+            duration_secs INTEGER,
+            max_requests INTEGER,
+            max_bytes INTEGER,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            fixture_set_id TEXT,
+            created_by TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_recording_sessions_agent
+            ON recording_sessions(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_recording_sessions_status
+            ON recording_sessions(status);
+
+        CREATE TABLE IF NOT EXISTS fixture_sets (
+            fixture_set_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            recording_session_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            fixture_file_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            digest TEXT NOT NULL,
+            host_summary TEXT NOT NULL DEFAULT '[]',
+            host_count INTEGER NOT NULL DEFAULT 0,
+            redaction_summary TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'ready'
+        );
+        CREATE INDEX IF NOT EXISTS idx_fixture_sets_agent
+            ON fixture_sets(agent_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            34_i64,
+            "recording_sessions_and_fixture_sets",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

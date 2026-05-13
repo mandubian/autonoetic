@@ -15,6 +15,7 @@ mod migrate;
 mod notifications;
 mod observability;
 mod reclamation;
+mod recordings;
 mod row_decode;
 mod runtime_control;
 mod scheduled_jobs;

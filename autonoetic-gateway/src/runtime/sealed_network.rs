@@ -225,6 +225,164 @@ pub fn unfixtured_envelope_body(
     .to_string()
 }
 
+/// A full recorded HTTP round-trip saved during recording mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixtureRecord {
+    pub request: RecordedRequest,
+    pub response: RecordedResponse,
+    pub recorded_at: String,
+    #[serde(default)]
+    pub redacted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordedRequest {
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordedResponse {
+    pub status: u16,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub body: String,
+}
+
+/// Header names whose values are redacted in recorded fixtures.
+const SENSITIVE_REQUEST_HEADERS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "x-api-key",
+    "x-api-key",
+    "proxy-authorization",
+];
+
+/// Header names whose values are redacted in recorded response fixtures.
+const SENSITIVE_RESPONSE_HEADERS: &[&str] = &[
+    "set-cookie",
+    "www-authenticate",
+    "proxy-authenticate",
+];
+
+/// Query parameter names whose values are redacted.
+const SENSITIVE_QUERY_PARAMS: &[&str] = &[
+    "token",
+    "api_key",
+    "apikey",
+    "secret",
+    "key",
+    "password",
+    "auth",
+    "signature",
+    "access_token",
+    "refresh_token",
+];
+
+/// Redact sensitive values from a recorded fixture in-place.
+///
+/// Returns the list of field names that were redacted.
+pub fn redact_fixture(record: &mut FixtureRecord) -> Vec<String> {
+    let mut redacted_fields = Vec::new();
+
+    // Redact sensitive request headers.
+    for header_name in SENSITIVE_REQUEST_HEADERS {
+        if let Some(value) = record.request.headers.get_mut(*header_name) {
+            if !value.is_empty() && value != "[REDACTED]" {
+                *value = "[REDACTED]".to_string();
+                redacted_fields.push(header_name.to_string());
+            }
+        }
+    }
+
+    // Redact sensitive response headers.
+    for header_name in SENSITIVE_RESPONSE_HEADERS {
+        if let Some(value) = record.response.headers.get_mut(*header_name) {
+            if !value.is_empty() && value != "[REDACTED]" {
+                *value = "[REDACTED]".to_string();
+                redacted_fields.push(header_name.to_string());
+            }
+        }
+    }
+
+    // Redact sensitive query parameters from the request URL.
+    if let Some(query_start) = record.request.url.find('?') {
+        let (base, query) = record.request.url.split_at(query_start);
+        let mut params: Vec<String> = query[1..]
+            .split('&')
+            .map(|pair| {
+                if let Some((key, value)) = pair.split_once('=') {
+                    if SENSITIVE_QUERY_PARAMS
+                        .iter()
+                        .any(|sensitive| key.eq_ignore_ascii_case(sensitive))
+                    {
+                        if !redacted_fields.contains(&format!("query_{}", key)) {
+                            redacted_fields.push(format!("query_{}", key));
+                        }
+                        format!("{}={}", key, "[REDACTED]")
+                    } else {
+                        pair.to_string()
+                    }
+                } else {
+                    pair.to_string()
+                }
+            })
+            .collect();
+        record.request.url = format!("{}?{}", base, params.join("&"));
+    }
+
+    // Redact Bearer tokens in Authorization header value copies that may be in body.
+    let body_redacted = redact_body_bearer(&mut record.response.body);
+    if body_redacted && !redacted_fields.contains(&"body_bearer".to_string()) {
+        redacted_fields.push("body_bearer".to_string());
+    }
+
+    record.redacted = redacted_fields.clone();
+    redacted_fields
+}
+
+/// Redact Bearer tokens from a response body string.
+fn redact_body_bearer(body: &mut String) -> bool {
+    let before = body.clone();
+    use regex::Regex;
+    let re = Regex::new(r"(?i)(bearer\s+)([^\s,;}\]]+)").expect("valid bearer regex");
+    *body = re.replace_all(body, "${1}[REDACTED]").to_string();
+    before != *body
+}
+
+/// Write a recorded fixture to the staging directory.
+///
+/// Returns the path of the written fixture file.
+pub fn write_recording_fixture(
+    staging_dir: &Path,
+    host: &str,
+    port: Option<u16>,
+    method: &str,
+    path: &str,
+    record: &FixtureRecord,
+) -> anyhow::Result<PathBuf> {
+    let host_dir = match port {
+        Some(p) => format!("{}-{}", host, p),
+        None => host.to_string(),
+    };
+    let trimmed = path.trim_start_matches('/');
+    let encoded_path = if trimmed.is_empty() {
+        "root".to_string()
+    } else {
+        trimmed.replace('/', "-")
+    };
+    let filename = format!("{}-{}.json", method.to_uppercase(), encoded_path);
+
+    let fixture_path = staging_dir.join(&host_dir).join(&filename);
+    std::fs::create_dir_all(fixture_path.parent().unwrap())?;
+    let json = serde_json::to_string_pretty(record)?;
+    std::fs::write(&fixture_path, json)?;
+    Ok(fixture_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
