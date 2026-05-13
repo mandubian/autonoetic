@@ -356,6 +356,55 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// List curator decision events (`category = 'curator'`, `action = 'decision'`)
+    /// for a specific target URI/id. Used by operator workflows asking
+    /// "why was memory X dropped" (issue #30). The underlying `idx_causal_target`
+    /// index makes this an O(log n) point query.
+    pub fn list_curator_decisions_by_target(
+        &self,
+        target: &str,
+        limit: i64,
+    ) -> Result<Vec<autonoetic_types::causal_chain::CausalEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, agent_id, session_id, turn_id, event_seq, timestamp,
+                    category, action, status, enforced_rules, target, payload,
+                    payload_ref, evidence_ref, reason
+             FROM causal_events
+             WHERE category = 'curator' AND action = 'decision' AND target = ?1
+             ORDER BY timestamp DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![target, limit], |row| {
+            let enforced_rules_json: String = row.get(9)?;
+            let enforced_rules = Some(enforced_rules_json.as_str())
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                .unwrap_or_else(autonoetic_types::causal_chain::default_enforced_rules);
+            Ok(autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: row.get(0)?,
+                agent_id: row.get(1)?,
+                session_id: row.get(2)?,
+                turn_id: row.get(3)?,
+                event_seq: row.get::<_, i64>(4)? as u64,
+                timestamp: row.get(5)?,
+                category: row.get(6)?,
+                action: row.get(7)?,
+                status: row.get(8)?,
+                enforced_rules,
+                target: row.get(10)?,
+                payload: row.get(11)?,
+                payload_ref: row.get(12)?,
+                evidence_ref: row.get(13)?,
+                reason: row.get(14)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
     pub fn create_execution_trace(
         &self,
         trace: &autonoetic_types::causal_chain::ExecutionTraceRecord,

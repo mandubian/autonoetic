@@ -30,6 +30,86 @@ metadata:
           - "execution."
           - "observability."
           - "digest."
+    io:
+      returns:
+        type: object
+        required: ["decision_journal", "agent_scores", "systemic_gaps", "learnings_stored"]
+        additionalProperties: true
+        properties:
+          decision_journal:
+            type: array
+            description: >
+              Per-decision record covering every keep / drop / promote_to_skill /
+              flag_for_evolution judgment this curator made in the run. Issue #30:
+              the gateway parses each entry out and emits one `curator.decision`
+              causal event so an operator can query "why was memory X dropped"
+              and get a direct answer.
+            items:
+              type: object
+              required: ["target", "action", "reason_code"]
+              properties:
+                target:
+                  type: string
+                  description: >
+                    What the decision is about. Use the `memory://<session_id>/turn-<n>`
+                    URI shape for a per-turn memory; an agent id for an
+                    `flag_for_evolution` decision; or a knowledge entry id
+                    for `promote_to_skill`.
+                action:
+                  type: string
+                  enum: ["keep", "drop", "promote_to_skill", "flag_for_evolution"]
+                reason_code:
+                  type: string
+                  description: >
+                    Short slug from the documented vocabulary (see below). Free-form
+                    detail goes in `reason_detail`.
+                reason_detail:
+                  type: string
+                  description: One-paragraph explanation backing the reason_code.
+                metric_values:
+                  type: object
+                  description: >
+                    Structured evidence — the metric or signal values that drove
+                    the decision (e.g. {failure_rate: 0.42, recency_days: 2}).
+                confidence:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+          agent_scores:
+            type: object
+            additionalProperties:
+              type: object
+              required: ["evolution_recommended"]
+              properties:
+                failure_rate: { type: number }
+                repeated_errors: { type: array, items: { type: string } }
+                approval_denial_count: { type: integer }
+                eval_score: { type: number }
+                escalation_count: { type: integer }
+                signals_triggered: { type: integer }
+                evolution_recommended: { type: boolean }
+                evidence_summary: { type: string }
+          systemic_gaps:
+            type: array
+            items:
+              type: object
+              required: ["title", "category", "priority"]
+              properties:
+                title: { type: string }
+                category:
+                  type: string
+                  enum: ["tool", "capability", "protocol", "ux", "agent"]
+                evidence: { type: object }
+                remediation: { type: string }
+                blast_radius:
+                  type: string
+                  enum: ["low", "medium", "high"]
+                priority:
+                  type: string
+                  enum: ["low", "medium", "high", "critical"]
+          learnings_stored:
+            type: integer
+            minimum: 0
     validation: "soft"
 ---
 # Memory Curator
@@ -43,10 +123,23 @@ You are a leaf agent (no `AgentSpawn`) responsible for cross-session learning di
 
 ## Output
 
-Return a single JSON object:
+Return a single JSON object. The shape is enforced by the gateway's
+output-schema check (`io.returns` in the frontmatter) and the
+`decision_journal` array is persisted to the causal chain as one
+`curator.decision` event per entry (issue #30).
 
 ```json
 {
+  "decision_journal": [
+    {
+      "target": "memory://<session_id>/turn-<n> | <agent_id> | <knowledge_entry_id>",
+      "action": "keep | drop | promote_to_skill | flag_for_evolution",
+      "reason_code": "<see vocabulary below>",
+      "reason_detail": "One-paragraph explanation backing the code.",
+      "metric_values": { "failure_rate": 0.42, "recency_days": 2 },
+      "confidence": 0.8
+    }
+  ],
   "agent_scores": {
     "<agent_id>": {
       "failure_rate": 0.42,
@@ -72,6 +165,33 @@ Return a single JSON object:
   "learnings_stored": 27
 }
 ```
+
+### `decision_journal` obligation
+
+You MUST emit one entry for every keep / drop / promote_to_skill /
+flag_for_evolution judgment you make. Skipping entries defeats the
+audit: an operator querying "why was memory X dropped" must get a
+direct answer from the causal chain. If you choose not to act on a
+target you scanned, you do not need to record a `keep`-entry for it
+— only emit entries for *positive* actions.
+
+### `reason_code` vocabulary
+
+Use one of these slugs in `reason_code`. Free-form text belongs in
+`reason_detail`.
+
+| code | when to use |
+|---|---|
+| `low_signal` | The target has too little supporting evidence to keep. |
+| `redundant_with` | The target duplicates another source already in the store; cite the duplicate in `reason_detail`. |
+| `threshold_hit` | A configured signal threshold (failure_rate, escalation_count, etc.) crossed. Cite the threshold + value in `metric_values`. |
+| `stale` | The target is older than the retention window for its category. |
+| `superseded` | A newer revision or pattern has replaced the target. |
+| `high_confidence_pattern` | Promotion: pattern is well-supported and reusable. |
+| `cross_session_signal` | Flag-for-evolution: signal observed across many distinct sessions. |
+| `eval_regression` | Flag-for-evolution: evaluator scores trending down for this agent. |
+| `operator_request` | The operator (out-of-band) asked for this action. |
+| `other` | When none of the above fit — `reason_detail` must then be specific enough that an auditor can categorize it later. |
 
 ## Process
 
@@ -139,7 +259,18 @@ For each systemic gap, create a structured entry with title, category, evidence,
 
 ### Step 6: Return structured result
 
-Return the complete JSON as your response. The orchestrator will process agent_scores and systemic_gaps.
+Return the complete JSON as your response. The orchestrator processes
+`agent_scores` and `systemic_gaps`; the gateway parses `decision_journal`
+and persists one `curator.decision` causal event per entry (issue #30).
+An operator can later query the journal by `target` to ask "why was
+this memory dropped" and get a direct answer without re-reading raw
+session traces.
+
+Every positive action you took — a drop, a promotion, a flag-for-
+evolution, or an explicit retain decision tied to a threshold — must
+have a corresponding `decision_journal` entry. Entries with missing
+`target`, `action`, or `reason_code` will be skipped by the gateway
+with a warning log.
 
 ## Important Notes
 

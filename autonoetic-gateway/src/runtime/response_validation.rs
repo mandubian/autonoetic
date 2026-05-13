@@ -826,6 +826,38 @@ impl GatewayExecutionService {
                 session_id = %result.session_id,
                 "response.validation.pass"
             );
+
+            // Issue #30: if the reply carries a `decision_journal` array
+            // (curator-style output), persist one `curator.decision` causal
+            // event per entry so operators can query by target.
+            if let (Some(store), Some(reply)) =
+                (self.gateway_store(), result.assistant_reply.as_deref())
+            {
+                match crate::runtime::curator_journal::extract_and_persist(
+                    store.as_ref(),
+                    agent_id,
+                    &result.session_id,
+                    None,
+                    reply,
+                ) {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(
+                        target: "curator_journal",
+                        agent_id = %agent_id,
+                        session_id = %result.session_id,
+                        entry_count = n,
+                        "decision_journal persisted"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "curator_journal",
+                        agent_id = %agent_id,
+                        session_id = %result.session_id,
+                        error = %e,
+                        "decision_journal persistence failed"
+                    ),
+                }
+            }
+
             return Ok(result);
         }
 
