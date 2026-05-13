@@ -47,6 +47,9 @@ struct ArtifactExecArgs {
     deployment_ticket: Option<String>,
     #[serde(default)]
     credential_env: Option<Vec<CredentialEnvMapping>>,
+    /// Optional fixture set ref to replay a recorded fixture set.
+    #[serde(default)]
+    fixture_set_ref: Option<String>,
 }
 
 pub struct ArtifactExecTool;
@@ -803,6 +806,46 @@ impl NativeTool for ArtifactExecTool {
             )?;
         }
 
+        // If a fixture_set_ref is provided, pre-populate the artifact's fixture
+        // directory from the recorded fixture set.
+        if let Some(fs_ref) = &args.fixture_set_ref {
+            if let Some(store) = &gateway_store {
+                let fixture_set = store.get_fixture_set(fs_ref)?.ok_or_else(|| {
+                    anyhow::anyhow!("Fixture set '{}' not found", fs_ref)
+                })?;
+                let recording_session = store
+                    .get_recording_session(&fixture_set.recording_session_id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Recording session for fixture set '{}' not found",
+                            fs_ref
+                        )
+                    })?;
+                let staging_dir = gw_dir
+                    .join("recordings")
+                    .join(&recording_session.session_id)
+                    .join("fixtures");
+                if staging_dir.exists() {
+                    let dest = temp_base.join("fixtures");
+                    copy_fixture_dir(&staging_dir, &dest)?;
+                    tracing::info!(
+                        target: "artifact_exec",
+                        fixture_set = %fs_ref,
+                        from = %staging_dir.display(),
+                        to = %dest.display(),
+                        "Pre-populated fixture directory for artifact exec"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "artifact_exec",
+                        fixture_set = %fs_ref,
+                        path = %staging_dir.display(),
+                        "Fixture staging directory not found"
+                    );
+                }
+            }
+        }
+
         let mut overrides =
             crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
         if approval_validated_for_command {
@@ -1049,6 +1092,46 @@ fn execute_with_ticket(
         )?;
     }
 
+    // If a fixture_set_ref is provided, pre-populate the artifact's fixture
+    // directory from the recorded fixture set.
+    if let Some(fs_ref) = &args.fixture_set_ref {
+        if let Some(store) = &gateway_store {
+            let fixture_set = store.get_fixture_set(fs_ref)?.ok_or_else(|| {
+                anyhow::anyhow!("Fixture set '{}' not found", fs_ref)
+            })?;
+            let recording_session = store
+                .get_recording_session(&fixture_set.recording_session_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Recording session for fixture set '{}' not found",
+                        fs_ref
+                    )
+                })?;
+            let staging_dir = gw_dir
+                .join("recordings")
+                .join(&recording_session.session_id)
+                .join("fixtures");
+            if staging_dir.exists() {
+                let dest = temp_base.join("fixtures");
+                copy_fixture_dir(&staging_dir, &dest)?;
+                tracing::info!(
+                    target: "artifact_exec",
+                    fixture_set = %fs_ref,
+                    from = %staging_dir.display(),
+                    to = %dest.display(),
+                    "Pre-populated fixture directory"
+                );
+            } else {
+                tracing::warn!(
+                    target: "artifact_exec",
+                    fixture_set = %fs_ref,
+                    path = %staging_dir.display(),
+                    "Fixture staging directory not found"
+                );
+            }
+        }
+    }
+
     let mut overrides =
         crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
     overrides.share_net = !ticket.approved_domains.is_empty();
@@ -1150,6 +1233,29 @@ fn execute_with_ticket(
     serde_json::to_string(&body).map_err(Into::into)
 }
 
+/// Recursively copy fixture files from source to destination.
+/// Used when replaying a recorded fixture set during artifact execution.
+fn copy_fixture_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<u64> {
+    if !src.exists() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(dst)?;
+    let mut count = 0;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let dest_path = dst.join(&file_name);
+        if path.is_dir() {
+            count += copy_fixture_dir(&path, &dest_path)?;
+        } else {
+            std::fs::copy(&path, &dest_path)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1205,5 +1311,44 @@ mod tests {
         assert!(reason.contains("Agent-stated purpose:"));
         assert!(reason.contains("Static analysis cues:"));
         assert!(reason.contains("[line 12] [import] `import requests`"));
+    }
+
+    #[test]
+    fn copy_fixture_dir_copies_files_recursively() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        std::fs::create_dir_all(src.path().join("api.example.com")).unwrap();
+        std::fs::write(
+            src.path().join("api.example.com").join("GET-items.json"),
+            r#"{"status":200}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("api.example.com").join("POST-submit.json"),
+            r#"{"status":201}"#,
+        )
+        .unwrap();
+
+        let count = super::copy_fixture_dir(src.path(), dst.path()).unwrap();
+        assert_eq!(count, 2);
+        assert!(dst.path().join("api.example.com").join("GET-items.json").exists());
+        assert!(dst.path().join("api.example.com").join("POST-submit.json").exists());
+    }
+
+    #[test]
+    fn copy_fixture_dir_empty_source_returns_zero() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        assert_eq!(super::copy_fixture_dir(src.path(), dst.path()).unwrap(), 0);
+    }
+
+    #[test]
+    fn copy_fixture_dir_nonexistent_source_returns_zero() {
+        let dst = tempfile::tempdir().unwrap();
+        assert_eq!(
+            super::copy_fixture_dir(&std::path::Path::new("/nonexistent"), dst.path()).unwrap(),
+            0
+        );
     }
 }
