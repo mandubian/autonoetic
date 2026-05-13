@@ -116,6 +116,26 @@ pub fn handle_recording_cancel(
 ) -> anyhow::Result<()> {
     let store = open_store(config_path)?;
     store.stop_recording_session(session_id, RecordingStatus::Cancelled)?;
+
+    let causal_event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: String::new(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "artifact".to_string(),
+        action: "artifact.fixture_recording_cancelled".to_string(),
+        status: "cancelled".to_string(),
+        enforced_rules: vec![],
+        target: Some(session_id.to_string()),
+        payload: None,
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some("Operator cancelled via CLI".to_string()),
+    };
+    let _ = store.create_causal_event(&causal_event);
+
     eprintln!("Recording session '{}' cancelled.", session_id);
     Ok(())
 }

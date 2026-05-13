@@ -19,7 +19,7 @@
 //! Refs: docs/design/recording-mode-design.md §2.2.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::{
@@ -530,12 +530,27 @@ pub async fn setup_sealed_proxy_for_exec_async(
     artifact_root: PathBuf,
     extra_env: &mut Vec<(String, String)>,
     overrides: &mut BwrapIsolationOverrides,
-    recording_dir: Option<PathBuf>,
-    recording_session_id: Option<String>,
+    gateway_dir: Option<&Path>,
+    session_id: Option<&str>,
 ) -> anyhow::Result<Option<SealedProxyHandle>> {
     if matches!(policy, SandboxNetworkPolicy::Normal) {
         return Ok(None);
     }
+
+    // Derive recording staging directory from gateway_dir + session_id when Recording.
+    let (recording_dir, recording_session_id): (Option<PathBuf>, Option<String>) =
+        if matches!(policy, SandboxNetworkPolicy::Recording) {
+            if let (Some(gw), Some(sid)) = (gateway_dir, session_id) {
+                let dir = gw.join("recordings").join(sid).join("fixtures");
+                std::fs::create_dir_all(&dir)?;
+                (Some(dir), Some(sid.to_string()))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
     let loader = Arc::new(FixtureLoader::new(artifact_root));
     let handle = start_sealed_proxy(policy, loader, recording_dir, recording_session_id).await?;
     let proxy_url = handle.proxy_url();
@@ -575,8 +590,8 @@ pub fn setup_sealed_proxy_for_exec(
     artifact_root: PathBuf,
     extra_env: &mut Vec<(String, String)>,
     overrides: &mut BwrapIsolationOverrides,
-    recording_dir: Option<PathBuf>,
-    recording_session_id: Option<String>,
+    gateway_dir: Option<&Path>,
+    session_id: Option<&str>,
 ) -> anyhow::Result<Option<SealedProxyHandle>> {
     if matches!(policy, SandboxNetworkPolicy::Normal) {
         return Ok(None);
@@ -598,8 +613,8 @@ pub fn setup_sealed_proxy_for_exec(
                 artifact_root,
                 extra_env,
                 overrides,
-                recording_dir,
-                recording_session_id,
+                gateway_dir,
+                session_id,
             ))
         })
     } else {
@@ -608,8 +623,8 @@ pub fn setup_sealed_proxy_for_exec(
             artifact_root,
             extra_env,
             overrides,
-            recording_dir,
-            recording_session_id,
+            gateway_dir,
+            session_id,
         ))
     }
 }

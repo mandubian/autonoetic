@@ -266,6 +266,7 @@ impl NativeTool for ArtifactExecTool {
                         &ticket,
                         config,
                         gateway_store,
+                        session_id,
                     );
                 } else {
                     return Ok(ToolError::resource(
@@ -878,8 +879,8 @@ impl NativeTool for ArtifactExecTool {
                 temp_base.clone(),
                 &mut extra_env,
                 &mut overrides,
-                None,
-                None,
+                Some(gw_dir),
+                session_id,
             )?;
 
         let runner = SandboxRunner::spawn_with_session_content_and_env(
@@ -998,6 +999,7 @@ fn execute_with_ticket(
     ticket: &crate::runtime::tools::artifact_prepare::DeploymentTicket,
     _config: Option<&autonoetic_types::config::GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    session_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
     let bundle = artifact_store.inspect(&ticket.artifact_id)?;
@@ -1100,8 +1102,8 @@ fn execute_with_ticket(
         temp_base.clone(),
         &mut extra_env,
         &mut overrides,
-        None,
-        None,
+        Some(gw_dir),
+        session_id,
     )?;
 
     let runner = SandboxRunner::spawn_with_session_content_and_env(

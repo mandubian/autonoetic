@@ -1311,6 +1311,35 @@ pub async fn run_agent_with_runtime(
         };
         store.create_recording_session(&recording_session)?;
 
+        // Emit causal event for recording session start.
+        let causal_event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: agent_id.to_string(),
+            session_id: recording_session.session_id.clone(),
+            turn_id: None,
+            event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "artifact".to_string(),
+            action: "artifact.fixture_recording_session_started".to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec![],
+            target: Some(agent_id.to_string()),
+            payload: Some(
+                serde_json::json!({
+                    "recording_session_id": &recording_session.session_id,
+                    "staging_dir": staging_dir.to_string_lossy(),
+                    "duration_secs": recording_duration,
+                    "max_requests": recording_max_requests,
+                    "max_bytes": recording_max_bytes,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        };
+        let _ = store.create_causal_event(&causal_event);
+
         eprintln!(
             "  Recording session {} started. Fixtures will be written to: {}",
             recording_session.session_id,
