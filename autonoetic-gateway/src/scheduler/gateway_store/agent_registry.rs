@@ -618,6 +618,24 @@ impl GatewayStore {
         Ok(current_revision_id)
     }
 
+    /// Count `Promote` (not `Rollback`) entries for an alias whose
+    /// `created_at >= since_rfc3339`. Used by the promotion safety governor
+    /// (issue #25) for the per-alias velocity check.
+    pub fn count_promotions_since(
+        &self,
+        agent_id: &str,
+        since_rfc3339: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM promotion_history
+             WHERE agent_id = ?1 AND kind = 'Promote' AND created_at >= ?2",
+            params![agent_id, since_rfc3339],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     pub fn list_promotion_history(&self, agent_id: &str) -> Result<Vec<PromotionRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

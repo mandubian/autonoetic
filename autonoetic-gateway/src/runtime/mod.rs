@@ -33,6 +33,7 @@ pub mod network_policy;
 pub mod openrouter_catalog;
 pub mod parser;
 pub mod post_session_digest;
+pub mod promotion_governor;
 pub mod promotion_store;
 pub mod prompt_budget;
 pub mod quality_signal;
