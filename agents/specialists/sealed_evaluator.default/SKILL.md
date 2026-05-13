@@ -165,7 +165,7 @@ After completing your evaluation, you MUST call `promotion_record` to persist th
 ```
 promotion_record({
   "artifact_ref": "ar.example",
-  "role": "evaluator",
+  "role": "sealed_evaluator",
   "pass": <true if evaluator_pass is true, false otherwise>,
   "findings": [<your findings array>],
   "summary": "Artifact ar.example: <your summary>"

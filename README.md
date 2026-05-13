@@ -80,7 +80,7 @@ Current bundles:
   - `agents/specialists/coder.default/`
   - `agents/specialists/executor.default/`
   - `agents/specialists/debugger.default/`
-  - `agents/specialists/evaluator.default/`
+  - `agents/specialists/sealed_evaluator.default/`
   - `agents/specialists/auditor.default/`
 - Evolution:
   - `agents/evolution/specialized_builder.default/`

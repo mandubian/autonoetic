@@ -145,10 +145,10 @@ impl NativeTool for ArtifactExecTool {
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::CodeExecution { .. }))
+        manifest.capabilities.iter().any(|cap| {
+            matches!(cap, Capability::CodeExecution { .. })
+                || matches!(cap, Capability::Evaluation { .. })
+        })
     }
 
     fn definition(&self) -> ToolDefinition {
