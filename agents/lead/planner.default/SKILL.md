@@ -303,7 +303,7 @@ federation.escalate({
 })
 ```
 
-The operator will review and respond. Check `knowledge_store` for the operator's decision (the gateway emits a notification when the escalation is resolved). The operator may:
+The operator will review the escalation via `admin.escalation_list` and respond via `admin.escalation_resolve`. Once resolved, re-check the escalation status with `promotion_query` or by respawning the federation roles with the same artifact. The operator may:
 - **Approve**: proceed to `specialized_builder.default` for install
 - **Request sealed eval**: spawn `sealed_evaluator.default`, collect verdict, re-escalate
 - **Fix**: route findings to `coder.default`, re-run federation after fixes

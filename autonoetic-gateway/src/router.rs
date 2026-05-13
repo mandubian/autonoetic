@@ -1324,7 +1324,9 @@ impl JsonRpcRouter {
                 #[derive(Deserialize)]
                 struct ResolveParams {
                     escalation_id: String,
+                    decided_by: String,
                     status: String,
+                    reason: Option<String>,
                 }
                 let params: ResolveParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
@@ -1336,6 +1338,13 @@ impl JsonRpcRouter {
                         );
                     }
                 };
+                if params.escalation_id.trim().is_empty() || params.decided_by.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "escalation_id and decided_by must not be empty",
+                    );
+                }
                 let store = self.execution.gateway_store();
                 let Some(store) = store else {
                     return JsonRpcResponse::error(
@@ -1355,12 +1364,18 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match store.resolve_escalation(&params.escalation_id, status) {
+                match store.resolve_escalation(
+                    &params.escalation_id,
+                    status,
+                    &params.decided_by,
+                    params.reason.as_deref(),
+                ) {
                     Ok(()) => JsonRpcResponse::success(
                         req.id,
                         serde_json::json!({
                             "escalation_id": params.escalation_id,
                             "status": params.status,
+                            "decided_by": params.decided_by,
                         }),
                     ),
                     Err(e) => JsonRpcResponse::error(

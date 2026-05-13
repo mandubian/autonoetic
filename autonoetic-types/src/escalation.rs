@@ -36,7 +36,7 @@ impl EscalationStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(EscalationStatus::Pending),
             "approved" => Some(EscalationStatus::Approved),
@@ -77,6 +77,12 @@ pub struct EscalationMessage {
     /// Current status.
     #[serde(default)]
     pub status: EscalationStatus,
+    /// Who decided (operator ID or admin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    /// Why the escalation was resolved this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
 }
 
 impl EscalationMessage {
@@ -101,6 +107,8 @@ impl EscalationMessage {
             resolved_at: None,
             root_session_id,
             status: EscalationStatus::Pending,
+            decided_by: None,
+            decision_reason: None,
         }
     }
 }

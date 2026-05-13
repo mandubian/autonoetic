@@ -789,7 +789,7 @@ mod tests {
             "root_session_xyz".to_string(),
         );
 
-        store.create_escalation(&mut escalation)?;
+        store.create_escalation(&escalation)?;
 
         let fetched = store
             .get_escalation("esc_test_001")?
@@ -814,6 +814,8 @@ mod tests {
         store.resolve_escalation(
             "esc_test_001",
             autonoetic_types::escalation::EscalationStatus::Approved,
+            "cli-operator",
+            Some("Looks good, promote"),
         )?;
 
         let pending_after = store.list_pending_escalations()?;
@@ -827,6 +829,8 @@ mod tests {
             autonoetic_types::escalation::EscalationStatus::Approved
         );
         assert!(resolved.resolved_at.is_some());
+        assert_eq!(resolved.decided_by.as_deref(), Some("cli-operator"));
+        assert_eq!(resolved.decision_reason.as_deref(), Some("Looks good, promote"));
 
         Ok(())
     }

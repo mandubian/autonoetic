@@ -1809,8 +1809,14 @@ fn apply_escalations_v33(conn: &mut Connection) -> Result<()> {
             created_at TEXT NOT NULL,
             resolved_at TEXT,
             root_session_id TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending'
-        );",
+            status TEXT NOT NULL DEFAULT 'pending',
+            decided_by TEXT,
+            decision_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_escalations_root_session
+            ON escalations(root_session_id);
+        CREATE INDEX IF NOT EXISTS idx_escalations_status
+            ON escalations(status);",
     )?;
 
     conn.execute(

@@ -3,9 +3,8 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
-use autonoetic_types::background::ApprovalRequest;
 use autonoetic_types::capability::Capability;
-use autonoetic_types::escalation::{EscalationMessage, EscalationStatus, RoleVerdictSummary};
+use autonoetic_types::escalation::{EscalationMessage, RoleVerdictSummary};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -33,8 +32,11 @@ impl NativeTool for FederationEscalateTool {
         "federation.escalate"
     }
 
-    fn is_available(&self, _manifest: &AgentManifest) -> bool {
-        true
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::AgentSpawn { .. }))
     }
 
     fn definition(&self) -> ToolDefinition {
