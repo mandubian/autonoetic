@@ -263,6 +263,38 @@ impl PromotionStore {
         }
     }
 
+    /// Returns true if any federation role (StaticEvaluator, UnitTestRunner,
+    /// SealedEvaluator) has recorded a verdict for this artifact.
+    pub fn has_federation_roles(&self, artifact_id: &str) -> bool {
+        let records = self.records.lock().unwrap();
+        if let Some(record) = records.get(artifact_id) {
+            record.static_evaluator_id.is_some()
+                || record.unit_test_runner_id.is_some()
+                || record.sealed_evaluator_id.is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Returns the agent IDs of all federation roles that recorded a verdict,
+    /// for distinct-identity enforcement (R-2.17 extension).
+    pub fn federation_agent_ids(&self, artifact_id: &str) -> Vec<String> {
+        let records = self.records.lock().unwrap();
+        let mut ids = Vec::new();
+        if let Some(record) = records.get(artifact_id) {
+            if let Some(id) = &record.static_evaluator_id {
+                ids.push(id.clone());
+            }
+            if let Some(id) = &record.unit_test_runner_id {
+                ids.push(id.clone());
+            }
+            if let Some(id) = &record.sealed_evaluator_id {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
     /// Returns true if an artifact has passed both evaluator (or sealed evaluator) and auditor promotion.
     pub fn is_fully_promoted(&self, artifact_id: &str) -> bool {
         let records = self.records.lock().unwrap();

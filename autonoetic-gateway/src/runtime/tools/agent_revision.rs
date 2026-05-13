@@ -1941,6 +1941,10 @@ impl NativeTool for AgentRevisionPromoteTool {
             /// behavioural-evaluation mechanism for pure-skill agents
             /// is not yet implemented.
             AuditOnly,
+            /// Federation jury mode: operator approval required because
+            /// federation roles (static_evaluator, unit_test_runner,
+            /// sealed_evaluator) recorded verdicts for this artifact.
+            FullJury,
         }
 
         let enforce_promotion_gate = |artifact_id: &str,
@@ -2012,6 +2016,9 @@ impl NativeTool for AgentRevisionPromoteTool {
                         args.revision_id
                     );
                 }
+                // FullJury enforcement is handled separately after the
+                // legacy gate; this variant is only used for event emission.
+                PromotionGateMode::FullJury => {}
             }
 
             let has_unresolved = rev
@@ -2051,6 +2058,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                         "mode": match mode {
                             PromotionGateMode::Full => "full",
                             PromotionGateMode::AuditOnly => "audit_only",
+                            PromotionGateMode::FullJury => "full_jury",
                         },
                     })
                     .to_string(),
@@ -2126,6 +2134,66 @@ impl NativeTool for AgentRevisionPromoteTool {
         }
         // else: no artifact OR zero-capability sandboxed agent → direct promote.
         // Capability enforcement on every tool call is the security gate.
+
+        // FullJury gate: when federation roles have recorded verdicts, require
+        // operator approval via an approved escalation. This is a fifth branch
+        // that activates on top of the legacy gate: if federation verdicts exist,
+        // an approved escalation must also exist. If no federation verdicts, the
+        // legacy check above is sufficient.
+        if let Some(artifact_id) = rev.artifact_id.as_deref() {
+            let promo_store =
+                crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+            if promo_store.has_federation_roles(artifact_id) {
+                let fed_ids = promo_store.federation_agent_ids(artifact_id);
+
+                // R-2.17 extended: each federation role identity must differ
+                // from every other federation role identity AND from the
+                // revision proposer.
+                let proposer = rev.created_by_id.as_str();
+                for id in &fed_ids {
+                    anyhow::ensure!(
+                        id != proposer,
+                        "Promotion gate (FullJury): federation role '{}' is the same identity \
+                         that proposed revision '{}' (R-2.17). Each federation role must be \
+                         a distinct agent from the proposer.",
+                        id,
+                        args.revision_id
+                    );
+                }
+                if fed_ids.len() > 1 {
+                    for i in 0..fed_ids.len() {
+                        for j in (i + 1)..fed_ids.len() {
+                            anyhow::ensure!(
+                                fed_ids[i] != fed_ids[j],
+                                "Promotion gate (FullJury): federation roles '{}' and '{}' \
+                                 are the same agent (R-2.17). Each federation role must be \
+                                 a distinct agent.",
+                                fed_ids[i],
+                                fed_ids[j]
+                            );
+                        }
+                    }
+                }
+
+                // Check for an approved escalation from the operator.
+                let escalation = gateway_store.find_escalation(
+                    artifact_id,
+                    &args.revision_id,
+                    autonoetic_types::escalation::EscalationStatus::Approved,
+                )?;
+                anyhow::ensure!(
+                    escalation.is_some(),
+                    "Promotion gate (FullJury): artifact '{}' has federation role verdicts \
+                     but no approved operator escalation for revision '{}'. \
+                     The planner must call federation.escalate and the operator must approve \
+                     before promotion.",
+                    artifact_id,
+                    args.revision_id
+                );
+
+                emit_gate_event(PromotionGateMode::FullJury, Some(artifact_id));
+            }
+        }
 
         if let Some(eval_run_id) = &args.required_eval_run_id {
             let eval_run = gateway_store.get_eval_run(eval_run_id)?;

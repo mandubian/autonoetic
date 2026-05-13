@@ -109,6 +109,30 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// Find the latest escalation for an artifact+revision with a matching
+    /// status (used by the FullJury gate to check for operator approval).
+    pub fn find_escalation(
+        &self,
+        artifact_id: &str,
+        revision_id: &str,
+        status: EscalationStatus,
+    ) -> Result<Option<EscalationMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
+             role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
+             decided_by, decision_reason
+             FROM escalations
+             WHERE artifact_id = ?1 AND revision_id = ?2 AND status = ?3
+             ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(
+            params![artifact_id, revision_id, status.as_str()],
+            row_to_escalation,
+        )?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn resolve_escalation(
         &self,
         escalation_id: &str,
