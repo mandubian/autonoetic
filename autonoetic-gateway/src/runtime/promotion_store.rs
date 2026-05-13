@@ -25,6 +25,18 @@ impl PromotionStore {
         record.auditor_pass = false;
         record.auditor_findings.clear();
         record.auditor_timestamp = None;
+        record.static_evaluator_id = None;
+        record.static_evaluator_pass = false;
+        record.static_evaluator_findings.clear();
+        record.static_evaluator_timestamp = None;
+        record.unit_test_runner_id = None;
+        record.unit_test_runner_pass = false;
+        record.unit_test_runner_findings.clear();
+        record.unit_test_runner_timestamp = None;
+        record.sealed_evaluator_id = None;
+        record.sealed_evaluator_pass = false;
+        record.sealed_evaluator_findings.clear();
+        record.sealed_evaluator_timestamp = None;
     }
 
     /// Creates a new PromotionStore, loading existing records from disk.
@@ -82,7 +94,19 @@ impl PromotionStore {
                 auditor_pass: false,
                 auditor_findings: vec![],
                 auditor_timestamp: None,
-                promotion_gate_version: "2.0".to_string(),
+                static_evaluator_id: None,
+                static_evaluator_pass: false,
+                static_evaluator_findings: vec![],
+                static_evaluator_timestamp: None,
+                unit_test_runner_id: None,
+                unit_test_runner_pass: false,
+                unit_test_runner_findings: vec![],
+                unit_test_runner_timestamp: None,
+                sealed_evaluator_id: None,
+                sealed_evaluator_pass: false,
+                sealed_evaluator_findings: vec![],
+                sealed_evaluator_timestamp: None,
+                promotion_gate_version: "2.1".to_string(),
             });
 
         if let Some(artifact_digest) = artifact_digest {
@@ -101,36 +125,51 @@ impl PromotionStore {
             }
         }
 
-        match role {
+        let role_name = match role {
             PromotionRole::Evaluator => {
                 record.evaluator_id = Some(agent_id.to_string());
                 record.evaluator_pass = pass;
                 record.evaluator_findings = findings;
                 record.evaluator_timestamp = Some(timestamp);
-                tracing::info!(
-                    target: "promotion_store",
-                    artifact_id = %artifact_id,
-                    agent_id = %agent_id,
-                    pass = pass,
-                    findings_count = record.evaluator_findings.len(),
-                    "Recorded evaluator promotion"
-                );
+                "evaluator"
             }
             PromotionRole::Auditor => {
                 record.auditor_id = Some(agent_id.to_string());
                 record.auditor_pass = pass;
                 record.auditor_findings = findings;
                 record.auditor_timestamp = Some(timestamp);
-                tracing::info!(
-                    target: "promotion_store",
-                    artifact_id = %artifact_id,
-                    agent_id = %agent_id,
-                    pass = pass,
-                    findings_count = record.auditor_findings.len(),
-                    "Recorded auditor promotion"
-                );
+                "auditor"
             }
-        }
+            PromotionRole::StaticEvaluator => {
+                record.static_evaluator_id = Some(agent_id.to_string());
+                record.static_evaluator_pass = pass;
+                record.static_evaluator_findings = findings;
+                record.static_evaluator_timestamp = Some(timestamp);
+                "static_evaluator"
+            }
+            PromotionRole::UnitTestRunner => {
+                record.unit_test_runner_id = Some(agent_id.to_string());
+                record.unit_test_runner_pass = pass;
+                record.unit_test_runner_findings = findings;
+                record.unit_test_runner_timestamp = Some(timestamp);
+                "unit_test_runner"
+            }
+            PromotionRole::SealedEvaluator => {
+                record.sealed_evaluator_id = Some(agent_id.to_string());
+                record.sealed_evaluator_pass = pass;
+                record.sealed_evaluator_findings = findings;
+                record.sealed_evaluator_timestamp = Some(timestamp);
+                "sealed_evaluator"
+            }
+        };
+        tracing::info!(
+            target: "promotion_store",
+            artifact_id = %artifact_id,
+            agent_id = %agent_id,
+            role = role_name,
+            pass = pass,
+            "Recorded promotion"
+        );
 
         if let Some(summary) = summary {
             tracing::debug!(
@@ -215,17 +254,20 @@ impl PromotionStore {
             match role {
                 PromotionRole::Evaluator => record.evaluator_pass,
                 PromotionRole::Auditor => record.auditor_pass,
+                PromotionRole::StaticEvaluator => record.static_evaluator_pass,
+                PromotionRole::UnitTestRunner => record.unit_test_runner_pass,
+                PromotionRole::SealedEvaluator => record.sealed_evaluator_pass,
             }
         } else {
             false
         }
     }
 
-    /// Returns true if an artifact has passed both evaluator and auditor promotion.
+    /// Returns true if an artifact has passed both evaluator (or sealed evaluator) and auditor promotion.
     pub fn is_fully_promoted(&self, artifact_id: &str) -> bool {
         let records = self.records.lock().unwrap();
         if let Some(record) = records.get(artifact_id) {
-            record.evaluator_pass && record.auditor_pass
+            (record.evaluator_pass || record.sealed_evaluator_pass) && record.auditor_pass
         } else {
             false
         }

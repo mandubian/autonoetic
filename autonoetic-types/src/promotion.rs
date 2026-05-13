@@ -28,6 +28,9 @@ pub enum FindingSeverity {
 pub enum PromotionRole {
     Evaluator,
     Auditor,
+    StaticEvaluator,
+    UnitTestRunner,
+    SealedEvaluator,
 }
 
 impl PromotionRole {
@@ -35,6 +38,9 @@ impl PromotionRole {
         match self {
             PromotionRole::Evaluator => "evaluator",
             PromotionRole::Auditor => "auditor",
+            PromotionRole::StaticEvaluator => "static_evaluator",
+            PromotionRole::UnitTestRunner => "unit_test_runner",
+            PromotionRole::SealedEvaluator => "sealed_evaluator",
         }
     }
 }
@@ -74,6 +80,42 @@ pub struct PromotionRecord {
     /// Timestamp of auditor validation (ISO 8601).
     #[serde(default)]
     pub auditor_timestamp: Option<String>,
+    /// Static evaluator agent (static_evaluator.default).
+    #[serde(default)]
+    pub static_evaluator_id: Option<String>,
+    /// Whether static evaluator passed.
+    #[serde(default)]
+    pub static_evaluator_pass: bool,
+    /// Findings from static evaluator.
+    #[serde(default)]
+    pub static_evaluator_findings: Vec<Finding>,
+    /// Timestamp of static evaluator validation (ISO 8601).
+    #[serde(default)]
+    pub static_evaluator_timestamp: Option<String>,
+    /// Unit test runner agent (unit_test_runner.default).
+    #[serde(default)]
+    pub unit_test_runner_id: Option<String>,
+    /// Whether unit test runner passed.
+    #[serde(default)]
+    pub unit_test_runner_pass: bool,
+    /// Findings from unit test runner.
+    #[serde(default)]
+    pub unit_test_runner_findings: Vec<Finding>,
+    /// Timestamp of unit test runner validation (ISO 8601).
+    #[serde(default)]
+    pub unit_test_runner_timestamp: Option<String>,
+    /// Sealed evaluator agent (sealed_evaluator.default).
+    #[serde(default)]
+    pub sealed_evaluator_id: Option<String>,
+    /// Whether sealed evaluator passed.
+    #[serde(default)]
+    pub sealed_evaluator_pass: bool,
+    /// Findings from sealed evaluator.
+    #[serde(default)]
+    pub sealed_evaluator_findings: Vec<Finding>,
+    /// Timestamp of sealed evaluator validation (ISO 8601).
+    #[serde(default)]
+    pub sealed_evaluator_timestamp: Option<String>,
     /// Version of promotion gate schema.
     pub promotion_gate_version: String,
 }
@@ -138,5 +180,17 @@ pub struct PromotionQueryResponse {
     pub auditor_findings: Vec<Finding>,
     pub evaluator_timestamp: Option<String>,
     pub auditor_timestamp: Option<String>,
+    pub static_evaluator_pass: Option<bool>,
+    pub static_evaluator_id: Option<String>,
+    pub static_evaluator_findings: Vec<Finding>,
+    pub static_evaluator_timestamp: Option<String>,
+    pub unit_test_runner_pass: Option<bool>,
+    pub unit_test_runner_id: Option<String>,
+    pub unit_test_runner_findings: Vec<Finding>,
+    pub unit_test_runner_timestamp: Option<String>,
+    pub sealed_evaluator_pass: Option<bool>,
+    pub sealed_evaluator_id: Option<String>,
+    pub sealed_evaluator_findings: Vec<Finding>,
+    pub sealed_evaluator_timestamp: Option<String>,
     pub promotion_gate_version: String,
 }

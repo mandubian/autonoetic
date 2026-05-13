@@ -33,7 +33,7 @@ impl NativeTool for PromotionRecordTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Records promotion status (evaluator or auditor validation result) for an artifact. Only evaluator.default and auditor.default agents can call this tool.".to_string(),
+            description: "Records promotion status (evaluator/auditor/static_evaluator/unit_test_runner/sealed_evaluator validation result) for an artifact. Only authorized promotion agents can call this tool.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -51,8 +51,8 @@ impl NativeTool for PromotionRecordTool {
                     },
                     "role": {
                         "type": "string",
-                        "description": "Role recording this promotion: 'evaluator' or 'auditor'",
-                        "enum": ["evaluator", "auditor"]
+                        "description": "Role recording this promotion",
+                        "enum": ["evaluator", "auditor", "static_evaluator", "unit_test_runner", "sealed_evaluator"]
                     },
                     "pass": {
                         "type": "boolean",
@@ -271,7 +271,7 @@ impl NativeTool for PromotionQueryTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Queries the promotion status of an artifact. Returns evaluator and auditor validation results, or null if no promotion record exists.".to_string(),
+            description: "Queries the promotion status of an artifact. Returns all role validation results (evaluator, auditor, static_evaluator, unit_test_runner, sealed_evaluator), or null if no promotion record exists.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -334,6 +334,18 @@ impl NativeTool for PromotionQueryTool {
                 auditor_findings: record.auditor_findings,
                 evaluator_timestamp: record.evaluator_timestamp,
                 auditor_timestamp: record.auditor_timestamp,
+                static_evaluator_pass: Some(record.static_evaluator_pass),
+                static_evaluator_id: record.static_evaluator_id,
+                static_evaluator_findings: record.static_evaluator_findings,
+                static_evaluator_timestamp: record.static_evaluator_timestamp,
+                unit_test_runner_pass: Some(record.unit_test_runner_pass),
+                unit_test_runner_id: record.unit_test_runner_id,
+                unit_test_runner_findings: record.unit_test_runner_findings,
+                unit_test_runner_timestamp: record.unit_test_runner_timestamp,
+                sealed_evaluator_pass: Some(record.sealed_evaluator_pass),
+                sealed_evaluator_id: record.sealed_evaluator_id,
+                sealed_evaluator_findings: record.sealed_evaluator_findings,
+                sealed_evaluator_timestamp: record.sealed_evaluator_timestamp,
                 promotion_gate_version: record.promotion_gate_version,
             },
             None => {
