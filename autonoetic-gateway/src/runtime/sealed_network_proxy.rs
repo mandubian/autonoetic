@@ -380,6 +380,14 @@ pub fn setup_sealed_proxy_for_exec(
     if matches!(policy, SandboxNetworkPolicy::Normal) {
         return Ok(None);
     }
+    if overrides.force_network_off {
+        tracing::warn!(
+            target: "sealed_network_proxy",
+            ?policy,
+            "force_network_off is set — sealed proxy would be unreachable. Skipping proxy setup."
+        );
+        return Ok(None);
+    }
     // We need a mutable-reference-safe block_on. Inline the pattern from
     // `block_on_http` since we capture &mut.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {

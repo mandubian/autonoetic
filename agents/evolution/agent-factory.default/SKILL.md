@@ -225,7 +225,7 @@ If gates required:
    (for code-bearing agents). Then call `workflow_wait` with the
    returned `task_id`.
 2. If the evaluator is required for this row, call `agent_spawn` with
-   `agent_id="evaluator.default"`, `async=true`, against the same
+    `agent_id="sealed_evaluator.default"`, `async=true`, against the same
    `artifact_ref`. Then call `workflow_wait`.
 3. Each required gate must call `promotion_record(artifact_id=<that
    artifact>, role=..., pass=true)`. specialized_builder verifies these

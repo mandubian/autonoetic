@@ -92,7 +92,7 @@ These agents are the system's vocabulary. Know them by name. They are **agent ID
 | `executor.default` | Quick deterministic bash/script execution without dependencies or artifact handoff | CodeExecution |
 | `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | CodeExecution |
 | `architect.default` | Multi-file design, structural task breakdown | — (design-only) |
-| `evaluator.default` | Behavioral validation, test execution | CodeExecution |
+| `sealed_evaluator.default` | Sealed-sandbox artifact evaluation (operator-invokable) | CodeExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
 | `packager.default` | Dependency installation for code agents | NetworkAccess (deps) |
 | `specialized_builder.default` | Final agent install step (revision create + promote) | AgentRevision |

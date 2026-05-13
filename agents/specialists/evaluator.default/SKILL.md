@@ -1,6 +1,6 @@
 ---
 name: "evaluator.default"
-description: "Validation and testing autonomous agent."
+description: "DEPRECATED — use sealed_evaluator.default instead. Validates and tests artifacts."
 metadata:
   autonoetic:
     version: "1.0"
