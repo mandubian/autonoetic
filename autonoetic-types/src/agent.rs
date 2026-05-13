@@ -174,10 +174,14 @@ pub struct AgentManifest {
     pub compression: Option<CompressionConfig>,
     /// Sandbox network egress policy (RFC scope 5.1). Default `Normal`.
     ///
-    /// `Sealed` and `Recording` interact with the sandbox egress hook
-    /// (scopes 5.2 / 5.3) which is not yet implemented; declaring them
-    /// today parses cleanly and produces a refuse-boot for `Recording`
-    /// when `gateway.sandbox.allow_recording` is not set.
+    /// `Sealed` routes HTTP through a fixture-driven proxy (scope 5.2
+    /// shipped — proxy + fixture loader + advisory env injection). HTTPS
+    /// is not yet supported (scope 5.2d deferred).
+    ///
+    /// `Recording` is a dormant stub — the proxy treats it identically to
+    /// `Sealed`. Live-capture on fixture miss (scope 5.3) is not yet
+    /// implemented. Declaring `Recording` produces a refuse-boot unless
+    /// `gateway.sandbox.allow_recording` is set.
     #[serde(default, skip_serializing_if = "is_default_sandbox_network_policy")]
     pub sandbox_network: SandboxNetworkPolicy,
 }

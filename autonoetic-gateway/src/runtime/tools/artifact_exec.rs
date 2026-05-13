@@ -391,6 +391,39 @@ impl NativeTool for ArtifactExecTool {
             approval_validated_for_command = true;
         }
 
+        // Phase 1.D: preapproved remote_access bypass.
+        // If the agent declares remote_access.approval_mode=preapproved AND
+        // (has NetworkAccess OR sandbox_network is Sealed/Recording), auto-approve.
+        // The sealed proxy intercepts HTTP calls for sealed-network agents,
+        // so NetworkAccess capability is not required in that case.
+        if !approval_validated_for_command && remote_analysis.requires_approval {
+            let declared_remote_access =
+                crate::runtime::network_policy::load_manifest_remote_access_declaration(agent_dir);
+            let remote_approval_mode = declared_remote_access
+                .as_ref()
+                .map(|d| d.approval_mode)
+                .unwrap_or(autonoetic_types::agent::RemoteAccessApprovalMode::Required);
+            if matches!(
+                remote_approval_mode,
+                autonoetic_types::agent::RemoteAccessApprovalMode::Preapproved
+            ) && (agent_has_network_access
+                || matches!(
+                    manifest.sandbox_network,
+                    autonoetic_types::agent::SandboxNetworkPolicy::Sealed
+                        | autonoetic_types::agent::SandboxNetworkPolicy::Recording
+                ))
+            {
+                tracing::info!(
+                    target: "artifact_exec",
+                    agent_id = %manifest.agent.id,
+                    sandbox_network = ?manifest.sandbox_network,
+                    patterns = ?remote_analysis.detected_patterns,
+                    "remote_access.approval_mode is preapproved — auto-approving remote access patterns"
+                );
+                approval_validated_for_command = true;
+            }
+        }
+
         if remote_analysis.requires_approval && !approval_validated_for_command {
             let detected_patterns = remote_analysis.detected_patterns.clone();
             let concrete_targets = normalize_targets(&detected_patterns);
