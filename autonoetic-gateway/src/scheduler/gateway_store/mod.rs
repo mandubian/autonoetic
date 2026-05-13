@@ -5,6 +5,7 @@ mod artifacts;
 pub mod attack_patterns;
 pub mod constitutional_proposals;
 mod credentials;
+mod escalations;
 mod evaluations;
 mod gate_messages;
 mod hook_deliveries;
@@ -318,6 +319,8 @@ mod tests {
         UserInteraction, UserInteractionAnswer, UserInteractionKind, UserInteractionOption,
     };
     use autonoetic_types::causal_chain::SessionTranscriptRecord;
+    use autonoetic_types::escalation::{EscalationMessage, RoleVerdictSummary};
+    use autonoetic_types::promotion::PromotionRole;
 
     fn artifact_ref(
         ref_id: &str,
@@ -748,6 +751,82 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, "completed");
         assert!(results[0].ended_at.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn escalation_create_get_list_resolve() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let verdicts = vec![
+            RoleVerdictSummary {
+                role: PromotionRole::StaticEvaluator,
+                agent_id: "static_evaluator.default".to_string(),
+                passed: true,
+                findings_summary: "Code looks clean, no vulnerabilities".to_string(),
+                evidence_ref: None,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            },
+            RoleVerdictSummary {
+                role: PromotionRole::UnitTestRunner,
+                agent_id: "unit_test_runner.default".to_string(),
+                passed: true,
+                findings_summary: "All 12 tests pass".to_string(),
+                evidence_ref: Some("art_artifact123".to_string()),
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            },
+        ];
+
+        let mut escalation = EscalationMessage::new(
+            "esc_test_001".to_string(),
+            "art_artifact123".to_string(),
+            "my.agent".to_string(),
+            "rev_sha256:abc123".to_string(),
+            verdicts,
+            "All roles passed. Recommend promotion.".to_string(),
+            "root_session_xyz".to_string(),
+        );
+
+        store.create_escalation(&mut escalation)?;
+
+        let fetched = store
+            .get_escalation("esc_test_001")?
+            .expect("escalation should exist");
+        assert_eq!(fetched.artifact_id, "art_artifact123");
+        assert_eq!(fetched.agent_id, "my.agent");
+        assert_eq!(fetched.role_verdicts.len(), 2);
+        assert_eq!(
+            fetched.role_verdicts[0].role.as_str(),
+            "static_evaluator"
+        );
+        assert!(fetched.role_verdicts[0].passed);
+        assert_eq!(
+            fetched.role_verdicts[1].findings_summary,
+            "All 12 tests pass"
+        );
+
+        let pending = store.list_pending_escalations()?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].escalation_id, "esc_test_001");
+
+        store.resolve_escalation(
+            "esc_test_001",
+            autonoetic_types::escalation::EscalationStatus::Approved,
+        )?;
+
+        let pending_after = store.list_pending_escalations()?;
+        assert_eq!(pending_after.len(), 0);
+
+        let resolved = store
+            .get_escalation("esc_test_001")?
+            .expect("escalation should still exist after resolution");
+        assert_eq!(
+            resolved.status,
+            autonoetic_types::escalation::EscalationStatus::Approved
+        );
+        assert!(resolved.resolved_at.is_some());
 
         Ok(())
     }

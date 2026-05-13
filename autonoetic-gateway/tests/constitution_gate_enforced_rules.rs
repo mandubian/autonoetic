@@ -261,6 +261,8 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
         similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
     };
     store.create_approval(&mut approval)?;
     store.record_decision(

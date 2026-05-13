@@ -943,6 +943,7 @@ pub mod credential;
 pub mod digest;
 pub mod evaluation;
 pub mod execution;
+pub mod federation;
 pub mod knowledge;
 pub mod observability;
 pub mod promotion;
@@ -992,6 +993,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::user_interaction::register_tools(&mut registry);
     crate::runtime::tools::user_profile::register_tools(&mut registry);
     crate::runtime::tools::observability::register_tools(&mut registry);
+    crate::runtime::tools::federation::register_tools(&mut registry);
     crate::runtime::tools::promotion::register_tools(&mut registry);
     crate::runtime::tools::scheduler::register_tools(&mut registry);
     crate::runtime::tools::skill::register_tools(&mut registry);

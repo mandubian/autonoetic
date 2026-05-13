@@ -45,6 +45,8 @@ fn make_critical_request(created_at: &str) -> ApprovalRequest {
         similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
     }
 }
 
@@ -74,6 +76,8 @@ fn make_standard_request() -> ApprovalRequest {
         similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
     }
 }
 

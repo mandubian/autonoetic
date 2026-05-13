@@ -286,32 +286,38 @@ After all roles complete, call `promotion_query({artifact_id})` to collect all r
 
 **Step 3: Escalate to operator**
 
-Bundle all evaluation reports and escalate to the operator:
+Bundle all evaluation reports and escalate to the operator using `federation.escalate`:
 
 ```json
-session_escalate({
-  "target": "human",
-  "urgency": "normal",
-  "payload": {
-    "escalation_type": "promotion_review",
-    "artifact_ref": "<artifact_ref>",
-    "evaluation_reports": [
-      {"role": "auditor", "pass": true, "findings": [...], "summary": "..."},
-      {"role": "static_evaluator", "pass": true, "findings": [...], "summary": "..."},
-      {"role": "unit_test_runner", "pass": true, "findings": [...], "summary": "..."}
-    ],
-    "suggested_actions": ["promote", "run_sealed_eval", "fix", "reject"]
-  }
+federation.escalate({
+  "artifact_id": "<artifact_ref>",
+  "agent_id": "<agent_id>",
+  "revision_id": "<revision_id>",
+  "root_session_id": "<root_session_id>",
+  "role_verdicts": [
+    {"role": "auditor", "agent_id": "auditor.default", "passed": true, "findings_summary": "...", "recorded_at": "..."},
+    {"role": "static_evaluator", "agent_id": "static_evaluator.default", "passed": true, "findings_summary": "...", "recorded_at": "..."},
+    {"role": "unit_test_runner", "agent_id": "unit_test_runner.default", "passed": true, "findings_summary": "...", "recorded_at": "..."}
+  ],
+  "planner_synthesis": "All three federation roles passed. Recommend promotion."
 })
 ```
 
-**Step 4: Handle operator decision**
-
-The operator reviews and responds:
-- **Promote**: proceed to `specialized_builder.default` for install
-- **Run sealed eval**: spawn `sealed_evaluator.default` with the artifact and optionally a `fixture_set_ref`, collect its verdict, re-escalate to operator
+The operator will review and respond. Check `knowledge_store` for the operator's decision (the gateway emits a notification when the escalation is resolved). The operator may:
+- **Approve**: proceed to `specialized_builder.default` for install
+- **Request sealed eval**: spawn `sealed_evaluator.default`, collect verdict, re-escalate
 - **Fix**: route findings to `coder.default`, re-run federation after fixes
 - **Reject**: report to user, do NOT promote
+
+**Note**: Do NOT use `session.escalate` for federation reviews — use `federation.escalate`. The `session.escalate` tool is for when the agent itself is stuck and needs human guidance, not for structured promotion review.
+
+**Step 4: Handle operator decision**
+
+After escalating, wait for the operator's response. The gateway resolves the escalation status when the operator decides. Check `knowledge_recall` or `workflow_state` for the resolution. The operator may:
+- **Approve** → proceed to `specialized_builder.default` for install
+- **Request sealed eval** → spawn `sealed_evaluator.default` with the artifact and optionally a `fixture_set_ref`, collect its verdict, re-escalate to operator
+- **Fix** → route findings to `coder.default`, re-run federation after fixes
+- **Reject** → report to user, do NOT promote
 
 **Step 5: Sealed evaluation (operator-requested)**
 

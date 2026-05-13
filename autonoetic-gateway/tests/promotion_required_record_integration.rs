@@ -87,7 +87,7 @@ async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<(
 
     assert!(
         err.to_string()
-            .contains("completed without a matching promotion.record within"),
+            .contains("completed without a matching promotion_record within"),
         "unexpected error: {err}"
     );
 

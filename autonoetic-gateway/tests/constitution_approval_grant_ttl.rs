@@ -231,6 +231,8 @@ fn make_sandbox_exec_request(
         similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
     }
 }
 

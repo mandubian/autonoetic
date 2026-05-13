@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 32;
+const SCHEMA_VERSION_LATEST: i64 = 33;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -517,6 +517,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
 
     apply_gate_messages_v31(conn)?;
     apply_approval_code_excerpts_v32(conn)?;
+    apply_escalations_v33(conn)?;
 
     Ok(())
 }
@@ -1780,6 +1781,43 @@ fn apply_approval_code_excerpts_v32(conn: &mut Connection) -> Result<()> {
         params![
             32_i64,
             "approval_code_excerpts",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_escalations_v33(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 33 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS escalations (
+            escalation_id TEXT PRIMARY KEY,
+            artifact_id TEXT NOT NULL,
+            artifact_digest TEXT,
+            agent_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            role_verdicts TEXT NOT NULL,
+            planner_synthesis TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            root_session_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            33_i64,
+            "escalations_table",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

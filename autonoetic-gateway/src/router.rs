@@ -1253,6 +1253,124 @@ impl JsonRpcRouter {
                 }
             }
 
+            "admin.escalation_list" => {
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for admin.escalation_list",
+                    );
+                };
+                match store.list_pending_escalations() {
+                    Ok(escalations) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "escalations": escalations,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to list escalations: {}", e),
+                    ),
+                }
+            }
+
+            "admin.escalation_inspect" => {
+                #[derive(Deserialize)]
+                struct InspectParams {
+                    escalation_id: String,
+                }
+                let params: InspectParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for admin.escalation_inspect: {}", e),
+                        );
+                    }
+                };
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for admin.escalation_inspect",
+                    );
+                };
+                match store.get_escalation(&params.escalation_id) {
+                    Ok(Some(escalation)) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "escalation": escalation,
+                        }),
+                    ),
+                    Ok(None) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Escalation '{}' not found", params.escalation_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to inspect escalation: {}", e),
+                    ),
+                }
+            }
+
+            "admin.escalation_resolve" => {
+                #[derive(Deserialize)]
+                struct ResolveParams {
+                    escalation_id: String,
+                    status: String,
+                }
+                let params: ResolveParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for admin.escalation_resolve: {}", e),
+                        );
+                    }
+                };
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for admin.escalation_resolve",
+                    );
+                };
+                let status = match params.status.as_str() {
+                    "approved" => autonoetic_types::escalation::EscalationStatus::Approved,
+                    "rejected" => autonoetic_types::escalation::EscalationStatus::Rejected,
+                    other => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid status '{}'; expected 'approved' or 'rejected'", other),
+                        );
+                    }
+                };
+                match store.resolve_escalation(&params.escalation_id, status) {
+                    Ok(()) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "escalation_id": params.escalation_id,
+                            "status": params.status,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to resolve escalation: {}", e),
+                    ),
+                }
+            }
+
             _ => JsonRpcResponse::error(req.id, -32601, "Method not found"),
         }
     }

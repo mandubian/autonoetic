@@ -78,6 +78,8 @@ fn r_2_14_user_ask_refused_when_pending_approval_exists() -> anyhow::Result<()> 
         similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
     };
     store.create_approval(&mut pending)?;
 

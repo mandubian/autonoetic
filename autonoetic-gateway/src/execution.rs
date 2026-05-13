@@ -450,6 +450,7 @@ impl std::fmt::Debug for ClarificationOutcome {
     }
 }
 
+#[derive(Debug)]
 pub struct SpawnResult {
     pub agent_id: String,
     pub session_id: String,

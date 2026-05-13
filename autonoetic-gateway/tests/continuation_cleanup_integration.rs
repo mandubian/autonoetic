@@ -50,6 +50,8 @@ fn seed_approval(store: &GatewayStore, task_id: &str) -> String {
         similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
     };
     store.create_approval(&mut request).unwrap();
     request_id
