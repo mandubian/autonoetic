@@ -163,6 +163,8 @@ pub enum Commands {
     Security(SecurityArgs),
     /// Recording sessions and fixture set management
     Recording(RecordingArgs),
+    /// Evaluate agents against recorded fixture sets
+    Eval(EvalArgs),
 }
 
 /// Arguments for the all-in-one `run` command.
@@ -1396,6 +1398,39 @@ pub enum RecordingCommands {
     Cancel {
         /// Recording session ID (rs_...).
         session_id: String,
+    },
+}
+
+/// Arguments for `autonoetic eval` subcommand.
+#[derive(Args)]
+pub struct EvalArgs {
+    #[command(subcommand)]
+    pub command: EvalCommands,
+}
+
+#[derive(Subcommand)]
+pub enum EvalCommands {
+    /// Run sealed evaluation against a recorded fixture set.
+    ///
+    /// Pre-populates the artifact's fixture directory from a recorded
+    /// fixture set, then spawns the sealed evaluator to run
+    /// deterministically against the recorded traffic.
+    Sealed {
+        /// Artifact ref to evaluate (ar_xxxxxxxx).
+        #[arg(long)]
+        artifact_ref: String,
+        /// Fixture set ID to replay (fs_xxxxxxxx).
+        #[arg(long)]
+        fixture_set: String,
+        /// Evaluator agent ID (default: sealed_evaluator.default).
+        #[arg(long, default_value = "sealed_evaluator.default")]
+        agent_id: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Max evaluation duration in seconds.
+        #[arg(long, default_value = "300")]
+        timeout: u64,
     },
 }
 

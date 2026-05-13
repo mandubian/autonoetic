@@ -487,6 +487,24 @@ async fn main() -> anyhow::Result<()> {
                 )?;
             }
         },
+        Commands::Eval(args) => match &args.command {
+            cli::common::EvalCommands::Sealed {
+                artifact_ref,
+                fixture_set,
+                agent_id,
+                json,
+                timeout,
+            } => {
+                cli::eval::handle_eval_sealed(
+                    &config_path,
+                    artifact_ref,
+                    fixture_set,
+                    agent_id,
+                    *json,
+                    *timeout,
+                )?;
+            }
+        },
         Commands::Recording(args) => match &args.command {
             cli::common::RecordingCommands::List { agent, limit, json } => {
                 cli::recording::handle_recording_list(&config_path, agent.as_deref(), *limit, *json)?;
