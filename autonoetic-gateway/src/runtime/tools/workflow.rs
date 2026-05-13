@@ -858,6 +858,9 @@ impl NativeTool for WorkflowStateTool {
             "has_coder_artifact": latest_artifact_by_role.contains_key("coder"),
             "has_evaluator_result": latest_artifact_by_role.contains_key("evaluator"),
             "has_auditor_result": latest_artifact_by_role.contains_key("auditor"),
+            "has_static_evaluator_result": latest_artifact_by_role.contains_key("static_evaluator"),
+            "has_unit_test_runner_result": latest_artifact_by_role.contains_key("unit_test_runner"),
+            "has_sealed_evaluator_result": latest_artifact_by_role.contains_key("sealed_evaluator"),
             "pending_approvals": !pending_approvals.is_empty(),
             "active_tasks_running": !active_tasks.is_empty(),
         });
@@ -876,10 +879,16 @@ impl NativeTool for WorkflowStateTool {
                 "approval_pending — do not spawn new tasks, wait for approval"
             } else if !active_tasks.is_empty() {
                 "tasks_running — wait for completion or proceed with partial results"
-            } else if latest_artifact_by_role.contains_key("evaluator") && latest_artifact_by_role.contains_key("auditor") {
+            } else if (latest_artifact_by_role.contains_key("evaluator") || latest_artifact_by_role.contains_key("sealed_evaluator"))
+                && latest_artifact_by_role.contains_key("auditor")
+            {
                 "evaluation_complete — proceed to specialized_builder or coder iteration"
+            } else if latest_artifact_by_role.contains_key("static_evaluator")
+                && latest_artifact_by_role.contains_key("auditor")
+            {
+                "federation_complete — collect all verdicts and escalate to operator"
             } else if latest_artifact_by_role.contains_key("coder") && !latest_artifact_by_role.contains_key("evaluator") {
-                "coder_done — proceed to evaluator/auditor"
+                "coder_done — proceed to evaluator/auditor or federation"
             } else if !completed_tasks.is_empty() {
                 "some_tasks_done — check completed_tasks for next step"
             } else {

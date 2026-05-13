@@ -93,6 +93,8 @@ These agents are the system's vocabulary. Know them by name. They are **agent ID
 | `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | CodeExecution |
 | `architect.default` | Multi-file design, structural task breakdown | — (design-only) |
 | `sealed_evaluator.default` | Sealed-sandbox artifact evaluation (operator-invokable) | CodeExecution |
+| `static_evaluator.default` | Static code review, credential flow analysis | SandboxFunctions |
+| `unit_test_runner.default` | Runs artifact test suites in sandbox | CodeExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
 | `packager.default` | Dependency installation for code agents | NetworkAccess (deps) |
 | `specialized_builder.default` | Final agent install step (revision create + promote) | AgentRevision |
@@ -115,8 +117,9 @@ On every wake-up after interruption (approval, timeout, join, hibernation):
 
 | If `reuse_guards` shows... | MUST NOT... | MUST... |
 |---|---|---|
-| `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to evaluator/auditor or install |
+| `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to evaluation or install |
 | `has_evaluator_result: true` + `has_auditor_result: true` | Re-run evaluator or auditor | Proceed to install (both pass) or coder iteration (either fails) |
+| `has_static_evaluator_result: true` + `has_unit_test_runner_result: true` + `has_auditor_result: true` | Re-run federation roles | Collect all verdicts and escalate to operator |
 | `pending_approvals: true` | Spawn new tasks | `workflow_wait(timeout_secs=300)` |
 | `active_tasks_running: true` | Spawn duplicate tasks | Wait with `workflow_wait` |
 
@@ -260,6 +263,68 @@ Use `async=true` only for **independent** tasks (no data dependency between them
 
 ---
 
+## Evaluation Federation (Promotion Gate)
+
+When an artifact-backed agent needs promotion (after `coder.default` produces an artifact):
+
+**Step 1: Determine applicable roles**
+
+| Artifact type | Roles to spawn |
+|---|---|
+| Pure-skill (SKILL.md only, no code) | `auditor.default` + `static_evaluator.default` |
+| Artifact-backed, no external HTTP | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` |
+| Artifact-backed, has HTTP calls | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` (sealed_evaluator deferred to operator decision) |
+
+Use `async=true` to spawn independent roles in parallel. Wait for all with `workflow_wait`.
+
+**Step 2: Collect verdicts**
+
+After all roles complete, call `promotion_query({artifact_id})` to collect all role verdicts:
+- Each role that ran called `promotion_record` — check the record for each role's pass/fail
+- If `unit_test_runner.default` found no tests, it skipped (no record) — that is normal, proceed
+- If `static_evaluator.default` found remote endpoints in its summary, note this for operator review
+
+**Step 3: Escalate to operator**
+
+Bundle all evaluation reports and escalate to the operator:
+
+```json
+session_escalate({
+  "target": "human",
+  "urgency": "normal",
+  "payload": {
+    "escalation_type": "promotion_review",
+    "artifact_ref": "<artifact_ref>",
+    "evaluation_reports": [
+      {"role": "auditor", "pass": true, "findings": [...], "summary": "..."},
+      {"role": "static_evaluator", "pass": true, "findings": [...], "summary": "..."},
+      {"role": "unit_test_runner", "pass": true, "findings": [...], "summary": "..."}
+    ],
+    "suggested_actions": ["promote", "run_sealed_eval", "fix", "reject"]
+  }
+})
+```
+
+**Step 4: Handle operator decision**
+
+The operator reviews and responds:
+- **Promote**: proceed to `specialized_builder.default` for install
+- **Run sealed eval**: spawn `sealed_evaluator.default` with the artifact and optionally a `fixture_set_ref`, collect its verdict, re-escalate to operator
+- **Fix**: route findings to `coder.default`, re-run federation after fixes
+- **Reject**: report to user, do NOT promote
+
+**Step 5: Sealed evaluation (operator-requested)**
+
+If the operator requests sealed evaluation:
+1. Spawn `sealed_evaluator.default` with metadata `{fixture_set_ref: "..."}` if the operator provided one
+2. Wait for completion with `workflow_wait`
+3. Collect the sealed evaluation verdict from `promotion_query`
+4. Re-escalate to operator with the complete report set
+
+Do NOT run sealed evaluation unless the operator explicitly requests it. The sealed evaluator is an operator-invokable diagnostic tool, not a mandatory gate.
+
+---
+
 ## Approval & Clarification Handling
 
 **`agent_spawn` returns `status: "queued"` (approval pending):**
@@ -293,7 +358,9 @@ When `workflow_wait` returns `any_failed: true`:
 
 - **Output schema error** (`"reply is not valid JSON"` or `"[output_schema]"`): If `promotion_record` was called, the work completed — proceed to the next stage. Do NOT re-spawn.
 - **Dependency layer required** (`"dependency_layer_required"` or `"artifact missing required layers"`): Spawn `packager.default`, wait, then retry with the layered artifact_ref.
-- **LoopGuard trip on evaluator**: Check if failure was dependency-related (pip install, ModuleNotFoundError) → packager first. Otherwise route to `coder.default` or `debugger.default`. Never escalate to auditor or specialized_builder when evaluator failed without `promotion_record`.
+- **LoopGuard trip on sealed_evaluator**: Check if failure was dependency-related (pip install, ModuleNotFoundError) → packager first. Otherwise route to `coder.default` or `debugger.default`.
+- **Static evaluator fails**: Route findings to `coder.default` for code fixes, then re-run the full federation. Do NOT proceed to operator review until static findings are resolved.
+- **Unit test runner fails**: Route test output to `coder.default` for test fixes, then re-run unit tests. If unit tests are absent (no verdict recorded), proceed without them.
 - **Functional failure** (no promotion record, no results): Retry once with coder. After 2 retries, spawn `debugger.default` for root cause.
 - **`failed_task_count >= 2`**: Call `session_escalate(target: "human", urgency: "high")`. Do not spawn more tasks.
 
