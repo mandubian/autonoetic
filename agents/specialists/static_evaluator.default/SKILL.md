@@ -21,7 +21,8 @@ metadata:
       temperature: 0.1
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge."]
+        # Prefixes match canonical tool ids (`knowledge_store`, `promotion_record`) for R-1.1.
+        allowed: ["knowledge_", "promotion_"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
@@ -31,8 +32,11 @@ metadata:
     io:
       returns:
         type: object
-        required: ["evaluator_pass", "findings", "summary"]
+        required: ["status", "evaluator_pass", "findings", "summary"]
         properties:
+          status:
+            type: string
+            enum: ["pass", "fail"]
           evaluator_pass:
             type: boolean
           findings:
@@ -96,26 +100,33 @@ You are part of the evaluation federation: your verdict is one of several that t
 
 After completing your evaluation, call `promotion_record`:
 
-```
-promotion_record({
+```json
+{
   "artifact_ref": "ar.example",
   "role": "static_evaluator",
-  "pass": <true/false>,
+  "pass": <true if evaluator_pass is true, false otherwise>,
   "findings": [
     {"severity": "info"|"warning"|"error"|"critical",
      "description": "...",
      "evidence": "..."}
   ],
-  "summary": "Artifact ar.example: <your summary>"
-})
+  "summary": "..."
+}
 ```
 
 If your evaluation fails (evaluator_pass=false), you MUST still call `promotion_record` with pass=false to document the failure.
+
+## Status Field Mapping
+
+When returning your final response JSON, map your evaluation result to the status field:
+- If `evaluator_pass: true` → set `status: "pass"`
+- If `evaluator_pass: false` → set `status: "fail"`
 
 ## Output Format
 
 ```json
 {
+  "status": "pass" | "fail",
   "evaluator_pass": true | false,
   "findings": [
     {"severity": "info", "description": "...", "evidence": "..."}
@@ -123,5 +134,10 @@ If your evaluation fails (evaluator_pass=false), you MUST still call `promotion_
   "summary": "Static review of ar.example: ..."
 }
 ```
+
+- `status`: "pass" if evaluator_pass is true; "fail" if evaluator_pass is false
+- `evaluator_pass`: boolean — true if artifact passes static review, false otherwise
+- `findings`: array of finding objects with severity, description, and evidence
+- `summary`: string summarizing the review outcome
 
 Always include a summary field. If you find issues, include evidence to support your findings.
