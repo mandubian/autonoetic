@@ -184,6 +184,10 @@ async fn main() -> anyhow::Result<()> {
                 interactive,
                 headless,
                 response_validation,
+                record_network,
+                recording_duration,
+                recording_max_requests,
+                recording_max_bytes,
             } => {
                 cli::agent::handle_agent_run(
                     &config_path,
@@ -192,6 +196,10 @@ async fn main() -> anyhow::Result<()> {
                     *interactive,
                     *headless,
                     *response_validation,
+                    *record_network,
+                    *recording_duration,
+                    *recording_max_requests,
+                    *recording_max_bytes,
                 )
                 .await?;
             }
@@ -477,6 +485,20 @@ async fn main() -> anyhow::Result<()> {
                     pattern_id,
                     notes.as_deref(),
                 )?;
+            }
+        },
+        Commands::Recording(args) => match &args.command {
+            cli::common::RecordingCommands::List { agent, limit, json } => {
+                cli::recording::handle_recording_list(&config_path, agent.as_deref(), *limit, *json)?;
+            }
+            cli::common::RecordingCommands::Inspect { session_id, json } => {
+                cli::recording::handle_recording_inspect(&config_path, session_id, *json)?;
+            }
+            cli::common::RecordingCommands::Delete { session_id } => {
+                cli::recording::handle_recording_delete(&config_path, session_id)?;
+            }
+            cli::common::RecordingCommands::Cancel { session_id } => {
+                cli::recording::handle_recording_cancel(&config_path, session_id)?;
             }
         },
     }

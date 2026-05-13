@@ -161,6 +161,8 @@ pub enum Commands {
     Mcp(McpArgs),
     /// Security sentinel — status, findings, and triage
     Security(SecurityArgs),
+    /// Recording sessions and fixture set management
+    Recording(RecordingArgs),
 }
 
 /// Arguments for the all-in-one `run` command.
@@ -560,6 +562,18 @@ pub enum AgentCommands {
         /// Override response validation mode for this local run.
         #[arg(long, value_enum)]
         response_validation: Option<ResponseValidationMode>,
+        /// Record all HTTP traffic as fixtures (Recording mode).
+        #[arg(long)]
+        record_network: bool,
+        /// Max recording duration in seconds (default: 600).
+        #[arg(long)]
+        recording_duration: Option<u64>,
+        /// Max requests to capture (default: 1000).
+        #[arg(long)]
+        recording_max_requests: Option<u64>,
+        /// Max total fixture bytes (default: 50MB).
+        #[arg(long)]
+        recording_max_bytes: Option<u64>,
     },
     /// Lists all local Agents registered with the Gateway
     List,
@@ -1341,6 +1355,47 @@ pub enum SecurityCommands {
         /// Optional operator notes.
         #[arg(long)]
         notes: Option<String>,
+    },
+}
+
+/// Arguments for `autonoetic recording` subcommand.
+#[derive(Args)]
+pub struct RecordingArgs {
+    #[command(subcommand)]
+    pub command: RecordingCommands,
+}
+
+#[derive(Subcommand)]
+pub enum RecordingCommands {
+    /// List recording sessions.
+    List {
+        /// Filter by agent ID.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Maximum results (default: 20).
+        #[arg(long, default_value = "20")]
+        limit: i64,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a recording session.
+    Inspect {
+        /// Recording session ID (rs_...).
+        session_id: String,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a recording session and its fixture set.
+    Delete {
+        /// Recording session ID (rs_...).
+        session_id: String,
+    },
+    /// Cancel a running recording session.
+    Cancel {
+        /// Recording session ID (rs_...).
+        session_id: String,
     },
 }
 

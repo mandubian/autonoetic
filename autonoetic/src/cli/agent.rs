@@ -1239,10 +1239,14 @@ pub async fn handle_agent_run(
     interactive: bool,
     headless: bool,
     response_validation: Option<super::common::ResponseValidationMode>,
+    record_network: bool,
+    recording_duration: Option<u64>,
+    recording_max_requests: Option<u64>,
+    recording_max_bytes: Option<u64>,
 ) -> anyhow::Result<()> {
     info!(
-        "Running Agent {} (interactive: {}, headless: {})",
-        agent_id, interactive, headless
+        "Running Agent {} (interactive: {}, headless: {}, record_network: {})",
+        agent_id, interactive, headless, record_network
     );
     if let Some(msg) = message {
         info!("Kickoff message: {}", msg);
@@ -1254,6 +1258,10 @@ pub async fn handle_agent_run(
         interactive,
         headless,
         response_validation,
+        record_network,
+        recording_duration,
+        recording_max_requests,
+        recording_max_bytes,
     )
     .await
 }
@@ -1265,15 +1273,68 @@ pub async fn run_agent_with_runtime(
     interactive: bool,
     headless: bool,
     response_validation: Option<super::common::ResponseValidationMode>,
+    record_network: bool,
+    recording_duration: Option<u64>,
+    recording_max_requests: Option<u64>,
+    recording_max_bytes: Option<u64>,
 ) -> anyhow::Result<()> {
     let mut loaded_config = autonoetic_gateway::config::load_config(config_path)?;
     super::common::apply_response_validation_override(&mut loaded_config, response_validation);
+
+    if record_network {
+        let gateway_dir = loaded_config.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir)?;
+        let store = Arc::new(
+            autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+        );
+
+        let session_id = format!("rs_{:x}", uuid::Uuid::new_v4().as_u128());
+        let staging_dir = gateway_dir.join("recordings").join(&session_id).join("fixtures");
+        std::fs::create_dir_all(&staging_dir)?;
+
+        let recording_session = autonoetic_types::recording::RecordingSession {
+            session_id,
+            agent_id: agent_id.to_string(),
+            artifact_id: String::new(),
+            revision_id: String::new(),
+            root_session_id: format!("root-{}", uuid::Uuid::new_v4().as_simple()),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            stopped_at: None,
+            duration_secs: recording_duration.map(|d| d as i64),
+            max_requests: recording_max_requests.map(|r| r as i64),
+            max_bytes: recording_max_bytes.map(|b| b as i64),
+            request_count: 0,
+            total_bytes: 0,
+            status: autonoetic_types::recording::RecordingStatus::Active,
+            fixture_set_id: None,
+            created_by: "cli".to_string(),
+        };
+        store.create_recording_session(&recording_session)?;
+
+        eprintln!(
+            "  Recording session {} started. Fixtures will be written to: {}",
+            recording_session.session_id,
+            staging_dir.display()
+        );
+    }
+
     let gateway_config = Arc::new(loaded_config);
     let repo = autonoetic_gateway::AgentRepository::from_config(&gateway_config);
     let loaded = repo.get_sync(agent_id)?;
     let manifest = loaded.manifest;
     let instructions = loaded.instructions;
     let agent_dir = loaded.dir;
+
+    // Override sandbox_network to Recording when --record-network is active.
+    let manifest = if record_network {
+        autonoetic_types::agent::AgentManifest {
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::Recording,
+            ..manifest
+        }
+    } else {
+        manifest
+    };
+
     let llm_config = manifest
         .llm_config
         .clone()
