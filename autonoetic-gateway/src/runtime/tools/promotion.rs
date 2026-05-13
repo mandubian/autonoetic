@@ -19,7 +19,11 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 fn is_promotion_agent(manifest: &AgentManifest) -> bool {
     matches!(
         manifest.agent.id.as_str(),
-        "evaluator.default" | "sealed_evaluator.default" | "auditor.default"
+        "evaluator.default"
+            | "sealed_evaluator.default"
+            | "auditor.default"
+            | "static_evaluator.default"
+            | "unit_test_runner.default"
     )
 }
 
