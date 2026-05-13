@@ -193,6 +193,9 @@ impl GatewayServer {
         )?;
         let background_scheduler =
             crate::scheduler::start_background_scheduler(jsonrpc_router.execution_service());
+        let fast_scheduler = crate::scheduler::fast_scheduler::start_fast_scheduler(
+            jsonrpc_router.execution_service(),
+        );
         let eval_runner =
             crate::scheduler::eval_runner::start_eval_runner(jsonrpc_router.execution_service());
 
@@ -250,6 +253,7 @@ impl GatewayServer {
             ),
             http_server,
             background_scheduler,
+            fast_scheduler,
             eval_runner,
         )?;
         Ok(())

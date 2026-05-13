@@ -60,6 +60,19 @@ max_background_due_per_tick: 32
 # Guardrail: sub-10s schedules are allowed only for script-mode target agents.
 # For tight schedules (<5s), reduce background_tick_secs to 1 for better precision.
 
+# ── Fast Scheduler Sidecar ────────────────────────────────────────────
+# Parallel low-latency loop for interval-style jobs (every N seconds).
+# Disabled by default. DB claim-and-advance remains the source of truth
+# so the canonical scheduler and the fast sidecar cannot double-dispatch.
+# Only interval-mode schedules are eligible; cron-style schedules stay
+# on the canonical loop. Sub-10s intervals still require script-mode
+# targets (defense-in-depth re-check at dispatch).
+# fast_scheduler:
+#   enabled: false
+#   tick_millis: 200          # How often the fast loop wakes up (ms)
+#   window_secs: 2            # Look-ahead window for "due-soon" jobs
+#   max_due_per_tick: 64      # Bounded work per tick
+
 # ── Response Validation & Repair ──────────────────────────────────────
 # When enabled, the gateway validates agent outputs against declared constraints.
 # repair_enabled allows auto-repair only for agents that explicitly opt in
