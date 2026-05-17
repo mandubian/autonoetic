@@ -16,7 +16,13 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(PromotionQueryTool));
 }
 
-fn is_promotion_agent(manifest: &AgentManifest) -> bool {
+/// Agents that may invoke [`PromotionRecordTool`] (when the tool surface includes it).
+///
+/// Used by [`crate::runtime::tool_dispatch::child_tool_tier_filter_for_manifest`] to set
+/// [`crate::runtime::tools::ToolTierFilter::allow_promotion_record_without_specialized_tier`]
+/// for delegated sessions: `promotion_record` is a Specialized-tier tool, and child
+/// sessions would otherwise omit the entire Specialized tier.
+pub fn manifest_may_record_promotion_verdicts(manifest: &AgentManifest) -> bool {
     matches!(
         manifest.agent.id.as_str(),
         "sealed_evaluator.default"
@@ -24,6 +30,10 @@ fn is_promotion_agent(manifest: &AgentManifest) -> bool {
             | "static_evaluator.default"
             | "unit_test_runner.default"
     )
+}
+
+fn is_promotion_agent(manifest: &AgentManifest) -> bool {
+    manifest_may_record_promotion_verdicts(manifest)
 }
 
 pub struct PromotionRecordTool;

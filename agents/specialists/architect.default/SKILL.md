@@ -27,6 +27,35 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [design_summary]
+        properties:
+          design_summary:
+            type: string
+          interfaces:
+            type: array
+            items:
+              type: object
+          sub_tasks:
+            type: array
+            items:
+              type: object
+          data_flow:
+            type: string
+          trade_offs:
+            type: array
+            items:
+              type: object
+          risks:
+            type: array
+            items:
+              type: object
+          execution_order:
+            type: array
+            items:
+              type: string
 ---
 # Architect
 

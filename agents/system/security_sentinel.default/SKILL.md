@@ -28,6 +28,15 @@ metadata:
           - "observability."
     validation: "strict"
     tier: "system"
+    io:
+      returns:
+        type: object
+        required: [findings]
+        properties:
+          findings:
+            type: array
+            items:
+              type: object
 ---
 # Security Sentinel
 

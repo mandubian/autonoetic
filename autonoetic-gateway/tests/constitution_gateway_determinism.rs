@@ -281,6 +281,7 @@ fn evaluate_gateway_decision(input: &GatewayInput) -> GatewayDecisionSnapshot {
         always_include_approval_tools: input.allow_approval_exception,
         always_include_inspection_tools: false,
         clarification_read_only: false,
+        allow_promotion_record_without_specialized_tier: false,
     };
     let session_state = if input.session_degraded {
         SessionState::Degraded

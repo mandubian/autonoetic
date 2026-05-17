@@ -11,6 +11,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Data Flow](#data-flow)
 - [Security Model](#security-model)
 - [Execution Modes](#execution-modes)
+- [Agent I/O Schemas](#agent-io-schemas)
 - [Memory Architecture](#memory-architecture)
 - [Revision & Activation Model](#revision--activation-model)
 - [Content Storage](#content-storage)
@@ -338,6 +339,43 @@ Input → Script → Output → Return
 | Data transforms | `script` | No ambiguity |
 | Code review | `reasoning` | Needs judgment |
 | Research | `reasoning` | Requires synthesis |
+
+---
+
+## Agent I/O Schemas
+
+Agents declare optional `io.accepts` (input) and `io.returns` (output) JSON Schema fragments in their SKILL.md frontmatter. The gateway enforces these mechanically — it never auto-generates, infers, or modifies schemas.
+
+### Enforcement behavior
+
+| Schema present? | Ingress (`agent.spawn`) | Egress (agent reply) |
+|---|---|---|
+| `io.accepts` absent | Message passes through unvalidated | — |
+| `io.accepts` present | Validates caller's message; rejects with `expected_schema` + repair hint | — |
+| `io.returns` absent | — | No output validation (fail-open) |
+| `io.returns` present | — | Validates reply against schema; repair retry if enabled |
+
+### Design choices and rationale
+
+**Schema authorship is LLM-owned.** The gateway is a dumb enforcement layer — it stores and validates schemas verbatim, never creates them. Agent-factory and specialized_builder include `io` in their install intent delegation so newly created agents carry schemas from birth.
+
+**Asymmetric guidance: `io.returns` encouraged, `io.accepts` discouraged for reasoning agents.** Reasoning agents receive natural-language messages from the planner; over-constraining the input schema blocks valid callers with validation errors. Script agents with structured CLI arguments benefit from `io.accepts`.
+
+**Minimal-but-real schemas.** LLMs are unreliable at producing deterministic JSON shapes. The design mitigates this with three rules:
+
+1. **Only require what's always there.** Typically just `status: string` for semi-structured agents, or 2-3 fields for highly structured agents (evaluators, auditor). Never require fields that are sometimes absent.
+
+2. **Use broad types, not narrow ones.** `string` not `enum`, `object` not a specific sub-shape, `array` not `array<SpecificType>`. This avoids type mismatches without losing structural signal.
+
+3. **Extra properties are always allowed.** The schema declares the *minimum* contract, not the maximum. LLM-generated extra fields are harmless and expected.
+
+**Three schema tiers by agent output predictability:**
+
+| Tier | Schema shape | When to use | Examples |
+|---|---|---|---|
+| Structured | `required: [field1, field2]`, specific properties | Output is deterministic, always the same shape | Evaluator, auditor, sentinel, curator, discovery |
+| Semi-structured | `required: ["status"]`, optional properties | Output carries a status plus variable extras | Agent-factory, specialized_builder, coder, packager |
+| Variable | `{type: "object"}` with no required fields | Output is too context-dependent for any fixed fields | Planner, researcher, debugger, executor |
 
 ---
 

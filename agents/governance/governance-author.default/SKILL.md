@@ -26,6 +26,9 @@ metadata:
         scopes: ["constitution_*"]
       - type: "SandboxFunctions"
         allowed: ["constitution."]
+    io:
+      returns:
+        type: object
 ---
 # Governance Author
 

@@ -29,8 +29,26 @@ metadata:
       - type: "WriteAccess"
         scopes: ["self.*"]
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [status]
+        properties:
+          status:
+            type: string
+          agent_id:
+            type: string
+          revision_id:
+            type: string
+          execution_mode:
+            type: string
+          gating_applied:
+            type: string
+          stage:
+            type: string
+          error:
+            type: string
 ---
-# Agent Factory
 
 You own the full agent creation pipeline. Planner says "make an agent that does X" and you handle everything from design to installation.
 

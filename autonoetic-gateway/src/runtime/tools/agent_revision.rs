@@ -1681,6 +1681,14 @@ struct RevisionPromoteArgs {
     /// bypassed for this exact (agent_id, revision_id) pair.
     #[serde(default)]
     approval_ref: Option<String>,
+    /// Bypass the promotion safety governor (issue #25). Requires
+    /// `force_reason` and emits a `governor.override` causal event.
+    #[serde(default)]
+    force: Option<bool>,
+    /// Operator-supplied justification recorded with the override event.
+    /// Required when `force = true`.
+    #[serde(default)]
+    force_reason: Option<String>,
 }
 
 pub struct AgentRevisionPromoteTool;
@@ -1708,7 +1716,9 @@ impl NativeTool for AgentRevisionPromoteTool {
                     "revision_id": { "type": "string", "description": "Revision ID to promote (must be in candidate or ready status)" },
                     "reason": { "type": "string", "description": "Optional: human-readable reason for promotion" },
                     "required_eval_run_id": { "type": "string", "description": "Optional: if provided, promotion requires this eval run to have passed for the target revision" },
-                    "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (R++2). Pass it on retry to bypass the gate." }
+                    "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (R++2). Pass it on retry to bypass the gate." },
+                    "force": { "type": "boolean", "description": "Optional: bypass the promotion safety governor (issue #25). Requires `force_reason`; emits a `governor.override` causal event." },
+                    "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -2251,6 +2261,66 @@ impl NativeTool for AgentRevisionPromoteTool {
                         "repair_hint": "Run an eval suite against this revision, then retry promotion with `required_eval_run_id` pointing to the passed run.",
                     })
                     .to_string());
+                }
+            }
+        }
+
+        // Promotion safety governor (issue #25): velocity / flapping /
+        // eval-regression gates. Bypassed when `force = true` (and a
+        // `force_reason` is recorded for the audit trail). Sits between the
+        // protected-agent gate and the sentinel sweep so a rejection here
+        // avoids the cost of a sentinel pre-promotion run.
+        if let Some(cfg) = config {
+            let force_requested = args.force.unwrap_or(false);
+            if force_requested {
+                let reason = args.force_reason.as_deref().unwrap_or("").trim();
+                if reason.is_empty() {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "validation",
+                        "error": "governor_force_requires_reason",
+                        "message": "Passing `force: true` to bypass the promotion safety governor requires a non-empty `force_reason`.",
+                        "repair_hint": "Supply `force_reason` describing why the governor is being overridden (e.g. 'planned rollback re-run after operator review').",
+                    })
+                    .to_string());
+                }
+                if reason.len() > 512 {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "validation",
+                        "error": "governor_force_reason_too_long",
+                        "message": format!("`force_reason` must be at most 512 characters (got {}).", reason.len()),
+                        "repair_hint": "Shorten the override justification.",
+                    })
+                    .to_string());
+                }
+                if cfg.promotion_governor.enabled {
+                    crate::runtime::promotion_governor::emit_override_event(
+                        gateway_store.as_ref(),
+                        &manifest.agent.id,
+                        session_id,
+                        &args.agent_id,
+                        &args.revision_id,
+                        reason,
+                    );
+                }
+            } else if cfg.promotion_governor.enabled {
+                if let Some(rejection) = crate::runtime::promotion_governor::run_governor_checks(
+                    &cfg.promotion_governor,
+                    gateway_store.as_ref(),
+                    gateway_dir,
+                    &args.agent_id,
+                    &args.revision_id,
+                )? {
+                    crate::runtime::promotion_governor::emit_rejected_event(
+                        gateway_store.as_ref(),
+                        &manifest.agent.id,
+                        session_id,
+                        &args.agent_id,
+                        &args.revision_id,
+                        &rejection,
+                    );
+                    return Ok(rejection.to_tool_error().to_string());
                 }
             }
         }

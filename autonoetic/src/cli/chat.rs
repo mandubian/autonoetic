@@ -87,9 +87,20 @@ enum MessageRole {
 }
 
 #[derive(Debug, Clone)]
+enum RichCard {
+    UserInteraction(Box<UserInteraction>),
+    Approval {
+        request: Box<ApprovalRequest>,
+        detail: String,
+        enrichment: Vec<autonoetic_gateway::runtime::human_gate::GateMessage>,
+    },
+}
+
+#[derive(Debug, Clone)]
 struct ChatMessage {
     role: MessageRole,
     content: String,
+    rich_card: Option<RichCard>,
 }
 
 struct PendingRequest {
@@ -220,6 +231,12 @@ enum ChatOutbound {
     PolicyAuthor(String),
 }
 
+#[derive(Debug, Clone)]
+struct TaskLifecycle {
+    agent_suffix: String,
+    stages: Vec<&'static str>,
+}
+
 struct App {
     messages: Vec<ChatMessage>,
     input: String,
@@ -255,6 +272,9 @@ struct App {
     /// Inline approvals: pending approval request IDs from workflow events and gateway store sync.
     /// Populated when `chat.inline_approvals` is enabled in config.
     pending_approval_ids: Vec<String>,
+    /// Action-type summaries for pending approvals, synced with pending_approval_ids.
+    /// Each entry is (request_id, action_type_or_summary_snippet).
+    pending_approval_summaries: Vec<(String, String)>,
     /// Whether inline approvals are enabled (from `config.chat.inline_approvals`).
     inline_approvals_enabled: bool,
     /// Store-derived approval IDs we already announced (avoid repeating every poll).
@@ -269,6 +289,8 @@ struct App {
     gate_history_approvals: Vec<String>,
     /// Gate history: resolved user interactions for this session tree.
     gate_history_interactions: Vec<String>,
+    /// Question text(s) for pending user interactions — shown in the right panel.
+    pending_question_summaries: Vec<String>,
     /// Submitted user lines, newest last — for ↑/↓ recall in the prompt.
     prompt_history: Vec<String>,
     /// When set, the input shows `prompt_history[len - 1 - k]` (`k == 0` is the most recent submission).
@@ -283,6 +305,8 @@ struct App {
     /// Synthetic pending IDs added after inline approval so the spinner shows
     /// until the scheduler picks up the Runnable task.
     post_approval_pending_ids: Vec<u64>,
+    task_lifecycles: HashMap<String, TaskLifecycle>,
+    task_lifecycle_msg_idx: HashMap<String, usize>,
 }
 
 impl App {
@@ -317,19 +341,23 @@ impl App {
             // Safe clipboard initialization - arboard can panic on headless/SSH systems
             clipboard: std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None),
             pending_approval_ids: Vec::new(),
+            pending_approval_summaries: Vec::new(),
             inline_approvals_enabled: false,
             announced_store_approval_ids: HashSet::new(),
             gateway_connected: false,
             seen_causal_policy_event_ids: HashSet::new(),
             policy_causal_pane: Vec::new(),
-        gate_history_approvals: Vec::new(),
-        gate_history_interactions: Vec::new(),
+            gate_history_approvals: Vec::new(),
+            gate_history_interactions: Vec::new(),
+            pending_question_summaries: Vec::new(),
             prompt_history: Vec::new(),
             prompt_history_scroll_back: None,
             prompt_history_draft: None,
             pending_prompt: None,
             last_llm_context: None,
             post_approval_pending_ids: Vec::new(),
+            task_lifecycles: HashMap::new(),
+            task_lifecycle_msg_idx: HashMap::new(),
         }
     }
 
@@ -416,7 +444,22 @@ impl App {
     }
 
     fn add_message(&mut self, role: MessageRole, content: String) {
-        self.messages.push(ChatMessage { role, content });
+        self.messages.push(ChatMessage {
+            role,
+            content,
+            rich_card: None,
+        });
+        if self.follow_output {
+            self.scroll_offset = self.last_max_scroll_offset;
+        }
+    }
+
+    fn add_rich_card(&mut self, role: MessageRole, fallback: String, card: RichCard) {
+        self.messages.push(ChatMessage {
+            role,
+            content: fallback,
+            rich_card: Some(card),
+        });
         if self.follow_output {
             self.scroll_offset = self.last_max_scroll_offset;
         }
@@ -946,6 +989,17 @@ fn refresh_session_snapshot(
             app.session_overview.latest_signal.clone(),
         ) {
             app.session_overview = snapshot.overview.clone();
+            app.pending_question_summaries = snapshot
+                .pending_interactions
+                .iter()
+                .map(|i| {
+                    if i.question.len() > 42 {
+                        format!("{}…", &i.question[..42])
+                    } else {
+                        i.question.clone()
+                    }
+                })
+                .collect();
             let _ = append_new_pending_user_interaction_prompts(app, &snapshot.pending_interactions);
         }
         let _ = merge_gateway_store_pending_approvals(app, config, store, &active_session_id);
@@ -1465,6 +1519,235 @@ fn format_user_interaction_prompt(interaction: &UserInteraction) -> String {
     lines.join("\n")
 }
 
+fn rich_box_top(header: &str, width: u16) -> Line<'static> {
+    let inner = width as usize;
+    let header_with_pad = if header.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", header)
+    };
+    let header_len = UnicodeWidthStr::width(header_with_pad.as_str());
+    let dash_count = inner.saturating_sub(4 + header_len).max(0);
+    let line_str = format!("╭─{}{}─╮", header_with_pad, "─".repeat(dash_count));
+    Line::from(Span::styled(line_str, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+}
+
+fn rich_box_mid(text: &str, width: u16) -> Line<'static> {
+    let inner = width as usize;
+    let padded = format!("│ {}", text);
+    let pad = inner.saturating_sub(UnicodeWidthStr::width(padded.as_str()) + 1).max(0);
+    let line_str = format!("{}{}│", padded, " ".repeat(pad));
+    Line::from(Span::raw(line_str))
+}
+
+fn rich_box_mid_styled(text: &str, width: u16, style: Style) -> Line<'static> {
+    let inner = width as usize;
+    let padded = format!("│ {}", text);
+    let pad = inner.saturating_sub(UnicodeWidthStr::width(padded.as_str()) + 1).max(0);
+    let line_str = format!("{}{}│", padded, " ".repeat(pad));
+    Line::from(Span::styled(line_str, style))
+}
+
+fn rich_box_separator(label: &str, width: u16) -> Line<'static> {
+    let inner = width as usize;
+    let label_with_pad = if label.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", label)
+    };
+    let label_len = UnicodeWidthStr::width(label_with_pad.as_str());
+    let dash_count = inner.saturating_sub(4 + label_len).max(0);
+    let line_str = format!("│{}{}{}│", "┈".repeat(2), label_with_pad, "┈".repeat(dash_count));
+    Line::from(Span::styled(line_str, Style::default().fg(Color::DarkGray)))
+}
+
+fn rich_box_empty(width: u16) -> Line<'static> {
+    rich_box_mid("", width)
+}
+
+fn rich_box_bottom(width: u16) -> Line<'static> {
+    let inner = width as usize;
+    let dash_count = inner.saturating_sub(2).max(0);
+    let line_str = format!("╰{}╯", "─".repeat(dash_count));
+    Line::from(Span::styled(line_str, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+}
+
+fn word_wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return text.lines().map(|l| l.to_string()).collect();
+    }
+    let mut result = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            result.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for word in line.split_whitespace() {
+            let word_width = UnicodeWidthStr::width(word);
+            let sep = if current.is_empty() { "" } else { " " };
+            let sep_width = if current.is_empty() { 0 } else { 1 };
+            if current_width + sep_width + word_width > max_width && !current.is_empty() {
+                result.push(std::mem::take(&mut current));
+                current = word.to_string();
+                current_width = word_width;
+            } else {
+                current.push_str(sep);
+                current.push_str(word);
+                current_width += sep_width + word_width;
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
+fn render_interaction_card(interaction: &UserInteraction, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let inner_width = width.saturating_sub(2).max(10) as usize;
+    let text_width = inner_width.saturating_sub(4).max(8);
+
+    let header = format!("🔔 {} ─ {}", interaction.kind, interaction.interaction_id);
+    lines.push(rich_box_top(&header, width));
+    lines.push(rich_box_empty(width));
+
+    let question_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    for wl in word_wrap_text(&interaction.question, text_width) {
+        lines.push(rich_box_mid_styled(&wl, width, question_style));
+    }
+
+    if let Some(ctx) = &interaction.context {
+        if !ctx.trim().is_empty() {
+            lines.push(rich_box_empty(width));
+            lines.push(rich_box_separator("context", width));
+            let ctx_style = Style::default().fg(Color::DarkGray);
+            for cl in ctx.lines() {
+                for wl in word_wrap_text(cl, text_width) {
+                    lines.push(rich_box_mid_styled(&wl, width, ctx_style));
+                }
+            }
+        }
+    }
+
+    if !interaction.options.is_empty() {
+        lines.push(rich_box_empty(width));
+        lines.push(rich_box_separator("options", width));
+        for (n, o) in interaction.options.iter().enumerate() {
+            let opt_text = format!("{}. {} → {}", n + 1, o.label, o.value);
+            for wl in word_wrap_text(&opt_text, text_width) {
+                lines.push(rich_box_mid_styled(&wl, width, Style::default().fg(Color::White)));
+            }
+        }
+    }
+
+    lines.push(rich_box_empty(width));
+    let hint_style = Style::default().fg(Color::Green);
+    lines.push(rich_box_mid_styled("💬 Type your answer below", width, hint_style));
+    lines.push(rich_box_empty(width));
+    lines.push(rich_box_bottom(width));
+
+    lines
+}
+
+fn render_approval_card(
+    req: &ApprovalRequest,
+    detail: &str,
+    enrichment: &[autonoetic_gateway::runtime::human_gate::GateMessage],
+    width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let inner_width = width.saturating_sub(2).max(10) as usize;
+    let text_width = inner_width.saturating_sub(4).max(8);
+
+    let action_label = action_summary(&req.action);
+    let header = format!("⏸ Approval Required ─ {} ─ {}", action_label, req.request_id);
+    lines.push(rich_box_top(&header, width));
+    lines.push(rich_box_empty(width));
+
+    let action_lines = format_scheduled_action_detail_lines(&req.action);
+    let action_style = Style::default().fg(Color::White);
+    for al in &action_lines {
+        for wl in word_wrap_text(al, text_width) {
+            lines.push(rich_box_mid_styled(&wl, width, action_style));
+        }
+    }
+
+    if let Some(r) = req.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        lines.push(rich_box_empty(width));
+        lines.push(rich_box_separator("reason", width));
+        let reason_style = Style::default().fg(Color::DarkGray);
+        for rl in r.lines() {
+            for wl in word_wrap_text(&clamp_chat_field(rl), text_width) {
+                lines.push(rich_box_mid_styled(&wl, width, reason_style));
+            }
+        }
+    }
+
+    if let Some(ev) = req.evidence_ref.as_deref().filter(|s| !s.is_empty()) {
+        lines.push(rich_box_empty(width));
+        let ev_text = format!("Evidence ref: {}", clamp_chat_field(ev));
+        for wl in word_wrap_text(&ev_text, text_width) {
+            lines.push(rich_box_mid_styled(&wl, width, Style::default().fg(Color::DarkGray)));
+        }
+    }
+
+    if !enrichment.is_empty() {
+        lines.push(rich_box_empty(width));
+        lines.push(rich_box_separator("context", width));
+        let ctx_style = Style::default().fg(Color::DarkGray);
+        for msg in enrichment {
+            for (i, ln) in msg.content.lines().enumerate() {
+                let text = if i == 0 {
+                    format!("[{}] {}", msg.sender, clamp_chat_field(ln))
+                } else {
+                    clamp_chat_field(ln)
+                };
+                for wl in word_wrap_text(&text, text_width) {
+                    lines.push(rich_box_mid_styled(&wl, width, ctx_style));
+                }
+            }
+        }
+    }
+
+    if let Some(ref risk) = req.risk_summary {
+        let mut risk_parts: Vec<String> = Vec::new();
+        if risk.host_count > 0 {
+            risk_parts.push(format!("{} host(s)", risk.host_count));
+        }
+        if !risk.dangerous_patterns.is_empty() {
+            risk_parts.push(format!("{} risk(s)", risk.dangerous_patterns.len()));
+        }
+        if let Some(ref v) = risk.auditor_verdict {
+            risk_parts.push(format!("auditor: {}", v));
+        }
+        if !risk_parts.is_empty() {
+            lines.push(rich_box_empty(width));
+            let risk_text = format!("Risk: {}", risk_parts.join(" | "));
+            for wl in word_wrap_text(&risk_text, text_width) {
+                lines.push(rich_box_mid_styled(&wl, width, Style::default().fg(Color::Yellow)));
+            }
+        }
+    }
+
+    lines.push(rich_box_empty(width));
+    let hint_style = Style::default().fg(Color::Green);
+    for dl in detail.lines() {
+        for wl in word_wrap_text(dl, text_width) {
+            lines.push(rich_box_mid_styled(&wl, width, hint_style));
+        }
+    }
+    lines.push(rich_box_empty(width));
+    lines.push(rich_box_bottom(width));
+
+    lines
+}
+
 /// Append structured cards for new pending interactions. Returns how many were added.
 fn append_new_pending_user_interaction_prompts(
     app: &mut App,
@@ -1480,10 +1763,14 @@ fn append_new_pending_user_interaction_prompts(
         }
         app.seen_user_interaction_prompts
             .insert(interaction.interaction_id.clone());
-        let card = format_user_interaction_prompt(&interaction);
+        let fallback = format_user_interaction_prompt(&interaction);
         app.session_overview.latest_signal =
             Some(format!("user.ask {}", interaction.interaction_id));
-        app.add_message(MessageRole::Signal, card);
+        app.add_rich_card(
+            MessageRole::Signal,
+            fallback,
+            RichCard::UserInteraction(Box::new(interaction.clone())),
+        );
         added += 1;
     }
     added
@@ -1781,10 +2068,75 @@ fn format_workflow_event_card(
     result
 }
 
-fn push_workflow_event_message(app: &mut App, role: MessageRole, card: String) {
+fn is_collapsible_lifecycle_event(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "task.spawned" => Some("spawned"),
+        "task.queued" => Some("queued"),
+        "task.started" => Some("started"),
+        "task.completed" => Some("completed"),
+        "task.failed" => Some("failed"),
+        "task.cancelled" => Some("cancelled"),
+        _ => None,
+    }
+}
+
+fn format_lifecycle_line(agent_suffix: &str, task: &str, stages: &[&'static str]) -> String {
+    let icon = match stages.last() {
+        Some(&"completed") => "✅",
+        Some(&"failed") => "❌",
+        Some(&"cancelled") => "🚫",
+        Some(&"started") => "▶",
+        Some(&"queued") => "📥",
+        Some(&"spawned") => "🚀",
+        _ => "📋",
+    };
+    let chain = stages.join(" → ");
+    format!("{} {} ({}) {}", icon, agent_suffix.trim_start_matches(" → "), task, chain)
+}
+
+fn push_workflow_event_message(
+    app: &mut App,
+    role: MessageRole,
+    card: String,
+    event_type: &str,
+    task_id: &str,
+    agent_suffix: &str,
+) {
+    if let Some(stage) = is_collapsible_lifecycle_event(event_type) {
+        let should_collapse = app.task_lifecycles.contains_key(task_id);
+        if should_collapse {
+            let lc = app.task_lifecycles.get_mut(task_id).unwrap();
+            lc.stages.push(stage);
+            let collapsed = format_lifecycle_line(&lc.agent_suffix, task_id, &lc.stages);
+            if let Some(&idx) = app.task_lifecycle_msg_idx.get(task_id) {
+                if idx < app.messages.len() {
+                    app.messages[idx].content = collapsed.clone();
+                    app.messages[idx].role = role;
+                    if app.follow_output {
+                        app.scroll_offset = app.last_max_scroll_offset;
+                    }
+                    return;
+                }
+            }
+            app.add_message(role, collapsed);
+        } else {
+            let collapsed = format_lifecycle_line(agent_suffix, task_id, &[stage]);
+            app.task_lifecycles.insert(
+                task_id.to_string(),
+                TaskLifecycle {
+                    agent_suffix: agent_suffix.to_string(),
+                    stages: vec![stage],
+                },
+            );
+            app.add_message(role, collapsed);
+        }
+        let msg_idx = app.messages.len().saturating_sub(1);
+        app.task_lifecycle_msg_idx.insert(task_id.to_string(), msg_idx);
+        return;
+    }
+
     match role {
         MessageRole::SignalLow => {
-            // Keep one rolling low-signal line instead of growing the transcript.
             if let Some(last_idx) = app
                 .messages
                 .iter()
@@ -1796,7 +2148,6 @@ fn push_workflow_event_message(app: &mut App, role: MessageRole, card: String) {
             }
         }
         _ => {
-            // Drop stale low-signal noise when meaningful events arrive.
             if let Some(last_idx) = app
                 .messages
                 .iter()
@@ -2277,13 +2628,52 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::raw("(no active tasks)"));
     }
 
+    let has_pending_approvals = !app.pending_approval_ids.is_empty();
+    let has_pending_questions = !app.pending_question_summaries.is_empty();
+
+    if has_pending_approvals || has_pending_questions {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            if has_pending_approvals && has_pending_questions {
+                format!("⚠ Pending ({}/{})", app.pending_approval_ids.len(), app.pending_question_summaries.len())
+            } else if has_pending_approvals {
+                format!("⚠ Pending ({} approval{})", app.pending_approval_ids.len(), if app.pending_approval_ids.len() == 1 { "" } else { "s" })
+            } else {
+                format!("⚠ Pending ({} question{})", app.pending_question_summaries.len(), if app.pending_question_summaries.len() == 1 { "" } else { "s" })
+            },
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        for (_, summary) in app.pending_approval_summaries.iter().take(3) {
+            lines.push(Line::from(Span::styled(
+                format!("  ⏸ {}", summary),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        for q in app.pending_question_summaries.iter().take(2) {
+            lines.push(Line::from(Span::styled(
+                format!("  💬 {}", q),
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+    }
+
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("Approvals", Style::default().add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled(
+        if has_pending_approvals {
+            "Approvals:"
+        } else {
+            "Approvals"
+        },
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
     if app.pending_approval_ids.is_empty() {
         lines.push(Line::raw("none"));
     } else {
-        for apr in app.pending_approval_ids.iter().rev().take(5) {
-            lines.push(Line::raw(format!("- {}", apr)));
+        for (i, (id, _)) in app.pending_approval_summaries.iter().rev().enumerate() {
+            if i >= 5 {
+                break;
+            }
+            lines.push(Line::raw(format!("- {}", id)));
         }
     }
     lines.push(Line::raw(""));
@@ -2402,103 +2792,133 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
             _ => (usize::MAX, usize::MAX, 0, 0),
         };
 
+    let content_width = area.width.saturating_sub(1);
     for msg in &app.messages {
-        let icon = match msg.role {
-            MessageRole::User => "> ",
-            MessageRole::Assistant => "🤖 ",
-            MessageRole::System => "ℹ ",
-            MessageRole::Signal => "🔔 ",
-            MessageRole::SignalLow => "  ",
-            MessageRole::AgentOutput => "📝 ",
-        };
-        let style = message_role_style(msg.role);
-
-        for (i, text_line) in msg.content.lines().enumerate() {
-            let prefix = if i == 0 { icon } else { "  " };
-            let visual_line_count = transcript_wrap_line_count(
-                Line::from(vec![
-                    Span::raw(prefix),
-                    Span::styled(text_line.to_string(), style),
-                ]),
-                wrap_width,
-            );
-            let visual_line_end = visual_row.saturating_add(visual_line_count);
-            let include_line = visual_line_end > visual_window_start;
-
-            // Compare content row against selection bounds.
-            let is_selected =
-                row >= content_sel_top && row <= content_sel_bot && content_sel_top != usize::MAX;
-
-            if include_line && is_selected {
-                // For selected lines, render with highlight.
-                // Column bounds only apply at the first and last selected lines.
-                let sel_col_start = if row == content_sel_top {
-                    sel_col_start_override
-                } else {
-                    0
-                };
-                let sel_col_end = if row == content_sel_bot {
-                    sel_col_end_override
-                } else {
-                    text_line.len()
-                };
-
-                // Normalize selection order (handle backwards selection)
-                let (sel_start, sel_end) = if sel_col_start <= sel_col_end {
-                    (sel_col_start, sel_col_end)
-                } else {
-                    (sel_col_end, sel_col_start)
-                };
-
-                let mut spans: Vec<Span> = Vec::new();
-                spans.push(Span::raw(prefix));
-
-                let sel_start_clamped = sel_start.min(text_line.len());
-                let sel_end_clamped = sel_end.min(text_line.len());
-
-                let sel_start_clamped = if text_line.is_char_boundary(sel_start_clamped) {
-                    sel_start_clamped
-                } else {
-                    (0..sel_start_clamped)
-                        .rfind(|&i| text_line.is_char_boundary(i))
-                        .unwrap_or(0)
-                };
-                let sel_end_clamped = if text_line.is_char_boundary(sel_end_clamped) {
-                    sel_end_clamped
-                } else {
-                    (0..sel_end_clamped)
-                        .rfind(|&i| text_line.is_char_boundary(i))
-                        .unwrap_or(text_line.len())
-                };
-
-                let before_sel = &text_line[..sel_start_clamped];
-                let in_sel = &text_line[sel_start_clamped..sel_end_clamped];
-                let after_sel = &text_line[sel_end_clamped..];
-
-                if !before_sel.is_empty() {
-                    spans.push(Span::styled(before_sel.to_string(), style));
+        if let Some(ref card) = msg.rich_card {
+            let rich_lines = match card {
+                RichCard::UserInteraction(interaction) => {
+                    render_interaction_card(interaction, content_width)
                 }
-                if !in_sel.is_empty() {
-                    spans.push(Span::styled(in_sel.to_string(), style.bg(Color::DarkGray)));
-                }
-                if !after_sel.is_empty() {
-                    spans.push(Span::styled(after_sel.to_string(), style));
+                RichCard::Approval {
+                    request,
+                    detail,
+                    enrichment,
+                } => render_approval_card(request, detail, enrichment, content_width),
+            };
+            for rl in &rich_lines {
+                let visual_line_count = transcript_wrap_line_count(rl.clone(), wrap_width);
+                let visual_line_end = visual_row.saturating_add(visual_line_count);
+                let include_line = visual_line_end > visual_window_start;
+
+                if include_line {
+                    if render_base_visual_row.is_none() {
+                        render_base_visual_row = Some(visual_row);
+                    }
+                    lines.push(rl.clone());
                 }
 
-                lines.push(Line::from(spans));
-            } else if include_line {
-                lines.push(Line::from(vec![
-                    Span::raw(prefix),
-                    Span::styled(text_line.to_string(), style),
-                ]));
+                visual_row = visual_line_end;
+                row = row.saturating_add(1);
             }
+        } else {
+            let icon = match msg.role {
+                MessageRole::User => "> ",
+                MessageRole::Assistant => "🤖 ",
+                MessageRole::System => "ℹ ",
+                MessageRole::Signal => "🔔 ",
+                MessageRole::SignalLow => "  ",
+                MessageRole::AgentOutput => "📝 ",
+            };
+            let style = message_role_style(msg.role);
 
-            if include_line && render_base_visual_row.is_none() {
-                render_base_visual_row = Some(visual_row);
+            for (i, text_line) in msg.content.lines().enumerate() {
+                let prefix = if i == 0 { icon } else { "  " };
+                let visual_line_count = transcript_wrap_line_count(
+                    Line::from(vec![
+                        Span::raw(prefix),
+                        Span::styled(text_line.to_string(), style),
+                    ]),
+                    wrap_width,
+                );
+                let visual_line_end = visual_row.saturating_add(visual_line_count);
+                let include_line = visual_line_end > visual_window_start;
+
+                let is_selected =
+                    row >= content_sel_top
+                        && row <= content_sel_bot
+                        && content_sel_top != usize::MAX;
+
+                if include_line && is_selected {
+                    let sel_col_start = if row == content_sel_top {
+                        sel_col_start_override
+                    } else {
+                        0
+                    };
+                    let sel_col_end = if row == content_sel_bot {
+                        sel_col_end_override
+                    } else {
+                        text_line.len()
+                    };
+
+                    let (sel_start, sel_end) = if sel_col_start <= sel_col_end {
+                        (sel_col_start, sel_col_end)
+                    } else {
+                        (sel_col_end, sel_col_start)
+                    };
+
+                    let mut spans: Vec<Span> = Vec::new();
+                    spans.push(Span::raw(prefix));
+
+                    let sel_start_clamped = sel_start.min(text_line.len());
+                    let sel_end_clamped = sel_end.min(text_line.len());
+
+                    let sel_start_clamped =
+                        if text_line.is_char_boundary(sel_start_clamped) {
+                            sel_start_clamped
+                        } else {
+                            (0..sel_start_clamped)
+                                .rfind(|&i| text_line.is_char_boundary(i))
+                                .unwrap_or(0)
+                        };
+                    let sel_end_clamped =
+                        if text_line.is_char_boundary(sel_end_clamped) {
+                            sel_end_clamped
+                        } else {
+                            (0..sel_end_clamped)
+                                .rfind(|&i| text_line.is_char_boundary(i))
+                                .unwrap_or(text_line.len())
+                        };
+
+                    let before_sel = &text_line[..sel_start_clamped];
+                    let in_sel = &text_line[sel_start_clamped..sel_end_clamped];
+                    let after_sel = &text_line[sel_end_clamped..];
+
+                    if !before_sel.is_empty() {
+                        spans.push(Span::styled(before_sel.to_string(), style));
+                    }
+                    if !in_sel.is_empty() {
+                        spans
+                            .push(Span::styled(in_sel.to_string(), style.bg(Color::DarkGray)));
+                    }
+                    if !after_sel.is_empty() {
+                        spans.push(Span::styled(after_sel.to_string(), style));
+                    }
+
+                    lines.push(Line::from(spans));
+                } else if include_line {
+                    lines.push(Line::from(vec![
+                        Span::raw(prefix),
+                        Span::styled(text_line.to_string(), style),
+                    ]));
+                }
+
+                if include_line && render_base_visual_row.is_none() {
+                    render_base_visual_row = Some(visual_row);
+                }
+
+                visual_row = visual_line_end;
+                row = row.saturating_add(1);
             }
-
-            visual_row = visual_line_end;
-            row = row.saturating_add(1);
         }
         let include_blank = visual_row.saturating_add(1) > visual_window_start;
         if include_blank {
@@ -4366,6 +4786,15 @@ fn merge_gateway_store_pending_approvals(
     }
     app.pending_approval_ids = merged;
 
+    // Rebuild pending_approval_summaries from the full list.
+    app.pending_approval_summaries = list
+        .iter()
+        .map(|req| {
+            let action_type = action_summary(&req.action);
+            (req.request_id.clone(), action_type.to_string())
+        })
+        .collect();
+
     let mut announced = false;
     for req in list {
         if app.announced_store_approval_ids.insert(req.request_id.clone()) {
@@ -4388,11 +4817,39 @@ fn merge_gateway_store_pending_approvals(
                 }
             };
             let card = format_store_approval_card(&req, &detail, &enrichment);
-            app.add_message(MessageRole::Signal, card);
+            app.add_rich_card(
+                MessageRole::Signal,
+                card,
+                RichCard::Approval {
+                    request: Box::new(req),
+                    detail,
+                    enrichment,
+                },
+            );
             announced = true;
         }
     }
     announced
+}
+
+/// Short human-readable summary of an action for the right-pane display.
+fn action_summary(action: &autonoetic_types::background::ScheduledAction) -> &'static str {
+    match action {
+        autonoetic_types::background::ScheduledAction::SandboxExec { .. } => "sandbox.exec",
+        autonoetic_types::background::ScheduledAction::WebSearch { .. } => "web.search",
+        autonoetic_types::background::ScheduledAction::WebFetch { .. } => "web.fetch",
+        autonoetic_types::background::ScheduledAction::WebCall { .. } => "web.call",
+        autonoetic_types::background::ScheduledAction::CredentialPrompt { .. } => "credential.prompt",
+        autonoetic_types::background::ScheduledAction::CredentialRequest { .. } => "credential.request",
+        autonoetic_types::background::ScheduledAction::SessionContinue { .. } => "session.continue",
+        autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => "session.escalate",
+        autonoetic_types::background::ScheduledAction::RevisionPromote { .. } => "revision.promote",
+        autonoetic_types::background::ScheduledAction::WriteFile { .. } => "write.file",
+        autonoetic_types::background::ScheduledAction::AgentInstall { .. } => "agent.install",
+        autonoetic_types::background::ScheduledAction::ProfileShare { .. } => "profile.share",
+        autonoetic_types::background::ScheduledAction::LayerMount { .. } => "layer.mount",
+        _ => "other",
+    }
 }
 
 fn refresh_policy_causal_pane(
@@ -4479,6 +4936,18 @@ async fn check_signals(
     app.session_overview.root_session_id = snapshot.overview.root_session_id.clone();
     app.session_overview.workflow = snapshot.overview.workflow.clone();
     app.session_overview.pending_user_interactions = snapshot.overview.pending_user_interactions;
+    // Sync pending_question_summaries for the right panel.
+    app.pending_question_summaries = snapshot
+        .pending_interactions
+        .iter()
+        .map(|i| {
+            if i.question.len() > 42 {
+                format!("{}…", &i.question[..42])
+            } else {
+                i.question.clone()
+            }
+        })
+        .collect();
     if app.session_overview != previous_overview {
         processed_any = true;
         // Show notification when workflow becomes active or changes
@@ -4566,7 +5035,20 @@ async fn check_signals(
                                                 continue;
                                             }
                                             app.session_overview.latest_signal = Some(card.clone());
-                                            push_workflow_event_message(app, role, card);
+                                            push_workflow_event_message(
+                                                app,
+                                                role,
+                                                card,
+                                                &event.event_type,
+                                                event.task_id.as_deref().unwrap_or("-"),
+                                                &event
+                                                    .payload
+                                                    .get("agent_id")
+                                                    .and_then(|v| v.as_str())
+                                                    .or_else(|| event.agent_id.as_deref())
+                                                    .map(|a| format!(" → {}", a))
+                                                    .unwrap_or_default(),
+                                            );
                                             processed_any = true;
                                         }
                                     }
@@ -4587,7 +5069,20 @@ async fn check_signals(
                                     let show_card =
                                         should_show_workflow_awaiting_approval_card(app, &event);
                                     if show_card {
-                                        push_workflow_event_message(app, role, card.clone());
+                                        push_workflow_event_message(
+                                            app,
+                                            role,
+                                            card.clone(),
+                                            &event.event_type,
+                                            event.task_id.as_deref().unwrap_or("-"),
+                                            &event
+                                                .payload
+                                                .get("agent_id")
+                                                .and_then(|v| v.as_str())
+                                                .or_else(|| event.agent_id.as_deref())
+                                                .map(|a| format!(" → {}", a))
+                                                .unwrap_or_default(),
+                                        );
                                         app.session_overview.latest_signal = Some(card.clone());
                                     }
 

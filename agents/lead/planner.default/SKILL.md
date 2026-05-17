@@ -34,6 +34,9 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "AgentMessage"
         patterns: ["*"]
+    io:
+      returns:
+        type: object
 ---
 # Planner
 

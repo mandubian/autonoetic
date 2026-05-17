@@ -32,6 +32,22 @@ metadata:
         patterns: ["*"]
     validation: "soft"
     io:
+      returns:
+        type: object
+        required: [status]
+        properties:
+          status:
+            type: string
+          artifact_ref:
+            type: string
+          clarification_request:
+            type: object
+          reason:
+            type: string
+          dependency_files:
+            type: array
+            items:
+              type: string
       output_policy:
         max_reply_length_chars: 2000
         min_artifact_builds: 1

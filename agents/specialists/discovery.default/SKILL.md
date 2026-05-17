@@ -27,6 +27,21 @@ metadata:
       - type: "WriteAccess"
         scopes: ["self.*"]
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [ranked_candidates, recommendation, needs_new_agent]
+        properties:
+          ranked_candidates:
+            type: array
+            items:
+              type: object
+          recommendation:
+            type: string
+          confidence:
+            type: string
+          needs_new_agent:
+            type: boolean
 ---
 # Discovery
 

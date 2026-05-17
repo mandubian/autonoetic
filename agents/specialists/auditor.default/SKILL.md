@@ -21,7 +21,8 @@ metadata:
       temperature: 0.1
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge."]
+        # Prefixes match canonical tool ids (`knowledge_store`, `promotion_record`) for R-1.1.
+        allowed: ["knowledge_", "promotion_"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
       - type: "WriteAccess"
@@ -29,6 +30,27 @@ metadata:
       - type: "Evaluation"
         patterns: ["*"]
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [status, auditor_pass, findings]
+        properties:
+          status:
+            type: string
+          auditor_pass:
+            type: boolean
+          security_risk:
+            type: string
+          findings:
+            type: array
+            items:
+              type: object
+          reproducibility:
+            type: string
+          recommendation:
+            type: string
+          summary:
+            type: string
 ---
 # Auditor
 

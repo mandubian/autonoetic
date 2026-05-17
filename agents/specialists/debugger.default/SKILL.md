@@ -29,6 +29,9 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
     validation: "soft"
+    io:
+      returns:
+        type: object
 ---
 # Debugger
 

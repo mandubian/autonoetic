@@ -61,6 +61,9 @@ metadata:
         - "http.Post"
       shell_commands: ["curl", "wget"]
       package_manager_commands: []
+    io:
+      returns:
+        type: object
 ---
 # Researcher
 

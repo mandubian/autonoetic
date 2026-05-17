@@ -51,6 +51,12 @@ pub struct ToolTierFilter {
     /// structurally cannot trigger any action — even if the agent's manifest
     /// or the system prompt would allow it.
     pub clarification_read_only: bool,
+    /// Child sessions normally omit [`ToolTier::Specialized`]. When true,
+    /// `promotion_record` still passes [`Self::allows`] so promotion-gate
+    /// delegate agents can persist verdicts without widening the tier to all
+    /// specialized tools (e.g. `web_search`). Not set during pending-approval
+    /// narrowing or degraded mode.
+    pub allow_promotion_record_without_specialized_tier: bool,
 }
 
 impl ToolTierFilter {
@@ -61,6 +67,7 @@ impl ToolTierFilter {
             always_include_approval_tools: false,
             always_include_inspection_tools: false,
             clarification_read_only: false,
+            allow_promotion_record_without_specialized_tier: false,
         }
     }
 
@@ -71,6 +78,7 @@ impl ToolTierFilter {
             always_include_approval_tools: false,
             always_include_inspection_tools: false,
             clarification_read_only: false,
+            allow_promotion_record_without_specialized_tier: false,
         }
     }
 
@@ -83,6 +91,7 @@ impl ToolTierFilter {
             always_include_approval_tools: true,
             always_include_inspection_tools: false,
             clarification_read_only: false,
+            allow_promotion_record_without_specialized_tier: false,
         }
     }
 
@@ -93,6 +102,7 @@ impl ToolTierFilter {
             always_include_approval_tools: false,
             always_include_inspection_tools: false,
             clarification_read_only: false,
+            allow_promotion_record_without_specialized_tier: false,
         }
     }
 
@@ -107,6 +117,7 @@ impl ToolTierFilter {
             always_include_approval_tools: false,
             always_include_inspection_tools: true,
             clarification_read_only: false,
+            allow_promotion_record_without_specialized_tier: false,
         }
     }
 
@@ -120,6 +131,7 @@ impl ToolTierFilter {
             always_include_approval_tools: false,
             always_include_inspection_tools: false,
             clarification_read_only: true,
+            allow_promotion_record_without_specialized_tier: false,
         }
     }
 
@@ -160,6 +172,9 @@ impl ToolTierFilter {
         if self.always_include_approval_tools && tool_name.starts_with("approval_") {
             return true;
         }
+        if self.allow_promotion_record_without_specialized_tier && tool_name == "promotion_record" {
+            return true;
+        }
         self.allows_tier(tool_tier(tool_name))
     }
 
@@ -177,6 +192,9 @@ impl ToolTierFilter {
             return true;
         }
         if self.always_include_approval_tools && tool_name.starts_with("approval_") {
+            return true;
+        }
+        if self.allow_promotion_record_without_specialized_tier && tool_name == "promotion_record" {
             return true;
         }
         self.allows_tier(tier)
@@ -1048,6 +1066,7 @@ mod tests {
             always_include_approval_tools: true,
             always_include_inspection_tools: false,
             clarification_read_only: false,
+            allow_promotion_record_without_specialized_tier: false,
         };
         assert!(!filter.allows("web_search"));
         assert!(filter.allows("approval_list"));

@@ -153,7 +153,11 @@ pub(crate) fn loop_guard_from_config_and_manifest(config: Option<&GatewayConfig>
 ///    promotion) while waiting for human approval.
 /// 3. **Child session handoff**: child agent sessions (session_id contains `/`)
 ///    get Core-only tools by default, plus the non-core tiers implied by their
-///    manifest capabilities.
+///    manifest capabilities. Promotion-gate child agents (`auditor.default`,
+///    `static_evaluator.default`, etc.) set
+///    [`crate::runtime::tools::ToolTierFilter::allow_promotion_record_without_specialized_tier`]
+///    so `promotion_record` (a Specialized-tier tool) is still visible without
+///    exposing other specialized tools such as `web_search`.
 ///
 /// Manifest-declared tiers always take precedence over runtime inference — if an
 /// agent explicitly restricts itself, the restriction is honoured.
@@ -176,6 +180,7 @@ pub fn determine_tool_tier_filter(
             always_include_approval_tools: true,
             always_include_inspection_tools: false,
             clarification_read_only: false,
+            allow_promotion_record_without_specialized_tier: false,
         };
     }
 
@@ -234,6 +239,8 @@ pub(crate) fn child_tool_tier_filter_for_manifest(
         always_include_approval_tools: true,
         always_include_inspection_tools: false,
         clarification_read_only: false,
+        allow_promotion_record_without_specialized_tier:
+            crate::runtime::tools::promotion::manifest_may_record_promotion_verdicts(manifest),
     }
 }
 
@@ -496,6 +503,39 @@ mod tier_filter_tests {
         assert!(!filter.allows("web_search"));
         assert!(!filter.allows("agent_spawn"));
         assert!(!filter.allows("promotion_record"));
+    }
+
+    #[test]
+    fn test_child_promotion_federation_agent_allows_promotion_record_not_web_search() {
+        let mut manifest = test_manifest();
+        manifest.agent.id = "static_evaluator.default".to_string();
+        let filter = determine_tool_tier_filter(
+            &manifest,
+            Some("root/child-static-eval"),
+            false,
+            SessionState::Normal,
+        );
+        assert!(filter.allows("promotion_record"));
+        assert!(!filter.allows("web_search"));
+    }
+
+    #[test]
+    fn test_child_auditor_allows_promotion_record_and_workflow_without_full_specialized() {
+        use autonoetic_types::capability::Capability;
+        let mut manifest = test_manifest();
+        manifest.agent.id = "auditor.default".to_string();
+        manifest.capabilities = vec![Capability::Evaluation {
+            patterns: vec!["*".to_string()],
+        }];
+        let filter = determine_tool_tier_filter(
+            &manifest,
+            Some("root/child-auditor"),
+            false,
+            SessionState::Normal,
+        );
+        assert!(filter.allows("promotion_record"));
+        assert!(filter.allows("workflow_wait"));
+        assert!(!filter.allows("web_search"));
     }
 
     #[test]
