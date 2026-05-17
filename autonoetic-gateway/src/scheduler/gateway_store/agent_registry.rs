@@ -618,6 +618,69 @@ impl GatewayStore {
         Ok(current_revision_id)
     }
 
+    /// Count `Promote` (not `Rollback`) entries for an alias whose
+    /// `created_at >= since_rfc3339`. Used by the promotion safety governor
+    /// (issue #25) for the per-alias velocity check.
+    pub fn count_promotions_since(
+        &self,
+        agent_id: &str,
+        since_rfc3339: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM promotion_history
+             WHERE agent_id = ?1 AND kind = 'Promote' AND created_at >= ?2",
+            params![agent_id, since_rfc3339],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Bounded variant of [`list_promotion_history`](Self::list_promotion_history).
+    /// Returns at most `limit` newest rows for the alias. Used by the promotion
+    /// safety governor to avoid loading unbounded history for long-lived agents.
+    pub fn list_recent_promotion_history(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PromotionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT promotion_id, kind, alias_id, agent_id, previous_revision_id,
+                    new_revision_id, source_eval_run_id, reason, created_at,
+                    created_by_type, created_by_id, origin_node_id
+             FROM promotion_history WHERE agent_id = ?1 ORDER BY created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![agent_id, limit as i64], |row| {
+            let kind_str: String = row.get(1)?;
+            let kind = match kind_str.as_str() {
+                "Promote" => PromotionKind::Promote,
+                "Rollback" => PromotionKind::Rollback,
+                _ => PromotionKind::Promote,
+            };
+            Ok(PromotionRecord {
+                promotion_id: row.get(0)?,
+                kind,
+                alias_id: row.get(2)?,
+                agent_id: row.get(3)?,
+                previous_revision_id: row.get(4)?,
+                new_revision_id: row.get(5)?,
+                source_eval_run_id: row.get(6)?,
+                reason: row.get(7)?,
+                created_at: row.get(8)?,
+                created_by_type: row.get(9)?,
+                created_by_id: row.get(10)?,
+                origin_node_id: row.get(11)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
     pub fn list_promotion_history(&self, agent_id: &str) -> Result<Vec<PromotionRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

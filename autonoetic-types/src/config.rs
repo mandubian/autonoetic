@@ -879,6 +879,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub scheduled_jobs: ScheduledJobsConfig,
 
+    /// Promotion safety governor (issue #25). Per-alias velocity, flapping,
+    /// and eval-regression checks enforced at `agent.revision.promote`.
+    #[serde(default)]
+    pub promotion_governor: PromotionGovernorConfig,
+
     /// Fast scheduler sidecar configuration. Disabled by default.
     #[serde(default)]
     pub fast_scheduler: FastSchedulerConfig,
@@ -987,6 +992,64 @@ fn default_scheduled_jobs_max_due_per_tick() -> usize {
     16
 }
 
+/// Promotion safety governor (issue #25).
+///
+/// Three gate-level checks applied at `agent.revision.promote` *before*
+/// `atomic_promote`:
+/// - **velocity**: max promotions per alias per window
+/// - **flapping**: re-promoting a recently-promoted revision_id
+/// - **eval-regression**: consecutive monotonic increases in non-info finding
+///   counts across recent verdicts
+///
+/// All three are bypassable via `force: true` + `force_reason` on the promote
+/// call (emits a `governor.override` causal event for the audit trail).
+/// Disabled by default for backwards compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionGovernorConfig {
+    /// Enable governor checks. Default: false (opt-in).
+    #[serde(default = "default_promotion_governor_enabled")]
+    pub enabled: bool,
+
+    /// Velocity-check window in hours. Default: 24.
+    #[serde(default = "default_promotion_governor_velocity_window_hours")]
+    pub velocity_window_hours: u64,
+
+    /// Maximum number of `Promote` entries per alias inside the velocity
+    /// window. Default: 3.
+    #[serde(default = "default_promotion_governor_max_promotions_per_window")]
+    pub max_promotions_per_window: usize,
+
+    /// How many most-recent promotions to scan when looking for the candidate
+    /// revision_id (flapping signal: re-promoting a revision already seen
+    /// recently). Default: 4.
+    #[serde(default = "default_promotion_governor_flapping_lookback")]
+    pub flapping_lookback: usize,
+
+    /// How many adjacent finding-count comparisons must be strictly increasing
+    /// for the eval-regression halt to fire. Default: 3 (i.e. counts c0 < c1
+    /// < c2 < c3 → 3 increases → halt).
+    #[serde(default = "default_promotion_governor_eval_regression_streak")]
+    pub eval_regression_streak: usize,
+
+    /// Maximum number of recent promotions to scan for the eval-regression
+    /// streak. Default: 6.
+    #[serde(default = "default_promotion_governor_eval_regression_lookback")]
+    pub eval_regression_lookback: usize,
+}
+
+impl Default for PromotionGovernorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_promotion_governor_enabled(),
+            velocity_window_hours: default_promotion_governor_velocity_window_hours(),
+            max_promotions_per_window: default_promotion_governor_max_promotions_per_window(),
+            flapping_lookback: default_promotion_governor_flapping_lookback(),
+            eval_regression_streak: default_promotion_governor_eval_regression_streak(),
+            eval_regression_lookback: default_promotion_governor_eval_regression_lookback(),
+        }
+    }
+}
+
 /// Fast scheduler sidecar configuration.
 ///
 /// Runs a low-latency parallel loop beside the canonical background
@@ -1016,6 +1079,30 @@ impl Default for FastSchedulerConfig {
             max_due_per_tick: default_fast_scheduler_max_due_per_tick(),
         }
     }
+}
+
+fn default_promotion_governor_enabled() -> bool {
+    false
+}
+
+fn default_promotion_governor_velocity_window_hours() -> u64 {
+    24
+}
+
+fn default_promotion_governor_max_promotions_per_window() -> usize {
+    3
+}
+
+fn default_promotion_governor_flapping_lookback() -> usize {
+    4
+}
+
+fn default_promotion_governor_eval_regression_streak() -> usize {
+    3
+}
+
+fn default_promotion_governor_eval_regression_lookback() -> usize {
+    6
 }
 
 fn default_fast_scheduler_enabled() -> bool {
@@ -1836,6 +1923,7 @@ impl Default for GatewayConfig {
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
             hooks: Vec::new(),
             scheduled_jobs: ScheduledJobsConfig::default(),
+            promotion_governor: PromotionGovernorConfig::default(),
             fast_scheduler: FastSchedulerConfig::default(),
             system_agents: Vec::new(),
             interaction_answer_orchestration: default_interaction_answer_orchestration(),
