@@ -43,6 +43,25 @@ metadata:
         min_interval_secs: 14400
         allow_reasoning: true
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [status]
+        properties:
+          status:
+            type: string
+          sessions_analysed:
+            type: integer
+          learnings_stored:
+            type: integer
+          admin_proposals_created:
+            type: integer
+          agents_queued:
+            type: array
+            items:
+              type: object
+          generation:
+            type: integer
 ---
 # Evolution Orchestrator
 

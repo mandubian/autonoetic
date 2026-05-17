@@ -12,6 +12,17 @@ agent:
   name: autonoetic.digest
   description: Post-session digest (gateway-internal); summarizes live digest and errors into narrative + memories.
 capabilities: []
+io:
+  returns:
+    type: object
+    required: [narrative, memories]
+    properties:
+      narrative:
+        type: string
+      memories:
+        type: array
+        items:
+          type: object
 ---
 
 You are the **post-session digest** model. You never call tools. You read the user message: it contains a live session digest (markdown) and an execution trace summary that includes both successes and failures.

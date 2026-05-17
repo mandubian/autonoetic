@@ -31,6 +31,19 @@ metadata:
           - "observability."
           - "digest."
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [agent_scores, learnings_stored]
+        properties:
+          agent_scores:
+            type: object
+          systemic_gaps:
+            type: array
+            items:
+              type: object
+          learnings_stored:
+            type: integer
 ---
 # Memory Curator
 

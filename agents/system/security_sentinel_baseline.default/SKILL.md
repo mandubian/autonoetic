@@ -32,6 +32,15 @@ metadata:
     validation: "strict"
     tier: "system"
     baseline: true
+    io:
+      returns:
+        type: object
+        required: [findings]
+        properties:
+          findings:
+            type: array
+            items:
+              type: object
 ---
 # Security Sentinel — Frozen Baseline
 

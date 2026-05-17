@@ -44,6 +44,9 @@ metadata:
       function_calls: []
       shell_commands: ["curl", "wget"]
       package_manager_commands: []
+    io:
+      returns:
+        type: object
 ---
 # Executor
 

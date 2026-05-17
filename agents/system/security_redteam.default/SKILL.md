@@ -29,6 +29,9 @@ metadata:
           - "observability."
     validation: "strict"
     tier: "system"
+    io:
+      returns:
+        type: object
 ---
 # Security Red-Team Agent
 

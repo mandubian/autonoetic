@@ -30,6 +30,21 @@ metadata:
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*", "agents/*"]
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [status]
+        properties:
+          status:
+            type: string
+          revision_id:
+            type: string
+          stage:
+            type: string
+          reason:
+            type: string
+          error:
+            type: string
 ---
 # Specialized Builder
 

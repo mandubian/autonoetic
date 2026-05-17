@@ -32,6 +32,16 @@ metadata:
         scopes: ["self.*", "skills/*", "scripts/*"]
     validation: "soft"
     io:
+      returns:
+        type: object
+        required: [status]
+        properties:
+          status:
+            type: string
+          artifact_ref:
+            type: string
+          error:
+            type: string
       output_policy:
         max_reply_length_chars: 2000
         min_artifact_builds: 1

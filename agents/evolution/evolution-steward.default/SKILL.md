@@ -32,6 +32,19 @@ metadata:
           - "agent."
           - "observability."
     validation: "soft"
+    io:
+      returns:
+        type: object
+        required: [evolved, reason]
+        properties:
+          evolved:
+            type: boolean
+          reason:
+            type: string
+          new_revision_id:
+            type: string
+          details:
+            type: string
 ---
 # Evolution Steward
 
