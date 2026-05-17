@@ -187,7 +187,8 @@ pub fn validate_spawn_response(
                 });
             }
             Some(reply) => {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(reply) {
+                let stripped = strip_markdown_code_fences(reply);
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stripped) {
                     violations.extend(validate_json_against_schema(&json, schema));
                 } else if schema_is_constrained {
                     violations.push(ValidationViolation {
@@ -568,6 +569,63 @@ pub fn violations_to_final_error(
     } else {
         anyhow::anyhow!("response validation failed: {}", summary)
     }
+}
+
+/// Strip markdown code fences wrapping a JSON payload.
+///
+/// LLMs (especially DeepSeek) often return JSON wrapped in
+/// `` ```json ... ``` `` or `` ``` ... ``` ``, sometimes with prose
+/// before/after the fence. This helper extracts the first JSON-like
+/// code fence block so `serde_json::from_str` can parse the inner JSON.
+fn strip_markdown_code_fences(s: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = s.trim();
+    if !trimmed.contains("```") {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    if let Some(extracted) = extract_first_fenced_json(trimmed) {
+        return std::borrow::Cow::Owned(extracted);
+    }
+    std::borrow::Cow::Borrowed(s)
+}
+
+fn extract_first_fenced_json(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+    while pos < len {
+        if bytes[pos] == b'`' && pos + 2 < len && &bytes[pos..pos + 3] == b"```" {
+            let fence_start = pos;
+            pos += 3;
+            while pos < len && bytes[pos] != b'\n' && bytes[pos] != b'\r' {
+                pos += 1;
+            }
+            if pos < len && bytes[pos] == b'\r' {
+                pos += 1;
+            }
+            if pos < len && bytes[pos] == b'\n' {
+                pos += 1;
+            }
+            let content_start = pos;
+            let mut search = content_start;
+            while search < len {
+                if bytes[search] == b'`'
+                    && search + 2 < len
+                    && &bytes[search..search + 3] == b"```"
+                {
+                    let content = s[content_start..search].trim();
+                    if serde_json::from_str::<serde_json::Value>(content).is_ok() {
+                        return Some(content.to_owned());
+                    }
+                    break;
+                }
+                search += 1;
+            }
+            pos = if search + 3 < len { search + 3 } else { len };
+        } else {
+            pos += 1;
+        }
+    }
+    None
 }
 
 /// Lightweight JSON schema validation (required + type + enum + minLength).
@@ -1485,5 +1543,106 @@ mod tests {
         let violations = validate_promotion_record(None, "art_x", "evaluator");
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule, "promotion_record");
+    }
+
+    #[test]
+    fn test_strip_json_code_fence() {
+        let input = "```json\n{\"status\": \"pass\"}\n```";
+        let stripped = strip_markdown_code_fences(input);
+        assert_eq!(stripped, "{\"status\": \"pass\"}");
+    }
+
+    #[test]
+    fn test_strip_plain_code_fence() {
+        let input = "```\n{\"status\": \"pass\"}\n```";
+        let stripped = strip_markdown_code_fences(input);
+        assert_eq!(stripped, "{\"status\": \"pass\"}");
+    }
+
+    #[test]
+    fn test_strip_code_fence_uppercase() {
+        let input = "```JSON\n{\"status\": \"pass\"}\n```";
+        let stripped = strip_markdown_code_fences(input);
+        assert_eq!(stripped, "{\"status\": \"pass\"}");
+    }
+
+    #[test]
+    fn test_no_strip_bare_json() {
+        let input = "{\"status\": \"pass\"}";
+        let stripped = strip_markdown_code_fences(input);
+        assert_eq!(&*stripped, input);
+    }
+
+    #[test]
+    fn test_output_schema_passes_with_code_fence() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("```json\n{\"status\": \"pass\"}\n```"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    #[test]
+    fn test_output_schema_passes_with_prose_and_code_fence() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("## Result\n\n```json\n{\"status\": \"pass\"}\n```"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    #[test]
+    fn test_output_schema_auditor_real_world_deepseek() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({
+            "required": ["status", "auditor_pass", "findings"],
+            "properties": {
+                "status": {"type": "string"},
+                "auditor_pass": {"type": "boolean"},
+                "findings": {"type": "array"}
+            }
+        });
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("```json\n{\n  \"status\": \"pass\",\n  \"auditor_pass\": true,\n  \"security_risk\": \"low\",\n  \"findings\": []\n}\n```"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    #[test]
+    fn test_no_strip_pure_prose() {
+        let input = "The artifact contains only moltbook_agent.py — no test files.";
+        let stripped = strip_markdown_code_fences(input);
+        assert_eq!(&*stripped, input);
+    }
+
+    #[test]
+    fn test_output_schema_auditor_prose_header_deepseek() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({
+            "required": ["status", "auditor_pass", "findings"],
+            "properties": {
+                "status": {"type": "string"},
+                "auditor_pass": {"type": "boolean"},
+                "findings": {"type": "array"}
+            }
+        });
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("## Audit Verdict\n\n```json\n{\n  \"status\": \"pass\",\n  \"auditor_pass\": true,\n  \"security_risk\": \"low\",\n  \"findings\": []\n}\n```"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
     }
 }
