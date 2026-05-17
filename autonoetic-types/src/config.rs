@@ -884,6 +884,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub promotion_governor: PromotionGovernorConfig,
 
+    /// Fast scheduler sidecar configuration. Disabled by default.
+    #[serde(default)]
+    pub fast_scheduler: FastSchedulerConfig,
+
     /// System agents: declared background agents that the gateway reconciles on startup.
     #[serde(default)]
     pub system_agents: Vec<SystemAgentEntry>,
@@ -1046,6 +1050,37 @@ impl Default for PromotionGovernorConfig {
     }
 }
 
+/// Fast scheduler sidecar configuration.
+///
+/// Runs a low-latency parallel loop beside the canonical background
+/// scheduler, targeting interval-style jobs (`every N seconds`). The DB
+/// `claim_and_advance_due_job` call remains the source of truth, so the
+/// two loops cannot double-dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FastSchedulerConfig {
+    /// Enable the fast scheduler sidecar. Default: false.
+    #[serde(default = "default_fast_scheduler_enabled")]
+    pub enabled: bool,
+
+    /// Tick interval in milliseconds. Default: 200ms.
+    #[serde(default = "default_fast_scheduler_tick_millis")]
+    pub tick_millis: u64,
+
+    /// Maximum number of candidate jobs admitted per tick. Default: 64.
+    #[serde(default = "default_fast_scheduler_max_due_per_tick")]
+    pub max_due_per_tick: usize,
+}
+
+impl Default for FastSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_fast_scheduler_enabled(),
+            tick_millis: default_fast_scheduler_tick_millis(),
+            max_due_per_tick: default_fast_scheduler_max_due_per_tick(),
+        }
+    }
+}
+
 fn default_promotion_governor_enabled() -> bool {
     false
 }
@@ -1068,6 +1103,18 @@ fn default_promotion_governor_eval_regression_streak() -> usize {
 
 fn default_promotion_governor_eval_regression_lookback() -> usize {
     6
+}
+
+fn default_fast_scheduler_enabled() -> bool {
+    false
+}
+
+fn default_fast_scheduler_tick_millis() -> u64 {
+    200
+}
+
+fn default_fast_scheduler_max_due_per_tick() -> usize {
+    64
 }
 
 /// Security sentinel configuration.
@@ -1877,6 +1924,7 @@ impl Default for GatewayConfig {
             hooks: Vec::new(),
             scheduled_jobs: ScheduledJobsConfig::default(),
             promotion_governor: PromotionGovernorConfig::default(),
+            fast_scheduler: FastSchedulerConfig::default(),
             system_agents: Vec::new(),
             interaction_answer_orchestration: default_interaction_answer_orchestration(),
             allow_runtime_lock_drift: false,

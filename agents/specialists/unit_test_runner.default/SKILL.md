@@ -22,7 +22,8 @@ metadata:
     sandbox_network: normal
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "sandbox."]
+        # Prefixes match canonical tool ids (`knowledge_store`, `sandbox_exec`, `promotion_record`) for R-1.1.
+        allowed: ["knowledge_", "sandbox_", "promotion_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "npm ", "bash -c ", "sh -c ", "go test", "cargo test"]
       - type: "WriteAccess"
@@ -33,8 +34,11 @@ metadata:
     io:
       returns:
         type: object
-        required: ["evaluator_pass", "findings", "summary"]
+        required: ["status", "evaluator_pass", "findings", "summary"]
         properties:
+          status:
+            type: string
+            enum: ["pass", "fail"]
           evaluator_pass:
             type: boolean
           findings:
@@ -77,19 +81,23 @@ If the test suite consists entirely of integration tests that require live netwo
 
 If you found and ran tests:
 
-```
-promotion_record({
-  "artifact_ref": "ar.example",
-  "role": "unit_test_runner",
-  "pass": <true if all tests pass, false otherwise>,
+```json
+{
+  "status": "pass" | "fail",
+  "evaluator_pass": true | false,
   "findings": [
     {"severity": "info"|"warning"|"error",
      "description": "X/Y tests passed",
      "evidence": "<test output>"}
   ],
   "summary": "Unit tests for ar.example: X/Y passed"
-})
+}
 ```
+
+- `status`: "pass" if all tests pass; "fail" if any test fails
+- `evaluator_pass`: boolean — true if all tests pass, false otherwise
+- `findings`: array of test result findings
+- `summary`: string with test execution summary
 
 If you found NO tests, skip — do NOT call `promotion_record`. The operator understands that this role is inapplicable for this artifact.
 
@@ -99,6 +107,12 @@ If you found NO tests, skip — do NOT call `promotion_record`. The operator und
 - **Do NOT modify test code** — run what exists
 - **If no tests exist**: skip, do NOT call `promotion_record`
 - **If some tests exist**: run all of them, report total/passed/failed
-- **If all tests pass**: `pass = true`
-- **If any test fails**: `pass = false`, include the failure output in findings
-- **If tests require network**: report `unable_to_evaluate`, do NOT force them to work
+- **If all tests pass**: `status = "pass"`, `evaluator_pass = true`
+- **If any test fails**: `status = "fail"`, `evaluator_pass = false`, include failure output in findings
+- **If tests require network**: report `status = "fail"`, `evaluator_pass = false`, document as finding
+
+## Status Field Mapping
+
+When returning your final response JSON, map your test execution result to the status field:
+- If all tests pass → `status: "pass"`, `evaluator_pass: true`
+- If any test fails or no tests found → `status: "fail"`, `evaluator_pass: false`
