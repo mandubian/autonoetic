@@ -99,7 +99,16 @@ If you found and ran tests:
 - `findings`: array of test result findings
 - `summary`: string with test execution summary
 
-If you found NO tests, skip — do NOT call `promotion_record`. The operator understands that this role is inapplicable for this artifact.
+If you found NO tests, skip — do NOT call `promotion_record`. The operator understands that this role is inapplicable for this artifact. **However, you MUST still return a structured JSON reply** — never return prose:
+
+```json
+{
+  "status": "fail",
+  "evaluator_pass": false,
+  "findings": [],
+  "summary": "No test files found in artifact"
+}
+```
 
 ## Key Rules
 
@@ -115,4 +124,5 @@ If you found NO tests, skip — do NOT call `promotion_record`. The operator und
 
 When returning your final response JSON, map your test execution result to the status field:
 - If all tests pass → `status: "pass"`, `evaluator_pass: true`
-- If any test fails or no tests found → `status: "fail"`, `evaluator_pass: false`
+- If any test fails → `status: "fail"`, `evaluator_pass: false`
+- If no tests found → `status: "fail"`, `evaluator_pass: false`, do NOT call `promotion_record`
