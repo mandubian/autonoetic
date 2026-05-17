@@ -72,6 +72,7 @@ agent:
   id: "{agent_id}"
   name: "{agent_id}"
   description: "Reasoning agent for fast scheduler guardrail test"
+execution_mode: reasoning
 capabilities: []
 ---
 # Reasoning Agent
@@ -88,7 +89,6 @@ fn fast_config(workspace: &TestWorkspace) -> GatewayConfig {
     cfg.fast_scheduler = FastSchedulerConfig {
         enabled: true,
         tick_millis: 100,
-        window_secs: 2,
         max_due_per_tick: 64,
     };
     cfg
@@ -222,7 +222,7 @@ async fn fast_path_skips_cron_style_schedules() -> anyhow::Result<()> {
     run_fast_scheduler_tick_at(execution, Utc::now(), stats.clone()).await?;
 
     let snap = stats.snapshot();
-    assert_eq!(snap.fast_due_loaded, 1, "candidate loaded");
+    assert_eq!(snap.fast_due_loaded, 0, "cron-style schedules are pre-filtered out");
     assert_eq!(snap.fast_claimed, 0, "cron-style schedule must not be claimed");
     assert_eq!(snap.fast_enqueued, 0);
 
@@ -342,12 +342,12 @@ async fn fast_path_concurrent_ticks_do_not_double_enqueue() -> anyhow::Result<()
         stats_a.fast_enqueued.load(Ordering::Relaxed) + stats_b.fast_enqueued.load(Ordering::Relaxed);
     let total_claimed =
         stats_a.fast_claimed.load(Ordering::Relaxed) + stats_b.fast_claimed.load(Ordering::Relaxed);
-    let total_miss =
-        stats_a.fast_claim_miss.load(Ordering::Relaxed) + stats_b.fast_claim_miss.load(Ordering::Relaxed);
 
     assert_eq!(total_claimed, 1, "exactly one claim across both ticks");
     assert_eq!(total_enqueued, 1, "exactly one enqueue across both ticks");
-    assert!(total_miss >= 1, "the loser sees a claim_miss");
+    // The loser may see a claim_miss or an empty candidate set (its next_run_at
+    // was advanced past `now` by the winner before the loser's load query).
+    // Either way, the invariant is: exactly one enqueue, no double-dispatch.
 
     let queued =
         workflow_store::load_queued_tasks(&config, Some(store.as_ref()), "sched-race-job-1")?;

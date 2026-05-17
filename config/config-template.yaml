@@ -70,7 +70,6 @@ max_background_due_per_tick: 32
 # fast_scheduler:
 #   enabled: false
 #   tick_millis: 200          # How often the fast loop wakes up (ms)
-#   window_secs: 2            # Look-ahead window for "due-soon" jobs
 #   max_due_per_tick: 64      # Bounded work per tick
 
 # ── Response Validation & Repair ──────────────────────────────────────

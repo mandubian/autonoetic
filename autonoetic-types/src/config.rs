@@ -1003,12 +1003,6 @@ pub struct FastSchedulerConfig {
     #[serde(default = "default_fast_scheduler_tick_millis")]
     pub tick_millis: u64,
 
-    /// Look-ahead window in seconds: jobs whose `next_run_at` falls within
-    /// `now + window_secs` are considered candidates for this tick.
-    /// Default: 2.
-    #[serde(default = "default_fast_scheduler_window_secs")]
-    pub window_secs: u64,
-
     /// Maximum number of candidate jobs admitted per tick. Default: 64.
     #[serde(default = "default_fast_scheduler_max_due_per_tick")]
     pub max_due_per_tick: usize,
@@ -1019,7 +1013,6 @@ impl Default for FastSchedulerConfig {
         Self {
             enabled: default_fast_scheduler_enabled(),
             tick_millis: default_fast_scheduler_tick_millis(),
-            window_secs: default_fast_scheduler_window_secs(),
             max_due_per_tick: default_fast_scheduler_max_due_per_tick(),
         }
     }
@@ -1031,10 +1024,6 @@ fn default_fast_scheduler_enabled() -> bool {
 
 fn default_fast_scheduler_tick_millis() -> u64 {
     200
-}
-
-fn default_fast_scheduler_window_secs() -> u64 {
-    2
 }
 
 fn default_fast_scheduler_max_due_per_tick() -> usize {

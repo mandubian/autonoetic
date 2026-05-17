@@ -162,21 +162,6 @@ pub fn load_due_scheduled_jobs(
     Ok(jobs)
 }
 
-/// Load scheduled jobs whose `next_run_at` falls within `[..window_end_rfc]`,
-/// bounded by `limit`. Used by the fast scheduler sidecar to pre-fetch
-/// near-future interval jobs in a single SQL round-trip. Interval-mode
-/// eligibility (cron-style schedules are skipped) is filtered in-process by
-/// the caller because the cron expression is an opaque string in storage.
-///
-/// Reuses the `idx_scheduled_jobs_status_next_run` index.
-pub fn load_due_scheduled_jobs_in_window(
-    conn: &Connection,
-    window_end_rfc3339: &str,
-    limit: usize,
-) -> Result<Vec<ScheduledJob>> {
-    load_due_scheduled_jobs(conn, window_end_rfc3339, limit)
-}
-
 /// Load due scheduled jobs whose `owner_agent_id` matches the given owner.
 ///
 /// Unlike [`load_due_scheduled_jobs`] (which loads globally), this query

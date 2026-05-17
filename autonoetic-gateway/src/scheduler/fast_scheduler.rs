@@ -20,7 +20,7 @@ use crate::scheduler::{cron_parser, workflow_store};
 /// Atomic counters exposed for tests and operator observability.
 #[derive(Debug, Default)]
 pub struct FastSchedulerStats {
-    /// Total candidate jobs returned by the window query (across all ticks).
+    /// Total interval-style candidates retained after pre-filtering (across all ticks).
     pub fast_due_loaded: AtomicU64,
     /// Jobs successfully claimed via `claim_and_advance_due_job`.
     pub fast_claimed: AtomicU64,
@@ -84,6 +84,10 @@ pub async fn start_fast_scheduler_with_stats(
             target: "scheduler::fast",
             "Fast scheduler sidecar disabled (fast_scheduler.enabled=false)"
         );
+        // Intentionally parks forever: `try_join!` in `server::start` only
+        // propagates errors, so a disabled sidecar must never complete.
+        // When disabled, the fast-scheduler future simply never resolves,
+        // while the canonical scheduler and listeners drive the daemon lifecycle.
         std::future::pending::<()>().await;
         unreachable!();
     }
@@ -91,7 +95,6 @@ pub async fn start_fast_scheduler_with_stats(
     tracing::info!(
         target: "scheduler::fast",
         tick_millis = cfg.tick_millis,
-        window_secs = cfg.window_secs,
         max_due_per_tick = cfg.max_due_per_tick,
         "Fast scheduler sidecar enabled"
     );
@@ -134,21 +137,24 @@ pub async fn run_fast_scheduler_tick_at(
     };
 
     let now_rfc = now.to_rfc3339();
-    let window_end = now + chrono::Duration::seconds(cfg.window_secs as i64);
-    let window_end_rfc = window_end.to_rfc3339();
 
-    let candidates =
-        store.load_due_scheduled_jobs_in_window(&window_end_rfc, cfg.max_due_per_tick)?;
-    if candidates.is_empty() {
-        finish_tick(&stats, tick_started, 0);
+    // Query only jobs that are already past-due (next_run_at <= now).
+    // The claim-and-advance query also checks next_run_at <= now, so
+    // using a wider window would load rows that can never be claimed,
+    // inflating fast_claim_miss and potentially starving interval jobs.
+    let raw_candidates =
+        store.load_due_scheduled_jobs(&now_rfc, cfg.max_due_per_tick)?;
+    if raw_candidates.is_empty() {
+        finish_tick(&stats, tick_started);
         return Ok(());
     }
 
-    stats
-        .fast_due_loaded
-        .fetch_add(candidates.len() as u64, Ordering::Relaxed);
-
-    for job in candidates {
+    // Pre-filter: parse cron expressions and retain only interval-style
+    // schedules. Cron-style schedules are left to the canonical loop.
+    // By filtering before counting, skipped cron jobs do not consume the
+    // per-tick budget and cannot starve interval candidates.
+    let mut candidates = Vec::new();
+    for job in raw_candidates {
         let cron = match cron_parser::parse_schedule(&job.cron_expr) {
             Ok(c) => c,
             Err(e) => {
@@ -163,19 +169,29 @@ pub async fn run_fast_scheduler_tick_at(
                 continue;
             }
         };
-
-        // Eligibility: fast path handles interval-style schedules only. Cron-style
-        // schedules stay on the canonical 1–5s loop where higher tick precision
-        // is unnecessary.
-        let Some(interval_secs) = cron.interval_seconds else {
+        if cron.interval_seconds.is_some() {
+            candidates.push((job, cron));
+        } else {
             tracing::trace!(
                 target: "scheduler::fast",
                 job_id = %job.job_id,
                 cron_expr = %job.cron_expr,
                 "Skipping non-interval schedule on fast path"
             );
-            continue;
-        };
+        }
+    }
+
+    if candidates.is_empty() {
+        finish_tick(&stats, tick_started);
+        return Ok(());
+    }
+
+    stats
+        .fast_due_loaded
+        .fetch_add(candidates.len() as u64, Ordering::Relaxed);
+
+    for (job, cron) in candidates {
+        let interval_secs = cron.interval_seconds.unwrap();
 
         // Defense-in-depth: re-check the sub-10s script-mode guardrail at
         // dispatch boundary. The cron tool enforces this at creation time
@@ -194,7 +210,14 @@ pub async fn run_fast_scheduler_tick_at(
             continue;
         }
 
-        let next_occurrence = cron_parser::next_occurrence(&cron, now);
+        // Compute next occurrence from the job's prior next_run_at to
+        // preserve cadence across tick jitter. Basing on `now` would snap
+        // the schedule forward on every late fire, causing drift.
+        let job_next: DateTime<Utc> = match job.next_run_at.parse() {
+            Ok(dt) => dt,
+            Err(_) => now,
+        };
+        let next_occurrence = cron_parser::next_occurrence(&cron, job_next);
         let next_run_at = match next_occurrence {
             Some(n) => n.to_rfc3339(),
             None => {
@@ -347,12 +370,12 @@ pub async fn run_fast_scheduler_tick_at(
         let _ = workflow_store::append_workflow_event(&config, Some(store.as_ref()), &trigger_event);
     }
 
-    let elapsed_ms = tick_started.elapsed().as_millis() as u64;
-    finish_tick(&stats, tick_started, elapsed_ms);
+    finish_tick(&stats, tick_started);
     Ok(())
 }
 
-fn finish_tick(stats: &FastSchedulerStats, _tick_started: Instant, elapsed_ms: u64) {
+fn finish_tick(stats: &FastSchedulerStats, tick_started: Instant) {
+    let elapsed_ms = tick_started.elapsed().as_millis() as u64;
     stats
         .fast_tick_duration_ms_total
         .fetch_add(elapsed_ms, Ordering::Relaxed);
