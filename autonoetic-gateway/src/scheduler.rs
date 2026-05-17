@@ -19,6 +19,7 @@ pub mod approval_similarity;
 pub mod cron_parser;
 pub mod decision;
 pub mod eval_runner;
+pub mod fast_scheduler;
 pub mod gateway_store;
 pub mod hooks;
 pub mod reclamation;
