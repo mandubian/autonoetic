@@ -830,17 +830,21 @@ impl GatewayExecutionService {
             // Issue #30: if the reply carries a `decision_journal` array
             // (curator-style output), persist one `curator.decision` causal
             // event per entry so operators can query by target.
-            // TODO: wire revision_id from the session's agent binding so
-            // decisions can be attributed to the exact revision that produced
-            // them (requires get_session_agent_binding store lookup).
             if let (Some(store), Some(reply)) =
                 (self.gateway_store(), result.assistant_reply.as_deref())
             {
+                let revision_id = store
+                    .get_session_agent_binding(&result.session_id)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.revision_id)
+                    .filter(|s| !s.is_empty());
                 match crate::runtime::curator_journal::extract_and_persist(
                     store.as_ref(),
+                    "curator",
                     agent_id,
                     &result.session_id,
-                    None,
+                    revision_id.as_deref(),
                     reply,
                 ) {
                     Ok(0) => {}

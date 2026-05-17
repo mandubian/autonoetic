@@ -76,12 +76,16 @@ pub fn extract_decision_journal_entries(reply: &str) -> Option<Vec<DecisionJourn
 
 /// Persist a decision-journal batch as causal events.
 ///
-/// Emits one `curator.decision` event per entry (with the entry's `target`
+/// Emits one `{category}.decision` event per entry (with the entry's `target`
 /// in the event's `target` column for indexed query-by-target) plus one
-/// `curator.decision_journal_recorded` summary event keyed by the
-/// curator's session so an operator can find the batch in one shot.
+/// `{category}.decision_journal_recorded` summary event keyed by the
+/// agent's session so an operator can find the batch in one shot.
+///
+/// The `category` parameter allows any agent to opt into the decision-journal
+/// surface without being misclassified. Curator agents should pass `"curator"`.
 pub fn persist_decision_journal_entries(
     store: &GatewayStore,
+    category: &str,
     agent_id: &str,
     session_id: &str,
     revision_id: Option<&str>,
@@ -101,7 +105,7 @@ pub fn persist_decision_journal_entries(
             "confidence": entry.confidence,
         });
         let event = autonoetic_types::causal_chain::CausalEventRecord {
-            event_id: format!("curator-dec-{}", uuid::Uuid::new_v4()),
+            event_id: format!("{}-dec-{}", category, uuid::Uuid::new_v4()),
             agent_id: agent_id.to_string(),
             session_id: session_id.to_string(),
             turn_id: None,
@@ -109,7 +113,7 @@ pub fn persist_decision_journal_entries(
             timestamp: timestamp.clone(),
             // TODO: parameterize category so non-curator agents opting into
             // decision_journal are not misclassified as "curator".
-            category: "curator".to_string(),
+            category: category.to_string(),
             action: "decision".to_string(),
             status: "active".to_string(),
             enforced_rules: Vec::new(),
@@ -122,16 +126,16 @@ pub fn persist_decision_journal_entries(
         store.create_causal_event(&event)?;
     }
 
-    // Summary event: one row per curator run, useful to scope a query to a
+    // Summary event: one row per journal run, useful to scope a query to a
     // single run without joining over the per-entry events.
     let summary = autonoetic_types::causal_chain::CausalEventRecord {
-        event_id: format!("curator-jrn-{}", uuid::Uuid::new_v4()),
+        event_id: format!("{}-jrn-{}", category, uuid::Uuid::new_v4()),
         agent_id: agent_id.to_string(),
         session_id: session_id.to_string(),
         turn_id: None,
-        event_seq: 0,
+        event_seq: entries.len() as u64,
         timestamp,
-        category: "curator".to_string(),
+        category: category.to_string(),
         action: "decision_journal_recorded".to_string(),
         status: "active".to_string(),
         enforced_rules: Vec::new(),
@@ -159,6 +163,7 @@ pub fn persist_decision_journal_entries(
 /// reply carries no journal). Errors only on store-write failure.
 pub fn extract_and_persist(
     store: &GatewayStore,
+    category: &str,
     agent_id: &str,
     session_id: &str,
     revision_id: Option<&str>,
@@ -171,6 +176,6 @@ pub fn extract_and_persist(
         return Ok(0);
     }
     let n = entries.len();
-    persist_decision_journal_entries(store, agent_id, session_id, revision_id, &entries)?;
+    persist_decision_journal_entries(store, category, agent_id, session_id, revision_id, &entries)?;
     Ok(n)
 }

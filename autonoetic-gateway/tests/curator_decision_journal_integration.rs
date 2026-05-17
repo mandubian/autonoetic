@@ -124,6 +124,7 @@ fn persist_emits_one_event_per_entry_plus_summary() {
     ];
     persist_decision_journal_entries(
         store.as_ref(),
+        "curator",
         "memory-curator.default",
         "sess-xyz",
         Some("rev-1"),
@@ -183,6 +184,7 @@ fn query_by_target_returns_only_that_target() {
     ];
     persist_decision_journal_entries(
         store.as_ref(),
+        "curator",
         "memory-curator.default",
         "sess-1",
         None,
@@ -207,6 +209,7 @@ fn extract_and_persist_skips_when_no_journal_field() {
     let (_temp, store) = temp_store();
     let n = extract_and_persist(
         store.as_ref(),
+        "curator",
         "memory-curator.default",
         "sess-no-journal",
         None,
@@ -231,6 +234,7 @@ fn extract_and_persist_persists_well_formed_entries() {
     .to_string();
     let n = extract_and_persist(
         store.as_ref(),
+        "curator",
         "memory-curator.default",
         "sess-go",
         Some("rev-9"),

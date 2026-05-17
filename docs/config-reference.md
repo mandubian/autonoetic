@@ -144,6 +144,76 @@ sandbox:
 
 ---
 
+## Fast Scheduler Sidecar
+
+Parallel low-latency scheduling loop for interval-style jobs (`every N seconds`). Runs beside the canonical background scheduler, sharing the same DB `claim_and_advance_due_job` call so the two loops cannot double-dispatch.
+
+Only interval-mode schedules are eligible; cron-style schedules remain on the canonical 5-second loop. Sub-10s intervals still require script-mode targets (defense-in-depth re-check at dispatch).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `fast_scheduler.enabled` | bool | `false` | Enable the fast scheduler sidecar. |
+| `fast_scheduler.tick_millis` | u64 | `200` | How often the fast loop wakes up (milliseconds). |
+| `fast_scheduler.max_due_per_tick` | usize | `64` | Maximum candidate jobs admitted per tick. |
+
+Example:
+
+```yaml
+fast_scheduler:
+  enabled: true
+  tick_millis: 200
+  max_due_per_tick: 64
+```
+
+---
+
+## Promotion Safety Governor
+
+Three soft gates enforced at `agent_revision_promote` time, guarding against runaway promotion velocity, flapping (re-promoting a recently-active revision), and eval regression (finding counts strictly increasing across consecutive promotions).
+
+All three gates are bypassable via `force: true` + `force_reason` (operator override, capped at 512 characters). Bypass emits a `governor.override` causal event. Disabled by default.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `promotion_governor.enabled` | bool | `false` | Enable governor checks. |
+| `promotion_governor.velocity_window_hours` | u64 | `24` | Sliding window for the velocity check (hours). |
+| `promotion_governor.max_promotions_per_window` | usize | `3` | Maximum `Promote` entries per alias inside the velocity window. |
+| `promotion_governor.flapping_lookback` | usize | `4` | How many most-recent promotions to scan when checking for candidate-exclusion (re-promoting a revision already seen recently). |
+| `promotion_governor.eval_regression_streak` | usize | `3` | How many adjacent finding-count comparisons must be strictly increasing for the eval-regression halt to fire. |
+| `promotion_governor.eval_regression_lookback` | usize | `6` | Maximum number of recent promotions to scan for the eval-regression streak. |
+
+Example:
+
+```yaml
+promotion_governor:
+  enabled: true
+  velocity_window_hours: 24
+  max_promotions_per_window: 3
+  flapping_lookback: 4
+  eval_regression_streak: 3
+  eval_regression_lookback: 6
+```
+
+---
+
+## Curator Decision Journal
+
+When `response_validation` is enabled, the gateway automatically parses the `decision_journal` array from agent output and persists one `curator.decision` causal event per entry. This is always active when response validation is on — no separate configuration key is needed.
+
+Each entry records:
+- **target**: the memory or resource the decision applies to
+- **action**: what was done (e.g. `keep`, `drop`, `merge`)
+- **reason_code**: stable machine-readable code (e.g. `high_confidence_pattern`)
+- **reason_detail**: optional human-readable explanation
+- **metric_values**: optional structured metrics
+- **confidence**: optional 0.0–1.0 confidence score
+
+The event's `target` column carries the entry's `target` field, enabling direct queries like "why was memory X dropped?". A summary event (`decision_journal_recorded`) is also emitted per agent run with the total entry count.
+
+The category parameter is configurable per agent type (defaults to `curator`). See `docs/security-sentinel.md` for how the sentinel's future LLM-judgment layer will audit these entries.
+
+---
+
 ## Response Validation & Repair
 
 When enabled, the gateway validates agent outputs against declared constraints in agent metadata before returning results to the caller. Repair mode adds bounded retry loops when validation fails, but only for agents that opt in via `io.output_policy.repair.auto`.
