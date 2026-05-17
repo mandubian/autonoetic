@@ -2284,6 +2284,16 @@ impl NativeTool for AgentRevisionPromoteTool {
                     })
                     .to_string());
                 }
+                if reason.len() > 512 {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "validation",
+                        "error": "governor_force_reason_too_long",
+                        "message": format!("`force_reason` must be at most 512 characters (got {}).", reason.len()),
+                        "repair_hint": "Shorten the override justification.",
+                    })
+                    .to_string());
+                }
                 if cfg.promotion_governor.enabled {
                     crate::runtime::promotion_governor::emit_override_event(
                         gateway_store.as_ref(),

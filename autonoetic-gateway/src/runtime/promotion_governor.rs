@@ -98,6 +98,14 @@ pub fn run_governor_checks(
 
 /// Velocity check: count `Promote` rows for the alias in the configured
 /// window; reject when the count >= the configured cap.
+///
+/// **TOCTOU note**: this check runs *outside* `atomic_promote`'s SQLite
+/// transaction. Concurrent promote calls for the same alias can all observe
+/// the same pre-promotion count and pass this gate before any of them inserts
+/// into `promotion_history`. For a default-disabled, force-overridable safety
+/// gate this is acceptable; the cap is a soft limit, not a hard invariant.
+/// TODO: move the count check into the `atomic_promote` transaction to close
+/// the window entirely.
 pub fn check_velocity(
     config: &PromotionGovernorConfig,
     store: &GatewayStore,
@@ -147,11 +155,10 @@ pub fn check_flapping(
     if config.flapping_lookback == 0 {
         return Ok(None);
     }
-    let history = store.list_promotion_history(agent_id)?;
+    let history = store.list_recent_promotion_history(agent_id, config.flapping_lookback)?;
     let recent: Vec<_> = history
         .into_iter()
         .filter(|r| matches!(r.kind, autonoetic_types::agent_revision::PromotionKind::Promote))
-        .take(config.flapping_lookback)
         .collect();
 
     if !recent
@@ -188,6 +195,13 @@ pub fn check_flapping(
 /// consecutive monotonic increases in the non-info finding count. The
 /// signal: even when the boolean `evaluator_pass` is `true`, a steady
 /// rise in warning/error findings means quality is drifting downward.
+///
+/// **Design note**: this check inspects only *already-promoted* history,
+/// not the candidate revision. The signal is a trailing indicator on
+/// completed promotions — "is the recent trend degrading?" The promotion
+/// that crosses the threshold is allowed through; the *next* one gets
+/// blocked. Including the candidate would require the promotion record to
+/// exist before the check runs, inverting the check-before-write model.
 pub fn check_eval_regression(
     config: &PromotionGovernorConfig,
     store: &GatewayStore,
@@ -197,11 +211,10 @@ pub fn check_eval_regression(
     if config.eval_regression_streak == 0 || config.eval_regression_lookback == 0 {
         return Ok(None);
     }
-    let history = store.list_promotion_history(agent_id)?;
+    let history = store.list_recent_promotion_history(agent_id, config.eval_regression_lookback)?;
     let recent: Vec<_> = history
         .into_iter()
         .filter(|r| matches!(r.kind, autonoetic_types::agent_revision::PromotionKind::Promote))
-        .take(config.eval_regression_lookback)
         .collect();
 
     // promotion_store opens the on-disk JSON each call; cheap enough for
@@ -359,7 +372,7 @@ fn compute_next_allowed_at(
     agent_id: &str,
     config: &PromotionGovernorConfig,
 ) -> Result<Option<String>> {
-    let history = store.list_promotion_history(agent_id)?;
+    let history = store.list_recent_promotion_history(agent_id, config.max_promotions_per_window)?;
     let window = chrono::Duration::hours(config.velocity_window_hours as i64);
     let since = chrono::Utc::now() - window;
     let mut in_window: Vec<_> = history
