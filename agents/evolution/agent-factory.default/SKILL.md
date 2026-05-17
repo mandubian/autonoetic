@@ -159,9 +159,35 @@ Install a new reasoning agent called '<agent_id>':
 - Capabilities: <intended_capabilities as capability objects>
 - Execution mode: reasoning
 - llm_config: { provider: "openrouter", model: "google/gemini-3-flash-preview", temperature: 0.2 }
+- io: { returns: { type: "object", required: ["status"], properties: { status: { type: "string" } } } }
 - Gating: none (reasoning-only, no CodeExecution/AgentSpawn)
 ```
 Then call `workflow_wait` with the returned `task_id`.
+
+**io schema guidance for reasoning agents:**
+Include `io.returns` in the install intent to give the gateway an output
+contract. Keep it minimal — a broad shape is better than a wrong detailed
+one. Example for an agent that returns a status and optional data:
+
+```json
+{
+  "io": {
+    "returns": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "type": "string" },
+        "data": { "type": "object" }
+      }
+    }
+  }
+}
+```
+
+Do NOT include `io.accepts` for reasoning agents — the planner constructs
+messages in natural language and over-constraining the input schema will
+break callers. Only script agents with structured CLI arguments benefit
+from `io.accepts`.
 
 **Why the bundled SKILL body matches the install intent's
 `instructions`:** specialized_builder uses the `instructions` field
