@@ -89,7 +89,7 @@ fn extract_drops_malformed_entries() {
             // empty target
             { "target": "", "action": "drop", "reason_code": "low_signal" },
             // valid
-            { "target": "memory://x/y", "action": "keep", "reason_code": "stable_pattern" },
+            { "target": "memory://x/y", "action": "keep", "reason_code": "high_confidence_pattern" },
             // missing reason_code
             { "target": "memory://a/b", "action": "drop" },
         ]
@@ -98,7 +98,7 @@ fn extract_drops_malformed_entries() {
     let entries = extract_decision_journal_entries(&reply).unwrap();
     assert_eq!(entries.len(), 1, "only one well-formed entry");
     assert_eq!(entries[0].target, "memory://x/y");
-    assert_eq!(entries[0].reason_code, "stable_pattern");
+    assert_eq!(entries[0].reason_code, "high_confidence_pattern");
 }
 
 #[test]

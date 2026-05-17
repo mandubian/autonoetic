@@ -88,7 +88,7 @@ pub fn persist_decision_journal_entries(
     entries: &[DecisionJournalEntry],
 ) -> Result<()> {
     let timestamp = chrono::Utc::now().to_rfc3339();
-    for entry in entries {
+    for (seq, entry) in entries.iter().enumerate() {
         let payload = serde_json::json!({
             "agent_id": agent_id,
             "session_id": session_id,
@@ -105,8 +105,10 @@ pub fn persist_decision_journal_entries(
             agent_id: agent_id.to_string(),
             session_id: session_id.to_string(),
             turn_id: None,
-            event_seq: 0,
+            event_seq: seq as u64,
             timestamp: timestamp.clone(),
+            // TODO: parameterize category so non-curator agents opting into
+            // decision_journal are not misclassified as "curator".
             category: "curator".to_string(),
             action: "decision".to_string(),
             status: "active".to_string(),

@@ -168,12 +168,11 @@ output-schema check (`io.returns` in the frontmatter) and the
 
 ### `decision_journal` obligation
 
-You MUST emit one entry for every keep / drop / promote_to_skill /
-flag_for_evolution judgment you make. Skipping entries defeats the
-audit: an operator querying "why was memory X dropped" must get a
-direct answer from the causal chain. If you choose not to act on a
-target you scanned, you do not need to record a `keep`-entry for it
-— only emit entries for *positive* actions.
+You MUST emit one entry for every *action* judgment (drop, promote_to_skill,
+flag_for_evolution). Skipping entries defeats the audit: an operator querying
+"why was memory X dropped" must get a direct answer from the causal chain.
+You MAY optionally emit `keep` entries to document *why* a target was retained,
+but they are not required — only emit entries for decisions that change state.
 
 ### `reason_code` vocabulary
 
