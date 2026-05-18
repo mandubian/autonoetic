@@ -28,6 +28,7 @@ pub mod signal;
 pub mod store;
 pub mod system_agents;
 pub mod auto_learning_jobs;
+pub mod overflow_classifier;
 pub mod workflow_causal;
 pub mod workflow_store;
 
@@ -1418,13 +1419,101 @@ async fn spawn_task_execution(
             finish_active_row("stopped");
         }
         Err(e) => {
+            let error_str = e.to_string();
+
+            // ── Phase 3: Overflow-aware retry ──────────────────────────
+            // When the overflow retry classifier is enabled, detect context
+            // overflow errors and retry exactly once with an aggressive
+            // governor pipeline. A second overflow is terminal.
+            if crate::scheduler::overflow_classifier::overflow_retry_classifier_enabled()
+                && crate::scheduler::overflow_classifier::is_context_overflow(&e)
+            {
+                let already_retried = prev_checkpoint
+                    .as_ref()
+                    .and_then(|cp| cp.state.get("overflow_recovery_attempted"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                if !already_retried {
+                    tracing::warn!(
+                        target: "workflow",
+                        task_id = %t_id,
+                        error = %error_str,
+                        "Context overflow detected — retrying once with aggressive governor"
+                    );
+                    let _ = workflow_store::checkpoint_task(
+                        &cfg, store, &wf_id, &t_id,
+                        "failed".to_string(),
+                        serde_json::json!({
+                            "status": "failed",
+                            "error": error_str,
+                            "overflow_recovery_attempted": true,
+                        }),
+                    );
+                    // Tag the task metadata so the governor knows to use the
+                    // aggressive reduction pipeline on retry. Merge into any
+                    // existing metadata rather than replacing it outright.
+                    let existing_meta = workflow_store::load_task_run(&cfg, store, &wf_id, &t_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|t| t.metadata)
+                        .unwrap_or(serde_json::json!({}));
+                    let merged = if let serde_json::Value::Object(mut m) = existing_meta {
+                        m.insert("overflow_recovery".to_string(), serde_json::Value::Bool(true));
+                        serde_json::Value::Object(m)
+                    } else {
+                        serde_json::json!({ "overflow_recovery": true })
+                    };
+                    let _ = workflow_store::update_task_run_metadata(
+                        &cfg, store, &wf_id, &t_id, merged,
+                    );
+                    // Set to Runnable so the scheduler re-queues this task
+                    let _ = workflow_store::update_task_run_status(
+                        &cfg, store, &wf_id, &t_id,
+                        autonoetic_types::workflow::TaskRunStatus::Runnable,
+                        Some("overflow_recovery_retry".to_string()),
+                        None, None,
+                    );
+                    let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+                    finish_active_row("stopped");
+                    return;
+                }
+
+                tracing::warn!(
+                    target: "workflow",
+                    task_id = %t_id,
+                    error = %error_str,
+                    "Context overflow retry exhausted — marking terminal"
+                );
+                // Fall through to normal failure path with terminal classification
+                let terminal_error = format!("context_overflow_terminal: task={} {}", t_id, error_str);
+                let _ = workflow_store::update_task_run_status(
+                    &cfg, store, &wf_id, &t_id,
+                    autonoetic_types::workflow::TaskRunStatus::Failed,
+                    Some(terminal_error.clone()),
+                    None, None,
+                );
+                let _ = workflow_store::checkpoint_task(
+                    &cfg, store, &wf_id, &t_id,
+                    "failed".to_string(),
+                    serde_json::json!({
+                        "status": "failed",
+                        "error": terminal_error,
+                        "overflow_recovery_exhausted": true,
+                    }),
+                );
+                let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+                finish_active_row("stopped");
+                return;
+            }
+
             if let Err(inner) = workflow_store::update_task_run_status(
                 &cfg,
                 store,
                 &wf_id,
                 &t_id,
                 autonoetic_types::workflow::TaskRunStatus::Failed,
-                Some(e.to_string()),
+                Some(error_str.clone()),
                 None,
                 None,
             ) {
@@ -1437,10 +1526,9 @@ async fn spawn_task_execution(
                 &wf_id,
                 &t_id,
                 "failed".to_string(),
-                serde_json::json!({ "status": "failed", "error": e.to_string() }),
+                serde_json::json!({ "status": "failed", "error": error_str }),
             );
             // Append validation errors to digest for better visibility
-            let error_str = e.to_string();
             let is_validation_error = error_str.contains("validation failed")
                 || error_str.contains("response_validation")
                 || error_str.contains("artifact_build_evidence")

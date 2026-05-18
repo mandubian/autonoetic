@@ -1829,6 +1829,16 @@ impl GatewayExecutionService {
             .with_degraded_sessions(Some(self.degraded_sessions.clone()))
             .with_persona(self.persona.clone());
 
+            // Phase 3: propagate overflow_recovery flag so the governor
+            // uses an aggressive reduction pipeline on retry.
+            let overflow_recovery = metadata
+                .and_then(|m| m.get("overflow_recovery"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if overflow_recovery {
+                runtime = runtime.with_overflow_recovery(true);
+            }
+
             use crate::runtime::lifecycle::TurnOutcome;
 
             // --- Turn continuation / checkpoint resume ---

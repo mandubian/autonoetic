@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 36;
+const SCHEMA_VERSION_LATEST: i64 = 37;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -521,7 +521,45 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_recordings_v34(conn)?;
     apply_post_promotion_reviews_v35(conn)?;
     apply_escalation_code_excerpts_v36(conn)?;
+    apply_stage_transitions_v37(conn)?;
 
+    Ok(())
+}
+
+fn apply_stage_transitions_v37(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 37 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS stage_transitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            transition_type TEXT NOT NULL DEFAULT 'attempt',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(agent_id, revision_id, stage)
+        );
+        CREATE INDEX IF NOT EXISTS idx_stage_transitions_agent_revision
+            ON stage_transitions(agent_id, revision_id);
+        CREATE INDEX IF NOT EXISTS idx_stage_transitions_stage
+            ON stage_transitions(stage);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            37_i64,
+            "stage_transitions",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 
