@@ -187,6 +187,34 @@ The body contains natural language instructions for the agent. Key sections typi
 - Rules and constraints
 - Output format guidance
 
+### Extended Instructions (`<!-- extended -->`)
+
+If the SKILL.md body contains `<!-- extended -->` on its own line, the parser splits the body into two parts:
+
+- **Core instructions**: everything before the marker — always injected into the system prompt
+- **Extended instructions**: everything after the marker — stored in the content store, available on-demand via `content_read({"name_or_handle": "extended_instructions"})`
+
+The system prompt automatically gets a hint: *"Extended instructions are available via content_read"*. The agent decides whether to fetch them.
+
+This is useful for deferring verbose reference tables, edge-case workflows, and seldom-used protocols. Example from `planner.default/SKILL.md`:
+
+```markdown
+## Decision Flow
+
+1. ...
+10. ...
+```
+
+<!-- extended -->
+
+```
+
+## Artifact Execution vs Script-Agent Promotion
+...
+```
+
+Core stays lean (~200 lines for planner); extended detail (~240 lines) is loaded only when needed.
+
 ---
 
 ## Capabilities System

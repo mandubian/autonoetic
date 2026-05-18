@@ -2,7 +2,17 @@
 
 ## Status
 
-Proposed
+**Implemented** — all 5 phases shipped across PRs #216, #217, #218, #219.
+
+| Phase | What | PR |
+|-------|------|----|
+| Phase 0–1 | Safe config defaults + Pluggable Context Governor module | #216 |
+| Phase 3 | Overflow-aware retry classifier + context_overflow error class | #217 |
+| Phase 4 | SKILL.md split marker convention (`<!-- extended -->`) | #218 |
+| Phase 2 | Hierarchical session summarization (CapsuleStrategy) | #219 |
+| Phase 5 | TUI transparency for context health | — *(not yet started)* |
+
+Feature flags: `AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1`, `AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER=1`, `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1`
 
 ## Incident Summary
 
