@@ -48,6 +48,10 @@ pub struct CausalChainEntry {
 
 pub const RULE_ID_EVENT_ATTRIBUTION: &str = "R+++3";
 
+/// Rule ID for context health / pressure observability events.
+/// Used by Phase 5 causal events so they appear in the TUI policy pane.
+pub const RULE_ID_CONTEXT_HEALTH: &str = "R-8.20";
+
 pub fn default_enforced_rules() -> Vec<String> {
     vec![RULE_ID_EVENT_ATTRIBUTION.to_string()]
 }

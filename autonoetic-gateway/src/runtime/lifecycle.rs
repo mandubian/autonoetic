@@ -1500,6 +1500,7 @@ impl AgentExecutor {
                                         "messages_summarized": metadata.messages_summarized,
                                         "compression_count": metadata.compression_count,
                                         "compressed_context_handle": metadata.compressed_context_handle,
+                                        "before_tokens": budget_breakdown.total_tokens,
                                     })),
                                 );
                                 *history = result.history;

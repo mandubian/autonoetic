@@ -32,6 +32,7 @@ pub fn rule_explanation(rule_id: &str) -> Option<&'static str> {
 
         // Audit and attribution (R-8.x, R+++3)
         "R-8.19" => "Gate decisions carry decider attribution",
+        "R-8.20" => "Context health observability events (pressure, overflow, compression)",
         "R+++3" => "Every enforcement action records the rule ID in the causal chain",
 
         // State attestation (R-6.x)

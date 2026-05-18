@@ -10,7 +10,7 @@
 | Phase 3 | Overflow-aware retry classifier + context_overflow error class | #217 |
 | Phase 4 | SKILL.md split marker convention (`<!-- extended -->`) | #218 |
 | Phase 2 | Hierarchical session summarization (CapsuleStrategy) | #219 |
-| Phase 5 | TUI transparency for context health | — *(not yet started)* |
+| Phase 5 | TUI transparency for context health | *(this commit)* |
 
 Feature flags: `AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1`, `AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER=1`, `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1`
 

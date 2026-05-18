@@ -621,6 +621,29 @@ impl App {
     fn disarm_cancel_window(&mut self) {
         self.esc_cancel_armed_until = None;
     }
+
+    fn context_health_badge(&self) -> Option<&'static str> {
+        match self.last_llm_context {
+            Some(ref u) => {
+                let pct = u
+                    .input_context_pct
+                    .map(f64::from)
+                    .or_else(|| u.context_window_tokens.and_then(|w| {
+                        if w == 0 {
+                            None
+                        } else {
+                            Some((u.input_tokens as f64 / f64::from(w)) * 100.0)
+                        }
+                    }));
+                match pct {
+                    Some(x) if x >= 95.0 => Some("ctx:🔥"),
+                    Some(x) if x >= 80.0 => Some("ctx:⚠"),
+                    _ => None,
+                }
+            }
+            None => None,
+        }
+    }
 }
 
 fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
@@ -2543,7 +2566,20 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 u.model.clone()
             };
-            lines.push(Line::raw(model));
+            let context_unknown = u.context_window_tokens.is_none() || u.context_window_tokens == Some(0);
+            let model_line = if context_unknown {
+                format!("{} ⚠", model)
+            } else {
+                model
+            };
+            lines.push(Line::from(Span::styled(
+                model_line,
+                if context_unknown {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                },
+            )));
             let in_s = format_tokens_compact(u.input_tokens);
             let derived_pct = u.context_window_tokens.map(|w| {
                 if w == 0 {
@@ -2987,7 +3023,12 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let workflow = app.session_overview.status_line();
+    let health = app.context_health_badge().unwrap_or("");
+    let workflow = if health.is_empty() {
+        app.session_overview.status_line()
+    } else {
+        format!("{} {}", app.session_overview.status_line(), health)
+    };
     let gateway = if app.gateway_connected {
         "Gateway: connected"
     } else {
@@ -3015,66 +3056,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             app.pending.len(),
             workflow,
             gateway,
-            pause_hint,
-            esc_hint,
-            follow_hint,
-        )
-    } else if !app.pending_approval_ids.is_empty() {
-        format!(
-            "{} {} approval(s) pending | {} | {} | {} | {} | {}",
-            app.spinner(),
-            app.pending_approval_ids.len(),
-            workflow,
-            gateway,
-            pause_hint,
-            esc_hint,
-            follow_hint,
-        )
-    } else if app.session_overview.pending_user_interactions > 0 {
-        format!(
-            "{} awaiting your response | {} | {} | {} | {} | {}",
-            app.spinner(),
-            workflow,
-            gateway,
-            pause_hint,
-            esc_hint,
-            follow_hint,
-        )
-    } else if app.session_overview.workflow.running > 0 || app.session_overview.workflow.queued > 0 {
-        format!(
-            "{} {} | {} | {} | {} | {}",
-            app.spinner(),
-            workflow,
-            gateway,
-            pause_hint,
-            esc_hint,
-            follow_hint,
-        )
-    } else {
-        format!("{} | {} | {} | {} | {}", workflow, gateway, pause_hint, esc_hint, follow_hint)
-    };
-    let pause_hint = if app.session_paused {
-        "Paused: ON"
-    } else {
-        "Paused: OFF"
-    };
-    let esc_hint = if app.cancel_armed() {
-        "Esc: armed (press again to cancel)"
-    } else {
-        "Esc: pause"
-    };
-    let follow_hint = if app.follow_output {
-        "Follow: ON"
-    } else {
-        "Follow: OFF"
-    };
-    let text = if !app.pending.is_empty() {
-        format!(
-            "{} {} pending | {} | {} | {} | {} | {}",
-            app.spinner(),
-            app.pending.len(),
-            gateway,
-            workflow,
             pause_hint,
             esc_hint,
             follow_hint,

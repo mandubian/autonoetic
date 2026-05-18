@@ -74,6 +74,19 @@ pub(crate) fn apply_prompt_budget(
                     total_tokens = current_total,
                     "Prompt budget approaching limit"
                 );
+                let _ = tracer.log_event(
+                    "agent.process",
+                    "context_pressure_high",
+                    autonoetic_types::causal_chain::EntryStatus::Success,
+                    Some(serde_json::json!({
+                        "utilization_pct": pct,
+                        "total_tokens": current_total,
+                        "effective_limit": effective_limit,
+                        "margin_tokens": budget_config.margin_tokens,
+                        "context_window": breakdown.context_window,
+                        "warning_threshold_pct": budget_config.warn_at_pct,
+                    })),
+                );
             }
         }
         return Ok((tools, history));
