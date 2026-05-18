@@ -158,11 +158,6 @@ impl NativeTool for FederationEscalateTool {
         store.create_escalation(&mut escalation)?;
 
         let approval_request_id = format!("apr-esc-{}", &escalation_id[..16.min(escalation_id.len())]);
-        let synthesis_preview = if args.planner_synthesis.len() > 200 {
-            format!("{}...", &args.planner_synthesis[..200])
-        } else {
-            args.planner_synthesis.clone()
-        };
         let mut approval = ApprovalRequest {
             request_id: approval_request_id.clone(),
             agent_id: args.agent_id.clone(),
@@ -175,7 +170,7 @@ impl NativeTool for FederationEscalateTool {
                 root_session_id: args.root_session_id.clone(),
                 requested_by_agent_id: args.agent_id.clone(),
                 reason: format!("Promotion review for agent '{}' (escalation {})", args.agent_id, escalation_id),
-                context: synthesis_preview,
+                context: args.planner_synthesis.clone(),
                 urgency: "normal".to_string(),
                 suggested_actions: vec!["approve".to_string(), "reject".to_string()],
                 payload: Some(serde_json::json!({
