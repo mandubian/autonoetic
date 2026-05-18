@@ -16,6 +16,9 @@ pub struct LoadedAgent {
     pub dir: PathBuf,
     pub manifest: AgentManifest,
     pub instructions: String,
+    /// Optional extended instructions (everything after `<!-- extended -->`
+    /// in the SKILL.md body) available for on-demand retrieval.
+    pub extended_instructions: Option<String>,
 }
 
 impl LoadedAgent {
@@ -129,6 +132,8 @@ impl AgentRepository {
         let skill_path = meta.dir.join("SKILL.md");
         let skill_content = std::fs::read_to_string(&skill_path)?;
         let (manifest, instructions) = SkillParser::parse(&skill_content)?;
+        let (core_instructions, extended) =
+            crate::runtime::parser::split_extended_instructions(&instructions);
 
         // Enforce identity: directory name must match manifest agent ID
         let dir_name = meta
@@ -161,7 +166,8 @@ impl AgentRepository {
         Ok(LoadedAgent {
             dir: meta.dir.clone(),
             manifest,
-            instructions,
+            instructions: core_instructions.to_string(),
+            extended_instructions: extended.map(String::from),
         })
     }
 
@@ -211,11 +217,14 @@ impl AgentRepository {
         let skill_path = rev_dir.join("SKILL.md");
         let skill_content = std::fs::read_to_string(&skill_path)?;
         let (manifest, instructions) = SkillParser::parse(&skill_content)?;
+        let (core_instructions, extended) =
+            crate::runtime::parser::split_extended_instructions(&instructions);
 
         Ok(LoadedAgent {
             dir: rev_dir,
             manifest,
-            instructions,
+            instructions: core_instructions.to_string(),
+            extended_instructions: extended.map(String::from),
         })
     }
 

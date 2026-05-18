@@ -182,7 +182,23 @@ fn reject_legacy_response_contract(content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Infers Autonoetic capabilities from AgentSkills.io `allowed-tools` entries.
+/// Split instructions at the `<!-- extended -->` marker.
+///
+/// Everything before the marker is "core" (always injected in the system
+/// prompt).  Everything after is "extended" (on-demand retrieval).  Returns
+/// `(core, Some(extended))` if the marker is found, or `(body, None)` if not.
+pub fn split_extended_instructions(body: &str) -> (&str, Option<&str>) {
+    // Accept either <!-- extended --> or <!--extended--> (with/without spaces)
+    for marker in &["<!-- extended -->", "<!--extended-->"] {
+        if let Some(pos) = body.find(marker) {
+            let core = body[..pos].trim();
+            let extended = body[pos + marker.len()..].trim();
+            let extended = if extended.is_empty() { None } else { Some(extended) };
+            return (core, extended);
+        }
+    }
+    (body, None)
+}
 ///
 /// Maps known AgentSkills tool names to Autonoetic capability types:
 /// - `Bash(*)` → `SandboxFunctions` / `CodeExecution`
@@ -652,5 +668,53 @@ metadata:
             .unwrap();
         assert_eq!(sandbox.len(), 1);
         assert_eq!(sandbox[0], "*");
+    }
+
+    #[test]
+    fn test_split_extended_no_marker() {
+        let body = "Just core instructions here.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, body);
+        assert!(extended.is_none());
+    }
+
+    #[test]
+    fn test_split_extended_marker_with_spaces() {
+        let body = "Core instructions.\n<!-- extended -->\nExtended instructions here.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core instructions.");
+        assert_eq!(extended, Some("Extended instructions here."));
+    }
+
+    #[test]
+    fn test_split_extended_marker_no_spaces() {
+        let body = "Core instructions.\n<!--extended-->\nExtended instructions here.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core instructions.");
+        assert_eq!(extended, Some("Extended instructions here."));
+    }
+
+    #[test]
+    fn test_split_extended_marker_at_start() {
+        let body = "<!-- extended -->\nAll content is extended.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "");
+        assert_eq!(extended, Some("All content is extended."));
+    }
+
+    #[test]
+    fn test_split_extended_empty_extended() {
+        let body = "Core.\n<!-- extended -->\n   ";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core.");
+        assert!(extended.is_none());
+    }
+
+    #[test]
+    fn test_split_extended_marker_at_end() {
+        let body = "Core.\n<!-- extended -->";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core.");
+        assert!(extended.is_none());
     }
 }

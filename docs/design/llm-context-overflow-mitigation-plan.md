@@ -317,33 +317,321 @@ Deliverables:
 5. Deprecation shims in old modules.
 6. Unit tests: strategy isolation (each strategy works independently), pipeline ordering (cascade stops at first `Resolved`), fallback (all strategies exhausted → typed error).
 
-## Phase 2: Hierarchical Session Summarization (Future Strategy)
+## Phase 2: Hierarchical Session Summarization (CapsuleStrategy)
 
-> **Note**: This phase is deferred after Phases 0, 1, and 3 ship. The existing `CompressionStrategy` in the governor is sufficient for the immediate failure mode. The capsule design introduces a new state machine (versions, merge conflicts under concurrent compression) that warrants its own RFC. Because the governor is pluggable, the capsule ships as a new `ReductionStrategy` implementation with zero changes to the pipeline or lifecycle.
+> **Note**: This phase is deferred after Phases 0, 1, and 3 ship. The existing `CompressionStrategy` in the governor is sufficient for the immediate failure mode. Because the governor is pluggable, the capsule ships as a new `ReductionStrategy` implementation with zero changes to the pipeline or lifecycle.
 
-Introduce a durable "state capsule" layer to prevent repeated long-form replay:
+> **Feature flag**: `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1`
 
-1. Keep last N turns raw (N=3 default).
-2. Maintain rolling summary blocks:
-   1. Objective and success criteria.
-   2. Decisions and rationale.
-   3. Stable identifiers (artifact refs, revision ids, approvals).
-   4. Open tasks/blockers.
-3. On each compression cycle, update capsule from deltas rather than regenerating from full history.
-4. Preserve original snapshots in content store for audit/replay.
+### Motivation
 
-Compression quality safeguards:
+The existing `CompressionStrategy` performs full LLM-based summarization of old turns on each compression cycle. This works for the immediate failure mode but has structural limitations in long-running (50+ turn) sessions:
 
-1. Never summarize away unresolved approvals/escalations.
-2. Never mutate structured IDs in summaries (lossless copy only).
-3. Keep most recent tool-call/result group intact.
+1. **Repeated re-summarization**: Each compression cycle regenerates the summary from scratch, losing incremental context nuance.
+2. **Structural information loss**: The flat summary text doesn't preserve structured identifiers (artifact handles, approval IDs, revision IDs) with guaranteed losslessness.
+3. **No semantic layering**: A planner session at turn 80 carries the same flat summary block as at turn 15 — there's no hierarchical decomposition of what matters.
+4. **Quality degradation**: Each re-summarization compounds error, especially for decisions and rationale that drift across compression cycles.
 
-Deliverables:
+### Concept
+
+Introduce a durable, versioned **state capsule** that maintains rolling structured sections updated from deltas rather than regenerated from full history:
+
+1. Keep last N turns raw (N=3 default, reusing existing `split_compressible_messages()`).
+2. Maintain rolling structured sections (see schema below).
+3. On each compression cycle, extract a typed `CapsuleDelta` from recent turns via LLM, then apply it mechanically.
+4. Preserve original capsule versions in content store for audit/replay (immutable chain).
+
+### Capsule Data Model
+
+The capsule is a versioned, structured state object at `context_governor::capsule`:
+
+```rust
+/// A durable state capsule that maintains rolling structured summaries.
+///
+/// Unlike flat compression, the capsule preserves structured sections
+/// that are updated incrementally from deltas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateCapsule {
+    /// Monotonic version counter, incremented on each update.
+    pub version: u64,
+    /// Session that owns this capsule.
+    pub session_id: String,
+    /// Turn number when this capsule was last updated.
+    pub last_update_turn: u64,
+
+    // --- Structured Sections ---
+
+    /// Current objective and success criteria.
+    /// Updated when the agent's goal shifts or refines.
+    pub objective_and_criteria: String,
+    /// Key decisions made and their rationale.
+    /// Append-only: new decisions are appended, never removed.
+    pub decisions_and_rationale: Vec<CapsuleDecision>,
+    /// Stable identifiers that MUST be preserved losslessly.
+    /// Content handles, artifact refs, approval IDs, revision IDs.
+    pub stable_identifiers: Vec<StableIdentifier>,
+    /// Open tasks and blockers at the current point.
+    /// Mutable: tasks are added, marked complete, or removed.
+    pub open_tasks: Vec<CapsuleTask>,
+
+    // --- Audit chain ---
+
+    /// Content store handle to the previous capsule version.
+    pub previous_version_handle: Option<String>,
+    /// Content store handle to the full original history snapshot
+    /// that was compressed into this capsule version.
+    pub source_history_handle: Option<String>,
+    /// Timestamp of last update (RFC3339).
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapsuleDecision {
+    pub turn: u64,
+    pub summary: String,
+    pub rationale: String,
+    pub referenced_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct StableIdentifier {
+    /// Category: "artifact", "approval", "revision", "content", "session", etc.
+    pub category: String,
+    /// The identifier value (content handle, approval ID, etc.)
+    pub value: String,
+    /// Human-readable label (optional).
+    pub label: Option<String>,
+    /// Turn when this ID was first referenced.
+    pub first_seen_turn: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapsuleTask {
+    pub description: String,
+    /// Status: "open", "in_progress", "blocked", "completed".
+    pub status: String,
+    pub added_turn: u64,
+    pub completed_turn: Option<u64>,
+    pub blocker: Option<String>,
+}
+```
+
+**Design rationale**: Structured sections rather than free-form text. The LLM extracts deltas into typed fields; the gateway mechanically enforces that `stable_identifiers` are never mutated (only appended). This follows the "dumb gateway" philosophy: the LLM does the semantic work (extraction), the gateway does the mechanical work (enforcement).
+
+### Delta Extraction
+
+On each compression cycle, the `CapsuleStrategy`:
+
+1. Sends the current capsule state (JSON) + recent compressible turns + a `CapsuleDelta` schema description to the compression LLM.
+2. Receives a typed `CapsuleDelta` as JSON.
+3. Validates the delta mechanically (see safety invariants below).
+4. Applies the delta to produce a new `StateCapsule` with `version + 1`.
+5. Persists the previous version to the content store (audit chain).
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapsuleDelta {
+    /// Updated objective (if changed), or None to keep current.
+    pub objective_update: Option<String>,
+    /// New decisions to append.
+    pub new_decisions: Vec<CapsuleDecision>,
+    /// New stable identifiers discovered in recent turns.
+    pub new_identifiers: Vec<StableIdentifier>,
+    /// Task updates: new tasks, status changes, completions.
+    pub task_updates: Vec<CapsuleTaskUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CapsuleTaskUpdate {
+    Add(CapsuleTask),
+    Complete { description: String, turn: u64 },
+    Block { description: String, blocker: String },
+    Remove { description: String },
+}
+```
+
+### CapsuleStrategy — ReductionStrategy Implementation
+
+`CapsuleStrategy` implements `ReductionStrategy` and replaces `CompressionStrategy` in the pipeline when the feature flag is set:
+
+```rust
+pub struct CapsuleStrategy {
+    http_client: reqwest::Client,
+    presets: HashMap<String, LlmPreset>,
+    gateway_dir: Option<PathBuf>,
+}
+
+#[async_trait]
+impl ReductionStrategy for CapsuleStrategy {
+    fn name(&self) -> &'static str { "capsule" }
+
+    async fn reduce(&self, ctx: &mut GovernorContext) -> anyhow::Result<ReductionOutcome> {
+        // 1. Check capsule compression enabled + LLM configured
+        // 2. Split history via split_compressible_messages() (reuse existing)
+        // 3. Load or create capsule from GovernorContext
+        // 4. Extract CapsuleDelta from compressible turns via LLM
+        // 5. Validate delta (no ID mutations, no decision removals,
+        //    unresolved approvals preserved)
+        // 6. Apply delta → new capsule version (version + 1)
+        // 7. Persist previous version to content store
+        // 8. Replace compressible history with capsule injection message
+        // 9. Update ctx.history, ctx.compression_metadata
+        // 10. Recompute token estimate; return Resolved or Insufficient
+    }
+}
+```
+
+**Pipeline position**: With the feature flag enabled, the pipeline becomes:
+
+1. `ToolSchemaCompression` — strip schemas after turn 0 (fast, lossless)
+2. **`Capsule`** — delta-based structured compression (replaces `Compression`)
+3. `TrimHistory` — drop oldest groups (fast, lossy)
+4. `ToolDemotion` — remove specialized tools (fast, reduces capability)
+5. `Fail` — typed overflow error (terminal)
+
+`CompressionStrategy` remains available as the default when the flag is unset.
+
+### Capsule Injection Format
+
+Instead of the current `[COMPRESSED CONTEXT - Turn N]` flat text, the capsule injects a structured message:
+
+```
+[SESSION STATE CAPSULE v{version} — Turn {turn}]
+
+## Objective
+{objective_and_criteria}
+
+## Key Decisions
+- [Turn {turn}] {summary}: {rationale}
+...
+
+## Active Identifiers
+- [{category}] {value} ({label})
+...
+
+## Open Tasks
+- [{status}] {description}
+...
+
+## Completed Tasks (Recent)
+- [done@{turn}] {description}
+...
+```
+
+### Safety Invariants (Mechanical Enforcement)
+
+These are enforced by the gateway, not by the LLM:
+
+| Invariant | Enforcement |
+|---|---|
+| Stable identifiers are never mutated | `apply_delta()` rejects any `new_identifiers` that conflict with existing entries by `(category, value)` |
+| Decisions are append-only | `apply_delta()` only appends `new_decisions`; no mechanism to modify or remove |
+| Unresolved approvals survive compression | `validate_delta()` scans compressed turns for approval tool calls without matching `approval.status` results; rejects delta if these aren't in `open_tasks` or `stable_identifiers` |
+| Capsule version chain is immutable | Each update persists the previous version to content store; content store blobs are read-only |
+| Most recent tool-call group is kept intact | Reuses existing `split_compressible_messages()` logic — tool-call groups are never split |
+| Decision overflow bounded | Capsule retains at most `max_capsule_decisions` (default 30); oldest beyond limit are summarized into a single "prior decisions summary" entry |
+| Completed task pruning | At most `max_completed_tasks` (default 10) completed tasks retained; oldest are dropped |
+
+### Persistence
+
+#### Content Store
+
+- Previous capsule versions → `content_store.write()` with name `capsule_v{version}_turn_{turn}`, visibility `Private` (session-local for v1)
+- Source history snapshots → `content_store.write()` (same as existing `CompressionStrategy`)
+- Audit chain: each capsule's `previous_version_handle` points to the prior version's content store handle
+
+#### Checkpoint
+
+`SessionCheckpoint` gains a new field:
+
+```rust
+// --- Capsule ---
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub capsule_state: Option<StateCapsule>,
+```
+
+On session resume, `restore_into()` restores capsule state so the next compression cycle does a delta update rather than starting fresh. `AgentExecutor` stores the capsule as `pub capsule_state: Option<StateCapsule>`.
+
+### Configuration
+
+`ContextCompressionConfig` gains capsule-specific fields:
+
+```rust
+/// Compression strategy: "summarization" (default) or "capsule".
+#[serde(default = "default_compression_strategy")]
+pub strategy: String,
+/// Maximum decisions retained in capsule (default 30).
+#[serde(default = "default_max_capsule_decisions")]
+pub max_capsule_decisions: usize,
+/// Maximum completed tasks retained in capsule (default 10).
+#[serde(default = "default_max_completed_tasks")]
+pub max_completed_tasks: usize,
+```
+
+`CompressionConfig` (per-agent SKILL.md) gains optional overrides:
+
+```rust
+/// Override compression strategy for this agent: "summarization" or "capsule".
+pub strategy: Option<String>,
+/// Override max capsule decisions for this agent.
+pub max_capsule_decisions: Option<usize>,
+```
+
+### Capsule Scope (Concurrency Decision)
+
+v1: **session-local only**. Each session owns its own capsule — no cross-session sharing, no CAS/locking needed. This avoids the concurrency complexity of two sibling sessions compressing simultaneously into a shared capsule.
+
+Future: if telemetry shows benefit, upgrade to root-session-shared capsules with CAS-style optimistic locking on the capsule version.
+
+### Migration from CompressionStrategy
+
+When upgrading mid-session (operator enables the feature flag during a running session), the `CapsuleStrategy` detects existing `[COMPRESSED CONTEXT]` markers in history and bootstraps the capsule's `objective_and_criteria` section from their content. The first capsule version is created at `version: 1` with the bootstrapped objective and empty decisions/identifiers/tasks sections.
+
+### Deliverables
 
 1. `context_governor::capsule::CapsuleStrategy` implementing `ReductionStrategy`.
-2. Capsule schema and serializer.
-3. Compression tests for id-preservation and decision continuity — prefer property-based (quickcheck-style) invariants over fixed fixtures where feasible.
-4. Config entry to swap `CompressionStrategy` for `CapsuleStrategy` in the pipeline.
+2. `StateCapsule`, `CapsuleDelta`, `StableIdentifier`, `CapsuleDecision`, `CapsuleTask` types with serialization.
+3. `apply_delta()` with mechanical enforcement of safety invariants.
+4. `validate_delta()` for unresolved approval detection.
+5. Delta extraction prompt and LLM integration (reusing compression LLM config).
+6. Content store persistence for capsule version chain.
+7. `SessionCheckpoint.capsule_state` field + `restore_into()` integration.
+8. Config entries in `ContextCompressionConfig` and `CompressionConfig`.
+9. Feature gate: `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1` selects `CapsuleStrategy` in pipeline.
+10. Migration logic: bootstrap capsule from existing `[COMPRESSED CONTEXT]` markers.
+
+### Tests
+
+Unit tests (in `capsule.rs`):
+
+1. Delta application: valid delta → version incremented, sections updated.
+2. ID preservation invariant: conflicting `StableIdentifier` → rejected.
+3. Decision append-only: cannot remove or modify existing decisions.
+4. Unresolved approval detection: compressed turns with pending approval calls → delta must preserve them.
+5. Capsule injection format: serialized capsule produces expected structured text.
+6. Migration from compressed context: `[COMPRESSED CONTEXT]` → bootstrapped capsule.
+7. Decision overflow: >30 decisions → oldest summarized into prior-decisions entry.
+8. Completed task pruning: >10 completed tasks → oldest dropped.
+
+Property-based tests (quickcheck-style):
+
+1. **ID losslessness**: for any arbitrary history containing structured IDs, after capsule compression, all IDs appear in `stable_identifiers`.
+2. **Decision monotonicity**: for any sequence of delta applications, decisions list length is monotonically non-decreasing.
+3. **Version monotonicity**: capsule version is strictly monotonically increasing.
+
+Pipeline tests:
+
+1. CapsuleStrategy resolves → `ReductionOutcome::Resolved`.
+2. CapsuleStrategy insufficient → `ReductionOutcome::Insufficient`, pipeline continues to `TrimHistory`.
+3. Feature flag off → `CompressionStrategy` used instead.
+4. Pipeline contains exactly one compression-tier strategy (capsule xor summarization).
+
+Integration tests:
+
+1. 50-turn synthetic session → capsule applied, history reduced, all approval IDs preserved, session resumable from checkpoint.
+2. Compress → checkpoint → resume → second compression uses delta on existing capsule (version 2).
+3. Content store audit chain: 3 capsule versions → 3 snapshots with correct `previous_version_handle` chain.
+4. Migration: session starts with `CompressionStrategy`, flag enabled, next compression bootstraps capsule from existing markers.
 
 ## Phase 3: Overflow-Aware Orchestration and Retry
 
@@ -426,18 +714,28 @@ Add/extend fields in session/workflow telemetry:
    3. `ToolDemotionStrategy` — tier filtering, section cap compliance.
    4. `ToolSchemaCompressionStrategy` — turn-0 skip, subsequent-turn compression.
    5. `FailStrategy` — emits `ContextOverflowError` with diagnostic.
+   6. `CapsuleStrategy` — delta application, ID preservation invariant, decision append-only, unresolved approval detection, capsule injection format, migration from `[COMPRESSED CONTEXT]`, decision overflow (>30 → summarized), completed task pruning (>10 → dropped).
 2. Pipeline tests (cascade behavior):
    1. Within budget → no strategies run.
    2. Single strategy resolves → later strategies skipped.
    3. All strategies exhausted → `GovernorResult::Overflow` with full diagnostic.
    4. Custom pipeline order via config.
-3. Integration tests:
+   5. Capsule replaces `CompressionStrategy` when `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1` is set; pipeline has exactly one compression-tier strategy.
+3. Property-based tests (capsule invariants):
+   1. ID losslessness: for arbitrary history with structured IDs, all IDs appear in `stable_identifiers` after capsule compression.
+   2. Decision monotonicity: decisions list length is monotonically non-decreasing across any delta application sequence.
+   3. Version monotonicity: capsule version is strictly monotonically increasing.
+4. Integration tests:
    1. Simulated long-history planner run that would previously exceed context; verify no hard failure.
    2. Overflow retry path emits expected events and terminal classification.
    3. Builder duplicate-spawn prevention after successful promotion/install tuple.
    4. Concurrent sibling overflow: both children overflow, only one retry proceeds, no duplicate stage transition.
    5. Provider error classification (parse OpenAI/Anthropic/Gemini overflow error codes → `ContextOverflowError`).
-4. Soak test:
+   6. 50-turn synthetic session with capsule: history reduced, approval IDs preserved, session resumable from checkpoint.
+   7. Capsule across session resume: compress → checkpoint → resume → delta update (version 2).
+   8. Content store audit chain: 3 capsule versions → 3 snapshots with correct `previous_version_handle` chain.
+   9. Migration: session starts with `CompressionStrategy`, flag enabled mid-session, next compression bootstraps capsule.
+5. Soak test:
    1. Long-running multi-agent session (50+ turns) with approvals and workflow joins.
 
 ## Rollout Strategy
@@ -447,7 +745,7 @@ Add/extend fields in session/workflow telemetry:
 1. Stage A: Config-only rollout (Phase 0) behind environment profile.
 2. Stage B: Scaffold `context_governor` module, migrate existing strategies behind `ReductionStrategy` trait, wire into lifecycle. Feature-gated behind `AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1`.
 3. Stage C: Enable Phase 3 overflow retry classifier under `AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER=1`.
-4. Stage D: Enable Phase 2 capsule in canary (deferred — requires its own RFC, ships as a new `ReductionStrategy`).
+4. Stage D: Enable Phase 2 capsule in canary. RFC complete (see Phase 2 section above). Ships as `CapsuleStrategy` implementing `ReductionStrategy` behind `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1`. Session-local scope for v1 (no cross-session sharing). Swaps `CompressionStrategy` in the pipeline when enabled.
 5. Stage E: Turn on Phase 5 UI transparency by default.
 
 Feature flags:
