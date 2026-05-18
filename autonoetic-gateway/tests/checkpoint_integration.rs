@@ -65,6 +65,7 @@ fn make_checkpoint(
         tokens_consumed: 100,
         estimated_cost_usd: 0.001,
         compression_metadata: None,
+        capsule_state: None,
     }
 }
 

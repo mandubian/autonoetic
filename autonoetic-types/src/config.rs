@@ -1839,6 +1839,16 @@ pub struct ContextCompressionConfig {
     /// the threshold. Default: 3
     #[serde(default = "default_min_turns_between_compression")]
     pub min_turns_between_compression: u64,
+
+    /// Maximum number of capsule decisions to keep before summarization.
+    /// Only used when capsule strategy is active. Default: 30
+    #[serde(default = "default_max_capsule_decisions")]
+    pub max_capsule_decisions: usize,
+
+    /// Maximum number of completed capsule tasks to retain.
+    /// Only used when capsule strategy is active. Default: 10
+    #[serde(default = "default_max_completed_tasks")]
+    pub max_completed_tasks: usize,
 }
 
 fn default_compression_threshold_pct() -> f64 {
@@ -1857,6 +1867,14 @@ fn default_min_turns_between_compression() -> u64 {
     3
 }
 
+fn default_max_capsule_decisions() -> usize {
+    30
+}
+
+fn default_max_completed_tasks() -> usize {
+    10
+}
+
 impl Default for ContextCompressionConfig {
     fn default() -> Self {
         Self {
@@ -1868,6 +1886,8 @@ impl Default for ContextCompressionConfig {
             recent_turns_to_keep: default_compression_recent_turns(),
             max_summary_tokens: default_compression_max_summary_tokens(),
             min_turns_between_compression: default_min_turns_between_compression(),
+            max_capsule_decisions: default_max_capsule_decisions(),
+            max_completed_tasks: default_max_completed_tasks(),
         }
     }
 }

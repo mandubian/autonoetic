@@ -14,6 +14,7 @@ use autonoetic_types::config::LlmPreset;
 use std::collections::HashMap;
 
 pub mod budget;
+pub mod capsule;
 pub mod compression;
 pub mod demotion;
 pub mod error;
@@ -29,10 +30,16 @@ pub fn strict_governor_enabled() -> bool {
     std::env::var(STRICT_GOVERNOR_ENV).as_deref() == Ok("1")
 }
 
+/// Whether capsule compression is enabled.
+pub fn capsule_enabled() -> bool {
+    crate::runtime::context_governor::capsule::capsule_enabled()
+}
+
 /// Configuration for the context governor pipeline.
 pub struct GovernorConfig {
     pub http_client: reqwest::Client,
     pub presets: HashMap<String, LlmPreset>,
+    pub gateway_dir: Option<PathBuf>,
 }
 
 /// The context governor — runs a pluggable strategy pipeline.
@@ -40,15 +47,36 @@ pub struct ContextGovernor {
     strategies: Vec<Box<dyn ReductionStrategy>>,
 }
 
+use std::path::PathBuf;
+
 impl ContextGovernor {
     /// Build the default pipeline.
+    /// When `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1`, replaces the LLM
+    /// summarization strategy with the delta-based capsule strategy.
     pub fn new(config: &GovernorConfig) -> Self {
+        let compression: Box<dyn ReductionStrategy> =
+            if crate::runtime::context_governor::capsule::capsule_enabled() {
+                let mut s = capsule::CapsuleStrategy::new(
+                    config.http_client.clone(),
+                    config.presets.clone(),
+                );
+                if let Some(ref dir) = config.gateway_dir {
+                    s = s.with_gateway_dir(dir.clone());
+                }
+                Box::new(s)
+            } else {
+                let mut s = compression::CompressionStrategy::new(
+                    config.http_client.clone(),
+                    config.presets.clone(),
+                );
+                if let Some(ref dir) = config.gateway_dir {
+                    s = s.with_gateway_dir(dir.clone());
+                }
+                Box::new(s)
+            };
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             Box::new(schema_compress::ToolSchemaCompressionStrategy::new()),
-            Box::new(compression::CompressionStrategy::new(
-                config.http_client.clone(),
-                config.presets.clone(),
-            )),
+            compression,
             Box::new(trimming::TrimHistoryStrategy),
             Box::new(demotion::ToolDemotionStrategy),
         ];

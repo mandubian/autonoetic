@@ -262,6 +262,7 @@ mod session_resume_tests {
             tokens_consumed: 0,
             estimated_cost_usd: 0.0,
             compression_metadata: None,
+            capsule_state: None,
         };
         let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
         assert_eq!(id, "tid-99");

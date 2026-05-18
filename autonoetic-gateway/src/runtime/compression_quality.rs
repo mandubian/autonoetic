@@ -270,6 +270,8 @@ pub async fn run_threshold_scan(
             min_turns_between_compression: 0,
             provider: None,
             model: None,
+            max_capsule_decisions: 30,
+            max_completed_tasks: 10,
         };
         results.push((
             *threshold,
@@ -289,6 +291,8 @@ pub fn default_test_compression_config() -> ContextCompressionConfig {
         min_turns_between_compression: 3,
         provider: None,
         model: None,
+        max_capsule_decisions: 30,
+        max_completed_tasks: 10,
     }
 }
 

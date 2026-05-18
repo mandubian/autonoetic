@@ -1,9 +1,10 @@
 use crate::llm::{Message, ToolDefinition};
+use crate::runtime::compression::CompressionMetadata;
+use crate::runtime::context_governor::capsule::StateCapsule;
 use crate::runtime::context_governor::error::GovernorAction;
 use crate::runtime::prompt_budget::PromptBudgetBreakdown;
-use autonoetic_types::config::{ContextCompressionConfig, PromptBudgetConfig};
 use autonoetic_types::agent::CompressionConfig;
-use crate::runtime::compression::CompressionMetadata;
+use autonoetic_types::config::{ContextCompressionConfig, PromptBudgetConfig};
 
 /// Shared mutable state passed through the reduction pipeline.
 pub struct GovernorContext {
@@ -17,6 +18,7 @@ pub struct GovernorContext {
     pub budget_config: PromptBudgetConfig,
     pub compression_config: Option<ContextCompressionConfig>,
     pub agent_compression: Option<CompressionConfig>,
+    pub capsule_state: Option<StateCapsule>,
 }
 
 impl GovernorContext {
@@ -44,6 +46,7 @@ impl GovernorContext {
             budget_config,
             compression_config,
             agent_compression,
+            capsule_state: None,
         }
     }
 }
@@ -136,6 +139,7 @@ mod tests {
             budget_config: PromptBudgetConfig::default(),
             compression_config: None,
             agent_compression: None,
+            capsule_state: None,
         }
     }
 

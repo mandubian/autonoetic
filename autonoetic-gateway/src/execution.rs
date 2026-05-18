@@ -1170,6 +1170,7 @@ impl GatewayExecutionService {
                 tokens_consumed: 0,
                 estimated_cost_usd: 0.0,
                 compression_metadata: None,
+                capsule_state: None,
             }
         };
         cp.yield_reason = YieldReason::EmergencyStop {
