@@ -81,6 +81,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
         tokens_consumed: 0,
         estimated_cost_usd: 0.0,
         compression_metadata: None,
+        capsule_state: None,
     };
     save_checkpoint(config, &cp).unwrap();
 }

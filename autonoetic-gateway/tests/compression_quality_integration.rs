@@ -121,6 +121,8 @@ async fn test_compression_structural_validation_with_real_llm() {
         min_turns_between_compression: 0,
         provider: preset.provider.clone(),
         model: preset.model.clone(),
+        max_capsule_decisions: 30,
+        max_completed_tasks: 10,
     };
 
     let presets = HashMap::new();
@@ -198,6 +200,8 @@ async fn test_compression_summary_quality_with_real_llm() {
         min_turns_between_compression: 0,
         provider: preset.provider.clone(),
         model: preset.model.clone(),
+        max_capsule_decisions: 30,
+        max_completed_tasks: 10,
     };
 
     let presets = HashMap::new();

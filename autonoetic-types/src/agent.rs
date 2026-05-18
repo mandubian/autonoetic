@@ -298,6 +298,12 @@ pub struct CompressionConfig {
     /// Override the number of recent turns to keep.
     #[serde(default)]
     pub recent_turns_to_keep: Option<usize>,
+    /// Override max capsule decisions (capsule strategy only).
+    #[serde(default)]
+    pub max_capsule_decisions: Option<usize>,
+    /// Override max completed tasks (capsule strategy only).
+    #[serde(default)]
+    pub max_completed_tasks: Option<usize>,
 }
 
 /// Middleware hooks declared in the agent's own manifest (replaces overlay-based hooks).

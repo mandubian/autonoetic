@@ -625,6 +625,7 @@ impl AgentExecutor {
             } else {
                 None
             },
+            capsule_state: self.extended_instructions.as_ref().and_then(|_| None),
         }
     }
 
@@ -1381,12 +1382,14 @@ impl AgentExecutor {
                         http_client: self.http_client.clone(),
                         presets: self.config.as_ref().map(|c| c.llm_presets.clone())
                             .unwrap_or_default(),
+                        gateway_dir: self.gateway_dir.clone(),
                     })
                 } else {
                     ContextGovernor::new(&GovernorConfig {
                         http_client: self.http_client.clone(),
                         presets: self.config.as_ref().map(|c| c.llm_presets.clone())
                             .unwrap_or_default(),
+                        gateway_dir: self.gateway_dir.clone(),
                     })
                 };
                 match governor.govern(&mut ctx).await {

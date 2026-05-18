@@ -153,6 +153,10 @@ pub struct SessionCheckpoint {
     /// Compression metadata if context compression was applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_metadata: Option<CompressionMetadata>,
+
+    /// Current state capsule for hierarchical summarization (Phase 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_state: Option<crate::runtime::context_governor::capsule::StateCapsule>,
 }
 
 impl SessionCheckpoint {
@@ -501,6 +505,7 @@ mod tests {
             tokens_consumed: 100,
             estimated_cost_usd: 0.001,
             compression_metadata: None,
+            capsule_state: None,
         };
 
         save_checkpoint(&config, &checkpoint).expect("should save");
@@ -553,6 +558,7 @@ mod tests {
             tokens_consumed: 100,
             estimated_cost_usd: 0.001,
             compression_metadata: None,
+            capsule_state: None,
         };
 
         let mut c2 = c1.clone();
@@ -613,6 +619,7 @@ mod tests {
                 tokens_consumed: 100,
                 estimated_cost_usd: 0.001,
                 compression_metadata: None,
+                capsule_state: None,
             };
             save_checkpoint(&config, &checkpoint).unwrap();
         }

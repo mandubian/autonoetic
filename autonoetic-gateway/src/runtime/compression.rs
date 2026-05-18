@@ -521,6 +521,8 @@ mod tests {
             threshold_pct: Some(40.0),
             recent_turns_to_keep: Some(2),
             llm_preset: Some("cheap".into()),
+            max_capsule_decisions: None,
+            max_completed_tasks: None,
         };
         let (threshold, recent, max) = effective_config(&gateway, Some(&agent));
         assert_eq!(threshold, 40.0);
