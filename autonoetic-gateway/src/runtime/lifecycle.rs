@@ -33,8 +33,9 @@ use std::sync::Arc;
 
 use crate::runtime::budget_tracker::{
     apply_prompt_budget, input_tokens_as_context_pct, is_retryable_empty_other_response,
-    max_other_empty_retries, resolve_context_window_for_run,
+    max_other_empty_retries,
 };
+use crate::runtime::context_governor::resolver::resolve_context_window_for_run;
 
 // ---------------------------------------------------------------------------
 // TurnOutcome
@@ -1198,7 +1199,7 @@ impl AgentExecutor {
             // Insert fresh system message at the front
             history.insert(0, Message::system(&system_instructions));
 
-            let tools: Vec<ToolDefinition> = {
+            let mut tools: Vec<ToolDefinition> = {
                 let pending_approvals = self.has_pending_approvals();
                 let tier_filter = determine_tool_tier_filter(
                     &self.manifest,
@@ -1263,90 +1264,152 @@ impl AgentExecutor {
                 })),
             );
 
-            // --- Budget Enforcement ---
-            let (tools, trimmed_history) = apply_prompt_budget(
-                tools,
-                history.clone(),
-                &budget_breakdown,
-                self.config.as_ref().map(|c| &**c),
-                &session_id,
-                &turn_id,
-                &mut tracer,
-            )?;
-            *history = trimmed_history;
-
-            // --- Context Compression ---
-            // Note: Budget enforcement (above) trims old turns when the prompt budget
-            // is exceeded. Context compression (below) summarizes old turns instead of
-            // discarding them. Both operate on the same token threshold independently.
-            // If `prompt_budget.warn_at_pct` and `context_compression.threshold_pct`
-            // are set to similar values, they may compete for the same boundary.
-            // Recommended: set compression threshold slightly below the budget trim
-            // threshold so compression fires first, preserving information.
-            let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
-            let agent_compression = self.manifest.compression.as_ref();
-            let should_compress = compression_cfg.map(|c| c.enabled).unwrap_or(false);
-            if should_compress {
-                let empty_presets = std::collections::HashMap::new();
-                let presets = match self.config.as_ref() {
-                    Some(c) => &c.llm_presets,
-                    None => &empty_presets,
+            // --- Budget Enforcement + Context Compression ---
+            // Feature-gated: the pluggable ContextGovernor pipeline replaces the
+            // legacy budget enforcement and compression block when the env var
+            // AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1 is set.
+            if crate::runtime::context_governor::strict_governor_enabled() {
+                use crate::runtime::context_governor::{
+                    ContextGovernor, GovernorConfig,
+                    strategies::GovernorResult,
                 };
-                match crate::runtime::compression::compress_context(
+                let margin = self.config.as_ref()
+                    .map(|c| c.prompt_budget.margin_tokens as usize)
+                    .unwrap_or(4096);
+                let effective_limit = budget_breakdown
+                    .context_window
+                    .map(|w| w.saturating_sub(margin))
+                    .unwrap_or(budget_breakdown.total_tokens + 1);
+                let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
+                let mut ctx = crate::runtime::context_governor::strategies::GovernorContext::new(
                     history.clone(),
-                    context_window_resolved.map(|w| w as usize),
-                    compression_cfg.unwrap(),
-                    agent_compression,
-                    presets,
-                    &self.http_client,
-                    &session_id,
-                    self.turn_counter,
-                    Some(&self.compression_metadata),
-                )
-                .await
-                {
-                    Ok(result) => {
-                        if result.compressed {
-                            let mut metadata = result.metadata;
-                            if let Some(gateway_dir) = self.gateway_dir.as_ref() {
-                                match crate::runtime::compression::persist_compressed_context(
-                                    gateway_dir,
-                                    &session_id,
-                                    &result.original_history,
-                                    &metadata,
-                                ) {
-                                    Ok(handle) => {
-                                        metadata.compressed_context_handle = handle;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            target: "autonoetic::compression",
-                                            error = %e,
-                                            "Failed to persist compressed context"
-                                        );
-                                    }
-                                }
+                    tools.clone(),
+                    budget_breakdown.clone(),
+                    effective_limit,
+                    self.turn_counter.saturating_sub(1),
+                    session_id.clone(),
+                    Some(self.compression_metadata.clone()),
+                    self.config.as_ref().map(|c| c.prompt_budget.clone())
+                        .unwrap_or_default(),
+                    compression_cfg.cloned(),
+                    self.manifest.compression.clone(),
+                );
+                let governor = ContextGovernor::new(&GovernorConfig {
+                    http_client: self.http_client.clone(),
+                    presets: self.config.as_ref().map(|c| c.llm_presets.clone())
+                        .unwrap_or_default(),
+                });
+                match governor.govern(&mut ctx).await {
+                    Ok(GovernorResult::Recovered { actions_taken }) => {
+                        tracing::info!(
+                            target: "autonoetic::context_governor",
+                            actions = ?actions_taken,
+                            "ContextGovernor recovered within budget"
+                        );
+                        // Update compression metadata if compression strategy ran
+                        if ctx.compression_metadata.as_ref().map(|m| m.compression_count > self.compression_metadata.compression_count).unwrap_or(false) {
+                            if let Some(meta) = ctx.compression_metadata.clone() {
+                                self.compression_metadata = meta;
                             }
-                            let _ = tracer.log_event(
-                                "agent.process",
-                                "context_compression",
-                                autonoetic_types::causal_chain::EntryStatus::Success,
-                                Some(serde_json::json!({
-                                    "messages_summarized": metadata.messages_summarized,
-                                    "compression_count": metadata.compression_count,
-                                    "compressed_context_handle": metadata.compressed_context_handle,
-                                })),
-                            );
-                            *history = result.history;
-                            self.compression_metadata = metadata;
                         }
                     }
+                    Ok(GovernorResult::Overflow(diag)) => {
+                        tracing::warn!(
+                            target: "autonoetic::context_governor",
+                            diagnostic = ?diag,
+                            "ContextGovernor exhausted — all strategies failed"
+                        );
+                    }
+                    Ok(GovernorResult::WithinBudget) => {}
                     Err(e) => {
                         tracing::warn!(
-                            target: "autonoetic::compression",
+                            target: "autonoetic::context_governor",
                             error = %e,
-                            "Context compression failed, proceeding without compression"
+                            "ContextGovernor error, falling through without reduction"
                         );
+                    }
+                }
+                *history = ctx.history;
+                tools = ctx.tools;
+            } else {
+                let (t, trimmed_history) = apply_prompt_budget(
+                    tools,
+                    history.clone(),
+                    &budget_breakdown,
+                    self.config.as_ref().map(|c| &**c),
+                    &session_id,
+                    &turn_id,
+                    &mut tracer,
+                )?;
+                tools = t;
+                *history = trimmed_history;
+
+                // --- Context Compression (legacy path) ---
+                let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
+                let agent_compression = self.manifest.compression.as_ref();
+                let should_compress = compression_cfg.map(|c| c.enabled).unwrap_or(false);
+                if should_compress {
+                    let empty_presets = std::collections::HashMap::new();
+                    let presets = match self.config.as_ref() {
+                        Some(c) => &c.llm_presets,
+                        None => &empty_presets,
+                    };
+                    match crate::runtime::compression::compress_context(
+                        history.clone(),
+                        context_window_resolved.map(|w| w as usize),
+                        compression_cfg.unwrap(),
+                        agent_compression,
+                        presets,
+                        &self.http_client,
+                        &session_id,
+                        self.turn_counter,
+                        Some(&self.compression_metadata),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            if result.compressed {
+                                let mut metadata = result.metadata;
+                                if let Some(gateway_dir) = self.gateway_dir.as_ref() {
+                                    match crate::runtime::compression::persist_compressed_context(
+                                        gateway_dir,
+                                        &session_id,
+                                        &result.original_history,
+                                        &metadata,
+                                    ) {
+                                        Ok(handle) => {
+                                            metadata.compressed_context_handle = handle;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "autonoetic::compression",
+                                                error = %e,
+                                                "Failed to persist compressed context"
+                                            );
+                                        }
+                                    }
+                                }
+                                let _ = tracer.log_event(
+                                    "agent.process",
+                                    "context_compression",
+                                    autonoetic_types::causal_chain::EntryStatus::Success,
+                                    Some(serde_json::json!({
+                                        "messages_summarized": metadata.messages_summarized,
+                                        "compression_count": metadata.compression_count,
+                                        "compressed_context_handle": metadata.compressed_context_handle,
+                                    })),
+                                );
+                                *history = result.history;
+                                self.compression_metadata = metadata;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "autonoetic::compression",
+                                error = %e,
+                                "Context compression failed, proceeding without compression"
+                            );
+                        }
                     }
                 }
             }

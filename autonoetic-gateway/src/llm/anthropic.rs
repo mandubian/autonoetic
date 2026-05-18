@@ -145,6 +145,11 @@ impl LlmDriver for AnthropicDriver {
                 .unwrap_or(false)
             {
                 let text = response.text().await.unwrap_or_default();
+                if crate::llm::is_context_overflow_error(status, &text) {
+                    anyhow::bail!(
+                        "context_overflow: provider=anthropic status={} detail={}", status, text
+                    );
+                }
                 anyhow::bail!("Anthropic API error {}: {}", status, text);
             }
 

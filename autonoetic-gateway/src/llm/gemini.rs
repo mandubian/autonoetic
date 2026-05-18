@@ -180,21 +180,27 @@ impl LlmDriver for GeminiDriver {
             let response = builder.send().await?;
             let status = response.status().as_u16();
 
-            if status == 429 {
-                if attempt < MAX_RETRIES {
-                    let wait_ms = (attempt + 1) as u64 * 2000;
-                    tracing::warn!(status, attempt, wait_ms, "Gemini rate limited, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                    continue;
-                }
-                anyhow::bail!("Gemini rate limited after {} retries", MAX_RETRIES);
-            }
-
+            // Check context overflow *before* rate-limit retry, because
+            // Gemini sometimes overflows as HTTP 429 with RESOURCE_EXHAUSTED.
             if !reqwest::StatusCode::from_u16(status)
                 .map(|s| s.is_success())
                 .unwrap_or(false)
             {
                 let text = response.text().await.unwrap_or_default();
+                if crate::llm::is_context_overflow_error(status, &text) {
+                    anyhow::bail!(
+                        "context_overflow: provider=gemini status={} detail={}", status, text
+                    );
+                }
+                if status == 429 {
+                    if attempt < MAX_RETRIES {
+                        let wait_ms = (attempt + 1) as u64 * 2000;
+                        tracing::warn!(status, attempt, wait_ms, "Gemini rate limited, retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    anyhow::bail!("Gemini rate limited after {} retries", MAX_RETRIES);
+                }
                 anyhow::bail!("Gemini API error {}: {}", status, text);
             }
 
