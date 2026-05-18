@@ -1458,7 +1458,7 @@ pub async fn handle_trace_fork(
             resume: false,
             test_mode: false,
         };
-        super::chat::handle_chat(config_path, &chat_args).await?;
+        super::chat::handle_chat(config_path, &chat_args, "trace").await?;
     } else if json_output {
         println!(
             "{}",
