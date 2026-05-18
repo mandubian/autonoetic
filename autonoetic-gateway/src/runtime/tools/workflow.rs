@@ -334,14 +334,14 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires.".to_string(),
+            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires. When task_ids is empty or omitted, waits for all tasks in the current workflow.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "task_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of task IDs to wait for (from agent.spawn responses with async=true)."
+                        "description": "List of task IDs to wait for. Omit or pass [] to wait for all tasks in the workflow."
                     },
                     "workflow_id": {
                         "type": "string",
@@ -360,7 +360,6 @@ impl NativeTool for WorkflowWaitTool {
                         "description": "Seconds between status polls when blocking. Default: 2."
                     }
                 },
-                "required": ["task_ids"],
                 "additionalProperties": false
             }),
         }
@@ -394,8 +393,6 @@ impl NativeTool for WorkflowWaitTool {
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        anyhow::ensure!(!args.task_ids.is_empty(), "task_ids must not be empty");
-
         let agents_dir = agent_dir
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Agent directory is missing its agents root parent"))?;
@@ -406,7 +403,6 @@ impl NativeTool for WorkflowWaitTool {
         };
         let gw_config = config.unwrap_or(&fallback_config);
 
-        // Resolve workflow_id from session if not provided
         let workflow_id = match args.workflow_id {
             Some(id) => id,
             None => {
@@ -416,6 +412,19 @@ impl NativeTool for WorkflowWaitTool {
                     .unwrap_or_else(|| "unknown".to_string())
             }
         };
+
+        let task_ids = if args.task_ids.is_empty() {
+            let tasks = crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                gw_config,
+                gateway_store.as_deref(),
+                &workflow_id,
+            )?;
+            tasks.iter().map(|t| t.task_id.clone()).collect::<Vec<_>>()
+        } else {
+            args.task_ids
+        };
+
+        anyhow::ensure!(!task_ids.is_empty(), "no tasks found in workflow '{}'", workflow_id);
 
         let timeout_secs = args.timeout_secs.unwrap_or(0).min(300);
         let poll_interval_secs = args.poll_interval_secs.unwrap_or(2).clamp(1, 30);
@@ -433,7 +442,7 @@ impl NativeTool for WorkflowWaitTool {
                 gw_config,
                 gateway_store.as_deref(),
                 &workflow_id,
-                &args.task_ids,
+                &task_ids,
                 _gateway_dir,
                 session_id,
             );
@@ -463,7 +472,7 @@ impl NativeTool for WorkflowWaitTool {
         }
 
         // Blocking mode: poll until join satisfied or timeout
-        let task_ids = args.task_ids.clone();
+        let task_ids_clone = task_ids.clone();
         let wf_id = workflow_id.clone();
         let gw_config_arc = std::sync::Arc::new(gw_config.clone());
 
@@ -482,7 +491,7 @@ impl NativeTool for WorkflowWaitTool {
                         gw_config_arc.as_ref(),
                         gateway_store.as_deref(),
                         &wf_id,
-                        &task_ids,
+                        &task_ids_clone,
                         timeout_secs,
                         poll_interval_secs,
                         _gateway_dir,
@@ -497,7 +506,7 @@ impl NativeTool for WorkflowWaitTool {
                     gw_config_arc.as_ref(),
                     gateway_store.as_deref(),
                     &wf_id,
-                    &task_ids,
+                    &task_ids_clone,
                     timeout_secs,
                     poll_interval_secs,
                     _gateway_dir,
