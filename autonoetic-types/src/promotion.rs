@@ -173,6 +173,9 @@ pub struct PromotionRecordResponse {
 pub struct PromotionQueryArgs {
     /// Artifact ID to query promotion status for.
     pub artifact_id: String,
+    /// Short artifact ref (e.g., 'ar.386f5b222421'). Alternative to artifact_id.
+    #[serde(default)]
+    pub artifact_ref: Option<String>,
 }
 
 /// Response from the `promotion.query` tool.

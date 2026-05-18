@@ -290,10 +290,13 @@ impl NativeTool for PromotionQueryTool {
                 "properties": {
                     "artifact_id": {
                         "type": "string",
-                        "description": "Artifact ID to query promotion status for (e.g., 'art_a1b2c3d4')"
+                        "description": "Canonical artifact ID (e.g., 'art_a1b2c3d4'). Alternative: use artifact_ref."
+                    },
+                    "artifact_ref": {
+                        "type": "string",
+                        "description": "Short artifact ref (e.g., 'ar.386f5b222421'). Resolved server-side to the canonical artifact_id. Alternative to artifact_id."
                     }
                 },
-                "required": ["artifact_id"],
                 "additionalProperties": false
             }),
         }
@@ -324,10 +327,29 @@ impl NativeTool for PromotionQueryTool {
         let args: PromotionQueryArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        anyhow::ensure!(
-            args.artifact_id.starts_with("art_"),
-            "artifact_id must start with 'art_'"
-        );
+        let artifact_id = match (&args.artifact_id, &args.artifact_ref) {
+            (id, _) if id.starts_with("art_") => id.clone(),
+            (_, Some(ref_id)) => {
+                let Some(gs) = _gateway_store.as_ref() else {
+                    anyhow::bail!("promotion_query: artifact_ref requires GatewayStore");
+                };
+                let Some(sid) = _session_id else {
+                    anyhow::bail!("promotion_query: artifact_ref requires a session_id");
+                };
+                let record = gs
+                    .resolve_artifact_ref_any_scope(ref_id, sid)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "promotion_query: artifact_ref '{}' not found, expired, or revoked",
+                            ref_id
+                        )
+                    })?;
+                record.artifact_id
+            }
+            _ => anyhow::bail!(
+                "promotion_query: either artifact_id (starting with 'art_') or artifact_ref is required"
+            ),
+        };
 
         let Some(gw_dir) = gateway_dir else {
             return Ok(ToolError::resource("Promotion store requires gateway directory to be configured", None::<String>).to_error_response());
@@ -335,7 +357,7 @@ impl NativeTool for PromotionQueryTool {
 
         let store = PromotionStore::new(gw_dir)?;
 
-        let response = match store.get_promotion(&args.artifact_id) {
+        let response = match store.get_promotion(&artifact_id) {
             Some(record) => PromotionQueryResponse {
                 artifact_id: record.artifact_id,
                 content_digest: record.content_digest,
