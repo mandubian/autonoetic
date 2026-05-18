@@ -100,7 +100,7 @@ These agents are the system's vocabulary. Know them by name. They are **agent ID
 | `unit_test_runner.default` | Runs artifact test suites in sandbox | CodeExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
 | `packager.default` | Dependency installation for code agents | NetworkAccess (deps) |
-| `specialized_builder.default` | Final agent install step (revision create + promote) | AgentRevision |
+| `specialized_builder.default` | Final agent install step (revision create + promote). **Do NOT delegate directly — use agent-factory.default instead.** | AgentRevision |
 | `debugger.default` | Root cause analysis when things fail repeatedly | CodeExecution |
 | `registration.default` | Human-in-the-loop credential ceremonies only (OAuth, identity verification, many user prompts); not generic skill_url onboarding | CredentialAccess |
 | `agent-factory.default` | Building a new agent end-to-end (pipeline owner) | AgentSpawn |
@@ -155,10 +155,11 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
     → Future sessions: spawn the installed agent directly — no re-onboarding, no endpoint guessing, no credential_request trial-and-error.
     → If no (one-off usage): proceed with executor.default + credential_id as in step 4a.
 
-2. New persistent agent needed
-  → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
-  → If a proven artifact already exists, also give it: artifact_ref, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
+ 2. New persistent agent needed
+   → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
+   → If a proven artifact already exists, also give it: artifact_ref, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
    → When agent-factory completes, the agent is installed and ready. Do NOT spawn additional specialized_builder, coder, or promotion tasks. The agent-factory handles the full pipeline internally.
+   → **CRITICAL: Never spawn specialized_builder.default yourself.** The gateway rejects duplicate installs for the same agent_id. If agent-factory failed, check agent_exists before retrying — a revision may already exist. Do NOT start a parallel builder while agent-factory is still running.
 
 3. Research / evidence / URL fetch
    → researcher.default

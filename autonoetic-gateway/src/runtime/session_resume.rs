@@ -150,11 +150,7 @@ pub(crate) async fn resume_answered_user_interaction_from_loaded_checkpoint(
         "Resuming session from user.ask checkpoint with stored answer"
     );
 
-    runtime.guard = crate::runtime::guard::LoopGuard::restore(checkpoint.loop_guard_state.clone());
-    runtime.session_state = checkpoint.session_state;
-    runtime.session_started = true;
-    runtime.turn_counter = checkpoint.turn_counter;
-    runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
+    checkpoint.restore_into(runtime);
 
     let mut history = checkpoint.history.clone();
     inject_answered_user_interaction_into_history(&mut history, &checkpoint, interaction)?;
@@ -179,12 +175,7 @@ pub(crate) async fn resume_answered_user_interaction_from_loaded_checkpoint(
         history.push(Message::user(message.to_string()));
     }
 
-    let initial_msg = checkpoint
-        .history
-        .iter()
-        .find(|m| matches!(m.role, crate::llm::Role::User))
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    let initial_msg = checkpoint.initial_user_message();
 
     let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))

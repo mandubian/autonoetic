@@ -1301,24 +1301,10 @@ impl GatewayExecutionService {
                             "Resumed from approval-required checkpoint",
                         );
                     }
-                    runtime.guard = crate::runtime::guard::LoopGuard::restore(
-                        checkpoint.loop_guard_state.clone(),
-                    );
-                    runtime.session_state = checkpoint.session_state;
-                    runtime.session_started = true;
-                    runtime.turn_counter = checkpoint.turn_counter;
-                    runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
-                    if let Some(ref cm) = checkpoint.compression_metadata {
-                        runtime.compression_metadata = cm.clone();
-                    }
+                    checkpoint.restore_into(runtime);
                     let mut history = checkpoint.history.clone();
                     inject_approval_ref_into_history(&mut history, rid);
-                    let initial_msg = checkpoint
-                        .history
-                        .iter()
-                        .find(|m| matches!(m.role, crate::llm::Role::User))
-                        .map(|m| m.content.clone())
-                        .unwrap_or_default();
+                    let initial_msg = checkpoint.initial_user_message();
                     let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
                     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
                 }
@@ -1369,12 +1355,7 @@ impl GatewayExecutionService {
                                     interaction_id = %iid,
                                     "Skipping UserInputRequired resume: interaction already claimed by another resume path"
                                 );
-                                let initial_msg = checkpoint
-                                    .history
-                                    .iter()
-                                    .find(|m| matches!(m.role, crate::llm::Role::User))
-                                    .map(|m| m.content.clone())
-                                    .unwrap_or_default();
+                                let initial_msg = checkpoint.initial_user_message();
                                 return Ok((
                                     crate::runtime::lifecycle::TurnOutcome::Completed(None),
                                     initial_msg,
@@ -1447,16 +1428,7 @@ impl GatewayExecutionService {
                             "Resumed from human escalation checkpoint",
                         );
                     }
-                    runtime.guard = crate::runtime::guard::LoopGuard::restore(
-                        checkpoint.loop_guard_state.clone(),
-                    );
-                    runtime.session_state = checkpoint.session_state;
-                    runtime.session_started = true;
-                    runtime.turn_counter = checkpoint.turn_counter;
-                    runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
-                    if let Some(ref cm) = checkpoint.compression_metadata {
-                        runtime.compression_metadata = cm.clone();
-                    }
+                    checkpoint.restore_into(runtime);
                     let mut history = checkpoint.history.clone();
                     let operator = req.decided_by.as_deref().unwrap_or("operator");
                     let guidance_note = req.decision_reason.as_deref().unwrap_or("");
@@ -1472,12 +1444,7 @@ impl GatewayExecutionService {
                         )
                     };
                     history.push(crate::llm::Message::system(escalation_msg));
-                    let initial_msg = checkpoint
-                        .history
-                        .iter()
-                        .find(|m| matches!(m.role, crate::llm::Role::User))
-                        .map(|m| m.content.clone())
-                        .unwrap_or_default();
+                    let initial_msg = checkpoint.initial_user_message();
                     let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
                     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
                 }
@@ -1491,25 +1458,11 @@ impl GatewayExecutionService {
                 yield_reason = ?checkpoint.yield_reason,
                 "Resuming session from latest checkpoint"
             );
-            runtime.guard = crate::runtime::guard::LoopGuard::restore(
-                checkpoint.loop_guard_state.clone(),
-            );
-            runtime.session_state = checkpoint.session_state;
-            runtime.session_started = true;
-            runtime.turn_counter = checkpoint.turn_counter;
-            runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
-            if let Some(ref cm) = checkpoint.compression_metadata {
-                runtime.compression_metadata = cm.clone();
-            }
+            checkpoint.restore_into(runtime);
 
             let mut history = checkpoint.history.clone();
             history.push(crate::llm::Message::user(message.to_string()));
-            let initial_msg = checkpoint
-                .history
-                .iter()
-                .find(|m| matches!(m.role, crate::llm::Role::User))
-                .map(|m| m.content.clone())
-                .unwrap_or_default();
+            let initial_msg = checkpoint.initial_user_message();
 
             let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
             Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
@@ -2658,16 +2611,7 @@ impl GatewayExecutionService {
         .with_degraded_sessions(Some(self.degraded_sessions.clone()))
         .with_persona(self.persona.clone());
 
-        // Restore executor state from checkpoint
-        runtime.guard =
-            crate::runtime::guard::LoopGuard::restore(checkpoint.loop_guard_state.clone());
-        runtime.session_state = checkpoint.session_state;
-        runtime.session_started = true;
-        runtime.turn_counter = checkpoint.turn_counter;
-        runtime.runtime_lock_hash = checkpoint.runtime_lock_hash.clone();
-        if let Some(ref cm) = checkpoint.compression_metadata {
-            runtime.compression_metadata = cm.clone();
-        }
+        checkpoint.restore_into(&mut runtime);
 
         // Build history from checkpoint, optionally appending an additional message
         let mut history = checkpoint.history.clone();

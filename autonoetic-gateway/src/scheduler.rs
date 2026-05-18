@@ -1411,7 +1411,7 @@ async fn spawn_task_execution(
                 "completed".to_string(),
                 serde_json::json!({
                     "status": "succeeded",
-                    "result_summary": spawn_result.assistant_reply.as_ref().map(|s| &s[..s.len().min(200)]),
+                    "result_summary": spawn_result.assistant_reply.as_ref().map(|s| &s[..s.floor_char_boundary(200)]),
                 }),
             );
             let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);

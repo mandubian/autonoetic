@@ -211,11 +211,7 @@ impl NativeTool for ApprovalWithdrawTool {
                 let status_str = r
                     .status
                     .as_ref()
-                    .map(|s| match s {
-                        autonoetic_types::background::ApprovalStatus::Approved => "approved",
-                        autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
-                        autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
-                    })
+                    .map(|s| s.as_str())
                     .unwrap_or("pending");
                 if status_str != "pending" {
                     return Ok(autonoetic_types::tool_error::ToolError::conflict(

@@ -186,7 +186,7 @@ impl NativeTool for UserAskTool {
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "conflict",
-                    "message": "user.ask is not available while gates are pending (approvals, interactions, or escalations). Resolve pending gates before retrying.",
+                    "message": "user.ask is not available while gates are pending (approvals or interactions). Resolve pending gates before retrying.",
                     "repair_hint": "Resolve or wait for pending gates, then retry user.ask.",
                     "error": "user.ask is not available while gates are pending. Resolve pending gates before retrying."
                 }).to_string());

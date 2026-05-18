@@ -155,6 +155,28 @@ pub struct SessionCheckpoint {
     pub compression_metadata: Option<CompressionMetadata>,
 }
 
+impl SessionCheckpoint {
+    pub fn restore_into(&self, runtime: &mut crate::runtime::lifecycle::AgentExecutor) {
+        runtime.guard =
+            crate::runtime::guard::LoopGuard::restore(self.loop_guard_state.clone());
+        runtime.session_state = self.session_state;
+        runtime.session_started = true;
+        runtime.turn_counter = self.turn_counter;
+        runtime.runtime_lock_hash = self.runtime_lock_hash.clone();
+        if let Some(ref cm) = self.compression_metadata {
+            runtime.compression_metadata = cm.clone();
+        }
+    }
+
+    pub fn initial_user_message(&self) -> String {
+        self.history
+            .iter()
+            .find(|m| matches!(m.role, crate::llm::Role::User))
+            .map(|m| m.content.clone())
+            .unwrap_or_default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------

@@ -708,6 +708,16 @@ pub enum ApprovalStatus {
     Cancelled,
 }
 
+impl ApprovalStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Rejected => "rejected",
+            ApprovalStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApprovalDecision {
     pub request_id: String,

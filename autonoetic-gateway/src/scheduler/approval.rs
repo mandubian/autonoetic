@@ -410,10 +410,34 @@ pub fn approve_request_with_options(
         gateway_store,
         request_id,
         decided_by,
-        reason,
+        reason.clone(),
         ApprovalStatus::Approved,
         options,
     )?;
+
+    if let ScheduledAction::SessionEscalate { payload, .. } = &decision.action {
+        if let Some(payload) = payload {
+            if payload.get("type").and_then(|v| v.as_str()) == Some("promotion_review") {
+                if let Some(esc_id) = payload.get("escalation_id").and_then(|v| v.as_str()) {
+                    if let Some(store) = gateway_store {
+                        if let Err(e) = store.resolve_escalation(
+                            esc_id,
+                            autonoetic_types::escalation::EscalationStatus::Approved,
+                            decided_by,
+                            reason.as_deref(),
+                        ) {
+                            tracing::warn!(
+                                target: "approval",
+                                escalation_id = %esc_id,
+                                error = %e,
+                                "Failed to resolve linked escalation on approval"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Dumb Gate model: notify the waiting session, do not auto-execute.
     if should_resume_waiting_session(&decision) {
@@ -525,11 +549,7 @@ fn cancel_approval_request(
 
     // Idempotency guard
     if let Some(ref current_status) = request.status {
-        let status_str = match current_status {
-            ApprovalStatus::Approved => "approved",
-            ApprovalStatus::Rejected => "rejected",
-            ApprovalStatus::Cancelled => "cancelled",
-        };
+        let status_str = current_status.as_str();
         anyhow::bail!(
             "Approval {} already decided as '{}' (by {})",
             request_id,
@@ -661,11 +681,7 @@ fn resume_session_after_approval(
     );
 
     // Build a synthetic message that the gateway will route to the waiting agent
-    let status_str = match decision.status {
-        ApprovalStatus::Approved => "approved",
-        ApprovalStatus::Rejected => "rejected",
-        ApprovalStatus::Cancelled => "cancelled",
-    };
+    let status_str = decision.status.as_str();
 
     // Extract agent_id and build status message based on action type
     let (agent_id, status_message) = match &decision.action {
@@ -863,11 +879,7 @@ fn resume_session_after_approval(
     );
 
     if let Some(executor) = hook_executor {
-        let status_str = match decision.status {
-            autonoetic_types::background::ApprovalStatus::Approved => "approved",
-            autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
-            autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
-        };
+        let status_str = decision.status.as_str();
         let root_id = decision
             .root_session_id
             .as_deref()
@@ -937,11 +949,7 @@ fn unblock_task_on_approval(
             agent_id: Some(decision.agent_id.clone()),
             payload: serde_json::json!({
                 "request_id": decision.request_id,
-                "status": match decision.status {
-                    ApprovalStatus::Approved => "approved",
-                    ApprovalStatus::Rejected => "rejected",
-                    ApprovalStatus::Cancelled => "cancelled",
-                },
+                "status": decision.status.as_str(),
             }),
             occurred_at: decision.decided_at.clone(),
         },
@@ -1072,11 +1080,7 @@ fn decide_request_with_options(
 
     // Idempotency guard: reject duplicate decisions
     if let Some(ref current_status) = request.status {
-        let status_str = match current_status {
-            ApprovalStatus::Approved => "approved",
-            ApprovalStatus::Rejected => "rejected",
-            ApprovalStatus::Cancelled => "cancelled",
-        };
+        let status_str = current_status.as_str();
         anyhow::bail!(
             "Approval {} already decided as '{}' (by {})",
             request_id,
@@ -1104,11 +1108,7 @@ fn decide_request_with_options(
         store
             .record_decision(
                 &decision.request_id,
-                match decision.status {
-                    ApprovalStatus::Approved => "approved",
-                    ApprovalStatus::Rejected => "rejected",
-                    ApprovalStatus::Cancelled => "cancelled",
-                },
+                decision.status.as_str(),
                 &decision.decided_by,
                 &decision.decided_at,
                 decision.reason.as_deref(),
@@ -1236,11 +1236,7 @@ fn decide_request_with_options(
         ApprovalStatus::Rejected => "background.approval",
         ApprovalStatus::Cancelled => "background.approval",
     };
-    let status_str = match status {
-        ApprovalStatus::Approved => "approved",
-        ApprovalStatus::Rejected => "rejected",
-        ApprovalStatus::Cancelled => "cancelled",
-    };
+    let status_str = status.as_str();
     let _ = trace_session.log_completed(
         action,
         Some(status_str),

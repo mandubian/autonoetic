@@ -1126,6 +1126,38 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         };
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
 
+        let existing = gateway_store.list_agent_revisions(&args.agent_id)?;
+        let has_active = existing.iter().any(|rev| {
+            matches!(
+                rev.status,
+                autonoetic_types::agent_revision::AgentRevisionStatus::Ready
+                    | autonoetic_types::agent_revision::AgentRevisionStatus::Candidate
+            )
+        });
+        if has_active {
+            let active: Vec<&str> = existing
+                .iter()
+                .filter(|rev| {
+                    matches!(
+                        rev.status,
+                        autonoetic_types::agent_revision::AgentRevisionStatus::Ready
+                            | autonoetic_types::agent_revision::AgentRevisionStatus::Candidate
+                    )
+                })
+                .map(|r| r.revision_id.as_str())
+                .collect();
+            return Ok(ToolError::fatal(
+                format!(
+                    "Agent '{}' already has an active revision ({}). \
+                     Use agent_exists to check before installing. \
+                     If you need to update, the existing revision must be archived first.",
+                    args.agent_id,
+                    active.join(", ")
+                ),
+                None::<String>,
+            ).to_error_response());
+        }
+
         let resolved_artifact = resolve_revision_artifact_input(
             args.artifact_id.as_deref(),
             args.artifact_ref.as_deref(),

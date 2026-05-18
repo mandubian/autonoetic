@@ -3,6 +3,9 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::background::{
+    ApprovalLevel, ApprovalRequest, ScheduledAction,
+};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::escalation::{EscalationMessage, RoleVerdictSummary};
 use serde::Deserialize;
@@ -154,11 +157,67 @@ impl NativeTool for FederationEscalateTool {
 
         store.create_escalation(&mut escalation)?;
 
+        let approval_request_id = format!("apr-esc-{}", &escalation_id[..16.min(escalation_id.len())]);
+        let synthesis_preview = if args.planner_synthesis.len() > 200 {
+            format!("{}...", &args.planner_synthesis[..200])
+        } else {
+            args.planner_synthesis.clone()
+        };
+        let mut approval = ApprovalRequest {
+            request_id: approval_request_id.clone(),
+            agent_id: args.agent_id.clone(),
+            session_id: _session_id.unwrap_or("").to_string(),
+            root_session_id: Some(args.root_session_id.clone()),
+            workflow_id: None,
+            task_id: None,
+            action: ScheduledAction::SessionEscalate {
+                session_id: _session_id.unwrap_or("").to_string(),
+                root_session_id: args.root_session_id.clone(),
+                requested_by_agent_id: args.agent_id.clone(),
+                reason: format!("Promotion review for agent '{}' (escalation {})", args.agent_id, escalation_id),
+                context: synthesis_preview,
+                urgency: "normal".to_string(),
+                suggested_actions: vec!["approve".to_string(), "reject".to_string()],
+                payload: Some(serde_json::json!({
+                    "escalation_id": escalation_id,
+                    "artifact_id": args.artifact_id,
+                    "revision_id": args.revision_id,
+                    "type": "promotion_review"
+                })),
+            },
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: Some(format!(
+                "Federation promotion review: agent '{}' artifact '{}' requires operator approval",
+                args.agent_id, args.artifact_id
+            )),
+            evidence_ref: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: escalation.code_excerpts.clone(),
+            risk_summary: None,
+        };
+        if let Err(e) = store.create_approval(&mut approval) {
+            tracing::warn!(
+                target: "federation",
+                escalation_id = %escalation_id,
+                error = %e,
+                "Failed to create linked approval for federation escalation"
+            );
+        }
+
         Ok(serde_json::json!({
             "ok": true,
             "escalation_id": escalation_id,
+            "approval_request_id": approval_request_id,
             "status": "pending",
-            "message": "Federation escalation created. The operator will review the verdicts."
+            "message": "Federation escalation created. The operator will review the verdicts via the approval system."
         })
         .to_string())
     }

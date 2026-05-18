@@ -85,11 +85,7 @@ impl NativeTool for ApprovalStatusTool {
         match store.get_approval(&args.approval_id) {
             Ok(Some(request)) => {
                 let status = match &request.status {
-                    Some(s) => match s {
-                        autonoetic_types::background::ApprovalStatus::Approved => "approved",
-                        autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
-                        autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
-                    },
+                    Some(s) => s.as_str(),
                     None => "pending",
                 }
                 .to_string();
