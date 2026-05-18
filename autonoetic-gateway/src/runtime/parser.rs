@@ -182,7 +182,23 @@ fn reject_legacy_response_contract(content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Infers Autonoetic capabilities from AgentSkills.io `allowed-tools` entries.
+/// Split instructions at the `<!-- extended -->` marker.
+///
+/// Everything before the marker is "core" (always injected in the system
+/// prompt).  Everything after is "extended" (on-demand retrieval).  Returns
+/// `(core, Some(extended))` if the marker is found, or `(body, None)` if not.
+pub fn split_extended_instructions(body: &str) -> (&str, Option<&str>) {
+    // Accept either <!-- extended --> or <!--extended--> (with/without spaces)
+    for marker in &["<!-- extended -->", "<!--extended-->"] {
+        if let Some(pos) = body.find(marker) {
+            let core = body[..pos].trim();
+            let extended = body[pos + marker.len()..].trim();
+            let extended = if extended.is_empty() { None } else { Some(extended) };
+            return (core, extended);
+        }
+    }
+    (body, None)
+}
 ///
 /// Maps known AgentSkills tool names to Autonoetic capability types:
 /// - `Bash(*)` → `SandboxFunctions` / `CodeExecution`

@@ -168,6 +168,9 @@ pub struct AgentExecutor {
     /// that skips CompressionStrategy and goes straight to TrimHistory.
     /// Set by the scheduler on overflow retry.
     pub overflow_recovery: bool,
+    /// Optional extended instructions (after `<!-- extended -->` in SKILL.md).
+    /// Written to content store for on-demand retrieval by the agent.
+    pub extended_instructions: Option<String>,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -221,6 +224,7 @@ impl AgentExecutor {
             ri_0_6_previous_snapshot: None,
             persona: None,
             overflow_recovery: false,
+            extended_instructions: None,
         }
     }
 
@@ -248,6 +252,12 @@ impl AgentExecutor {
     /// Phase 3: Enable aggressive context governor pipeline for overflow retry.
     pub fn with_overflow_recovery(mut self, enabled: bool) -> Self {
         self.overflow_recovery = enabled;
+        self
+    }
+
+    /// Set optional extended instructions for on-demand retrieval.
+    pub fn with_extended_instructions(mut self, instructions: Option<String>) -> Self {
+        self.extended_instructions = instructions;
         self
     }
 
@@ -705,8 +715,15 @@ impl AgentExecutor {
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
         let memory_context = self.build_memory_context_snippet();
+        let instructions_with_hint = match &self.extended_instructions {
+            Some(ext) if !ext.is_empty() => format!(
+                "{}\n\nExtended instructions are available via content_read(\"extended_instructions\").",
+                self.instructions
+            ),
+            _ => self.instructions.clone(),
+        };
         let mut system_instructions = compose_system_instructions_full(
-            &self.instructions,
+            &instructions_with_hint,
             &self.manifest,
             self.manifest
                 .io
@@ -1003,6 +1020,27 @@ impl AgentExecutor {
                 self.runtime_lock_hash =
                     crate::runtime::checkpoint::compute_runtime_lock_hash(&self.agent_dir);
             }
+
+            // Write extended instructions to content store for on-demand retrieval
+            if let Some(ext) = &self.extended_instructions {
+                if !ext.is_empty() {
+                    if let Some(gw_dir) = &self.gateway_dir {
+                        if let Ok(store) =
+                            crate::runtime::content_store::ContentStore::new(gw_dir)
+                        {
+                            if let Ok(handle) = store.write(ext.as_bytes()) {
+                                let sid = self.session_id.as_deref().unwrap_or("default");
+                                let _ = store.register_name_with_visibility(
+                                    sid,
+                                    "extended_instructions",
+                                    &handle,
+                                    crate::runtime::content_store::ContentVisibility::Session,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
         // --- Auto-inject Agent Messages ---
         if let Some(store) = self.gateway_store.as_ref() {
@@ -1178,8 +1216,15 @@ impl AgentExecutor {
             // Update system message — ensure exactly one system message at position 0
             let user_context = self.build_user_context_snippet();
             let memory_context = self.build_memory_context_snippet();
+            let instructions_with_hint = match &self.extended_instructions {
+                Some(ext) if !ext.is_empty() => format!(
+                    "{}\n\nExtended instructions are available via content_read(\"extended_instructions\").",
+                    self.instructions
+                ),
+                _ => self.instructions.clone(),
+            };
             let mut system_instructions = compose_system_instructions_full(
-                &self.instructions,
+                &instructions_with_hint,
                 &self.manifest,
                 self.manifest
                     .io
