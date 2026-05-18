@@ -2224,12 +2224,15 @@ impl NativeTool for AgentRevisionPromoteTool {
                     }
                 }
 
-                // Check for an approved escalation from the operator.
                 let escalation = gateway_store.find_escalation(
                     artifact_id,
                     &args.revision_id,
                     autonoetic_types::escalation::EscalationStatus::Approved,
                 )?;
+                let escalation = match escalation {
+                    Some(e) => Some(e),
+                    None => gateway_store.find_approved_escalation_for_artifact(artifact_id)?,
+                };
                 anyhow::ensure!(
                     escalation.is_some(),
                     "Promotion gate (FullJury): artifact '{}' has federation role verdicts \

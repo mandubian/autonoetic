@@ -175,6 +175,23 @@ impl GatewayStore {
         Ok(rows.next().transpose()?)
     }
 
+    pub fn find_approved_escalation_for_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<EscalationMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
+             role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
+             decided_by, decision_reason, code_excerpts, escalation_type
+             FROM escalations
+             WHERE artifact_id = ?1 AND status = 'approved'
+             ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![artifact_id], row_to_escalation)?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn resolve_escalation(
         &self,
         escalation_id: &str,

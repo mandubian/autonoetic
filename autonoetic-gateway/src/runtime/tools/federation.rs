@@ -133,22 +133,43 @@ impl NativeTool for FederationEscalateTool {
             .to_error_response());
         };
 
+        let (canonical_artifact_id, canonical_revision_id) =
+            match store.get_agent_revision(&args.revision_id)? {
+                Some(rev) => {
+                    let art = rev
+                        .artifact_id
+                        .as_deref()
+                        .unwrap_or(&args.artifact_id)
+                        .to_string();
+                    if art != args.artifact_id {
+                        tracing::warn!(
+                            target: "federation",
+                            escalation_artifact_id = %args.artifact_id,
+                            canonical_artifact_id = %art,
+                            "federation.escalate: LLM provided wrong artifact_id, correcting to canonical value from revision record"
+                        );
+                    }
+                    (art, rev.revision_id.clone())
+                }
+                None => (args.artifact_id.clone(), args.revision_id.clone()),
+            };
+
         let escalation_id = args
             .escalation_id
             .unwrap_or_else(|| format!("esc_{:x}", uuid::Uuid::new_v4().as_u128()));
 
         let mut escalation = EscalationMessage::new(
             escalation_id.clone(),
-            args.artifact_id.clone(),
+            canonical_artifact_id.clone(),
             args.agent_id.clone(),
-            args.revision_id.clone(),
+            canonical_revision_id.clone(),
             args.role_verdicts,
             args.planner_synthesis.clone(),
             args.root_session_id.clone(),
         );
         escalation.artifact_digest = args.artifact_digest;
 
-        if let (Some(gw_dir), artifact_id) = (gateway_dir, &args.artifact_id) {
+        if let (Some(gw_dir), artifact_id) = (gateway_dir, &canonical_artifact_id) {
             if !artifact_id.is_empty() {
                 escalation.code_excerpts =
                     crate::runtime::code_excerpts::build_code_excerpts(artifact_id, gw_dir);
@@ -175,15 +196,15 @@ impl NativeTool for FederationEscalateTool {
                 suggested_actions: vec!["approve".to_string(), "reject".to_string()],
                 payload: Some(serde_json::json!({
                     "escalation_id": escalation_id,
-                    "artifact_id": args.artifact_id,
-                    "revision_id": args.revision_id,
+                    "artifact_id": canonical_artifact_id,
+                    "revision_id": canonical_revision_id,
                     "type": "promotion_review"
                 })),
             },
             created_at: chrono::Utc::now().to_rfc3339(),
             reason: Some(format!(
                 "Federation promotion review: agent '{}' artifact '{}' requires operator approval",
-                args.agent_id, args.artifact_id
+                args.agent_id, canonical_artifact_id
             )),
             evidence_ref: None,
             status: None,
