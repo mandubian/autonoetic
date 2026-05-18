@@ -13,6 +13,7 @@ pub mod checkpoint;
 pub mod code_excerpts;
 pub mod compression;
 pub mod compression_quality;
+pub mod context_governor;
 pub mod content_store;
 pub mod context;
 pub mod continuation;

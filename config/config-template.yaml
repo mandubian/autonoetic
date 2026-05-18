@@ -304,16 +304,16 @@ max_session_turns: 12
 #  max_tool_failures: 5
 #  max_consecutive_same_progress: 1
 
-# ── Prompt Budget ─────────────────────────────────────────────────────
+# ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
-# Uncomment to customize (defaults: warn_at 80%, 4096 margin tokens).
-# prompt_budget:
-#   system_prompt_max_tokens: 0
-#   tool_definitions_max_tokens: 0
-#   warn_at_pct: 80.0
-#   margin_tokens: 4096
-#   on_exceeded: warn           # warn | trim_history | demote_tools | fail
-#   compress_tool_schemas_after_turn_0: false
+# Uncomment to customize.
+prompt_budget:
+  system_prompt_max_tokens: 0
+  tool_definitions_max_tokens: 0
+  warn_at_pct: 75.0
+  margin_tokens: 4096
+  on_exceeded: trim_history
+  compress_tool_schemas_after_turn_0: true
 #
 # ── Tool Tier Registry (Constitution 4.7) ──────────────────────────────
 # Tier assignments are declarative in config/tools.yaml and loaded at gateway start.
@@ -482,15 +482,15 @@ llm_preset_mapping:
 #   discovery: research          # semantic reasoning over agent descriptions
 #   default: fallback
 
-# ── Context Compression ──────────────────────────────────────────────
+# ── Context Compression (Safe Defaults) ──────────────────────────────
 # Summarizes old conversation turns when approaching context limits.
-# context_compression:
-#   enabled: false
-#   llm_preset: haiku
-#   threshold_pct: 60.0
-#   recent_turns_to_keep: 3
-#   max_summary_tokens: 500
-#   min_turns_between_compression: 3
+context_compression:
+  enabled: true
+  llm_preset: haiku
+  threshold_pct: 60.0
+  recent_turns_to_keep: 3
+  max_summary_tokens: 500
+  min_turns_between_compression: 3
 
 # ── System Agents ─────────────────────────────────────────────────────
 # Declared background agents that the gateway reconciles on startup.

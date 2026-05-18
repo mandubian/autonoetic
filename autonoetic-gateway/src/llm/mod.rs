@@ -16,6 +16,48 @@ pub mod gemini;
 pub mod openai;
 pub mod provider;
 
+/// Check whether a non-success status / body indicates a context-overflow error
+/// for any of the supported providers.  Returns `true` when the governor should
+/// trigger reduction strategies rather than propagate a fatal error.
+///
+/// Pattern matching order:
+///  1. `\"code\":\"context_length_exceeded\"` — OpenAI minified JSON in error body
+///  2. `max_context_window_reached` — Anthropic
+///  3. `RESOURCE_EXHAUSTED` + `context` — Gemini
+///  4. `SAFETY` — content-filter rejections (not overflow but surfaced the same way)
+pub fn is_context_overflow_error(status: u16, body: &str) -> bool {
+    if status == 0 {
+        return false;
+    }
+
+    // OpenRouter / OpenAI — pass through the JSON error body to check
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+        // OpenAI returns error.code == "context_length_exceeded"
+        if let Some(code) = val.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()) {
+            if code == "context_length_exceeded" {
+                return true;
+            }
+        }
+    }
+
+    // Anthropic — full text search (Anthropic doesn't always JSON-encode)
+    if body.contains("max_context_window_reached") {
+        return true;
+    }
+
+    // Gemini RESOURCE_EXHAUSTED context overflow
+    if body.contains("RESOURCE_EXHAUSTED") && body.contains("context") {
+        return true;
+    }
+
+    // Safety filter — treat as overflow-like so the governor handles it
+    if body.contains("SAFETY") {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests;
 

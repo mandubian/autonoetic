@@ -204,6 +204,11 @@ impl LlmDriver for OpenAiDriver {
 
             if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
+                if crate::llm::is_context_overflow_error(status.as_u16(), &text) {
+                    anyhow::bail!(
+                        "context_overflow: provider=openai status={} detail={}", status, text
+                    );
+                }
                 tracing::warn!(
                     target: "llm::openai",
                     status = %status,

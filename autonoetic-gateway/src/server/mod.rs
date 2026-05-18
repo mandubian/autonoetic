@@ -183,6 +183,37 @@ impl GatewayServer {
             }
         }
 
+        // Warn at startup if any LLM preset has no context_window_tokens and
+        // the provider cannot resolve one from env, static table, or catalog.
+        let env_override = std::env::var("AUTONOETIC_LLM_CONTEXT_WINDOW").ok();
+        for (name, preset) in &self.config.llm_presets {
+            if preset.routing.is_some() {
+                continue;
+            }
+            if preset.context_window_tokens.is_some() {
+                continue;
+            }
+            if env_override.is_some() {
+                continue;
+            }
+            if let Some(ref model) = preset.model {
+                if crate::runtime::context_governor::resolver::static_context_window(model).is_some() {
+                    continue;
+                }
+            }
+            if preset.provider.as_deref().map(|p| p.eq_ignore_ascii_case("openrouter")).unwrap_or(false) {
+                continue;
+            }
+            tracing::warn!(
+                target: "gateway",
+                preset = %name,
+                provider = ?preset.provider,
+                model = ?preset.model,
+                "LLM preset has no context_window_tokens — context governor cannot enforce budget for this preset. \
+                 Set context_window_tokens in the preset, or set AUTONOETIC_LLM_CONTEXT_WINDOW env var."
+            );
+        }
+
         let jsonrpc_router = Arc::new(crate::router::JsonRpcRouter::new(
             self.config.as_ref().clone(),
             Some(gateway_store.clone()),
