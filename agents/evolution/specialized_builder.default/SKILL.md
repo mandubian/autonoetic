@@ -104,7 +104,17 @@ For agents that only use existing gateway tools (`credential_request`, `memory.*
        {"type": "ReadAccess", "scopes": ["self.*"]},
        {"type": "WriteAccess", "scopes": ["self.*"]},
        {"type": "BackgroundReevaluation", "min_interval_secs": 300, "allow_reasoning": true}
-     ]
+     ],
+     "io": {
+       "returns": {
+         "type": "object",
+         "required": ["status"],
+         "properties": {
+           "status": {"type": "string"},
+           "summary": {"type": "string"}
+         }
+       }
+     }
    }
    ```
 
@@ -142,6 +152,23 @@ Use `agent_revision_create_from_intent` as the canonical install path.
     "fallback_provider": null,
     "fallback_model": null,
     "chat_only": false
+  },
+  "io": {
+    "accepts": {
+      "type": "object",
+      "required": ["task"],
+      "properties": {
+        "task": {"type": "string"}
+      }
+    },
+    "returns": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string"},
+        "data": {"type": "object"}
+      }
+    }
   }
 }
 ```
@@ -168,6 +195,7 @@ Activates the created revision.
 | `instructions` | required; free-form markdown body provided by agent. **Must match the SKILL body that was bundled in the `artifact_ref`** for pure-reasoning installs — agent-factory ensures this. |
 | `capabilities` | declared capabilities for the agent |
 | `llm_config` | required when `execution_mode=reasoning`; **OMIT entirely for `execution_mode=script`** |
+| `io` | optional; pass through from delegation as-is. The gateway stores it verbatim — no validation, no inference. For reasoning agents: include `io.returns` (output contract) but NOT `io.accepts` (over-constrains callers). For script agents: include both `io.accepts` and `io.returns` when the script has clear input/output shapes. Keep schemas minimal: `{ type: "object", required: ["task"], properties: { task: { type: "string" } } }` |
 
 ### Key Rules:
 1. **`artifact_ref` is required for every install.** Script agents: artifact contains executable code + `script_entry`. Pure-reasoning agents: intent-only bundle containing the SKILL body (no `script_entry`, no executable code).

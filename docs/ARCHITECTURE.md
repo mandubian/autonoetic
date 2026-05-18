@@ -28,6 +28,9 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Recording Mode](#recording-mode)
 - [Post-Promotion Review](#post-promotion-review)
 - [Scheduled Tasks](#scheduled-tasks)
+- [Fast Scheduler Sidecar](#fast-scheduler-sidecar)
+- [Promotion Safety Governor](#promotion-safety-governor)
+- [Curator Decision Journal](#curator-decision-journal)
 - [Error Taxonomy](#error-taxonomy)
 - [Design Principles](#design-principles)
 
@@ -93,6 +96,7 @@ The gateway is the security boundary and execution engine. It is a **narrow rule
 | **Content Store** | SHA-256 content-addressable storage for artifacts |
 | **Causal Chain** | Append-only JSONL audit log with hash-chain integrity |
 | **Scheduler** | Manages background reevaluation cadence; wake predicates: `Timer` and `ApprovalResolved` |
+| **Fast Scheduler** | Parallel low-latency loop for sub-second interval jobs (disabled by default) |
 | **Sandbox Runner** | Executes scripts via bubblewrap, docker, or microvm |
 | **Secret Vault** | Injects secrets ephemerally, never exposes to agents |
 | **HTTP API** | REST endpoints for remote agent content access |
@@ -1310,6 +1314,48 @@ On startup, the gateway checks each declared agent:
 CLI control: `autonoetic gateway system-agents list|bootstrap|run <agent_id>`
 
 System agent jobs use the same `scheduled_jobs` table and execution path as agent-created jobs — no special privileges. See [Scheduled Tasks Guide](scheduled-tasks.md) for full documentation.
+
+### Fast Scheduler Sidecar
+
+For interval-style jobs (`every N seconds`), the canonical 5-second scheduler tick introduces unacceptable latency. The fast scheduler sidecar runs a parallel loop (default: 200 ms tick) that checks the same `scheduled_jobs` table but only considers interval-mode schedules (cron-style schedules stay on the canonical loop).
+
+Key design decisions:
+- **Same DB claim-and-advance**: both loops call `claim_and_advance_due_job`, so double-dispatch is impossible at the database level
+- **Pre-filtering**: the fast loop filters out cron-expression jobs before counting (cron expressions are opaque strings the DB cannot parse)
+- **Bounded work**: `max_due_per_tick` (default 64) caps the number of jobs claimed per tick
+- **Disabled by default**: enable via `fast_scheduler.enabled: true` in config
+
+---
+
+## Promotion Safety Governor
+
+Three soft gates enforced at `agent_revision_promote` time, protecting against promotion storms:
+
+1. **Velocity gate**: limits the number of promotions per alias within a sliding time window (default: 3 per 24 hours). Prevents rapid-fire promote/rollback cycles.
+
+2. **Flapping gate**: rejects promotions where the candidate revision was already promoted recently (scans the last N promotions, default 4). Detects oscillation between two revisions.
+
+3. **Eval-regression gate**: halts promotion when the count of findings (errors, warnings) is strictly increasing across consecutive recent promotions. Requires N adjacent increases (default: 3) within a lookback window (default: 6 promotions).
+
+All three gates are bypassable via `force: true` + `force_reason` (capped at 512 characters). Bypass emits a `governor.override` causal event for audit. The governor is disabled by default; enable via `promotion_governor.enabled: true`.
+
+The governor runs after the existing capability-delta and sentinel gates but before the alias is moved. A TOCTOU race window exists between the velocity check and the actual promotion (the check reads promotion_history, then the promote writes it), but this is acceptable for a default-disabled, force-overridable soft gate.
+
+---
+
+## Curator Decision Journal
+
+When response validation is enabled, the gateway parses the `decision_journal` array from agent output and persists one causal event per entry. This provides a durable, queryable audit trail for memory curation decisions (keep, drop, merge, etc.).
+
+Each entry produces a `curator.decision` causal event with:
+- `target`: the memory or resource the decision applies to (enables direct queries like "why was memory X dropped?")
+- `action`: what was done
+- `reason_code`: stable machine-readable code
+- `reason_detail`, `metric_values`, `confidence`: optional structured context
+
+A summary event (`decision_journal_recorded`) is also emitted per agent run, carrying the total entry count. Events are sequenced (0, 1, 2, ...) for deterministic batch ordering within a single run.
+
+The category is configurable per agent type (defaults to `curator`), making the journal reusable for other decision-making agents beyond the memory curator. The gateway wires the `revision_id` from the session's agent binding into each event for full provenance tracking.
 
 ---
 
