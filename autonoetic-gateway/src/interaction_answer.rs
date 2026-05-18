@@ -274,36 +274,12 @@ pub async fn answer_and_orchestrate_resume(
         });
     }
 
-    // Standalone session: drive checkpoint resume immediately.
-    if !store.try_claim_answered_standalone_interaction_resume(&params.interaction_id)? {
-        return Ok(InteractionAnswerOutcome {
-            interaction_id: params.interaction_id.clone(),
-            answer_applied: true,
-            resumed: false,
-            workflow_task_unblocked: false,
-            ambiguous: false,
-            ambiguous_candidates: vec![],
-            error: None,
-            assistant_reply: None,
-        });
-    }
-
     let default_follow = "[operator] User answered the pending question via interaction.answer.";
     let resume_result = execution
         .resume_from_user_interaction(&params.interaction_id, follow.or(Some(default_follow)))
         .await;
 
     if let Err(e) = resume_result {
-        if let Err(release_err) =
-            store.release_answered_standalone_interaction_resume_claim(&params.interaction_id)
-        {
-            tracing::warn!(
-                target: "scheduler",
-                interaction_id = %params.interaction_id,
-                error = %release_err,
-                "Failed to release standalone interaction resume claim after resume error"
-            );
-        }
         return Err(e);
     }
 

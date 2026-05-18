@@ -442,3 +442,130 @@ async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[serial_test::serial]
+#[tokio::test]
+async fn test_duplicate_resume_claim_guard_skips_second_caller() -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let agent_id = "ask-agent-claim-guard";
+    install_ask_agent(&workspace.agents_dir, agent_id)?;
+
+    let ask_args = serde_json::json!({
+        "question": "Proceed?",
+        "kind": "clarification",
+        "allow_freeform": true
+    })
+    .to_string();
+
+    let call_count = Arc::new(Mutex::new(0usize));
+    let call_count_clone = Arc::clone(&call_count);
+    let responses = Arc::new(Mutex::new(stub_user_ask_then_text(
+        ask_args,
+        "Done after answer.",
+    )));
+    let responses_clone = Arc::clone(&responses);
+
+    let stub = OpenAiStub::spawn(move |_raw, _body| {
+        let responses = Arc::clone(&responses_clone);
+        let call_count = Arc::clone(&call_count_clone);
+        async move {
+            *call_count.lock().unwrap() += 1;
+            let mut q = responses.lock().unwrap();
+            if q.is_empty() {
+                serde_json::json!({
+                    "choices": [{"message": {"content": "extra"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                })
+            } else {
+                q.remove(0)
+            }
+        }
+    })
+    .await?;
+
+    let _base = EnvGuard::set(LLM_BASE_URL_ENV, stub.completion_url());
+    let _key = EnvGuard::set(LLM_API_KEY_ENV, "test-key");
+
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(
+        &store,
+        &config,
+        agent_id,
+        &workspace.agents_dir.join(agent_id),
+    )?;
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
+
+    let session_id = "session-claim-guard";
+
+    let first = execution
+        .spawn_agent_once(
+            agent_id,
+            "Ask if ready.",
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+    assert!(first.assistant_reply.is_none());
+
+    let cp = load_latest_checkpoint(&config, session_id)?.expect("checkpoint");
+    let interaction_id = match &cp.yield_reason {
+        YieldReason::UserInputRequired { interaction_id } => interaction_id.clone(),
+        other => anyhow::bail!("expected UserInputRequired, got {:?}", other),
+    };
+
+    store.answer_user_interaction(&UserInteractionAnswer {
+        interaction_id: interaction_id.clone(),
+        answer_option_id: None,
+        answer_text: Some("yes".to_string()),
+        answered_by: "integration_test".to_string(),
+    })?;
+
+    assert!(
+        store.try_claim_answered_standalone_interaction_resume(&interaction_id)?,
+        "first claim should succeed"
+    );
+
+    let second = execution
+        .spawn_agent_once(
+            agent_id,
+            "[operator] resume after answer",
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+    assert!(
+        second.assistant_reply.is_none(),
+        "second spawn should skip resume (already claimed), got: {:?}",
+        second.assistant_reply
+    );
+
+    let llm_calls = *call_count.lock().unwrap();
+    assert_eq!(
+        llm_calls, 1,
+        "LLM should only be called once (during first spawn), but was called {} times",
+        llm_calls
+    );
+
+    Ok(())
+}

@@ -1356,6 +1356,33 @@ impl GatewayExecutionService {
                     );
                 }
                 UserInteractionStatus::Answered => {
+                    let is_standalone = interaction
+                        .workflow_id
+                        .as_ref()
+                        .map_or(true, |w| w.trim().is_empty());
+                    if is_standalone {
+                        if let Some(store) = self.gateway_store.as_ref() {
+                            if !store.try_claim_answered_standalone_interaction_resume(iid)? {
+                                tracing::info!(
+                                    target: "checkpoint",
+                                    session_id = %session_id,
+                                    interaction_id = %iid,
+                                    "Skipping UserInputRequired resume: interaction already claimed by another resume path"
+                                );
+                                let initial_msg = checkpoint
+                                    .history
+                                    .iter()
+                                    .find(|m| matches!(m.role, crate::llm::Role::User))
+                                    .map(|m| m.content.clone())
+                                    .unwrap_or_default();
+                                return Ok((
+                                    crate::runtime::lifecycle::TurnOutcome::Completed(None),
+                                    initial_msg,
+                                    None,
+                                ));
+                            }
+                        }
+                    }
                     Ok(resume_answered_user_interaction_from_loaded_checkpoint(
                         runtime,
                         session_id,

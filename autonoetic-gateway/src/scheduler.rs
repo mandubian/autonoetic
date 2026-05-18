@@ -761,15 +761,6 @@ async fn resume_answered_standalone_interactions(
     }
 
     for interaction in answered {
-        if !store.try_claim_answered_standalone_interaction_resume(&interaction.interaction_id)? {
-            tracing::debug!(
-                target: "scheduler",
-                interaction_id = %interaction.interaction_id,
-                "Standalone interaction already claimed or resumed"
-            );
-            continue;
-        }
-
         tracing::info!(
             target: "scheduler",
             interaction_id = %interaction.interaction_id,
@@ -779,7 +770,6 @@ async fn resume_answered_standalone_interactions(
         );
 
         let exec = execution.clone();
-        let store = store.clone();
         let interaction_id = interaction.interaction_id.clone();
         tokio::spawn(async move {
             let result = exec
@@ -800,24 +790,12 @@ async fn resume_answered_standalone_interactions(
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.starts_with("session_waiting_for_approval:") {
-                        // Session moved to an ApprovalRequired checkpoint during the resume turn.
-                        // The approval path owns the next resume; stop retrying this interaction.
                         tracing::debug!(
                             target: "scheduler",
                             interaction_id = %interaction_id,
                             "Standalone interaction deferred: session is now waiting for approval"
                         );
                     } else {
-                        if let Err(release_err) =
-                            store.release_answered_standalone_interaction_resume_claim(&interaction_id)
-                        {
-                            tracing::warn!(
-                                target: "scheduler",
-                                interaction_id = %interaction_id,
-                                error = %release_err,
-                                "Failed to release standalone interaction resume claim"
-                            );
-                        }
                         tracing::warn!(
                             target: "scheduler",
                             interaction_id = %interaction_id,
