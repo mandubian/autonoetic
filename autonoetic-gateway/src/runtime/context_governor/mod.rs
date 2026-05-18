@@ -56,15 +56,23 @@ impl ContextGovernor {
     pub fn new(config: &GovernorConfig) -> Self {
         let compression: Box<dyn ReductionStrategy> =
             if crate::runtime::context_governor::capsule::capsule_enabled() {
-                Box::new(capsule::CapsuleStrategy::new(
+                let mut s = capsule::CapsuleStrategy::new(
                     config.http_client.clone(),
                     config.presets.clone(),
-                ))
+                );
+                if let Some(ref dir) = config.gateway_dir {
+                    s = s.with_gateway_dir(dir.clone());
+                }
+                Box::new(s)
             } else {
-                Box::new(compression::CompressionStrategy::new(
+                let mut s = compression::CompressionStrategy::new(
                     config.http_client.clone(),
                     config.presets.clone(),
-                ))
+                );
+                if let Some(ref dir) = config.gateway_dir {
+                    s = s.with_gateway_dir(dir.clone());
+                }
+                Box::new(s)
             };
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             Box::new(schema_compress::ToolSchemaCompressionStrategy::new()),

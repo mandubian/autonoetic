@@ -151,6 +151,8 @@ pub struct AgentExecutor {
     pub session_started_at: Option<String>,
     /// Compression state carried across turns within a session.
     pub compression_metadata: crate::runtime::compression::CompressionMetadata,
+    /// Current state capsule (Phase 2), set by CapsuleStrategy after compression.
+    pub capsule_state: Option<crate::runtime::context_governor::capsule::StateCapsule>,
     /// Shared HTTP client for compression and other gateway-side operations.
     pub http_client: reqwest::Client,
     /// User ID for profile binding resolution (if authenticated).
@@ -218,6 +220,7 @@ impl AgentExecutor {
             last_history: Vec::new(),
             session_started_at: None,
             compression_metadata: Default::default(),
+            capsule_state: None,
             http_client: reqwest::Client::new(),
             user_id: None,
             artifact_id: None,
@@ -625,7 +628,7 @@ impl AgentExecutor {
             } else {
                 None
             },
-            capsule_state: self.extended_instructions.as_ref().and_then(|_| None),
+            capsule_state: self.capsule_state.clone(),
         }
     }
 
@@ -1404,6 +1407,10 @@ impl AgentExecutor {
                             if let Some(meta) = ctx.compression_metadata.clone() {
                                 self.compression_metadata = meta;
                             }
+                        }
+                        // Update capsule state if capsule strategy ran
+                        if ctx.capsule_state.is_some() {
+                            self.capsule_state = ctx.capsule_state.clone();
                         }
                     }
                     Ok(GovernorResult::Overflow(diag)) => {

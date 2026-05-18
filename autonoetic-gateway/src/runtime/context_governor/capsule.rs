@@ -61,6 +61,7 @@ pub struct CapsuleDelta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum CapsuleTaskUpdate {
     Add(CapsuleTask),
     Complete { description: String, turn: u64 },
@@ -447,6 +448,7 @@ impl super::ReductionStrategy for CapsuleStrategy {
         apply_delta(&mut capsule, delta, ctx.turn_number)?;
         cap_decisions(&mut capsule, max_capsule_decisions);
         cap_completed_tasks(&mut capsule, max_completed_tasks);
+        ctx.capsule_state = Some(capsule.clone());
 
         if let Some(ref dir) = self.gateway_dir {
             if let Ok(store) = ContentStore::new(dir) {
