@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::runtime::continuation;
 
-use autonoetic_types::causal_chain::{CausalEventRecord, RULE_ID_CONTEXT_HEALTH};
+use autonoetic_types::causal_chain::CausalEventRecord;
 
 pub mod approval;
 pub mod approval_hardening;
@@ -1454,7 +1454,7 @@ async fn spawn_task_execution(
                             category: "agent.process".to_string(),
                             action: "overflow_retry_started".to_string(),
                             status: "SUCCESS".to_string(),
-                            enforced_rules: vec![RULE_ID_CONTEXT_HEALTH.to_string()],
+                            enforced_rules: vec![],
                             target: None,
                             payload: Some(serde_json::json!({
                                 "task_id": t_id,
@@ -1521,7 +1521,7 @@ async fn spawn_task_execution(
                         category: "agent.process".to_string(),
                         action: "overflow_retry_exhausted".to_string(),
                         status: "ERROR".to_string(),
-                        enforced_rules: vec![RULE_ID_CONTEXT_HEALTH.to_string()],
+                        enforced_rules: vec![],
                         target: None,
                         payload: Some(serde_json::json!({
                             "task_id": t_id,
