@@ -1408,7 +1408,10 @@ impl AgentExecutor {
                                 self.compression_metadata = meta;
                             }
                         }
-                        // Update capsule state if capsule strategy ran
+                        // Update capsule state if capsule strategy ran.
+                        // Once set, capsule_state is never cleared back to None —
+                        // this is intentional: the latest capsule always represents
+                        // the current session compression state.
                         if ctx.capsule_state.is_some() {
                             self.capsule_state = ctx.capsule_state.clone();
                         }

@@ -3,14 +3,19 @@ use crate::runtime::context_governor::strategies::{GovernorContext, ReductionOut
 use crate::runtime::content_store::{ContentStore, ContentVisibility};
 use autonoetic_types::config::LlmPreset;
 use async_trait::async_trait;
+use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 const CAPSULE_ENV: &str = "AUTONOETIC_STATE_CAPSULE_COMPRESSION";
 
-pub fn capsule_enabled() -> bool {
+static CAPSULE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
     std::env::var(CAPSULE_ENV).as_deref() == Ok("1")
+});
+
+pub fn capsule_enabled() -> bool {
+    *CAPSULE_ENABLED
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +27,10 @@ pub struct StateCapsule {
     pub decisions_and_rationale: Vec<CapsuleDecision>,
     pub stable_identifiers: Vec<StableIdentifier>,
     pub open_tasks: Vec<CapsuleTask>,
+    /// Summary of prior decisions that were capped out of `decisions_and_rationale`.
+    /// Replaced (not appended) on each overflow, so it stays bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_decisions_summary: Option<String>,
     pub previous_version_handle: Option<String>,
     pub source_history_handle: Option<String>,
     pub updated_at: String,
@@ -156,6 +165,12 @@ fn compile_capsule_injection(capsule: &StateCapsule) -> String {
         out.push('\n');
     }
 
+    if let Some(ref prior) = capsule.prior_decisions_summary {
+        out.push_str("## Prior Decisions (Summarized)\n");
+        out.push_str(prior);
+        out.push_str("\n\n");
+    }
+
     if !capsule.stable_identifiers.is_empty() {
         out.push_str("## Active Identifiers\n");
         for id in &capsule.stable_identifiers {
@@ -189,6 +204,23 @@ fn compile_capsule_injection(capsule: &StateCapsule) -> String {
     out
 }
 
+fn validate_delta_approvals(delta: &CapsuleDelta, _turn_number: u64) -> anyhow::Result<()> {
+    for decision in &delta.new_decisions {
+        for rid in &decision.referenced_ids {
+            if rid.starts_with("appr_") {
+                let preserved = delta.new_identifiers.iter().any(|id| id.value == *rid);
+                if !preserved {
+                    anyhow::bail!(
+                        "Approval ID '{}' referenced in decision but not preserved in stable_identifiers",
+                        rid
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_delta(
     capsule: &mut StateCapsule,
     delta: CapsuleDelta,
@@ -200,19 +232,25 @@ fn apply_delta(
         }
     }
 
-    for decision in &delta.new_decisions {
+    let mut decisions = Vec::new();
+    for decision in delta.new_decisions {
         if capsule.decisions_and_rationale.iter().any(|d| d.turn == decision.turn && d.summary == decision.summary) {
-            anyhow::bail!("Duplicate decision rejected: turn {} '{}'", decision.turn, decision.summary);
+            tracing::warn!(target: "capsule", "Skipping duplicate decision: turn {} '{}'", decision.turn, decision.summary);
+        } else {
+            decisions.push(decision);
         }
     }
-    capsule.decisions_and_rationale.extend(delta.new_decisions);
+    capsule.decisions_and_rationale.extend(decisions);
 
-    for id in &delta.new_identifiers {
+    let mut identifiers = Vec::new();
+    for id in delta.new_identifiers {
         if capsule.stable_identifiers.iter().any(|existing| existing.category == id.category && existing.value == id.value) {
-            anyhow::bail!("Duplicate stable identifier rejected: {} ({})", id.category, id.value);
+            tracing::warn!(target: "capsule", "Skipping duplicate identifier: {} ({})", id.category, id.value);
+        } else {
+            identifiers.push(id);
         }
     }
-    capsule.stable_identifiers.extend(delta.new_identifiers);
+    capsule.stable_identifiers.extend(identifiers);
 
     for update in delta.task_updates {
         match update {
@@ -244,23 +282,6 @@ fn apply_delta(
     Ok(())
 }
 
-fn validate_delta_approvals(delta: &CapsuleDelta, _turn_number: u64) -> anyhow::Result<()> {
-    for decision in &delta.new_decisions {
-        for rid in &decision.referenced_ids {
-            if rid.starts_with("appr_") {
-                let preserved = delta.new_identifiers.iter().any(|id| id.value == *rid);
-                if !preserved {
-                    anyhow::bail!(
-                        "Approval ID '{}' referenced in decision but not preserved in stable_identifiers",
-                        rid
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 fn bootstrap_capsule_from_compressed_markers(
     session_id: &str,
     history: &[crate::llm::Message],
@@ -277,6 +298,7 @@ fn bootstrap_capsule_from_compressed_markers(
                 decisions_and_rationale: Vec::new(),
                 stable_identifiers: Vec::new(),
                 open_tasks: Vec::new(),
+                prior_decisions_summary: None,
                 previous_version_handle: None,
                 source_history_handle: None,
                 updated_at: chrono::Utc::now().to_rfc3339(),
@@ -290,13 +312,13 @@ fn cap_decisions(capsule: &mut StateCapsule, max_decisions: usize) {
     if capsule.decisions_and_rationale.len() > max_decisions {
         let overflow_count = capsule.decisions_and_rationale.len() - max_decisions;
         let overflow: Vec<_> = capsule.decisions_and_rationale.drain(..overflow_count).collect();
-        let prior_summary = overflow
-            .iter()
-            .map(|d| format!("[Turn {}] {}: {}", d.turn, d.summary, d.rationale))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let priors = format!("Prior decisions (summarized):\n{}", prior_summary);
-        capsule.objective_and_criteria = format!("{}\n\n---\n{}", capsule.objective_and_criteria, priors);
+        capsule.prior_decisions_summary = Some(
+            overflow
+                .iter()
+                .map(|d| format!("[Turn {}] {}: {}", d.turn, d.summary, d.rationale))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
 }
 
@@ -428,6 +450,7 @@ impl super::ReductionStrategy for CapsuleStrategy {
                 decisions_and_rationale: Vec::new(),
                 stable_identifiers: Vec::new(),
                 open_tasks: Vec::new(),
+                prior_decisions_summary: None,
                 previous_version_handle: None,
                 source_history_handle: None,
                 updated_at: chrono::Utc::now().to_rfc3339(),
@@ -451,17 +474,28 @@ impl super::ReductionStrategy for CapsuleStrategy {
         ctx.capsule_state = Some(capsule.clone());
 
         if let Some(ref dir) = self.gateway_dir {
-            if let Ok(store) = ContentStore::new(dir) {
-                if let Ok(json_bytes) = serde_json::to_vec(&capsule) {
-                    if let Ok(handle) = store.write(&json_bytes) {
-                        let _ = store.register_name_with_visibility(
-                            &ctx.session_id,
-                            &format!("capsule_v{}_turn_{}", capsule.version - 1, ctx.turn_number),
-                            &handle,
-                            ContentVisibility::Private,
-                        );
+            match ContentStore::new(dir) {
+                Ok(store) => {
+                    match serde_json::to_vec(&capsule) {
+                        Ok(json_bytes) => {
+                            match store.write(&json_bytes) {
+                                Ok(handle) => {
+                                    if let Err(e) = store.register_name_with_visibility(
+                                        &ctx.session_id,
+                                        &format!("capsule_v{}_turn_{}", capsule.version - 1, ctx.turn_number),
+                                        &handle,
+                                        ContentVisibility::Private,
+                                    ) {
+                                        tracing::warn!(target: "capsule", "Failed to register capsule name: {e}");
+                                    }
+                                }
+                                Err(e) => tracing::warn!(target: "capsule", "Failed to write capsule to content store: {e}"),
+                            }
+                        }
+                        Err(e) => tracing::warn!(target: "capsule", "Failed to serialize capsule: {e}"),
                     }
                 }
+                Err(e) => tracing::warn!(target: "capsule", "Failed to open content store: {e}"),
             }
         }
 
@@ -499,5 +533,339 @@ impl super::ReductionStrategy for CapsuleStrategy {
                 tokens_after: ctx.breakdown.total_tokens,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_capsule() -> StateCapsule {
+        StateCapsule {
+            version: 1,
+            session_id: "test-session".into(),
+            last_update_turn: 5,
+            objective_and_criteria: "Build a thing".into(),
+            decisions_and_rationale: vec![CapsuleDecision {
+                turn: 1,
+                summary: "Chose Rust".into(),
+                rationale: "Best for perf".into(),
+                referenced_ids: vec![],
+            }],
+            stable_identifiers: vec![StableIdentifier {
+                category: "file".into(),
+                value: "src/main.rs".into(),
+                label: Some("Main".into()),
+                first_seen_turn: 1,
+            }],
+            open_tasks: vec![
+                CapsuleTask {
+                    description: "Write parser".into(),
+                    status: "in_progress".into(),
+                    added_turn: 2,
+                    completed_turn: None,
+                    blocker: None,
+                },
+                CapsuleTask {
+                    description: "Write tests".into(),
+                    status: "completed".into(),
+                    added_turn: 3,
+                    completed_turn: Some(5),
+                    blocker: None,
+                },
+            ],
+            prior_decisions_summary: None,
+            previous_version_handle: None,
+            source_history_handle: None,
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn apply_delta_objective_update() {
+        let mut capsule = make_capsule();
+        let delta = CapsuleDelta {
+            objective_update: Some("New objective".into()),
+            new_decisions: vec![],
+            new_identifiers: vec![],
+            task_updates: vec![],
+        };
+        assert!(apply_delta(&mut capsule, delta, 6).is_ok());
+        assert_eq!(capsule.objective_and_criteria, "New objective");
+        assert_eq!(capsule.version, 2);
+        assert_eq!(capsule.last_update_turn, 6);
+    }
+
+    #[test]
+    fn apply_delta_add_decisions() {
+        let mut capsule = make_capsule();
+        let delta = CapsuleDelta {
+            objective_update: None,
+            new_decisions: vec![CapsuleDecision {
+                turn: 3,
+                summary: "Chose Axum".into(),
+                rationale: "Async HTTP".into(),
+                referenced_ids: vec![],
+            }],
+            new_identifiers: vec![],
+            task_updates: vec![],
+        };
+        assert!(apply_delta(&mut capsule, delta, 7).is_ok());
+        assert_eq!(capsule.decisions_and_rationale.len(), 2);
+        assert_eq!(capsule.decisions_and_rationale[1].summary, "Chose Axum");
+    }
+
+    #[test]
+    fn apply_delta_skips_duplicate_decisions() {
+        let mut capsule = make_capsule();
+        let delta = CapsuleDelta {
+            objective_update: None,
+            new_decisions: vec![
+                CapsuleDecision {
+                    turn: 1,
+                    summary: "Chose Rust".into(),
+                    rationale: "Better rationale".into(),
+                    referenced_ids: vec![],
+                },
+                CapsuleDecision {
+                    turn: 3,
+                    summary: "Chose Axum".into(),
+                    rationale: "Async HTTP".into(),
+                    referenced_ids: vec![],
+                },
+            ],
+            new_identifiers: vec![],
+            task_updates: vec![],
+        };
+        assert!(apply_delta(&mut capsule, delta, 7).is_ok());
+        assert_eq!(capsule.decisions_and_rationale.len(), 2);
+        assert_eq!(capsule.decisions_and_rationale[1].summary, "Chose Axum");
+    }
+
+    #[test]
+    fn apply_delta_skips_duplicate_identifiers() {
+        let mut capsule = make_capsule();
+        let delta = CapsuleDelta {
+            objective_update: None,
+            new_decisions: vec![],
+            new_identifiers: vec![
+                StableIdentifier {
+                    category: "file".into(),
+                    value: "src/main.rs".into(),
+                    label: None,
+                    first_seen_turn: 99,
+                },
+                StableIdentifier {
+                    category: "dep".into(),
+                    value: "tokio".into(),
+                    label: Some("async runtime".into()),
+                    first_seen_turn: 6,
+                },
+            ],
+            task_updates: vec![],
+        };
+        assert!(apply_delta(&mut capsule, delta, 7).is_ok());
+        assert_eq!(capsule.stable_identifiers.len(), 2);
+        assert_eq!(capsule.stable_identifiers[1].value, "tokio");
+    }
+
+    #[test]
+    fn apply_delta_task_updates() {
+        let mut capsule = make_capsule();
+        let delta = CapsuleDelta {
+            objective_update: None,
+            new_decisions: vec![],
+            new_identifiers: vec![],
+            task_updates: vec![
+                CapsuleTaskUpdate::Add(CapsuleTask {
+                    description: "Deploy".into(),
+                    status: "pending".into(),
+                    added_turn: 6,
+                    completed_turn: None,
+                    blocker: None,
+                }),
+                CapsuleTaskUpdate::Complete {
+                    description: "Write parser".into(),
+                    turn: 6,
+                },
+                CapsuleTaskUpdate::Block {
+                    description: "Write tests".into(),
+                    blocker: "Need CI".into(),
+                },
+            ],
+        };
+        assert!(apply_delta(&mut capsule, delta, 7).is_ok());
+        assert_eq!(capsule.open_tasks.len(), 3);
+        let parser = capsule
+            .open_tasks
+            .iter()
+            .find(|t| t.description == "Write parser")
+            .unwrap();
+        assert_eq!(parser.status, "completed");
+        assert_eq!(parser.completed_turn, Some(6));
+        let tests = capsule
+            .open_tasks
+            .iter()
+            .find(|t| t.description == "Write tests")
+            .unwrap();
+        assert_eq!(tests.status, "blocked");
+        assert_eq!(tests.blocker.as_deref(), Some("Need CI"));
+        let deploy = capsule
+            .open_tasks
+            .iter()
+            .find(|t| t.description == "Deploy")
+            .unwrap();
+        assert_eq!(deploy.status, "pending");
+    }
+
+    #[test]
+    fn apply_delta_task_remove() {
+        let mut capsule = make_capsule();
+        let delta = CapsuleDelta {
+            objective_update: None,
+            new_decisions: vec![],
+            new_identifiers: vec![],
+            task_updates: vec![CapsuleTaskUpdate::Remove {
+                description: "Write parser".into(),
+            }],
+        };
+        assert!(apply_delta(&mut capsule, delta, 7).is_ok());
+        assert_eq!(capsule.open_tasks.len(), 1);
+        assert_eq!(capsule.open_tasks[0].description, "Write tests");
+    }
+
+    #[test]
+    fn cap_decisions_overflow_moves_to_prior_summary() {
+        let mut capsule = make_capsule();
+        capsule.decisions_and_rationale.push(CapsuleDecision {
+            turn: 2,
+            summary: "Chose Axum".into(),
+            rationale: "Async".into(),
+            referenced_ids: vec![],
+        });
+        capsule.decisions_and_rationale.push(CapsuleDecision {
+            turn: 3,
+            summary: "Chose SQLite".into(),
+            rationale: "Embedded".into(),
+            referenced_ids: vec![],
+        });
+        assert_eq!(capsule.decisions_and_rationale.len(), 3);
+
+        cap_decisions(&mut capsule, 1);
+
+        assert_eq!(capsule.decisions_and_rationale.len(), 1);
+        let prior = capsule.prior_decisions_summary.as_deref().unwrap();
+        assert!(prior.contains("[Turn 1]"));
+        assert!(prior.contains("[Turn 2]"));
+        assert_eq!(
+            capsule.objective_and_criteria,
+            make_capsule().objective_and_criteria
+        );
+    }
+
+    #[test]
+    fn cap_decisions_no_overflow_leaves_prior_unchanged() {
+        let mut capsule = make_capsule();
+        capsule.prior_decisions_summary = Some("Previous summary".into());
+        cap_decisions(&mut capsule, 10);
+        assert_eq!(capsule.decisions_and_rationale.len(), 1);
+        assert_eq!(
+            capsule.prior_decisions_summary.as_deref(),
+            Some("Previous summary")
+        );
+    }
+
+    #[test]
+    fn cap_completed_tasks_removes_oldest_first() {
+        let mut capsule = make_capsule();
+        capsule.open_tasks.push(CapsuleTask {
+            description: "Task A".into(),
+            status: "completed".into(),
+            added_turn: 1,
+            completed_turn: Some(2),
+            blocker: None,
+        });
+        capsule.open_tasks.push(CapsuleTask {
+            description: "Task B".into(),
+            status: "completed".into(),
+            added_turn: 3,
+            completed_turn: Some(4),
+            blocker: None,
+        });
+        assert_eq!(capsule.open_tasks.len(), 4);
+
+        cap_completed_tasks(&mut capsule, 1);
+
+        let completed: Vec<_> = capsule
+            .open_tasks
+            .iter()
+            .filter(|t| t.status == "completed")
+            .collect();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].description, "Task B");
+    }
+
+    #[test]
+    fn compile_capsule_injection_basic() {
+        let capsule = make_capsule();
+        let output = compile_capsule_injection(&capsule);
+
+        assert!(output.contains("[SESSION STATE CAPSULE v1"));
+        assert!(output.contains("## Objective"));
+        assert!(output.contains("Build a thing"));
+        assert!(output.contains("## Key Decisions"));
+        assert!(output.contains("[Turn 1]"));
+        assert!(output.contains("Chose Rust"));
+        assert!(output.contains("## Active Identifiers"));
+        assert!(output.contains("src/main.rs"));
+        assert!(output.contains("## Open Tasks"));
+        assert!(output.contains("Write parser"));
+        assert!(output.contains("## Completed Tasks (Recent)"));
+        assert!(output.contains("[done@5] Write tests"));
+    }
+
+    #[test]
+    fn compile_capsule_injection_includes_prior_decisions() {
+        let mut capsule = make_capsule();
+        capsule.prior_decisions_summary = Some("[Turn 0] Started: Initial planning".into());
+        let output = compile_capsule_injection(&capsule);
+
+        assert!(output.contains("## Prior Decisions (Summarized)"));
+        assert!(output.contains("[Turn 0] Started: Initial planning"));
+    }
+
+    #[test]
+    fn bootstrap_capsule_from_compressed_markers_present() {
+        use crate::llm::Role;
+
+        let history = vec![crate::llm::Message {
+            role: Role::Assistant,
+            content: "Some text\n[COMPRESSED CONTEXT]\nprior info here\n[/COMPRESSED CONTEXT]"
+                .into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+
+        let result = bootstrap_capsule_from_compressed_markers("sess-1", &history, 10);
+        assert!(result.is_some());
+        let capsule = result.unwrap();
+        assert!(capsule.objective_and_criteria.contains("prior info here"));
+        assert_eq!(capsule.session_id, "sess-1");
+        assert_eq!(capsule.last_update_turn, 10);
+    }
+
+    #[test]
+    fn bootstrap_capsule_from_compressed_markers_absent() {
+        let history = vec![crate::llm::Message {
+            role: crate::llm::Role::Assistant,
+            content: "Just normal text".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+
+        let result = bootstrap_capsule_from_compressed_markers("sess-1", &history, 10);
+        assert!(result.is_none());
     }
 }
