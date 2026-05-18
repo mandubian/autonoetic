@@ -198,6 +198,8 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
      If discovery returns needs_new_agent: true → agent-factory.default
 ```
 
+<!-- extended -->
+
 ---
 
 ## Artifact Execution vs Script-Agent Promotion

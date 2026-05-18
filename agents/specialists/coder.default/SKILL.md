@@ -118,6 +118,8 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
   "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."
 8. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
 
+<!-- extended -->
+
 ## If Evaluator/Auditor Finds Issues
 
 When planner returns evaluator/auditor findings for your script:
