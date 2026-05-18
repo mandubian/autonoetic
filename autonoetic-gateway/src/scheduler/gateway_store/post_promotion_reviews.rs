@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use serde::Serialize;
 
 use super::GatewayStore;
@@ -81,14 +81,11 @@ impl GatewayStore {
 
     pub fn get_most_recent_review_timestamp(&self) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let result: Option<String> = conn
-            .query_row(
-                "SELECT MAX(reviewed_at) FROM post_promotion_reviews",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(result)
+        Ok(conn.query_row(
+            "SELECT MAX(reviewed_at) FROM post_promotion_reviews",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )?)
     }
 
     pub fn list_post_promotion_reviews(
@@ -192,5 +189,21 @@ impl GatewayStore {
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn get_most_recent_review_timestamp_empty_table_returns_none() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store.get_most_recent_review_timestamp().unwrap(),
+            None
+        );
     }
 }
