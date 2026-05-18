@@ -217,7 +217,24 @@ pub(crate) fn compose_system_instructions_full(
             .and_then(|io| io.returns.as_ref())
         {
             if let Ok(compact) = serde_json::to_string(schema) {
-                lines.push(format!("- **io.returns** (your reply must conform): `{compact}`"));
+                let has_required = schema
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map_or(false, |a| !a.is_empty());
+                let has_properties = schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .map_or(false, |o| !o.is_empty());
+                if has_required || has_properties {
+                    let template = generate_json_template(schema);
+                    lines.push(format!(
+                        "- **io.returns** — your ENTIRE final reply must be a single JSON object matching this schema. No prose before or after the JSON.\n  Schema: `{compact}`\n  Template:\n  ```json\n  {template}\n  ```"
+                    ));
+                } else {
+                    lines.push(format!(
+                        "- **io.returns** — your final reply should be a JSON object. Schema: `{compact}`"
+                    ));
+                }
             }
         }
 
@@ -627,9 +644,50 @@ mod agentskills_bridging_tests {
     }
 }
 
+fn generate_json_template(schema: &serde_json::Value) -> String {
+    let props = schema
+        .get("properties")
+        .and_then(|p| p.as_object());
+    let required: std::collections::HashSet<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let Some(props) = props else {
+        return "{}".to_string();
+    };
+
+    let mut obj = serde_json::Map::new();
+    for (key, prop_schema) in props {
+        let placeholder = if required.contains(key.as_str()) {
+            json_placeholder(prop_schema, false)
+        } else {
+            json_placeholder(prop_schema, true)
+        };
+        obj.insert(key.clone(), placeholder);
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn json_placeholder(prop_schema: &serde_json::Value, optional: bool) -> serde_json::Value {
+    let type_str = prop_schema.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+    match type_str {
+        "string" => {
+            let hint = if optional { "..." } else { "(required)" };
+            serde_json::Value::String(hint.to_string())
+        }
+        "boolean" => serde_json::Value::Bool(false),
+        "integer" | "number" => serde_json::Value::Number(0.into()),
+        "array" => serde_json::Value::Array(vec![]),
+        "object" => serde_json::Value::Object(serde_json::Map::new()),
+        _ => serde_json::Value::String(format!("({})", type_str)),
+    }
+}
+
 #[cfg(test)]
 mod workflow_status_chat_tests {
-    use super::workflow_status_user_message_for_chat;
+    use super::*;
 
     #[test]
     fn workflow_chat_planner_nonempty_only_headline() {
@@ -646,5 +704,33 @@ mod workflow_status_chat_tests {
         let m = workflow_status_user_message_for_chat(s, true);
         assert!(m.contains("wf-abc"));
         assert!(m.contains("Done with task."));
+    }
+
+    #[test]
+    fn json_template_coder_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["status"],
+            "properties": {
+                "status": { "type": "string" },
+                "artifact_ref": { "type": "string" },
+                "clarification_request": { "type": "object" },
+                "reason": { "type": "string" },
+                "dependency_files": { "type": "array", "items": { "type": "string" } }
+            }
+        });
+        let tmpl = generate_json_template(&schema);
+        eprintln!("{}", tmpl);
+        assert!(tmpl.contains("\"status\": \"(required)\""));
+        assert!(tmpl.contains("\"artifact_ref\": \"...\""));
+        assert!(tmpl.contains("\"clarification_request\": {}"));
+        assert!(tmpl.contains("\"dependency_files\": []"));
+    }
+
+    #[test]
+    fn json_template_empty_schema() {
+        let schema = serde_json::json!({"type": "object"});
+        let tmpl = generate_json_template(&schema);
+        assert_eq!(tmpl, "{}");
     }
 }
