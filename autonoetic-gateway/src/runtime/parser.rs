@@ -669,4 +669,52 @@ metadata:
         assert_eq!(sandbox.len(), 1);
         assert_eq!(sandbox[0], "*");
     }
+
+    #[test]
+    fn test_split_extended_no_marker() {
+        let body = "Just core instructions here.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, body);
+        assert!(extended.is_none());
+    }
+
+    #[test]
+    fn test_split_extended_marker_with_spaces() {
+        let body = "Core instructions.\n<!-- extended -->\nExtended instructions here.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core instructions.");
+        assert_eq!(extended, Some("Extended instructions here."));
+    }
+
+    #[test]
+    fn test_split_extended_marker_no_spaces() {
+        let body = "Core instructions.\n<!--extended-->\nExtended instructions here.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core instructions.");
+        assert_eq!(extended, Some("Extended instructions here."));
+    }
+
+    #[test]
+    fn test_split_extended_marker_at_start() {
+        let body = "<!-- extended -->\nAll content is extended.";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "");
+        assert_eq!(extended, Some("All content is extended."));
+    }
+
+    #[test]
+    fn test_split_extended_empty_extended() {
+        let body = "Core.\n<!-- extended -->\n   ";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core.");
+        assert!(extended.is_none());
+    }
+
+    #[test]
+    fn test_split_extended_marker_at_end() {
+        let body = "Core.\n<!-- extended -->";
+        let (core, extended) = split_extended_instructions(body);
+        assert_eq!(core, "Core.");
+        assert!(extended.is_none());
+    }
 }

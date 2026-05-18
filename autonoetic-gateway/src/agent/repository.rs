@@ -17,7 +17,7 @@ pub struct LoadedAgent {
     pub manifest: AgentManifest,
     pub instructions: String,
     /// Optional extended instructions (everything after `<!-- extended -->`
-    /// in the SKILL.md body). Available for on-demand retrieval.
+    /// in the SKILL.md body) available for on-demand retrieval.
     pub extended_instructions: Option<String>,
 }
 

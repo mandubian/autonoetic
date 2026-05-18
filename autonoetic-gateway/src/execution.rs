@@ -1829,7 +1829,6 @@ impl GatewayExecutionService {
             .with_degraded_sessions(Some(self.degraded_sessions.clone()))
         .with_persona(self.persona.clone())
         .with_extended_instructions(loaded.extended_instructions.clone());
-            runtime = runtime.with_extended_instructions(loaded.extended_instructions.clone());
             // Phase 3: propagate overflow_recovery flag so the governor
             // uses an aggressive reduction pipeline on retry.
             let overflow_recovery = metadata
@@ -2620,7 +2619,8 @@ impl GatewayExecutionService {
         .with_active_executions(Some(self.active_executions.clone()))
         .with_http_client(self.http_client.clone())
         .with_degraded_sessions(Some(self.degraded_sessions.clone()))
-        .with_persona(self.persona.clone());
+        .with_persona(self.persona.clone())
+        .with_extended_instructions(loaded.extended_instructions.clone());
 
         checkpoint.restore_into(&mut runtime);
 

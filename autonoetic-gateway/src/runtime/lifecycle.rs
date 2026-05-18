@@ -717,7 +717,7 @@ impl AgentExecutor {
         let memory_context = self.build_memory_context_snippet();
         let instructions_with_hint = match &self.extended_instructions {
             Some(ext) if !ext.is_empty() => format!(
-                "{}\n\nExtended instructions are available via content_read(\"extended_instructions\").",
+                "{}\n\nExtended instructions are available via content_read({{\"name_or_handle\": \"extended_instructions\"}}).",
                 self.instructions
             ),
             _ => self.instructions.clone(),
@@ -1025,16 +1025,38 @@ impl AgentExecutor {
             if let Some(ext) = &self.extended_instructions {
                 if !ext.is_empty() {
                     if let Some(gw_dir) = &self.gateway_dir {
-                        if let Ok(store) =
-                            crate::runtime::content_store::ContentStore::new(gw_dir)
-                        {
-                            if let Ok(handle) = store.write(ext.as_bytes()) {
-                                let sid = self.session_id.as_deref().unwrap_or("default");
-                                let _ = store.register_name_with_visibility(
-                                    sid,
-                                    "extended_instructions",
-                                    &handle,
-                                    crate::runtime::content_store::ContentVisibility::Session,
+                        match crate::runtime::content_store::ContentStore::new(gw_dir) {
+                            Ok(store) => {
+                                match store.write(ext.as_bytes()) {
+                                    Ok(handle) => {
+                                        let sid = self
+                                            .session_id
+                                            .as_deref()
+                                            .unwrap_or(&self.manifest.agent.id);
+                                        if let Err(e) = store.register_name_with_visibility(
+                                            sid,
+                                            "extended_instructions",
+                                            &handle,
+                                            crate::runtime::content_store::ContentVisibility::Session,
+                                        ) {
+                                            tracing::warn!(
+                                                target: "extended_instructions",
+                                                "Failed to register extended instructions in content store: {e}"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "extended_instructions",
+                                            "Failed to write extended instructions to content store: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "extended_instructions",
+                                    "Failed to open content store for extended instructions: {e}"
                                 );
                             }
                         }
@@ -1218,7 +1240,7 @@ impl AgentExecutor {
             let memory_context = self.build_memory_context_snippet();
             let instructions_with_hint = match &self.extended_instructions {
                 Some(ext) if !ext.is_empty() => format!(
-                    "{}\n\nExtended instructions are available via content_read(\"extended_instructions\").",
+                    "{}\n\nExtended instructions are available via content_read({{\"name_or_handle\": \"extended_instructions\"}}).",
                     self.instructions
                 ),
                 _ => self.instructions.clone(),
