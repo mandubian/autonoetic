@@ -3378,7 +3378,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     // `event.ingest` JSON-RPC round-trip). Notify the UI loop when that work finishes so we can
     // clear the same `Working...` pending row used for normal chat sends.
     let (interaction_resume_tx, mut interaction_resume_rx) =
-        tokio::sync::mpsc::unbounded_channel::<u64>();
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<String>)>();
 
     // Shared shutdown flag — set by Ctrl+C handler, checked by all loops
     let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -3538,8 +3538,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
     signal_interval: &mut tokio::time::Interval,
     shutdown: &std::sync::Arc<tokio::sync::Notify>,
     jsonrpc_auth_token: &str,
-    interaction_resume_tx: tokio::sync::mpsc::UnboundedSender<u64>,
-    interaction_resume_rx: &mut tokio::sync::mpsc::UnboundedReceiver<u64>,
+    interaction_resume_tx: tokio::sync::mpsc::UnboundedSender<(u64, Option<String>)>,
+    interaction_resume_rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, Option<String>)>,
 ) -> anyhow::Result<bool> {
     let mut needs_redraw = true;
     let mut last_spinner_tick = Instant::now();
@@ -3589,8 +3589,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
             }
 
             // Background `answer_and_orchestrate_resume` finished (user answered `user_ask` in TUI)
-            Some(done_pending_id) = interaction_resume_rx.recv() => {
+            Some((done_pending_id, assistant_reply)) = interaction_resume_rx.recv() => {
                 app.remove_pending(done_pending_id);
+                if let Some(reply) = assistant_reply {
+                    app.add_message(MessageRole::Assistant, reply);
+                }
                 needs_redraw = true;
             }
 
@@ -3767,6 +3770,10 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             },
                                         )
                                         .await;
+                                        let reply = match &result {
+                                            Ok(outcome) => outcome.assistant_reply.clone(),
+                                            Err(_) => None,
+                                        };
                                         if let Err(e) = result {
                                             tracing::warn!(
                                                 target: "chat",
@@ -3775,7 +3782,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 "Background interaction answer orchestration failed"
                                             );
                                         }
-                                        let _ = resume_notify.send(pending_row_id);
+                                        let _ = resume_notify.send((pending_row_id, reply));
                                     });
                                     app.add_message(
                                         MessageRole::System,

@@ -18,6 +18,8 @@ pub struct InteractionAnswerOutcome {
     pub ambiguous: bool,
     pub ambiguous_candidates: Vec<String>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_reply: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -162,6 +164,7 @@ pub async fn answer_and_orchestrate_resume(
                 ambiguous: false,
                 ambiguous_candidates: vec![],
                 error: None,
+                assistant_reply: None,
             });
         }
     }
@@ -267,6 +270,7 @@ pub async fn answer_and_orchestrate_resume(
             ambiguous: false,
             ambiguous_candidates: vec![],
             error: None,
+            assistant_reply: None,
         });
     }
 
@@ -280,14 +284,16 @@ pub async fn answer_and_orchestrate_resume(
             ambiguous: false,
             ambiguous_candidates: vec![],
             error: None,
+            assistant_reply: None,
         });
     }
 
     let default_follow = "[operator] User answered the pending question via interaction.answer.";
-    if let Err(e) = execution
+    let resume_result = execution
         .resume_from_user_interaction(&params.interaction_id, follow.or(Some(default_follow)))
-        .await
-    {
+        .await;
+
+    if let Err(e) = resume_result {
         if let Err(release_err) =
             store.release_answered_standalone_interaction_resume_claim(&params.interaction_id)
         {
@@ -300,6 +306,10 @@ pub async fn answer_and_orchestrate_resume(
         }
         return Err(e);
     }
+
+    let assistant_reply = resume_result
+        .ok()
+        .and_then(|r| r.assistant_reply);
 
     if let Err(e) = crate::scheduler::process_queued_workflow_tasks(Arc::clone(execution)).await {
         tracing::warn!(
@@ -317,6 +327,7 @@ pub async fn answer_and_orchestrate_resume(
         ambiguous: false,
         ambiguous_candidates: vec![],
         error: None,
+        assistant_reply,
     })
 }
 
@@ -354,6 +365,7 @@ pub async fn resolve_and_answer(
                 "Multiple pending interactions; specify interaction_id or reply_to_interaction_id"
                     .to_string(),
             ),
+            assistant_reply: None,
         }),
     }
 }
