@@ -517,6 +517,21 @@ pub fn save_task_run(
     Ok(())
 }
 
+/// Update a task run's metadata.
+pub fn update_task_run_metadata(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    task_id: &str,
+    metadata: serde_json::Value,
+) -> anyhow::Result<()> {
+    let mut task = load_task_run(config, store, workflow_id, task_id)?
+        .ok_or_else(|| anyhow::anyhow!("task '{}' not in workflow '{}'", task_id, workflow_id))?;
+    task.metadata = Some(metadata);
+    task.updated_at = now_rfc3339();
+    save_task_run(config, store, &task)
+}
+
 /// Load a task run if the file exists.
 pub fn load_task_run(
     config: &GatewayConfig,

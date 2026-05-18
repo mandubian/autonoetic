@@ -44,11 +44,28 @@ impl ContextGovernor {
     /// Build the default pipeline.
     pub fn new(config: &GovernorConfig) -> Self {
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
-            Box::new(schema_compress::ToolSchemaCompressionStrategy),
+            Box::new(schema_compress::ToolSchemaCompressionStrategy::new()),
             Box::new(compression::CompressionStrategy::new(
                 config.http_client.clone(),
                 config.presets.clone(),
             )),
+            Box::new(trimming::TrimHistoryStrategy),
+            Box::new(demotion::ToolDemotionStrategy),
+        ];
+        Self { strategies }
+    }
+
+    /// Build the aggressive pipeline for overflow recovery retry.
+    ///
+    /// Skips `CompressionStrategy` (already attempted) and forces schema
+    /// compression on turn 0 + straight to trimming. This pipeline will
+    /// never attempt LLM-based summarisation — it goes directly to lossy
+    /// reduction.
+    pub fn new_aggressive(config: &GovernorConfig) -> Self {
+        let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
+            // Force schema compression on every turn (even turn 0)
+            Box::new(schema_compress::ToolSchemaCompressionStrategy::forced()),
+            // Skip CompressionStrategy (already attempted in prior run)
             Box::new(trimming::TrimHistoryStrategy),
             Box::new(demotion::ToolDemotionStrategy),
         ];

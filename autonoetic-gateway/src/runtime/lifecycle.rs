@@ -164,6 +164,10 @@ pub struct AgentExecutor {
     /// Cross-agent persona text loaded from `persona.md`. Injected into every
     /// agent's system prompt between the foundation and agent-specific instructions.
     pub persona: Option<String>,
+    /// When true, the context governor uses an aggressive reduction pipeline
+    /// that skips CompressionStrategy and goes straight to TrimHistory.
+    /// Set by the scheduler on overflow retry.
+    pub overflow_recovery: bool,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -216,6 +220,7 @@ impl AgentExecutor {
             artifact_id: None,
             ri_0_6_previous_snapshot: None,
             persona: None,
+            overflow_recovery: false,
         }
     }
 
@@ -237,6 +242,12 @@ impl AgentExecutor {
 
     pub fn with_persona(mut self, persona: Option<String>) -> Self {
         self.persona = persona;
+        self
+    }
+
+    /// Phase 3: Enable aggressive context governor pipeline for overflow retry.
+    pub fn with_overflow_recovery(mut self, enabled: bool) -> Self {
+        self.overflow_recovery = enabled;
         self
     }
 
@@ -1294,11 +1305,23 @@ impl AgentExecutor {
                     compression_cfg.cloned(),
                     self.manifest.compression.clone(),
                 );
-                let governor = ContextGovernor::new(&GovernorConfig {
-                    http_client: self.http_client.clone(),
-                    presets: self.config.as_ref().map(|c| c.llm_presets.clone())
-                        .unwrap_or_default(),
-                });
+                let governor = if self.overflow_recovery {
+                    tracing::info!(
+                        target: "autonoetic::context_governor",
+                        "Using aggressive governor pipeline (overflow recovery)"
+                    );
+                    ContextGovernor::new_aggressive(&GovernorConfig {
+                        http_client: self.http_client.clone(),
+                        presets: self.config.as_ref().map(|c| c.llm_presets.clone())
+                            .unwrap_or_default(),
+                    })
+                } else {
+                    ContextGovernor::new(&GovernorConfig {
+                        http_client: self.http_client.clone(),
+                        presets: self.config.as_ref().map(|c| c.llm_presets.clone())
+                            .unwrap_or_default(),
+                    })
+                };
                 match governor.govern(&mut ctx).await {
                     Ok(GovernorResult::Recovered { actions_taken }) => {
                         tracing::info!(

@@ -312,6 +312,38 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         messages::mark_message_delivered(&conn, message_id, session_id)
     }
+    /// Record a stage transition for idempotent builder/install/promotion flow.
+    /// Returns `true` if the transition was newly inserted, `false` if it already existed.
+    pub fn record_stage_transition(
+        &self,
+        agent_id: &str,
+        revision_id: &str,
+        stage: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO stage_transitions (agent_id, revision_id, stage, created_at)
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            params![agent_id, revision_id, stage],
+        )?;
+        Ok(result > 0)
+    }
+
+    /// Check whether a given stage transition has already been recorded.
+    pub fn has_stage_transition(
+        &self,
+        agent_id: &str,
+        revision_id: &str,
+        stage: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM stage_transitions WHERE agent_id = ?1 AND revision_id = ?2 AND stage = ?3",
+            params![agent_id, revision_id, stage],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
 }
 
 #[cfg(test)]
