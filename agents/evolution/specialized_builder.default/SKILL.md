@@ -413,12 +413,12 @@ When `agent_revision_promote` returns `"Promotion gate (FullJury): artifact 'art
 
 1. **STOP immediately** — do NOT retry the promote call. The gate is mechanically enforced.
 2. **Report back to planner** with the exact `artifact_id` and `revision_id` from the error message.
-3. The planner is responsible for calling `federation_escalate` to request operator approval. You cannot do this yourself.
+3. The planner is responsible for calling `federation.escalate` to request operator approval. You cannot do this yourself.
 4. Once the operator approves the escalation, the planner will re-delegate the install to you. At that point retry `agent_revision_promote` once.
 
 ### `promotion_query` Returns "No promotion record found"
 
-When you query a freshly-built artifact and `promotion_query` returns `{"error":"No promotion record found for this artifact"}`:
+When you query a freshly-built artifact and `promotion_query` returns `{"artifact_id": null, "error": "No promotion record found for this artifact"}`:
 
 1. **Do NOT loop on `promotion_query`** with different argument shapes. The schema accepts either `artifact_id` (canonical `art_*` form) OR `artifact_ref` (short `ar.*` form) — pass exactly one. A failed query is a fact, not a syntax problem to debug.
 2. **Two legitimate causes** for this result:
