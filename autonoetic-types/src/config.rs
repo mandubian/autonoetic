@@ -2024,6 +2024,21 @@ impl GatewayConfig {
             }
         }
 
+        // Cross-cutting role keys require a fixed (non-routing) preset because
+        // the consumers (e.g. compression LLM resolution) need a concrete
+        // provider/model, not a runtime routing decision.
+        if let Some(preset_name) = self.llm_preset_mapping.get("context_compression") {
+            if let Some(preset) = self.llm_presets.get(preset_name) {
+                if preset.routing.is_some() {
+                    errors.push(format!(
+                        "llm_preset_mapping.context_compression: '{}' is a routing preset; \
+                         context_compression requires a fixed preset",
+                        preset_name
+                    ));
+                }
+            }
+        }
+
         errors
     }
 }
@@ -2248,6 +2263,68 @@ mod tests {
 
         let errors = config.validate_llm_presets();
         assert!(errors.iter().any(|e| e.contains("unknown preset")));
+    }
+
+    #[test]
+    fn validate_llm_presets_rejects_routing_preset_for_context_compression() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "haiku".to_string(),
+            LlmPreset {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-haiku-3".to_string()),
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                api_key_env: None,
+                thinking: None,
+                tier: Some(CapabilityTier::Economy),
+                cost: None,
+                latency: None,
+                routing: None,
+            },
+        );
+        config.llm_presets.insert(
+            "smart".to_string(),
+            LlmPreset {
+                provider: None,
+                model: None,
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                api_key_env: None,
+                thinking: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: Some(RoutingPresetConfig {
+                    strategy: RoutingStrategy::Deterministic,
+                    models: vec!["haiku".to_string()],
+                    classifier_preset: None,
+                    deterministic: DeterministicRoutingConfig::default(),
+                    classifier: ClassifierRoutingConfig::default(),
+                    hybrid: HybridRoutingConfig::default(),
+                }),
+            },
+        );
+        config
+            .llm_preset_mapping
+            .insert("context_compression".to_string(), "smart".to_string());
+
+        let errors = config.validate_llm_presets();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("context_compression") && e.contains("routing preset")),
+            "expected routing-preset rejection for context_compression, got: {:?}",
+            errors
+        );
     }
 
     #[test]

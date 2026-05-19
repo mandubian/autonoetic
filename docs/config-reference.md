@@ -574,7 +574,7 @@ etc.), but the following cross-cutting role keys are also honored:
 
 | Key | Effect |
 |-----|--------|
-| `context_compression` | Used as fallback for `context_compression.llm_preset` when that field is not set explicitly. The mapped preset must be a fixed preset (not a routing preset). |
+| `context_compression` | Used as fallback for `context_compression.llm_preset` when that field is not set explicitly. The mapped preset must be a fixed preset (not a routing preset) — `validate_llm_presets` rejects routing presets here because the consumer needs a concrete provider/model. The fallback only fires when no compression LLM is configured at all (explicit `llm_preset`, explicit `provider`+`model`, and agent-level overrides take precedence). |
 
 Example:
 

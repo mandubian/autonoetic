@@ -27,11 +27,21 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
 /// are not set explicitly. This lets operators centralize preset choice
 /// for cross-cutting roles (e.g. `context_compression`) alongside the
 /// per-agent role mappings.
+///
+/// Only fires when no compression LLM is configured at all — explicit
+/// `llm_preset`, explicit `provider`+`model`, and an agent-level override
+/// all take precedence. `resolve_compression_llm_config` prefers
+/// `llm_preset` over inline `provider`/`model`, so populating it
+/// unconditionally would shadow inline configuration.
 fn apply_role_mapping_fallbacks(config: &mut GatewayConfig) {
-    if config.context_compression.llm_preset.is_none() {
-        if let Some(preset) = config.llm_preset_mapping.get("context_compression") {
-            config.context_compression.llm_preset = Some(preset.clone());
-        }
+    let cc = &config.context_compression;
+    let already_configured = cc.llm_preset.is_some()
+        || (cc.provider.is_some() && cc.model.is_some());
+    if already_configured {
+        return;
+    }
+    if let Some(preset) = config.llm_preset_mapping.get("context_compression") {
+        config.context_compression.llm_preset = Some(preset.clone());
     }
 }
 
@@ -96,6 +106,28 @@ mod tests {
         assert_eq!(
             config.context_compression.llm_preset.as_deref(),
             Some("explicit")
+        );
+    }
+
+    #[test]
+    fn role_mapping_fallback_does_not_shadow_inline_provider_model() {
+        let mut config = GatewayConfig::default();
+        config.context_compression.provider = Some("anthropic".to_string());
+        config.context_compression.model = Some("claude-haiku-3".to_string());
+        config
+            .llm_preset_mapping
+            .insert("context_compression".to_string(), "mapping".to_string());
+        apply_role_mapping_fallbacks(&mut config);
+        // llm_preset must stay None — otherwise resolve_compression_llm_config
+        // would short-circuit on preset lookup and ignore the inline config.
+        assert!(config.context_compression.llm_preset.is_none());
+        assert_eq!(
+            config.context_compression.provider.as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            config.context_compression.model.as_deref(),
+            Some("claude-haiku-3")
         );
     }
 }
