@@ -1782,8 +1782,11 @@ impl Default for PromptBudgetConfig {
 /// Configuration for context compression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextCompressionConfig {
-    /// Enable context compression. Default: false.
-    #[serde(default)]
+    /// Enable context compression. Default: true. Requires `llm_preset` (or
+    /// `provider`/`model`) to be set to a fixed cheap model preset; if no
+    /// preset resolves, the capsule strategy logs a warning and skips
+    /// compression for the turn (graceful no-op).
+    #[serde(default = "default_compression_enabled")]
     pub enabled: bool,
 
     /// LLM preset name to use for compression (should be a cheap/fast model).
@@ -1830,6 +1833,10 @@ pub struct ContextCompressionConfig {
     pub max_completed_tasks: usize,
 }
 
+fn default_compression_enabled() -> bool {
+    true
+}
+
 fn default_compression_threshold_pct() -> f64 {
     60.0
 }
@@ -1857,7 +1864,7 @@ fn default_max_completed_tasks() -> usize {
 impl Default for ContextCompressionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_compression_enabled(),
             llm_preset: None,
             provider: None,
             model: None,

@@ -72,6 +72,7 @@ llm_preset_mapping:
   evolution-steward: default
   evolution-orchestrator: default
   agent-adapter: default
+  context_compression: default      # cross-cutting role: capsule summarization LLM
 "#,
         agents_dir = agents_dir_str,
         provider = provider,
