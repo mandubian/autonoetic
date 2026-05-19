@@ -634,10 +634,23 @@ pub fn update_task_run_status(
             serde_json::json!({ "status": status })
         }
     } else if matches!(status, TaskRunStatus::Succeeded) {
-        serde_json::json!({
+        let agent_outcome = result_summary
+            .as_deref()
+            .and_then(autonoetic_types::task_completion::extract_agent_outcome)
+            .map(|o| o.as_str());
+        let mut payload = serde_json::json!({
             "status": status,
             "result_summary": result_summary,
-        })
+        });
+        if let Some(outcome) = agent_outcome {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert(
+                    "agent_outcome".to_string(),
+                    serde_json::Value::String(outcome.to_string()),
+                );
+            }
+        }
+        payload
     } else {
         serde_json::json!({ "status": status })
     };

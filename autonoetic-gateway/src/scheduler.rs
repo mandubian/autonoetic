@@ -15,6 +15,7 @@ use crate::runtime::continuation;
 
 use autonoetic_types::causal_chain::CausalEventRecord;
 
+pub mod agent_outcome;
 pub mod approval;
 pub mod approval_hardening;
 pub mod approval_similarity;

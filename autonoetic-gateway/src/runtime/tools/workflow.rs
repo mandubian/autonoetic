@@ -258,6 +258,12 @@ fn check_task_statuses(
                         }
                     }
                 }
+                if t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
+                    autonoetic_types::task_completion::enrich_task_status_entry(
+                        &mut entry,
+                        t.result_summary.as_deref(),
+                    );
+                }
                 tasks_status.push(entry);
             }
             None => {
@@ -442,6 +448,8 @@ impl NativeTool for WorkflowWaitTool {
                 _gateway_dir,
                 session_id,
             );
+            let any_gate_fail =
+                autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
             return serde_json::to_string(&serde_json::json!({
                 "ok": true,
                 "workflow_id": workflow_id,
@@ -449,20 +457,17 @@ impl NativeTool for WorkflowWaitTool {
                 "join_satisfied": all_done,
                 "any_failed": any_failed,
                 "any_not_found": any_not_found,
+                "any_gate_unsatisfied": any_gate_fail,
                 "failed_task_count": failed_task_count,
                 "failure_summary": failure_summary,
                 "waited_secs": 0,
-                "message": if all_done {
-                    if any_failed {
-                        "All tasks completed (some failed). Review task results and proceed."
-                    } else {
-                        "All tasks completed successfully. You may proceed with the results."
-                    }
-                } else if any_not_found {
-                    "One or more tasks were not found. Verify task_ids and workflow_id."
-                } else {
-                    "Some tasks are still running. Call workflow.wait with timeout_secs > 0 to block until they finish, or continue with other work."
-                }
+                "message": autonoetic_types::task_completion::workflow_wait_join_message(
+                    all_done,
+                    any_failed,
+                    any_not_found,
+                    any_gate_fail,
+                    0,
+                ),
             }))
             .map_err(Into::into);
         }
@@ -512,6 +517,8 @@ impl NativeTool for WorkflowWaitTool {
             })
         };
 
+        let any_gate_fail =
+            autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "workflow_id": workflow_id,
@@ -519,20 +526,17 @@ impl NativeTool for WorkflowWaitTool {
             "join_satisfied": all_done,
             "any_failed": any_failed,
             "any_not_found": any_not_found,
+            "any_gate_unsatisfied": any_gate_fail,
             "failed_task_count": failed_task_count,
             "failure_summary": failure_summary,
             "waited_secs": waited_secs,
-            "message": if all_done {
-                if any_failed {
-                    format!("All tasks completed after {}s (some failed). Review task results and proceed.", waited_secs)
-                } else {
-                    format!("All tasks completed successfully after {}s. You may proceed with the results.", waited_secs)
-                }
-            } else if any_not_found {
-                "One or more tasks were not found. Verify task_ids and workflow_id.".to_string()
-            } else {
-                format!("Timed out after {}s. Some tasks are still running. Call workflow.wait again or proceed with partial results.", waited_secs)
-            }
+            "message": autonoetic_types::task_completion::workflow_wait_join_message(
+                all_done,
+                any_failed,
+                any_not_found,
+                any_gate_fail,
+                waited_secs,
+            ),
         }))
         .map_err(Into::into)
     }
@@ -769,13 +773,20 @@ impl NativeTool for WorkflowStateTool {
 
         for task in &tasks {
             let implicit_artifact_id = format!("impl_{}", task.task_id);
-            let entry = serde_json::json!({
+            let mut entry = serde_json::json!({
                 "task_id": task.task_id,
                 "agent_id": task.agent_id,
                 "status": format!("{:?}", task.status),
                 "result_summary": task.result_summary,
                 "implicit_artifact_id": implicit_artifact_id,
             });
+
+            if task.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
+                autonoetic_types::task_completion::enrich_task_status_entry(
+                    &mut entry,
+                    task.result_summary.as_deref(),
+                );
+            }
 
             match task.status {
                 autonoetic_types::workflow::TaskRunStatus::Succeeded => {
