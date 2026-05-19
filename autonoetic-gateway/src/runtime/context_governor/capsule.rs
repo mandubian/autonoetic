@@ -3,20 +3,9 @@ use crate::runtime::context_governor::strategies::{GovernorContext, ReductionOut
 use crate::runtime::content_store::{ContentStore, ContentVisibility};
 use autonoetic_types::config::LlmPreset;
 use async_trait::async_trait;
-use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-const CAPSULE_ENV: &str = "AUTONOETIC_STATE_CAPSULE_COMPRESSION";
-
-static CAPSULE_ENABLED: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var(CAPSULE_ENV).as_deref() == Ok("1")
-});
-
-pub fn capsule_enabled() -> bool {
-    *CAPSULE_ENABLED
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateCapsule {
@@ -396,12 +385,6 @@ impl super::ReductionStrategy for CapsuleStrategy {
     }
 
     async fn reduce(&self, ctx: &mut GovernorContext) -> anyhow::Result<ReductionOutcome> {
-        if !capsule_enabled() {
-            return Ok(ReductionOutcome::Insufficient {
-                tokens_remaining: ctx.breakdown.total_tokens,
-            });
-        }
-
         let Some(ref cfg) = ctx.compression_config else {
             return Ok(ReductionOutcome::Insufficient {
                 tokens_remaining: ctx.breakdown.total_tokens,

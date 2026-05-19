@@ -1423,13 +1423,10 @@ async fn spawn_task_execution(
         Err(e) => {
             let error_str = e.to_string();
 
-            // ── Phase 3: Overflow-aware retry ──────────────────────────
-            // When the overflow retry classifier is enabled, detect context
-            // overflow errors and retry exactly once with an aggressive
-            // governor pipeline. A second overflow is terminal.
-            if crate::scheduler::overflow_classifier::overflow_retry_classifier_enabled()
-                && crate::scheduler::overflow_classifier::is_context_overflow(&e)
-            {
+            // ── Overflow-aware retry ──────────────────────────────────
+            // Detect context overflow errors and retry exactly once with
+            // an aggressive governor pipeline. A second overflow is terminal.
+            if crate::scheduler::overflow_classifier::is_context_overflow(&e) {
                 let already_retried = prev_checkpoint
                     .as_ref()
                     .and_then(|cp| cp.state.get("overflow_recovery_attempted"))

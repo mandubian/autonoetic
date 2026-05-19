@@ -15,25 +15,12 @@ use std::collections::HashMap;
 
 pub mod budget;
 pub mod capsule;
-pub mod compression;
 pub mod demotion;
 pub mod error;
 pub mod resolver;
 pub mod schema_compress;
 pub mod strategies;
 pub mod trimming;
-
-const STRICT_GOVERNOR_ENV: &str = "AUTONOETIC_STRICT_CONTEXT_GOVERNOR";
-
-/// Whether the strict context governor is enabled.
-pub fn strict_governor_enabled() -> bool {
-    std::env::var(STRICT_GOVERNOR_ENV).as_deref() == Ok("1")
-}
-
-/// Whether capsule compression is enabled.
-pub fn capsule_enabled() -> bool {
-    crate::runtime::context_governor::capsule::capsule_enabled()
-}
 
 /// Configuration for the context governor pipeline.
 pub struct GovernorConfig {
@@ -51,32 +38,20 @@ use std::path::PathBuf;
 
 impl ContextGovernor {
     /// Build the default pipeline.
-    /// When `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1`, replaces the LLM
-    /// summarization strategy with the delta-based capsule strategy.
+    ///
+    /// Order: schema compression → capsule summarization → history trimming
+    /// → tool demotion.
     pub fn new(config: &GovernorConfig) -> Self {
-        let compression: Box<dyn ReductionStrategy> =
-            if crate::runtime::context_governor::capsule::capsule_enabled() {
-                let mut s = capsule::CapsuleStrategy::new(
-                    config.http_client.clone(),
-                    config.presets.clone(),
-                );
-                if let Some(ref dir) = config.gateway_dir {
-                    s = s.with_gateway_dir(dir.clone());
-                }
-                Box::new(s)
-            } else {
-                let mut s = compression::CompressionStrategy::new(
-                    config.http_client.clone(),
-                    config.presets.clone(),
-                );
-                if let Some(ref dir) = config.gateway_dir {
-                    s = s.with_gateway_dir(dir.clone());
-                }
-                Box::new(s)
-            };
+        let mut capsule = capsule::CapsuleStrategy::new(
+            config.http_client.clone(),
+            config.presets.clone(),
+        );
+        if let Some(ref dir) = config.gateway_dir {
+            capsule = capsule.with_gateway_dir(dir.clone());
+        }
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             Box::new(schema_compress::ToolSchemaCompressionStrategy::new()),
-            compression,
+            Box::new(capsule),
             Box::new(trimming::TrimHistoryStrategy),
             Box::new(demotion::ToolDemotionStrategy),
         ];
@@ -85,15 +60,14 @@ impl ContextGovernor {
 
     /// Build the aggressive pipeline for overflow recovery retry.
     ///
-    /// Skips `CompressionStrategy` (already attempted) and forces schema
-    /// compression on turn 0 + straight to trimming. This pipeline will
-    /// never attempt LLM-based summarisation — it goes directly to lossy
-    /// reduction.
+    /// Skips the LLM-tier capsule strategy (already attempted) and forces
+    /// schema compression on turn 0 + goes straight to lossy reduction
+    /// (trim + demote).
     pub fn new_aggressive(config: &GovernorConfig) -> Self {
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             // Force schema compression on every turn (even turn 0)
             Box::new(schema_compress::ToolSchemaCompressionStrategy::forced()),
-            // Skip CompressionStrategy (already attempted in prior run)
+            // Skip capsule (already attempted in prior run)
             Box::new(trimming::TrimHistoryStrategy),
             Box::new(demotion::ToolDemotionStrategy),
         ];

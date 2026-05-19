@@ -30,20 +30,23 @@ prompt_budget:
   warn_at_pct: 80
   # Safety margin subtracted from context window before enforcement
   margin_tokens: 1024
-  # Action when total exceeds effective limit (context_window - margin)
-  on_exceeded: demote_tools
   # Whether to compress tool schemas to {} on turns after turn 0
   compress_tool_schemas_after_turn_0: true
 ```
 
-### Enforcement Actions
+### Reduction Cascade (Context Governor)
 
-| Action | Behavior |
-|--------|----------|
-| `warn` | Log a warning, proceed without changes |
-| `trim_history` | Remove oldest message groups (preserving tool-call/result pairs) until within budget. Fails if the minimum floor (last 2 message groups) is reached while still over budget. |
-| `demote_tools` | Remove Specialized-tier tools, keeping only Core + Workflow. Fails if Core tools alone still exceed the budget or `tool_definitions_max_tokens`. |
-| `fail` | Return an error immediately — the turn is not sent to the LLM |
+When utilization exceeds `context_window - margin_tokens`, the governor runs
+its strategies in order. Each strategy returns either `Resolved` (within
+budget) or `Insufficient` (try the next one). Exhausting the pipeline
+classifies the turn as `context_overflow`.
+
+| Strategy | Behavior |
+|----------|----------|
+| `schema_compress` | Replace tool JSON schemas with `{}` placeholders. |
+| `capsule` | Hierarchical state-capsule summarization of old turns (LLM call). |
+| `trim_history` | Remove oldest message groups, preserving tool-call/result pairs. |
+| `demote_tools` | Drop Specialized-tier tools, keep Core + Workflow. |
 
 ### Section Caps
 
@@ -121,8 +124,10 @@ The context window for budget calculations is resolved with this priority:
 | Component | Path |
 |-----------|------|
 | Breakdown + estimation | `autonoetic-gateway/src/runtime/prompt_budget.rs` |
-| Enforcement strategies | `autonoetic-gateway/src/runtime/prompt_budget.rs` (`BudgetEnforcementStrategy` trait) |
-| Lifecycle integration | `autonoetic-gateway/src/runtime/lifecycle.rs` (`apply_prompt_budget`, `compose_foundation`, `determine_tool_tier_filter`) |
+| Reduction pipeline | `autonoetic-gateway/src/runtime/context_governor/` (`ContextGovernor::govern`) |
+| Reduction strategies | `context_governor::{schema_compress, capsule, trimming, demotion}` |
+| Lifecycle integration | `autonoetic-gateway/src/runtime/lifecycle.rs` (governor call site, `compose_foundation`, `determine_tool_tier_filter`) |
+| Pressure observability | `autonoetic-gateway/src/runtime/budget_tracker.rs` (`emit_context_pressure_high_if_warranted`) |
 | Config structs | `autonoetic_types::config::PromptBudgetConfig` |
 | Tool tier enum | `autonoetic_types::agent::ToolTier` |
 

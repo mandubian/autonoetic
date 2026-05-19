@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::runtime::budget_tracker::{
-    apply_prompt_budget, emit_context_pressure_high_if_warranted, input_tokens_as_context_pct,
+    emit_context_pressure_high_if_warranted, input_tokens_as_context_pct,
     is_retryable_empty_other_response, max_other_empty_retries,
 };
 use crate::runtime::context_governor::resolver::resolve_context_window_for_run;
@@ -1346,19 +1346,16 @@ impl AgentExecutor {
                 })),
             );
 
-            // Emit pressure-high causal event before either enforcement branch
-            // so it fires under both the strict-governor and legacy pipelines.
+            // Emit pressure-high causal event before reduction so operators
+            // see warnings even when no enforcement action is needed.
             emit_context_pressure_high_if_warranted(
                 &budget_breakdown,
                 self.config.as_ref().map(|c| &**c),
                 &mut tracer,
             );
 
-            // --- Budget Enforcement + Context Compression ---
-            // Feature-gated: the pluggable ContextGovernor pipeline replaces the
-            // legacy budget enforcement and compression block when the env var
-            // AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1 is set.
-            if crate::runtime::context_governor::strict_governor_enabled() {
+            // --- Budget Enforcement + Context Compression (Context Governor) ---
+            {
                 use crate::runtime::context_governor::{
                     ContextGovernor, GovernorConfig,
                     strategies::GovernorResult,
@@ -1410,16 +1407,13 @@ impl AgentExecutor {
                             actions = ?actions_taken,
                             "ContextGovernor recovered within budget"
                         );
-                        // Update compression metadata if compression strategy ran
                         if ctx.compression_metadata.as_ref().map(|m| m.compression_count > self.compression_metadata.compression_count).unwrap_or(false) {
                             if let Some(meta) = ctx.compression_metadata.clone() {
                                 self.compression_metadata = meta;
                             }
                         }
-                        // Update capsule state if capsule strategy ran.
                         // Once set, capsule_state is never cleared back to None —
-                        // this is intentional: the latest capsule always represents
-                        // the current session compression state.
+                        // the latest capsule represents current session compression state.
                         if ctx.capsule_state.is_some() {
                             self.capsule_state = ctx.capsule_state.clone();
                         }
@@ -1442,88 +1436,6 @@ impl AgentExecutor {
                 }
                 *history = ctx.history;
                 tools = ctx.tools;
-            } else {
-                let (t, trimmed_history) = apply_prompt_budget(
-                    tools,
-                    history.clone(),
-                    &budget_breakdown,
-                    self.config.as_ref().map(|c| &**c),
-                    &session_id,
-                    &turn_id,
-                    &mut tracer,
-                )?;
-                tools = t;
-                *history = trimmed_history;
-
-                // --- Context Compression (legacy path) ---
-                let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
-                let agent_compression = self.manifest.compression.as_ref();
-                let should_compress = compression_cfg.map(|c| c.enabled).unwrap_or(false);
-                if should_compress {
-                    let empty_presets = std::collections::HashMap::new();
-                    let presets = match self.config.as_ref() {
-                        Some(c) => &c.llm_presets,
-                        None => &empty_presets,
-                    };
-                    match crate::runtime::compression::compress_context(
-                        history.clone(),
-                        context_window_resolved.map(|w| w as usize),
-                        compression_cfg.unwrap(),
-                        agent_compression,
-                        presets,
-                        &self.http_client,
-                        &session_id,
-                        self.turn_counter,
-                        Some(&self.compression_metadata),
-                    )
-                    .await
-                    {
-                        Ok(result) => {
-                            if result.compressed {
-                                let mut metadata = result.metadata;
-                                if let Some(gateway_dir) = self.gateway_dir.as_ref() {
-                                    match crate::runtime::compression::persist_compressed_context(
-                                        gateway_dir,
-                                        &session_id,
-                                        &result.original_history,
-                                        &metadata,
-                                    ) {
-                                        Ok(handle) => {
-                                            metadata.compressed_context_handle = handle;
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                target: "autonoetic::compression",
-                                                error = %e,
-                                                "Failed to persist compressed context"
-                                            );
-                                        }
-                                    }
-                                }
-                                let _ = tracer.log_event(
-                                    "agent.process",
-                                    "context_compression",
-                                    autonoetic_types::causal_chain::EntryStatus::Success,
-                                    Some(serde_json::json!({
-                                        "messages_summarized": metadata.messages_summarized,
-                                        "compression_count": metadata.compression_count,
-                                        "compressed_context_handle": metadata.compressed_context_handle,
-                                        "before_tokens": budget_breakdown.total_tokens,
-                                    })),
-                                );
-                                *history = result.history;
-                                self.compression_metadata = metadata;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "autonoetic::compression",
-                                error = %e,
-                                "Context compression failed, proceeding without compression"
-                            );
-                        }
-                    }
-                }
             }
 
             // --- Model Routing: select model based on budget/complexity signals ---

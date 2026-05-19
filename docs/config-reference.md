@@ -25,8 +25,8 @@ Fields marked **required** must be present or the gateway will fail to start.
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
 | `node_id` | string | `"gateway"` | Node identity for OFP federation and causal chain authorship. Overridable by `AUTONOETIC_NODE_ID` env var. |
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.05/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.19/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.19/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | Require a valid constitution lock signature at startup (`fail-shut` on missing/invalid signature). |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trusted signer registry (`signer_id` -> base64 Ed25519 public key, 32 bytes). Used for non-`gateway:*` signer IDs. |
 | `max_concurrent_spawns` | usize | `8` | Maximum agent runtime executions allowed concurrently across all sessions. |
@@ -50,8 +50,8 @@ Controls which constitutional release the gateway enforces.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.05/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.19/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.19/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | If `true`, unsigned locks are rejected and signed locks must verify. |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trust store for constitution lock signatures. Keys are signer IDs, values are base64 Ed25519 public keys (32 bytes). |
 
@@ -90,8 +90,8 @@ Example:
 
 ```yaml
 constitution:
-  source_path: "docs/constitution/versions/2026.05.05/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.05.19/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.19/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -101,8 +101,8 @@ To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
 
 ```yaml
 constitution:
-  source_path: ".gateway/constitution/versions/2026.05.05/constitution.md"
-  lock_path: ".gateway/constitution/versions/2026.05.05/gateway-constitution.lock.json"
+  source_path: ".gateway/constitution/versions/2026.05.19/constitution.md"
+  lock_path: ".gateway/constitution/versions/2026.05.19/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -458,8 +458,11 @@ Controls context window transparency and enforcement for prompt construction.
 | `prompt_budget.tool_definitions_max_tokens` | usize | `0` | Maximum tokens for all tool definitions combined. `0` = unlimited. |
 | `prompt_budget.warn_at_pct` | float | `80.0` | Warn when total prompt utilization exceeds this percentage of context window. |
 | `prompt_budget.margin_tokens` | usize | `4096` | Reserve this many tokens at the end of the context window for LLM output. |
-| `prompt_budget.on_exceeded` | string | `"warn"` | Action when budget exceeded: `"warn"`, `"trim_history"`, `"demote_tools"`, `"fail"`. |
 | `prompt_budget.compress_tool_schemas_after_turn_0` | bool | `false` | Strip tool JSON schemas to `{}` after the first turn to save tokens. |
+
+When utilization exceeds the budget, the context governor cascades reduction
+strategies (tool-schema compression → hierarchical capsule summarization →
+history trimming → tool demotion). See [docs/prompt-budget.md](prompt-budget.md).
 
 Example:
 
@@ -469,7 +472,6 @@ prompt_budget:
   tool_definitions_max_tokens: 0
   warn_at_pct: 80.0
   margin_tokens: 4096
-  on_exceeded: warn
   compress_tool_schemas_after_turn_0: false
 ```
 
@@ -914,8 +916,8 @@ tls: false
 node_id: "gateway"
 node_name: "gateway"
 constitution:
-  source_path: "docs/constitution/versions/2026.05.05/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.05.19/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.19/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -962,7 +964,6 @@ session_budget:
 prompt_budget:
   warn_at_pct: 80.0
   margin_tokens: 4096
-  on_exceeded: warn
 
 retention:
   execution_traces_days: 30
