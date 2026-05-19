@@ -459,6 +459,7 @@ llm_preset_mapping:
   registration: gemma4_31b        # credential onboarding flow
   agent-factory: gemma4_31b       # agent creation pipeline orchestration
   discovery: gemma4_31b          # semantic reasoning over agent descriptions
+  context_compression: haiku      # capsule summarization LLM (cross-cutting role)
   default: gemma4_31b
 
 

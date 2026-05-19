@@ -1782,8 +1782,11 @@ impl Default for PromptBudgetConfig {
 /// Configuration for context compression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextCompressionConfig {
-    /// Enable context compression. Default: false.
-    #[serde(default)]
+    /// Enable context compression. Default: true. Requires `llm_preset` (or
+    /// `provider`/`model`) to be set to a fixed cheap model preset; if no
+    /// preset resolves, the capsule strategy logs a warning and skips
+    /// compression for the turn (graceful no-op).
+    #[serde(default = "default_compression_enabled")]
     pub enabled: bool,
 
     /// LLM preset name to use for compression (should be a cheap/fast model).
@@ -1830,6 +1833,10 @@ pub struct ContextCompressionConfig {
     pub max_completed_tasks: usize,
 }
 
+fn default_compression_enabled() -> bool {
+    true
+}
+
 fn default_compression_threshold_pct() -> f64 {
     60.0
 }
@@ -1857,7 +1864,7 @@ fn default_max_completed_tasks() -> usize {
 impl Default for ContextCompressionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_compression_enabled(),
             llm_preset: None,
             provider: None,
             model: None,
@@ -2014,6 +2021,21 @@ impl GatewayConfig {
                     "llm_preset_mapping: template '{}' references unknown preset '{}'",
                     template, preset_name
                 ));
+            }
+        }
+
+        // Cross-cutting role keys require a fixed (non-routing) preset because
+        // the consumers (e.g. compression LLM resolution) need a concrete
+        // provider/model, not a runtime routing decision.
+        if let Some(preset_name) = self.llm_preset_mapping.get("context_compression") {
+            if let Some(preset) = self.llm_presets.get(preset_name) {
+                if preset.routing.is_some() {
+                    errors.push(format!(
+                        "llm_preset_mapping.context_compression: '{}' is a routing preset; \
+                         context_compression requires a fixed preset",
+                        preset_name
+                    ));
+                }
             }
         }
 
@@ -2241,6 +2263,68 @@ mod tests {
 
         let errors = config.validate_llm_presets();
         assert!(errors.iter().any(|e| e.contains("unknown preset")));
+    }
+
+    #[test]
+    fn validate_llm_presets_rejects_routing_preset_for_context_compression() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "haiku".to_string(),
+            LlmPreset {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-haiku-3".to_string()),
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                api_key_env: None,
+                thinking: None,
+                tier: Some(CapabilityTier::Economy),
+                cost: None,
+                latency: None,
+                routing: None,
+            },
+        );
+        config.llm_presets.insert(
+            "smart".to_string(),
+            LlmPreset {
+                provider: None,
+                model: None,
+                temperature: None,
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                api_key_env: None,
+                thinking: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: Some(RoutingPresetConfig {
+                    strategy: RoutingStrategy::Deterministic,
+                    models: vec!["haiku".to_string()],
+                    classifier_preset: None,
+                    deterministic: DeterministicRoutingConfig::default(),
+                    classifier: ClassifierRoutingConfig::default(),
+                    hybrid: HybridRoutingConfig::default(),
+                }),
+            },
+        );
+        config
+            .llm_preset_mapping
+            .insert("context_compression".to_string(), "smart".to_string());
+
+        let errors = config.validate_llm_presets();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("context_compression") && e.contains("routing preset")),
+            "expected routing-preset rejection for context_compression, got: {:?}",
+            errors
+        );
     }
 
     #[test]

@@ -395,6 +395,21 @@ impl super::ReductionStrategy for CapsuleStrategy {
                 tokens_remaining: ctx.breakdown.total_tokens,
             });
         }
+        // No compression LLM resolved (no preset, no inline provider/model,
+        // no mapping fallback hit). Skip gracefully so the governor cascade
+        // can fall through to trim/demote instead of erroring out and
+        // aborting the rest of the pipeline.
+        if resolve_compression_llm_config(cfg, ctx.agent_compression.as_ref(), &self.presets)
+            .is_none()
+        {
+            tracing::warn!(
+                target: "autonoetic::capsule",
+                "Context compression enabled but no compression LLM configured — skipping capsule strategy"
+            );
+            return Ok(ReductionOutcome::Insufficient {
+                tokens_remaining: ctx.breakdown.total_tokens,
+            });
+        }
 
         let (recent_turns_to_keep, max_capsule_decisions, max_completed_tasks) = {
             let agent = ctx.agent_compression.as_ref();
