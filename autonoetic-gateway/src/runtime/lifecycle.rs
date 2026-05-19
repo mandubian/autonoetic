@@ -10,7 +10,7 @@ use crate::runtime::checkpoint::{
     SessionCheckpoint, YieldReason,
 };
 use crate::runtime::context::{
-    compose_system_instructions_full, safe_prefix_by_bytes,
+    compose_system_instructions_full, inline_extended, safe_prefix_by_bytes,
     workflow_status_user_message_for_chat,
 };
 pub(crate) use crate::runtime::context::compose_system_instructions_with_metadata;
@@ -719,15 +719,9 @@ impl AgentExecutor {
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
         let memory_context = self.build_memory_context_snippet();
-        let instructions_with_hint = match &self.extended_instructions {
-            Some(ext) if !ext.is_empty() => format!(
-                "{}\n\nExtended instructions are available via content_read({{\"name_or_handle\": \"extended_instructions\"}}).",
-                self.instructions
-            ),
-            _ => self.instructions.clone(),
-        };
+        let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
         let mut system_instructions = compose_system_instructions_full(
-            &instructions_with_hint,
+            &inlined_instructions,
             &self.manifest,
             self.manifest
                 .io
@@ -1024,49 +1018,6 @@ impl AgentExecutor {
                 self.runtime_lock_hash =
                     crate::runtime::checkpoint::compute_runtime_lock_hash(&self.agent_dir);
             }
-
-            // Write extended instructions to content store for on-demand retrieval
-            if let Some(ext) = &self.extended_instructions {
-                if !ext.is_empty() {
-                    if let Some(gw_dir) = &self.gateway_dir {
-                        match crate::runtime::content_store::ContentStore::new(gw_dir) {
-                            Ok(store) => {
-                                match store.write(ext.as_bytes()) {
-                                    Ok(handle) => {
-                                        let sid = self
-                                            .session_id
-                                            .as_deref()
-                                            .unwrap_or(&self.manifest.agent.id);
-                                        if let Err(e) = store.register_name_with_visibility(
-                                            sid,
-                                            "extended_instructions",
-                                            &handle,
-                                            crate::runtime::content_store::ContentVisibility::Session,
-                                        ) {
-                                            tracing::warn!(
-                                                target: "extended_instructions",
-                                                "Failed to register extended instructions in content store: {e}"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            target: "extended_instructions",
-                                            "Failed to write extended instructions to content store: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "extended_instructions",
-                                    "Failed to open content store for extended instructions: {e}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
         }
         // --- Auto-inject Agent Messages ---
         if let Some(store) = self.gateway_store.as_ref() {
@@ -1242,15 +1193,9 @@ impl AgentExecutor {
             // Update system message — ensure exactly one system message at position 0
             let user_context = self.build_user_context_snippet();
             let memory_context = self.build_memory_context_snippet();
-            let instructions_with_hint = match &self.extended_instructions {
-                Some(ext) if !ext.is_empty() => format!(
-                    "{}\n\nExtended instructions are available via content_read({{\"name_or_handle\": \"extended_instructions\"}}).",
-                    self.instructions
-                ),
-                _ => self.instructions.clone(),
-            };
+            let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
             let mut system_instructions = compose_system_instructions_full(
-                &instructions_with_hint,
+                &inlined_instructions,
                 &self.manifest,
                 self.manifest
                     .io

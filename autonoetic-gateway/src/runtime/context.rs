@@ -162,6 +162,27 @@ pub(crate) fn compose_system_instructions_with_user_context(
     compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None)
 }
 
+/// Concatenate core + extended SKILL.md sections for the system prompt.
+///
+/// The `<!-- extended -->` marker in `SKILL.md` was originally a "deferred
+/// load via content_read" optimization (Phase 4 / PR #218), but an audit of
+/// session-3b4485d4 found that agents with the marker never actually issued
+/// `content_read("extended_instructions")` — they just operated on the core
+/// section and silently lost critical guidance (e.g. promotion-gate handling,
+/// "if evaluator finds issues" recipe). The marker still serves as a visual
+/// section divider in the source, but at runtime the two halves are inlined.
+///
+/// The parser-level split (`split_extended_instructions`) and the
+/// `LoadedAgent.extended_instructions` field are retained so a future
+/// optimization (e.g. dynamic tiered loading) can re-wire the split without
+/// re-introducing the source structure.
+pub(crate) fn inline_extended(core: &str, extended: Option<&str>) -> String {
+    match extended {
+        Some(ext) if !ext.is_empty() => format!("{core}\n\n{ext}"),
+        _ => core.to_string(),
+    }
+}
+
 /// Full system prompt composition.
 ///
 /// Layer order (each layer is structurally positioned so it cannot override
@@ -556,6 +577,29 @@ impl AgentExecutor {
              Evidence: {}\n",
             rules, degraded_event.event_id, evidence
         )))
+    }
+}
+
+#[cfg(test)]
+mod inline_extended_tests {
+    use super::inline_extended;
+
+    #[test]
+    fn no_extended_returns_core_unchanged() {
+        assert_eq!(inline_extended("core only", None), "core only");
+    }
+
+    #[test]
+    fn empty_extended_returns_core_unchanged() {
+        assert_eq!(inline_extended("core only", Some("")), "core only");
+    }
+
+    #[test]
+    fn concatenates_with_blank_line_separator() {
+        assert_eq!(
+            inline_extended("core part", Some("extended part")),
+            "core part\n\nextended part"
+        );
     }
 }
 
