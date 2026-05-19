@@ -2514,14 +2514,13 @@ fn draw(f: &mut Frame, app: &App) {
         draw_hints_pane(f, app, hints);
     }
 
-    let before_cursor_display_width =
-        UnicodeWidthStr::width(&app.input[..app.cursor_pos]).min(usize::from(u16::MAX)) as u16;
-    let prefix_width =
-        UnicodeWidthStr::width(app.input_prefix()).min(usize::from(u16::MAX)) as u16;
-    let cursor_x = (layout.input.x + 1 + prefix_width + before_cursor_display_width)
-        .min(layout.input.x + layout.input.width.saturating_sub(1));
-    let cursor_y = layout.input.y + 1;
-    f.set_cursor_position((cursor_x, cursor_y));
+    // Software cursor (white-background span in draw_input) is the sole
+    // visible cursor. Do NOT call f.set_cursor_position here — ratatui shows
+    // the OS hardware cursor whenever set_cursor_position is called, which
+    // overrides the Hide from terminal setup and produces a duplicated cursor
+    // on native Linux terminals (WSL terminals tend to suppress the OS cursor
+    // in raw+alt-screen mode regardless, which is why this bug was invisible
+    // there).
 }
 
 fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
