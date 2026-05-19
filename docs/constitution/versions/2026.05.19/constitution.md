@@ -530,7 +530,7 @@ With R+++2 enforced, `constitution_digest` changes whenever this file's
 canonical content changes. A digest change is the mechanical signal that
 the law changed, and federated peers observe it through the OFP handshake.
 The digest is pinned in
-`docs/constitution/versions/2026.05.05/gateway-constitution.lock.json`
+`docs/constitution/versions/2026.05.19/gateway-constitution.lock.json`
 (versioned manifest). Gateway startup verifies this lock against canonical
 extraction and refuses to boot on mismatch.
 

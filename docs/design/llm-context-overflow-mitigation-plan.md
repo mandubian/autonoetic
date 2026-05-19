@@ -16,6 +16,14 @@ R-6.9 was updated accordingly in version `2026.05.19`.
 | Phase 2 | Hierarchical session summarization (CapsuleStrategy) | #219 |
 | Phase 5 | TUI transparency for context health | #226 |
 
+> **Historical record:** the sections below describe the **original rollout
+> plan**. References to `AUTONOETIC_STRICT_CONTEXT_GOVERNOR`,
+> `AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER`, `AUTONOETIC_STATE_CAPSULE_COMPRESSION`,
+> the legacy `apply_prompt_budget` path, and the `CompressionStrategy` LLM-tier
+> reducer reflect that plan, not the current code. PR #227 removed all three
+> flags and the legacy path; capsule is now the only LLM-tier reducer. The
+> design rationale is preserved for posterity.
+
 ## Incident Summary
 
 A workflow run failed in the promotion/install path with:

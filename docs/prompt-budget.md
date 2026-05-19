@@ -43,10 +43,13 @@ classifies the turn as `context_overflow`.
 
 | Strategy | Behavior |
 |----------|----------|
-| `schema_compress` | Replace tool JSON schemas with `{}` placeholders. |
+| `tool_schema_compression` | Replace tool JSON schemas with `{}` placeholders. |
 | `capsule` | Hierarchical state-capsule summarization of old turns (LLM call). |
 | `trim_history` | Remove oldest message groups, preserving tool-call/result pairs. |
 | `demote_tools` | Drop Specialized-tier tools, keep Core + Workflow. |
+
+Strategy names match those emitted in `GovernorAction` diagnostics and
+causal events.
 
 ### Section Caps
 
