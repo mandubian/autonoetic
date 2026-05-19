@@ -407,6 +407,26 @@ When `agent_revision_promote` returns `"Promotion gate: no promotion_record foun
 3. Do NOT attempt to create promotion records yourself — only evaluator and auditor can call `promotion_record`
 4. Do NOT retry the promote call — the promotion gate is mechanically enforced and will always block until the records exist
 
+### FullJury Escalation Required
+
+When `agent_revision_promote` returns `"Promotion gate (FullJury): artifact 'art_X' has federation role verdicts but no approved operator escalation for revision 'rev_X'. The planner must call federation.escalate ..."`:
+
+1. **STOP immediately** — do NOT retry the promote call. The gate is mechanically enforced.
+2. **Report back to planner** with the exact `artifact_id` and `revision_id` from the error message.
+3. The planner is responsible for calling `federation.escalate` to request operator approval. You cannot do this yourself.
+4. Once the operator approves the escalation, the planner will re-delegate the install to you. At that point retry `agent_revision_promote` once.
+
+### `promotion_query` Returns "No promotion record found"
+
+When you query a freshly-built artifact and `promotion_query` returns `{"artifact_id": null, "error": "No promotion record found for this artifact"}`:
+
+1. **Do NOT loop on `promotion_query`** with different argument shapes. The schema accepts either `artifact_id` (canonical `art_*` form) OR `artifact_ref` (short `ar.*` form) — pass exactly one. A failed query is a fact, not a syntax problem to debug.
+2. **Two legitimate causes** for this result:
+   - The evaluator federation has not yet run on this artifact (e.g., agent-factory rebuilt the artifact after evaluator findings but did not re-trigger federation).
+   - The artifact_ref points to a different artifact than the one with verdicts (rebuilds get new artifact_ids).
+3. **Stop and report back to planner**: "No promotion record exists for `<artifact_ref>` (canonical id `<artifact_id>`). The evaluator federation must be re-run on this artifact before promotion is possible."
+4. Do NOT proceed with `agent_revision_create_from_intent` + `agent_revision_promote` hoping the gate will pass — it won't, and you'll only learn that at the promote step after creating an orphan revision.
+
 ### Other Revision Tools
 
 You also have access to these revision management tools:
