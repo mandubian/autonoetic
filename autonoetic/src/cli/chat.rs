@@ -234,7 +234,8 @@ enum ChatOutbound {
 #[derive(Debug, Clone)]
 struct TaskLifecycle {
     agent_suffix: String,
-    stages: Vec<&'static str>,
+    /// Display labels, e.g. `completed` or `completed (gate: fail)`.
+    stages: Vec<String>,
 }
 
 struct App {
@@ -1986,6 +1987,13 @@ fn format_workflow_event_card(
                 .get("result_summary")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let pres =
+                autonoetic_types::task_completion::TaskCompletionPresentation::from_event_payload(
+                    &event.payload,
+                    true,
+                );
+            let icon = terminal_icon_for_completion(&pres);
+            let gate_note = pres.detail_suffix().unwrap_or("");
             if event.workflow_id.starts_with("sched-") && !result_summary.is_empty() {
                 Some((
                     format!("🔔 [{}] {}: {}", ts_short, agent_id, result_summary),
@@ -1995,14 +2003,22 @@ fn format_workflow_event_card(
                 let preview = clamp_chat_field(result_summary);
                 Some((
                     format!(
-                        "✅ [{}] Task completed: {}{}\n   Result: {}",
-                        ts_short, task, agent_suffix, preview
+                        "{} [{}] Task completed: {}{}{}\n   Result: {}",
+                        icon,
+                        ts_short,
+                        task,
+                        agent_suffix,
+                        gate_note,
+                        preview
                     ),
                     MessageRole::Signal,
                 ))
             } else {
                 Some((
-                    format!("✅ [{}] Task completed: {}{}", ts_short, task, agent_suffix),
+                    format!(
+                        "{} [{}] Task completed: {}{}{}",
+                        icon, ts_short, task, agent_suffix, gate_note
+                    ),
                     MessageRole::Signal,
                 ))
             }
@@ -2103,18 +2119,50 @@ fn is_collapsible_lifecycle_event(event_type: &str) -> Option<&'static str> {
     }
 }
 
-fn format_lifecycle_line(agent_suffix: &str, task: &str, stages: &[&'static str]) -> String {
-    let icon = match stages.last() {
-        Some(&"completed") => "✅",
-        Some(&"failed") => "❌",
-        Some(&"cancelled") => "🚫",
-        Some(&"started") => "▶",
-        Some(&"queued") => "📥",
-        Some(&"spawned") => "🚀",
-        _ => "📋",
-    };
+/// Lifecycle stage label; `task.completed` may include gate outcome from payload.
+fn lifecycle_stage_label(event_type: &str, payload: &serde_json::Value) -> String {
+    match is_collapsible_lifecycle_event(event_type) {
+        Some(_) if event_type == "task.completed" => {
+            autonoetic_types::task_completion::TaskCompletionPresentation::from_event_payload(
+                payload,
+                true,
+            )
+            .lifecycle_stage()
+        }
+        Some(stage) => stage.to_string(),
+        None => event_type.to_string(),
+    }
+}
+
+/// Terminal TUI icon for a task completion (adapter-specific; not in shared types).
+fn terminal_icon_for_completion(
+    pres: &autonoetic_types::task_completion::TaskCompletionPresentation,
+) -> &'static str {
+    use autonoetic_types::task_completion::CompletionSeverity;
+    match pres.severity {
+        CompletionSeverity::Success => "✅",
+        CompletionSeverity::Caveat => "⚠️",
+        CompletionSeverity::Failure => "❌",
+    }
+}
+
+fn format_lifecycle_line(agent_suffix: &str, task: &str, stages: &[String]) -> String {
+    let icon = lifecycle_icon_for_stage(stages.last().map(String::as_str));
     let chain = stages.join(" → ");
     format!("{} {} ({}) {}", icon, agent_suffix.trim_start_matches(" → "), task, chain)
+}
+
+fn lifecycle_icon_for_stage(stage: Option<&str>) -> &'static str {
+    match stage {
+        Some(s) if s.contains("(gate:") => "⚠️",
+        Some("completed") => "✅",
+        Some("failed") => "❌",
+        Some("cancelled") => "🚫",
+        Some("started") => "▶",
+        Some("queued") => "📥",
+        Some("spawned") => "🚀",
+        _ => "📋",
+    }
 }
 
 fn push_workflow_event_message(
@@ -2124,8 +2172,10 @@ fn push_workflow_event_message(
     event_type: &str,
     task_id: &str,
     agent_suffix: &str,
+    payload: &serde_json::Value,
 ) {
-    if let Some(stage) = is_collapsible_lifecycle_event(event_type) {
+    if is_collapsible_lifecycle_event(event_type).is_some() {
+        let stage = lifecycle_stage_label(event_type, payload);
         let should_collapse = app.task_lifecycles.contains_key(task_id);
         if should_collapse {
             let lc = app.task_lifecycles.get_mut(task_id).unwrap();
@@ -2143,7 +2193,7 @@ fn push_workflow_event_message(
             }
             app.add_message(role, collapsed);
         } else {
-            let collapsed = format_lifecycle_line(agent_suffix, task_id, &[stage]);
+            let collapsed = format_lifecycle_line(agent_suffix, task_id, std::slice::from_ref(&stage));
             app.task_lifecycles.insert(
                 task_id.to_string(),
                 TaskLifecycle {
@@ -2521,6 +2571,13 @@ fn draw(f: &mut Frame, app: &App) {
     // on native Linux terminals (WSL terminals tend to suppress the OS cursor
     // in raw+alt-screen mode regardless, which is why this bug was invisible
     // there).
+    //
+    // Tradeoff: IME composition windows (fcitx, ibus, etc.) anchor to the
+    // OS cursor position. Without set_cursor_position, IME popups for
+    // non-Latin input may appear at (0, 0) or stale positions rather than
+    // tracking the input column. If IME support becomes a requirement,
+    // re-introduce set_cursor_position and instead drop the software cursor
+    // span in draw_input so the OS cursor is the sole indicator.
 }
 
 fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
@@ -5068,6 +5125,7 @@ async fn check_signals(
                                                     .or_else(|| event.agent_id.as_deref())
                                                     .map(|a| format!(" → {}", a))
                                                     .unwrap_or_default(),
+                                                &event.payload,
                                             );
                                             processed_any = true;
                                         }
@@ -5102,6 +5160,7 @@ async fn check_signals(
                                                 .or_else(|| event.agent_id.as_deref())
                                                 .map(|a| format!(" → {}", a))
                                                 .unwrap_or_default(),
+                                            &event.payload,
                                         );
                                         app.session_overview.latest_signal = Some(card.clone());
                                     }
@@ -5305,8 +5364,9 @@ fn copy_selection_to_clipboard(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_approval_request_id, extract_structured_approval, format_user_interaction_prompt,
-        format_workflow_event_card, parse_slash_command, SlashCommand,
+        extract_approval_request_id, extract_structured_approval, format_lifecycle_line,
+        format_user_interaction_prompt, format_workflow_event_card, parse_slash_command,
+        SlashCommand,
     };
     use autonoetic_types::background::{
         UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
@@ -5437,6 +5497,38 @@ mod tests {
         assert!(line.contains("Task completed: task-42"));
         assert!(line.contains("Result:"));
         assert!(line.contains("exit=1"));
+    }
+
+    #[test]
+    fn test_task_completed_lifecycle_stage_gate_fail() {
+        let payload = serde_json::json!({
+            "agent_outcome": "fail",
+            "result_summary": "No test files found"
+        });
+        let pres =
+            autonoetic_types::task_completion::TaskCompletionPresentation::from_event_payload(
+                &payload,
+                true,
+            );
+        assert_eq!(pres.lifecycle_stage(), "completed (gate: fail)");
+        assert_eq!(
+            super::terminal_icon_for_completion(&pres),
+            "⚠️"
+        );
+        assert!(pres.detail_suffix().unwrap_or("").contains("gate: fail"));
+    }
+
+    #[test]
+    fn test_format_lifecycle_line_gate_fail_icon() {
+        let stages = vec![
+            "spawned".to_string(),
+            "queued".to_string(),
+            "started".to_string(),
+            "completed (gate: fail)".to_string(),
+        ];
+        let line = format_lifecycle_line("unit_test_runner.default", "task-866b7287", &stages);
+        assert!(line.starts_with("⚠️"));
+        assert!(line.contains("completed (gate: fail)"));
     }
 
     #[test]
