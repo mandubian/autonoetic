@@ -497,6 +497,45 @@ impl App {
             || self.session_overview.pending_user_interactions > 0
             || self.session_overview.workflow.running > 0
             || self.session_overview.workflow.queued > 0
+            || self.session_overview.workflow.awaiting > 0
+    }
+
+    /// Same selection logic as the bottom-of-transcript indicator in `draw_messages`.
+    /// Centralized so `content_line_count` and `draw_messages` cannot drift apart and
+    /// hide the spinner by miscounting transcript height.
+    fn active_work_text(&self) -> Option<String> {
+        if !self.has_active_work() {
+            return None;
+        }
+        let text = if !self.pending.is_empty() {
+            format!(
+                "{} Working... ({} pending, {}s)",
+                self.spinner(),
+                self.pending.len(),
+                self.oldest_secs()
+            )
+        } else if !self.pending_approval_ids.is_empty() {
+            format!(
+                "{} Waiting for approval ({} pending)",
+                self.spinner(),
+                self.pending_approval_ids.len()
+            )
+        } else if self.session_overview.pending_user_interactions > 0 {
+            format!(
+                "{} Awaiting your response... ({} pending)",
+                self.spinner(),
+                self.session_overview.pending_user_interactions
+            )
+        } else if self.session_overview.workflow.awaiting > 0 {
+            format!(
+                "{} Waiting on approval ({} task(s))",
+                self.spinner(),
+                self.session_overview.workflow.awaiting
+            )
+        } else {
+            format!("{} Working...", self.spinner())
+        };
+        Some(text)
     }
 
     fn tick_spinner(&mut self) {
@@ -563,13 +602,7 @@ impl App {
             }
             count = count.saturating_add(transcript_wrap_line_count(Line::raw(""), ww));
         }
-        if !self.pending.is_empty() {
-            let pending_text = format!(
-                "{} Working... ({} pending, {}s)",
-                self.spinner(),
-                self.pending.len(),
-                self.oldest_secs()
-            );
+        if let Some(pending_text) = self.active_work_text() {
             count = count.saturating_add(transcript_wrap_line_count(
                 Line::from(vec![Span::styled(
                     pending_text,
@@ -3024,29 +3057,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Active-work indicator (pending RPCs, approvals, user interactions, workflow tasks)
-    if app.has_active_work() {
-        let pending_text = if !app.pending.is_empty() {
-            format!(
-                "{} Working... ({} pending, {}s)",
-                app.spinner(),
-                app.pending.len(),
-                app.oldest_secs()
-            )
-        } else if !app.pending_approval_ids.is_empty() {
-            format!(
-                "{} Waiting for approval ({} pending)",
-                app.spinner(),
-                app.pending_approval_ids.len()
-            )
-        } else if app.session_overview.pending_user_interactions > 0 {
-            format!(
-                "{} Awaiting your response... ({} pending)",
-                app.spinner(),
-                app.session_overview.pending_user_interactions
-            )
-        } else {
-            format!("{} Working...", app.spinner())
-        };
+    if let Some(pending_text) = app.active_work_text() {
         let pending_line = Line::from(vec![Span::styled(
             pending_text,
             Style::default()
@@ -3139,6 +3150,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         )
     } else if app.session_overview.workflow.running > 0
         || app.session_overview.workflow.queued > 0
+        || app.session_overview.workflow.awaiting > 0
     {
         format!(
             "{} {} | {} | {} | {} | {}",
@@ -4982,17 +4994,32 @@ async fn check_signals(
 ) -> bool {
     let mut processed_any = false;
 
-    let snapshot = poll_session_snapshot(config, store, session_id, app.session_overview.latest_signal.clone())
-        .unwrap_or_else(|e| {
-            tracing::warn!(target: "chat", error = %e, "Failed to poll session snapshot, continuing with empty snapshot");
-            SessionPollSnapshot {
-                overview: SessionOverview {
-                    root_session_id: app.session_overview.root_session_id.clone(),
-                    ..SessionOverview::default()
-                },
-                pending_interactions: Vec::new(),
+    // On poll failure, preserve the previous overview instead of zeroing workflow
+    // counts / pending interactions. Replacing them with defaults briefly hides the
+    // working indicator even when the session is still active. The store-backed
+    // pending-approval merge still runs so Ctrl+A stays responsive, and the next
+    // 1s tick retries.
+    let snapshot = match poll_session_snapshot(
+        config,
+        store,
+        session_id,
+        app.session_overview.latest_signal.clone(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                target: "chat",
+                error = %e,
+                "Failed to poll session snapshot, preserving previous overview"
+            );
+            if let Some(st) = store {
+                if merge_gateway_store_pending_approvals(app, config, st, session_id) {
+                    processed_any = true;
+                }
             }
-        });
+            return processed_any;
+        }
+    };
 
     let root_session_id = snapshot.overview.root_session_id.clone();
 
