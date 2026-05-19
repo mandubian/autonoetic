@@ -27,6 +27,49 @@ pub(crate) fn is_retryable_empty_other_response(response: &crate::llm::Completio
         && response.text.trim().is_empty()
 }
 
+/// Emit a `context_pressure_high` causal event when utilization crosses the
+/// configured warning threshold. Called unconditionally from the turn-prep
+/// path so the event fires under both the strict-governor and legacy budget
+/// pipelines.
+pub(crate) fn emit_context_pressure_high_if_warranted(
+    breakdown: &crate::runtime::prompt_budget::PromptBudgetBreakdown,
+    config: Option<&GatewayConfig>,
+    tracer: &mut SessionTracer,
+) {
+    let Some(config) = config else { return };
+    let budget_config = &config.prompt_budget;
+    let Some(pct) = breakdown.utilization_pct else {
+        return;
+    };
+    if pct < budget_config.warn_at_pct {
+        return;
+    }
+    let effective_limit = breakdown
+        .context_window
+        .map(|cw| cw.saturating_sub(budget_config.margin_tokens))
+        .unwrap_or(usize::MAX);
+    tracing::warn!(
+        target: "autonoetic::prompt_budget",
+        utilization_pct = pct,
+        warn_threshold = budget_config.warn_at_pct,
+        total_tokens = breakdown.total_tokens,
+        "Prompt budget approaching limit"
+    );
+    let _ = tracer.log_event(
+        "agent.process",
+        "context_pressure_high",
+        autonoetic_types::causal_chain::EntryStatus::Success,
+        Some(serde_json::json!({
+            "utilization_pct": pct,
+            "total_tokens": breakdown.total_tokens,
+            "effective_limit": effective_limit,
+            "margin_tokens": budget_config.margin_tokens,
+            "context_window": breakdown.context_window,
+            "warning_threshold_pct": budget_config.warn_at_pct,
+        })),
+    );
+}
+
 /// Apply prompt budget enforcement based on the configured strategy.
 ///
 /// Returns potentially modified tools and history after enforcement actions.
@@ -65,30 +108,6 @@ pub(crate) fn apply_prompt_budget(
     };
 
     if !section_cap_violation && within_total_budget {
-        if let Some(pct) = breakdown.utilization_pct {
-            if pct >= budget_config.warn_at_pct {
-                tracing::warn!(
-                    target: "autonoetic::prompt_budget",
-                    utilization_pct = pct,
-                    warn_threshold = budget_config.warn_at_pct,
-                    total_tokens = current_total,
-                    "Prompt budget approaching limit"
-                );
-                let _ = tracer.log_event(
-                    "agent.process",
-                    "context_pressure_high",
-                    autonoetic_types::causal_chain::EntryStatus::Success,
-                    Some(serde_json::json!({
-                        "utilization_pct": pct,
-                        "total_tokens": current_total,
-                        "effective_limit": effective_limit,
-                        "margin_tokens": budget_config.margin_tokens,
-                        "context_window": breakdown.context_window,
-                        "warning_threshold_pct": budget_config.warn_at_pct,
-                    })),
-                );
-            }
-        }
         return Ok((tools, history));
     }
 

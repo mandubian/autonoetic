@@ -3060,6 +3060,39 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             esc_hint,
             follow_hint,
         )
+    } else if !app.pending_approval_ids.is_empty() {
+        format!(
+            "{} {} approval(s) pending | {} | {} | {} | {} | {}",
+            app.spinner(),
+            app.pending_approval_ids.len(),
+            workflow,
+            gateway,
+            pause_hint,
+            esc_hint,
+            follow_hint,
+        )
+    } else if app.session_overview.pending_user_interactions > 0 {
+        format!(
+            "{} awaiting your response | {} | {} | {} | {} | {}",
+            app.spinner(),
+            workflow,
+            gateway,
+            pause_hint,
+            esc_hint,
+            follow_hint,
+        )
+    } else if app.session_overview.workflow.running > 0
+        || app.session_overview.workflow.queued > 0
+    {
+        format!(
+            "{} {} | {} | {} | {} | {}",
+            app.spinner(),
+            workflow,
+            gateway,
+            pause_hint,
+            esc_hint,
+            follow_hint,
+        )
     } else {
         format!(
             "Session: {} | Target: {} | {} | {} | {} | {} | {}",
