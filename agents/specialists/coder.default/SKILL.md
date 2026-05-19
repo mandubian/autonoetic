@@ -91,20 +91,26 @@ If the task is ephemeral execution only, tell the planner to use `executor.defau
 
 When the planner asks you to create an agent (e.g. "create a weather agent"):
 
-1. **Write the implementation files** using content_write
-2. **Test your code** with `sandbox_exec` using the base runtime only
-  - If external packages are required, stop and return a `needs_packager` handoff instead of trying to install them directly
-3. **Write free-form instructions content only** (for example `agent_instructions.md`). Do NOT write SKILL metadata/frontmatter.
-4. **Do NOT write `runtime.lock`**. The gateway generates canonical runtime lock content.
-5. **Build an artifact** from implementation files (and optional free-form instructions) with `kind: "agent_bundle"`:
+1. **Write the implementation files** using `content_write`. While Python is a primary language of implementation, other languages (such as JavaScript/Node.js, Go, Rust, etc.) can be used too.
+2. **Write unit tests** alongside the implementation when building a `kind: "agent_bundle"`.
+   - Use filename conventions standard for the target language (e.g., `test_*.py` or `*_test.py` for Python; `*.test.js` or `*.spec.js` for JavaScript/Node.js; `*_test.go` for Go).
+   - Use the language's standard library or built-in test features and mocking capabilities, avoiding external test framework dependencies.
+   - **Do NOT perform real side effects:** Ensure tests do not trigger real external operations (e.g., executing actual network registrations, posting live messages to external services, or mutating shared external databases/state). Always mock out external network requests, communications, and side-effect-heavy APIs.
+   - If your implementation or tests require external libraries/packages, you must explicitly declare them in the appropriate dependency manifest (e.g., `requirements.txt` for Python, `package.json` for JavaScript/Node.js, etc.) so they can be resolved, rather than trying to install them during execution.
+3. **Test your code** with `sandbox_exec` using the base runtime only to verify the basic correctness of your implementation (smoke-testing). You only need to run basic verification for your code; running and validating the entire unit test suite for promotion is the responsibility of `unit_test_runner.default` and other evaluation agents.
+   - If external packages/libraries are required, make sure they are declared, and return a `needs_packager` handoff to the planner if package resolution/layering is needed before running.
+4. **Write free-form instructions content only** (for example `agent_instructions.md`). Do NOT write SKILL metadata/frontmatter.
+5. **Do NOT write `runtime.lock`**. The gateway generates canonical runtime lock content.
+6. **Build an artifact** from implementation files, test files, dependency manifests, and optional free-form instructions with `kind: "agent_bundle"`:
    ```json
    artifact_build({
-     "inputs": ["weather.py", "agent_instructions.md"],
+     "inputs": ["weather.py", "test_weather.py", "requirements.txt", "agent_instructions.md"],
      "entrypoints": ["weather.py"],
      "kind": "agent_bundle"
    })
    ```
-6. **Return the artifact_ref + install intent payload** to the planner. Include:
+   If no test files are included, the promotion `unit_test_runner` may return `unable_to_evaluate`; this does not block promotion.
+7. **Return the artifact_ref + install intent payload** to the planner. Include:
     - `agent_id`
     - `description`
     - `instructions` (free-form markdown body)
@@ -114,9 +120,9 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
     - `capabilities`
     - optional `io` / `middleware` (including `io.output_policy`)
   The returned `artifact_ref` is the canonical install handoff. Prefer it over loose `cnt_...` handles for later packaging, validation, or installation.
-7. Suggested handoff text:
+8. Suggested handoff text:
   "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."
-8. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
+9. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
 
 <!-- extended -->
 
