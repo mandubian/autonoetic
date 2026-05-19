@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use crate::runtime::continuation;
 
+use autonoetic_types::causal_chain::CausalEventRecord;
+
 pub mod approval;
 pub mod approval_hardening;
 pub mod approval_similarity;
@@ -1441,6 +1443,29 @@ async fn spawn_task_execution(
                         error = %error_str,
                         "Context overflow detected — retrying once with aggressive governor"
                     );
+                    if let Some(ref gs) = store {
+                        let _ = gs.create_causal_event(&CausalEventRecord {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            agent_id: agent_id.clone(),
+                            session_id: session_id.clone(),
+                            turn_id: None,
+                            event_seq: 0,
+                            timestamp: Utc::now().to_rfc3339(),
+                            category: "agent.process".to_string(),
+                            action: "overflow_retry_started".to_string(),
+                            status: "SUCCESS".to_string(),
+                            enforced_rules: vec![],
+                            target: None,
+                            payload: Some(serde_json::json!({
+                                "task_id": t_id,
+                                "workflow_id": wf_id,
+                                "error": error_str,
+                            }).to_string()),
+                            payload_ref: None,
+                            evidence_ref: None,
+                            reason: Some("Context overflow detected, retrying once with aggressive governor".to_string()),
+                        });
+                    }
                     let _ = workflow_store::checkpoint_task(
                         &cfg, store, &wf_id, &t_id,
                         "failed".to_string(),
@@ -1485,6 +1510,29 @@ async fn spawn_task_execution(
                     error = %error_str,
                     "Context overflow retry exhausted — marking terminal"
                 );
+                if let Some(ref gs) = store {
+                    let _ = gs.create_causal_event(&CausalEventRecord {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        agent_id: agent_id.clone(),
+                        session_id: session_id.clone(),
+                        turn_id: None,
+                        event_seq: 0,
+                        timestamp: Utc::now().to_rfc3339(),
+                        category: "agent.process".to_string(),
+                        action: "overflow_retry_exhausted".to_string(),
+                        status: "ERROR".to_string(),
+                        enforced_rules: vec![],
+                        target: None,
+                        payload: Some(serde_json::json!({
+                            "task_id": t_id,
+                            "workflow_id": wf_id,
+                            "error": error_str,
+                        }).to_string()),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: Some("Context overflow retry exhausted — marking terminal".to_string()),
+                    });
+                }
                 // Fall through to normal failure path with terminal classification
                 let terminal_error = format!("context_overflow_terminal: task={} {}", t_id, error_str);
                 let _ = workflow_store::update_task_run_status(

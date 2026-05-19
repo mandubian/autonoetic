@@ -484,6 +484,10 @@ llm_preset_mapping:
 
 # ── Context Compression (Safe Defaults) ──────────────────────────────
 # Summarizes old conversation turns when approaching context limits.
+# Feature flags (env-only, not yet in config struct):
+#   AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1   — use pluggable context governor pipeline
+#   AUTONOETIC_STATE_CAPSULE_COMPRESSION=1 — use hierarchical capsule strategy
+#   AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER=1 — retry context overflow once with aggressive gov
 context_compression:
   enabled: true
   llm_preset: haiku
@@ -491,6 +495,9 @@ context_compression:
   recent_turns_to_keep: 3
   max_summary_tokens: 500
   min_turns_between_compression: 3
+  # Capsule strategy settings (only read when AUTONOETIC_STATE_CAPSULE_COMPRESSION=1)
+  max_capsule_decisions: 30   # decisions to retain before summarization
+  max_completed_tasks: 10     # completed tasks to retain
 
 # ── System Agents ─────────────────────────────────────────────────────
 # Declared background agents that the gateway reconciles on startup.

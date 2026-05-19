@@ -32,8 +32,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::runtime::budget_tracker::{
-    apply_prompt_budget, input_tokens_as_context_pct, is_retryable_empty_other_response,
-    max_other_empty_retries,
+    apply_prompt_budget, emit_context_pressure_high_if_warranted, input_tokens_as_context_pct,
+    is_retryable_empty_other_response, max_other_empty_retries,
 };
 use crate::runtime::context_governor::resolver::resolve_context_window_for_run;
 
@@ -1346,6 +1346,14 @@ impl AgentExecutor {
                 })),
             );
 
+            // Emit pressure-high causal event before either enforcement branch
+            // so it fires under both the strict-governor and legacy pipelines.
+            emit_context_pressure_high_if_warranted(
+                &budget_breakdown,
+                self.config.as_ref().map(|c| &**c),
+                &mut tracer,
+            );
+
             // --- Budget Enforcement + Context Compression ---
             // Feature-gated: the pluggable ContextGovernor pipeline replaces the
             // legacy budget enforcement and compression block when the env var
@@ -1500,6 +1508,7 @@ impl AgentExecutor {
                                         "messages_summarized": metadata.messages_summarized,
                                         "compression_count": metadata.compression_count,
                                         "compressed_context_handle": metadata.compressed_context_handle,
+                                        "before_tokens": budget_breakdown.total_tokens,
                                     })),
                                 );
                                 *history = result.history;
