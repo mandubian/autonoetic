@@ -71,13 +71,13 @@ If the test suite consists entirely of integration tests that require live netwo
    - Go: `*_test.go`
    - Rust: `Cargo.toml` (then `cargo test` discovers the rest)
 3. **If zero test files match the patterns above → STOP IMMEDIATELY.** Do not list directories, do not `find`, do not `grep` source files for the substring "test", do not `content_read` files looking for embedded tests. Return the `unable_to_evaluate` JSON below. Iterating on discovery wastes a turn cycle and trips `LoopGuard`. The promotion gate accepts `unable_to_evaluate` for trivial scripts.
-4. If tests exist → run them with the appropriate command in the sandbox:
-   - Python: `python3 -m unittest discover /tmp -v` or `python3 -m pytest /tmp/tests/ -v` or `python3 /tmp/test_*.py`
-   - Node.js: `node --test /tmp/*.test.js` or `node /tmp/node_modules/.bin/mocha /tmp/test/*.test.js`
+4. If test files exist → run them in the sandbox using the appropriate test runner for that language, prioritizing built-in or standard library test runners:
+   - Python: Prefer stdlib runners (e.g., `python3 -m unittest discover /tmp -v` or running `python3 /tmp/test_*.py`). Only use `pytest` (e.g., `python3 -m pytest /tmp/tests/ -v`) if `artifact_inspect` shows it is vendored or declared in the dependencies.
+   - Node.js: Prefer the built-in runner (e.g., `node --test /tmp/*.test.js`). Only use `mocha` (e.g., `node /tmp/node_modules/.bin/mocha`) if `artifact_inspect` shows a vendored runner in `node_modules`.
    - Go: `go test /tmp/...`
-   - Rust: `cargo test` (only if Cargo.toml exists)
-5. Collect output — pass if all tests pass, fail if any test fails
-6. Call `promotion_record` with test stats
+   - Rust: `cargo test` (only if `Cargo.toml` is present).
+5. Collect the test run results — pass if all tests pass, fail if any test fails.
+6. Call `promotion_record` with the test stats.
 
 ## Recording Promotion
 
