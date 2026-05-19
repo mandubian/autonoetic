@@ -694,7 +694,20 @@ impl SessionReportWriter {
             state.status = status.to_string();
             state.ended_at = Some(now.clone());
             let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
-            agent.status = status.to_string();
+            let mut agent_status = status.to_string();
+            if status == "completed" {
+                if let Some(text) = latest_assistant_output {
+                    if let Some(outcome) =
+                        autonoetic_types::task_completion::extract_agent_outcome(text)
+                    {
+                        let pres = autonoetic_types::task_completion::TaskCompletionPresentation::from_workflow_succeeded(Some(outcome));
+                        if pres.gate_caveat() {
+                            agent_status = pres.status_label();
+                        }
+                    }
+                }
+            }
+            agent.status = agent_status;
             agent.ended_at = Some(now.clone());
             agent.close_reason = Some(reason.to_string());
             if let Some(text) = latest_assistant_output
@@ -2945,6 +2958,9 @@ fn render_agent_tree_html(
 }
 
 fn status_to_badge_class(status: &str) -> &str {
+    if status.contains("(gate:") {
+        return "badge-suspended";
+    }
     match status {
         "completed" => "badge-completed",
         "failed" => "badge-failed",
