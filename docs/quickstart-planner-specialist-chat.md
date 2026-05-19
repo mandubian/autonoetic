@@ -153,7 +153,6 @@ prompt_budget:
   tool_definitions_max_tokens: 0   # 0 = unlimited
   warn_at_pct: 80.0                # warn when utilization exceeds this %
   margin_tokens: 4096              # reserve for LLM output
-  on_exceeded: warn                # warn | trim_history | demote_tools | fail
   compress_tool_schemas_after_turn_0: false
 
 # ── Session Budget (optional per-session resource limits) ─────────────

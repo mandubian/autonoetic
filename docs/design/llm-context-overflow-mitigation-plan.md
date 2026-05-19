@@ -2,7 +2,11 @@
 
 ## Status
 
-**Implemented** — all 5 phases shipped across PRs #216, #217, #218, #219.
+**Implemented and migrated to default** — all 5 phases shipped across PRs
+#216, #217, #218, #219, #226. The three rollout feature flags have since
+been removed and the governor pipeline (with the capsule strategy as the
+default LLM-tier reducer) is the only enforcement path. Constitution rule
+R-6.9 was updated accordingly in version `2026.05.19`.
 
 | Phase | What | PR |
 |-------|------|----|
@@ -10,9 +14,15 @@
 | Phase 3 | Overflow-aware retry classifier + context_overflow error class | #217 |
 | Phase 4 | SKILL.md split marker convention (`<!-- extended -->`) | #218 |
 | Phase 2 | Hierarchical session summarization (CapsuleStrategy) | #219 |
-| Phase 5 | TUI transparency for context health | *(this commit)* |
+| Phase 5 | TUI transparency for context health | #226 |
 
-Feature flags: `AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1`, `AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER=1`, `AUTONOETIC_STATE_CAPSULE_COMPRESSION=1`
+> **Historical record:** the sections below describe the **original rollout
+> plan**. References to `AUTONOETIC_STRICT_CONTEXT_GOVERNOR`,
+> `AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER`, `AUTONOETIC_STATE_CAPSULE_COMPRESSION`,
+> the legacy `apply_prompt_budget` path, and the `CompressionStrategy` LLM-tier
+> reducer reflect that plan, not the current code. PR #227 removed all three
+> flags and the legacy path; capsule is now the only LLM-tier reducer. The
+> design rationale is preserved for posterity.
 
 ## Incident Summary
 

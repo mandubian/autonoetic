@@ -157,37 +157,6 @@ pub trait BudgetEnforcementStrategy: Send + Sync + 'static {
     ) -> anyhow::Result<EnforcementResult>;
 }
 
-/// Warn-only strategy: logs a warning but makes no changes.
-#[derive(Debug, Clone, Copy)]
-pub struct WarnStrategy;
-
-impl BudgetEnforcementStrategy for WarnStrategy {
-    fn name(&self) -> &'static str {
-        "warn"
-    }
-
-    fn enforce(
-        &self,
-        tools: Vec<ToolDefinition>,
-        history: Vec<Message>,
-        breakdown: &PromptBudgetBreakdown,
-        effective_limit: usize,
-        _budget_config: &autonoetic_types::config::PromptBudgetConfig,
-    ) -> anyhow::Result<EnforcementResult> {
-        tracing::warn!(
-            target: "autonoetic::prompt_budget",
-            current_total = breakdown.total_tokens,
-            effective_limit,
-            "Prompt budget exceeded (warn mode, proceeding)"
-        );
-        Ok(EnforcementResult {
-            tools,
-            history,
-            was_trimmed: false,
-        })
-    }
-}
-
 fn check_section_caps(
     breakdown: &PromptBudgetBreakdown,
     budget_config: &autonoetic_types::config::PromptBudgetConfig,
@@ -389,53 +358,6 @@ impl BudgetEnforcementStrategy for DemoteToolsStrategy {
             history,
             was_trimmed: false,
         })
-    }
-}
-
-/// Fail strategy: rejects the turn with a descriptive error.
-#[derive(Debug, Clone, Copy)]
-pub struct FailStrategy;
-
-impl BudgetEnforcementStrategy for FailStrategy {
-    fn name(&self) -> &'static str {
-        "fail"
-    }
-
-    fn enforce(
-        &self,
-        _tools: Vec<ToolDefinition>,
-        _history: Vec<Message>,
-        breakdown: &PromptBudgetBreakdown,
-        effective_limit: usize,
-        budget_config: &autonoetic_types::config::PromptBudgetConfig,
-    ) -> anyhow::Result<EnforcementResult> {
-        // Check section caps first — report the specific violation if present.
-        check_section_caps(breakdown, budget_config, false, false)?;
-
-        anyhow::bail!(
-            "Prompt budget exceeded: {} tokens (limit: {} tokens). \
-             System: {}, Conversation: {}, Tools: {} ({} definitions). \
-             Configure a larger context window or reduce tool count.",
-            breakdown.total_tokens,
-            effective_limit,
-            breakdown.system_prompt_tokens,
-            breakdown.conversation_tokens,
-            breakdown.tool_definition_tokens,
-            breakdown.tool_count,
-        )
-    }
-}
-
-/// Resolve a `PromptBudgetAction` to its corresponding enforcement strategy.
-pub fn enforcement_strategy(
-    action: autonoetic_types::config::PromptBudgetAction,
-) -> Box<dyn BudgetEnforcementStrategy> {
-    use autonoetic_types::config::PromptBudgetAction;
-    match action {
-        PromptBudgetAction::Warn => Box::new(WarnStrategy),
-        PromptBudgetAction::TrimHistory => Box::new(TrimHistoryStrategy),
-        PromptBudgetAction::DemoteTools => Box::new(DemoteToolsStrategy),
-        PromptBudgetAction::Fail => Box::new(FailStrategy),
     }
 }
 

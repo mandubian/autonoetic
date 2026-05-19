@@ -126,6 +126,8 @@ def main() -> None:
     constitution_digest = hashlib.sha256(compact_json_bytes(digest_payload)).hexdigest()
 
     lock = json.loads(lock_path.read_text())
+    lock["constitution_version"] = args.version
+    lock["constitution_source"] = f"docs/constitution/versions/{args.version}/constitution.md"
     lock["constitution_digest"] = constitution_digest
     lock["rule_enforcement_count"] = len(rules)
     lock["right_enforcement_count"] = len(rights)

@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "constitution_id": "autonoetic-gateway-constitution",
+  "constitution_version": "2026.05.19",
+  "constitution_source": "docs/constitution/versions/2026.05.19/constitution.md",
+  "constitution_digest": "ba9a9bf3be0c3198c8974e64f968ffe9fa10281e8eacce523b8970f993c46f57",
+  "rule_enforcement_count": 158,
+  "right_enforcement_count": 13,
+  "canonicalization": {
+    "algorithm": "sha256",
+    "payload": "json({constitution_text,rights_enforcement,rules_enforcement})",
+    "rules_prefix": "R-",
+    "rights_prefix": "Ri-"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "signer_id": "autonoetic:constitution:v1",
+    "signature_b64": "P8+8ymfE0tMnd9gcjczuoefu2BE6myj2f0u6iDg8Swp9E60Qxj+/9sNn5TfH2gOBpVfUwlK8cETTW4AmgmnABA=="
+  }
+}

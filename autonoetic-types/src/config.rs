@@ -561,11 +561,11 @@ impl Default for ConstitutionConfig {
 }
 
 fn default_constitution_source_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.13/constitution.md")
+    PathBuf::from("docs/constitution/versions/2026.05.19/constitution.md")
 }
 
 fn default_constitution_lock_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.13/gateway-constitution.lock.json")
+    PathBuf::from("docs/constitution/versions/2026.05.19/gateway-constitution.lock.json")
 }
 
 fn default_require_constitution_signature() -> bool {
@@ -1753,30 +1753,10 @@ pub struct PromptBudgetConfig {
     #[serde(default = "default_prompt_budget_margin")]
     pub margin_tokens: usize,
 
-    /// Action when budget exceeded: "warn" (log only), "trim_history" (remove oldest messages),
-    /// "demote_tools" (remove specialized tools), or "fail" (reject the turn).
-    #[serde(default)]
-    pub on_exceeded: PromptBudgetAction,
-
     /// Strip tool JSON schemas to `{}` after the first turn to save tokens.
     /// Some LLM providers require full schemas on every request — enable with caution.
     #[serde(default)]
     pub compress_tool_schemas_after_turn_0: bool,
-}
-
-/// Action to take when prompt budget is exceeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptBudgetAction {
-    /// Log a warning but proceed anyway.
-    #[default]
-    Warn,
-    /// Remove oldest non-system messages to fit within budget.
-    TrimHistory,
-    /// Remove specialized (Specialized tier) tool definitions.
-    DemoteTools,
-    /// Fail the turn with a budget exceeded error.
-    Fail,
 }
 
 fn default_prompt_budget_warn_pct() -> f64 {
@@ -1794,7 +1774,6 @@ impl Default for PromptBudgetConfig {
             tool_definitions_max_tokens: 0,
             warn_at_pct: default_prompt_budget_warn_pct(),
             margin_tokens: default_prompt_budget_margin(),
-            on_exceeded: PromptBudgetAction::Warn,
             compress_tool_schemas_after_turn_0: false,
         }
     }
@@ -2081,7 +2060,6 @@ mod tests {
         assert_eq!(config.prompt_budget.tool_definitions_max_tokens, 0);
         assert_eq!(config.prompt_budget.warn_at_pct, 80.0);
         assert_eq!(config.prompt_budget.margin_tokens, 4096);
-        assert_eq!(config.prompt_budget.on_exceeded, PromptBudgetAction::Warn);
     }
 
     #[test]
@@ -2091,14 +2069,12 @@ mod tests {
             "tool_definitions_max_tokens": 4000,
             "warn_at_pct": 90.0,
             "margin_tokens": 2048,
-            "on_exceeded": "demote_tools"
         });
         let parsed: PromptBudgetConfig = serde_json::from_value(j).expect("parse json");
         assert_eq!(parsed.system_prompt_max_tokens, 8000);
         assert_eq!(parsed.tool_definitions_max_tokens, 4000);
         assert_eq!(parsed.warn_at_pct, 90.0);
         assert_eq!(parsed.margin_tokens, 2048);
-        assert_eq!(parsed.on_exceeded, PromptBudgetAction::DemoteTools);
     }
 
     #[test]

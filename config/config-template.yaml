@@ -26,14 +26,14 @@ node_name: "gateway"
 #   <agents_dir>/.gateway/constitution/
 # You can point source_path/lock_path there for fully runtime-local enforcement.
 constitution:
-  source_path: "docs/constitution/versions/2026.05.05/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.05/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.05.19/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.19/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 # constitution:
-#   source_path: ".gateway/constitution/versions/2026.05.05/constitution.md"
-#   lock_path: ".gateway/constitution/versions/2026.05.05/gateway-constitution.lock.json"
+#   source_path: ".gateway/constitution/versions/2026.05.19/constitution.md"
+#   lock_path: ".gateway/constitution/versions/2026.05.19/gateway-constitution.lock.json"
 #   require_signature: true
 #   trusted_signers:
 #     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -312,7 +312,6 @@ prompt_budget:
   tool_definitions_max_tokens: 0
   warn_at_pct: 75.0
   margin_tokens: 4096
-  on_exceeded: trim_history
   compress_tool_schemas_after_turn_0: true
 #
 # ── Tool Tier Registry (Constitution 4.7) ──────────────────────────────
@@ -341,7 +340,6 @@ llm_routing:
 #
 # tier: economy | standard | premium
 # strategy: disabled | deterministic | classifier | hybrid
-# on_exceeded (prompt_budget): warn | trim_history | demote_tools | fail
 #
 # For local OpenAI-compatible servers (LM Studio, Ollama, etc.), set base_url:
 #
@@ -484,10 +482,8 @@ llm_preset_mapping:
 
 # ── Context Compression (Safe Defaults) ──────────────────────────────
 # Summarizes old conversation turns when approaching context limits.
-# Feature flags (env-only, not yet in config struct):
-#   AUTONOETIC_STRICT_CONTEXT_GOVERNOR=1   — use pluggable context governor pipeline
-#   AUTONOETIC_STATE_CAPSULE_COMPRESSION=1 — use hierarchical capsule strategy
-#   AUTONOETIC_OVERFLOW_RETRY_CLASSIFIER=1 — retry context overflow once with aggressive gov
+# The hierarchical capsule strategy is the default LLM-tier reducer in
+# the context governor pipeline.
 context_compression:
   enabled: true
   llm_preset: haiku
@@ -495,7 +491,7 @@ context_compression:
   recent_turns_to_keep: 3
   max_summary_tokens: 500
   min_turns_between_compression: 3
-  # Capsule strategy settings (only read when AUTONOETIC_STATE_CAPSULE_COMPRESSION=1)
+  # Capsule strategy settings
   max_capsule_decisions: 30   # decisions to retain before summarization
   max_completed_tasks: 10     # completed tasks to retain
 
