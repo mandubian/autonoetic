@@ -550,7 +550,7 @@ impl NativeTool for AgentExistsTool {
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: AgentExistsArgs = serde_json::from_str(arguments_json)
@@ -558,6 +558,33 @@ impl NativeTool for AgentExistsTool {
 
         validate_agent_id(&args.agent_id)?;
 
+        // Check SQLite agent_aliases first (revision-based promoted agents)
+        if let Some(ref store) = gateway_store {
+            if let Ok(Some(_alias)) = store.resolve_alias(&args.agent_id) {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "exists": true,
+                    "agent_id": args.agent_id,
+                    "status": "healthy",
+                })
+                .to_string());
+            }
+            // Check for any revision belonging to this agent (unpromoted)
+            if let Ok(revisions) = store.list_agent_revisions(&args.agent_id) {
+                if !revisions.is_empty() {
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "exists": true,
+                        "agent_id": args.agent_id,
+                        "status": "unpromoted",
+                        "message": "Agent has revisions but none are promoted yet. Call agent.revision.promote to activate."
+                    })
+                    .to_string());
+                }
+            }
+        }
+
+        // Fall back to filesystem for legacy agents in agents_dir
         let agents_dir = config
             .map(|c| &c.agents_dir)
             .ok_or_else(|| anyhow::anyhow!("config is required for agent.exists"))?;
@@ -859,12 +886,12 @@ impl NativeTool for AgentListTool {
         _manifest: &AgentManifest,
         _policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
@@ -879,77 +906,170 @@ impl NativeTool for AgentListTool {
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
+        let mut agents: Vec<serde_json::Value> = Vec::new();
+
+        // Phase 1: query SQLite aliases for revision-based agents
+        let mut sqlite_agent_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let (Some(ref store), Some(gd)) = (&gateway_store, gateway_dir) {
+            if let Ok(aliases) = store.list_agent_aliases(None) {
+                for alias in aliases {
+                    // Apply prefix filter early
+                    if let Some(ref prefix) = args.filter_prefix {
+                        if !alias.agent_id.starts_with(prefix.as_str()) {
+                            continue;
+                        }
+                    }
+                    sqlite_agent_ids.insert(alias.agent_id.clone());
+
+                    // Read manifest metadata from the revision record
+                    if let Ok(Some(rev)) = store.get_agent_revision(&alias.revision_id) {
+                        let manifest_meta = rev.metadata_json.get("manifest");
+
+                        if let Some(meta) = manifest_meta {
+                            // Rich metadata available from SQLite
+                            let description = meta.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let cap_types: Vec<String> = meta.get("capabilities")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                .unwrap_or_default();
+                            let mode = meta.get("execution_mode").and_then(|v| v.as_str()).unwrap_or("reasoning").to_string();
+                            let script_input_mode = meta.get("script_input_mode")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let io_accepts = meta.get("io")
+                                .and_then(|v| v.get("accepts"))
+                                .cloned();
+                            let io_returns = meta.get("io")
+                                .and_then(|v| v.get("returns"))
+                                .cloned();
+
+                            // Apply capability filter
+                            if let Some(ref req_cap) = args.requires_capability {
+                                let has_cap = cap_types.iter().any(|c| c.eq_ignore_ascii_case(req_cap));
+                                if !has_cap {
+                                    continue;
+                                }
+                            }
+                            // Apply execution_mode filter
+                            if let Some(ref req_mode) = args.execution_mode {
+                                if !mode.eq_ignore_ascii_case(req_mode) {
+                                    continue;
+                                }
+                            }
+
+                            agents.push(serde_json::json!({
+                                "agent_id": alias.agent_id,
+                                "description": description,
+                                "capabilities": cap_types,
+                                "execution_mode": mode,
+                                "script_input_mode": script_input_mode,
+                                "io_accepts": io_accepts,
+                                "io_returns": io_returns,
+                            }));
+                        } else {
+                            // Fallback: no manifest metadata in SQLite — try reading from
+                            // gateway_dir/revisions/agents/<id>/latest/SKILL.md
+                            let latest_path = gd.join("revisions").join("agents")
+                                .join(&alias.agent_id).join("latest").join("SKILL.md");
+                            if let Ok(skill_text) = std::fs::read_to_string(&latest_path) {
+                                if let Ok((manifest, _)) = crate::runtime::parser::SkillParser::parse(&skill_text) {
+                                    let cap_types: Vec<String> = manifest.capabilities.iter().map(|c| capability_type_name(c)).collect();
+                                    let mode = match manifest.execution_mode {
+                                        autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
+                                        autonoetic_types::agent::ExecutionMode::Script => "script",
+                                    };
+
+                                    // Apply filters
+                                    if let Some(ref req_cap) = args.requires_capability {
+                                        let has_cap = cap_types.iter().any(|c| c.eq_ignore_ascii_case(req_cap));
+                                        if !has_cap { continue; }
+                                    }
+                                    if let Some(ref req_mode) = args.execution_mode {
+                                        if !mode.eq_ignore_ascii_case(req_mode) { continue; }
+                                    }
+
+                                    let io_accepts = manifest.io.as_ref().and_then(|io| io.accepts.clone());
+                                    let io_returns = manifest.io.as_ref().and_then(|io| io.returns.clone());
+                                    let script_input_mode = matches!(manifest.execution_mode, autonoetic_types::agent::ExecutionMode::Script)
+                                        .then(|| match manifest.script_input_mode {
+                                            autonoetic_types::agent::ScriptInputMode::Stdin => "stdin",
+                                            autonoetic_types::agent::ScriptInputMode::Args => "args",
+                                        });
+
+                                    agents.push(serde_json::json!({
+                                        "agent_id": alias.agent_id,
+                                        "description": manifest.agent.description,
+                                        "capabilities": cap_types,
+                                        "execution_mode": mode,
+                                        "script_input_mode": script_input_mode,
+                                        "io_accepts": io_accepts,
+                                        "io_returns": io_returns,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: fall back to filesystem for legacy agents not in SQLite
         let agents_dir = config
             .map(|c| &c.agents_dir)
             .ok_or_else(|| anyhow::anyhow!("config is required for agent.list"))?;
 
         let repo = crate::agent::AgentRepository::new(agents_dir.clone());
-        let loaded_agents = repo.list_loaded_sync()?;
-
-        let agents: Vec<serde_json::Value> = loaded_agents
-            .into_iter()
-            .filter(|agent| {
-                if let Some(prefix) = &args.filter_prefix {
-                    if !agent.id().starts_with(prefix.as_str()) {
-                        return false;
+        if let Ok(loaded_agents) = repo.list_loaded_sync() {
+            for agent in loaded_agents {
+                let agent_id = agent.id().to_string();
+                // Skip agents already listed via SQLite
+                if sqlite_agent_ids.contains(&agent_id) {
+                    continue;
+                }
+                // Apply prefix filter
+                if let Some(ref prefix) = args.filter_prefix {
+                    if !agent_id.starts_with(prefix.as_str()) {
+                        continue;
                     }
                 }
-                if let Some(req_cap) = &args.requires_capability {
-                    let has_cap = agent
-                        .manifest
-                        .capabilities
-                        .iter()
-                        .any(|c| capability_type_name(c).eq_ignore_ascii_case(req_cap));
-                    if !has_cap {
-                        return false;
-                    }
+                // Apply capability filter
+                if let Some(ref req_cap) = args.requires_capability {
+                    let has_cap = agent.manifest.capabilities.iter().any(|c| capability_type_name(c).eq_ignore_ascii_case(req_cap));
+                    if !has_cap { continue; }
                 }
-                if let Some(mode) = &args.execution_mode {
+                // Apply execution_mode filter
+                if let Some(ref mode) = args.execution_mode {
                     let agent_mode = match &agent.manifest.execution_mode {
                         autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
                         autonoetic_types::agent::ExecutionMode::Script => "script",
                     };
-                    if !agent_mode.eq_ignore_ascii_case(mode) {
-                        return false;
-                    }
+                    if !agent_mode.eq_ignore_ascii_case(mode) { continue; }
                 }
-                true
-            })
-            .map(|agent| {
-                let cap_types: Vec<String> = agent
-                    .manifest
-                    .capabilities
-                    .iter()
-                    .map(|c| capability_type_name(c))
-                    .collect();
+
+                let cap_types: Vec<String> = agent.manifest.capabilities.iter().map(|c| capability_type_name(c)).collect();
                 let mode = match &agent.manifest.execution_mode {
                     autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
                     autonoetic_types::agent::ExecutionMode::Script => "script",
                 };
-                // Surface the I/O schema so callers (notably the planner) can map
-                // natural-language intent into the shape the target expects before
-                // calling agent.spawn.
                 let io_accepts = agent.manifest.io.as_ref().and_then(|io| io.accepts.clone());
                 let io_returns = agent.manifest.io.as_ref().and_then(|io| io.returns.clone());
-                let script_input_mode = matches!(
-                    agent.manifest.execution_mode,
-                    autonoetic_types::agent::ExecutionMode::Script
-                )
-                .then(|| match agent.manifest.script_input_mode {
-                    autonoetic_types::agent::ScriptInputMode::Stdin => "stdin",
-                    autonoetic_types::agent::ScriptInputMode::Args => "args",
-                });
-                serde_json::json!({
-                    "agent_id": agent.id(),
+                let script_input_mode = matches!(agent.manifest.execution_mode, autonoetic_types::agent::ExecutionMode::Script)
+                    .then(|| match agent.manifest.script_input_mode {
+                        autonoetic_types::agent::ScriptInputMode::Stdin => "stdin",
+                        autonoetic_types::agent::ScriptInputMode::Args => "args",
+                    });
+
+                agents.push(serde_json::json!({
+                    "agent_id": agent_id,
                     "description": agent.manifest.agent.description,
                     "capabilities": cap_types,
                     "execution_mode": mode,
                     "script_input_mode": script_input_mode,
                     "io_accepts": io_accepts,
                     "io_returns": io_returns,
-                })
-            })
-            .collect();
+                }));
+            }
+        }
 
         Ok(serde_json::json!({
             "ok": true,

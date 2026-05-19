@@ -9,6 +9,7 @@
 
 use crate::scheduler::gateway_store::GatewayStore;
 use anyhow::Result;
+use autonoetic_types::agent::ExecutionMode;
 use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus};
 use autonoetic_types::config::{GatewayConfig, LlmPreset};
 use autonoetic_types::id_format::mint_hashed_prefixed_id;
@@ -224,6 +225,17 @@ fn bootstrap_agent_inner(
         status: AgentRevisionStatus::Candidate,
         metadata_json: serde_json::json!({
             "summary": "Bootstrapped from reference agent bundle",
+            "manifest": {
+                "description": parsed_manifest.agent.description,
+                "capabilities": parsed_manifest.capabilities.iter().map(crate::runtime::tools::capability_type_name).collect::<Vec<_>>(),
+                "execution_mode": match parsed_manifest.execution_mode {
+                    ExecutionMode::Reasoning => "reasoning",
+                    ExecutionMode::Script => "script",
+                },
+                "script_input_mode": serde_json::to_value(&parsed_manifest.script_input_mode).ok(),
+                "script_entry": parsed_manifest.script_entry,
+                "io": parsed_manifest.io,
+            },
         }),
         short_id: String::new(),
         signature: None,

@@ -418,6 +418,7 @@ struct RevisionCreateCommonArgs {
     base_revision_id: Option<String>,
     summary: Option<String>,
     metadata: Option<serde_json::Value>,
+    manifest_meta: Option<serde_json::Value>,
     source_kind: String,
     source_ref: Option<String>,
 }
@@ -654,13 +655,19 @@ fn create_revision_from_files(
         origin_node_id: "gateway".to_string(),
         trust_domain: "local".to_string(),
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
-        metadata_json: serde_json::json!({
-            "summary": common.summary,
-            "metadata": common.metadata,
-            "has_unresolved_dependencies": health_report.map(|h| h.has_unresolved_dependencies).unwrap_or(false),
-            "dependency_files": health_report.map(|h| h.dependency_files.clone()).unwrap_or_default(),
-            "detected_external_imports": health_report.map(|h| h.detected_external_imports.clone()).unwrap_or_default(),
-        }),
+        metadata_json: {
+            let mut md = serde_json::json!({
+                "summary": common.summary,
+                "metadata": common.metadata,
+                "has_unresolved_dependencies": health_report.map(|h| h.has_unresolved_dependencies).unwrap_or(false),
+                "dependency_files": health_report.map(|h| h.dependency_files.clone()).unwrap_or_default(),
+                "detected_external_imports": health_report.map(|h| h.detected_external_imports.clone()).unwrap_or_default(),
+            });
+            if let Some(ref m) = common.manifest_meta {
+                md["manifest"] = m.clone();
+            }
+            md
+        },
         short_id: String::new(),
         signature,
         signer_id,
@@ -996,12 +1003,24 @@ impl NativeTool for AgentRevisionCreateTool {
             )?
         };
 
+        let manifest_meta = serde_json::json!({
+            "description": bundle_manifest.agent.description,
+            "capabilities": bundle_manifest.capabilities.iter().map(crate::runtime::tools::capability_type_name).collect::<Vec<_>>(),
+            "execution_mode": match bundle_manifest.execution_mode {
+                autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
+                autonoetic_types::agent::ExecutionMode::Script => "script",
+            },
+            "script_input_mode": serde_json::to_value(&bundle_manifest.script_input_mode).ok(),
+            "script_entry": bundle_manifest.script_entry,
+            "io": bundle_manifest.io,
+        });
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
             artifact_id: Some(args.artifact_id.clone()),
             base_revision_id: args.base_revision_id.clone(),
             summary: args.summary.clone(),
             metadata: args.metadata.clone(),
+            manifest_meta: Some(manifest_meta),
             source_kind: "artifact".to_string(),
             source_ref: Some(args.artifact_id.clone()),
         };
@@ -1372,6 +1391,17 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             Some(gateway_dir),
         )?;
 
+        let manifest_meta = serde_json::json!({
+            "description": target_manifest.agent.description,
+            "capabilities": target_manifest.capabilities.iter().map(crate::runtime::tools::capability_type_name).collect::<Vec<_>>(),
+            "execution_mode": match target_manifest.execution_mode {
+                autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
+                autonoetic_types::agent::ExecutionMode::Script => "script",
+            },
+            "script_input_mode": serde_json::to_value(&target_manifest.script_input_mode).ok(),
+            "script_entry": target_manifest.script_entry,
+            "io": target_manifest.io,
+        });
         let common = RevisionCreateCommonArgs {
             agent_id: args.agent_id.clone(),
             artifact_id: resolved_artifact
@@ -1380,6 +1410,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             base_revision_id: args.base_revision_id.clone(),
             summary: args.summary.clone(),
             metadata: args.metadata.clone(),
+            manifest_meta: Some(manifest_meta),
             source_kind,
             source_ref,
         };
