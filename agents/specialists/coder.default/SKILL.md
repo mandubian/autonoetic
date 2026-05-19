@@ -94,17 +94,24 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
 1. **Write the implementation files** using content_write
 2. **Test your code** with `sandbox_exec` using the base runtime only
   - If external packages are required, stop and return a `needs_packager` handoff instead of trying to install them directly
-3. **Write free-form instructions content only** (for example `agent_instructions.md`). Do NOT write SKILL metadata/frontmatter.
-4. **Do NOT write `runtime.lock`**. The gateway generates canonical runtime lock content.
-5. **Build an artifact** from implementation files (and optional free-form instructions) with `kind: "agent_bundle"`:
+3. **Write unit tests** for the implementation. **Required for `kind: "agent_bundle"`** — without tests the promotion gate's `unit_test_runner` has nothing to run and the artifact cannot promote.
+   - Filename convention: `test_<entry>.py` (Python) or `*.test.js` / `*.spec.js` (Node). The runner discovers these patterns automatically.
+   - **Cover at minimum:** happy path + one error case (e.g. invalid input, HTTP failure, missing env var).
+   - **Stdlib only** — the promotion sandbox has no network (R+16), so use `unittest.mock` / `monkeypatch` to fake any HTTP/file/subprocess interaction. **A test that makes a real HTTP call will fail with `ECONNREFUSED`.**
+   - **No external test frameworks** unless they are vendored in the artifact — prefer `unittest` (Python) or Node's built-in `node:test` over pytest/mocha.
+   - Smoke-run the tests once via `sandbox_exec` (e.g. `python3 -m unittest test_weather.py`) before bundling.
+   - Include the test file(s) in `artifact_build` inputs so the runner can discover them inside `/tmp/`.
+4. **Write free-form instructions content only** (for example `agent_instructions.md`). Do NOT write SKILL metadata/frontmatter.
+5. **Do NOT write `runtime.lock`**. The gateway generates canonical runtime lock content.
+6. **Build an artifact** from implementation files, tests, and optional free-form instructions with `kind: "agent_bundle"`:
    ```json
    artifact_build({
-     "inputs": ["weather.py", "agent_instructions.md"],
+     "inputs": ["weather.py", "test_weather.py", "agent_instructions.md"],
      "entrypoints": ["weather.py"],
      "kind": "agent_bundle"
    })
    ```
-6. **Return the artifact_ref + install intent payload** to the planner. Include:
+7. **Return the artifact_ref + install intent payload** to the planner. Include:
     - `agent_id`
     - `description`
     - `instructions` (free-form markdown body)
@@ -114,9 +121,9 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
     - `capabilities`
     - optional `io` / `middleware` (including `io.output_policy`)
   The returned `artifact_ref` is the canonical install handoff. Prefer it over loose `cnt_...` handles for later packaging, validation, or installation.
-7. Suggested handoff text:
+8. Suggested handoff text:
   "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."
-8. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
+9. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
 
 <!-- extended -->
 

@@ -38,7 +38,9 @@ metadata:
         properties:
           status:
             type: string
-            enum: ["pass", "fail"]
+            enum: ["pass", "fail", "unable_to_evaluate"]
+          # status "unable_to_evaluate" is used when no tests exist or tests
+          # require live network — see parse_status_str in task_completion.rs.
           evaluator_pass:
             type: boolean
           findings:
@@ -63,19 +65,19 @@ If the test suite consists entirely of integration tests that require live netwo
 ## Behavior
 
 1. `artifact_inspect(artifact_ref)` — review file list and entrypoints
-2. `content_read(handle)` — read source files to find test files
-3. **Discover tests**: look for common test patterns:
-   - Python: files matching `test_*.py` or `*_test.py`, directories named `tests/`
-   - Node.js: files matching `*.test.js` or `*.spec.js`, `__tests__/` directories
-   - Use `sandbox_exec` with `ls -la` or `find` to explore the artifact directory
-4. If no tests exist → stop and skip (do NOT call `promotion_record`)
-5. If tests exist → run them with the appropriate command in the sandbox:
-   - Python: `python3 -m pytest /tmp/tests/ -v` or `python3 /tmp/test_*.py`
-   - Node.js: `node /tmp/node_modules/.bin/mocha /tmp/test/*.test.js`
+2. **Single-pass test discovery** from the inspect result — look for these filename patterns in the artifact's file list:
+   - Python: `test_*.py`, `*_test.py`, anything under a `tests/` directory
+   - Node.js: `*.test.js`, `*.spec.js`, anything under `__tests__/`
+   - Go: `*_test.go`
+   - Rust: `Cargo.toml` (then `cargo test` discovers the rest)
+3. **If zero test files match the patterns above → STOP IMMEDIATELY.** Do not list directories, do not `find`, do not `grep` source files for the substring "test", do not `content_read` files looking for embedded tests. Return the `unable_to_evaluate` JSON below. Iterating on discovery wastes a turn cycle and trips `LoopGuard`. The promotion gate accepts `unable_to_evaluate` for trivial scripts.
+4. If tests exist → run them with the appropriate command in the sandbox:
+   - Python: `python3 -m unittest discover /tmp -v` or `python3 -m pytest /tmp/tests/ -v` or `python3 /tmp/test_*.py`
+   - Node.js: `node --test /tmp/*.test.js` or `node /tmp/node_modules/.bin/mocha /tmp/test/*.test.js`
    - Go: `go test /tmp/...`
    - Rust: `cargo test` (only if Cargo.toml exists)
-6. Collect output — pass if all tests pass, fail if any test fails
-7. Call `promotion_record` with test stats
+5. Collect output — pass if all tests pass, fail if any test fails
+6. Call `promotion_record` with test stats
 
 ## Recording Promotion
 
@@ -99,30 +101,34 @@ If you found and ran tests:
 - `findings`: array of test result findings
 - `summary`: string with test execution summary
 
-If you found NO tests, skip — do NOT call `promotion_record`. The operator understands that this role is inapplicable for this artifact. **However, you MUST still return a structured JSON reply** — never return prose:
+If you found NO tests, **do NOT call `promotion_record`**. The role is inapplicable for this artifact — that is not a failure. Return this JSON exactly:
 
 ```json
 {
-  "status": "fail",
+  "status": "unable_to_evaluate",
   "evaluator_pass": false,
   "findings": [],
   "summary": "No test files found in artifact"
 }
 ```
 
+`evaluator_pass: false` here means "this gate did not pass affirmatively" — not "the artifact is bad". The `status: "unable_to_evaluate"` is the signal downstream consumers (`promotion_query`, the operator UI) use to skip this gate for trivial scripts. Returning `status: "fail"` instead causes the LLM to second-guess itself and re-search for tests that don't exist; do not do that.
+
 ## Key Rules
 
 - **Do NOT install packages** — the sandbox has no network
 - **Do NOT modify test code** — run what exists
-- **If no tests exist**: skip, do NOT call `promotion_record`
+- **Do NOT write new tests** — that's `coder.default`'s job when building the agent_bundle
+- **If no tests exist**: return `status: "unable_to_evaluate"` after a single inspect pass; do NOT loop on discovery
 - **If some tests exist**: run all of them, report total/passed/failed
 - **If all tests pass**: `status = "pass"`, `evaluator_pass = true`
 - **If any test fails**: `status = "fail"`, `evaluator_pass = false`, include failure output in findings
-- **If tests require network**: report `status = "fail"`, `evaluator_pass = false`, document as finding
+- **If tests require network**: return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (cannot be evaluated in sealed sandbox per R+16)
 
 ## Status Field Mapping
 
 When returning your final response JSON, map your test execution result to the status field:
-- If all tests pass → `status: "pass"`, `evaluator_pass: true`
-- If any test fails → `status: "fail"`, `evaluator_pass: false`
-- If no tests found → `status: "fail"`, `evaluator_pass: false`, do NOT call `promotion_record`
+- All tests pass → `status: "pass"`, `evaluator_pass: true`
+- Any test fails → `status: "fail"`, `evaluator_pass: false`
+- No tests found → `status: "unable_to_evaluate"`, `evaluator_pass: false`, do NOT call `promotion_record`
+- Tests require network → `status: "unable_to_evaluate"`, `evaluator_pass: false`, do NOT call `promotion_record`
