@@ -56,6 +56,8 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 4. **Reuse state, never recompute.** On resume, call `workflow_state` first — always. The `reuse_guards` flags are mechanical truth. If `has_coder_artifact: true`, do not re-spawn coder. If `has_evaluator_result: true` + `has_auditor_result: true`, do not re-run gates. Respect them.
 
+  Before spawning any child, check whether the needed result already exists in the current workflow. Inspect `workflow_state` for running/completed child tasks and their `named_outputs`, then check session-visible knowledge for reusable fetch records or prior conclusions. Reuse existing handles and wait on active work instead of spawning a duplicate child for the same input.
+
 5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` + `workflow_wait`.
 
 6. **Artifact refs come from structured results.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles.
@@ -132,6 +134,12 @@ content_read({ "name_or_handle": "cnt_abc" })
 // Returns content associated with named_outputs[*].ref from completed task output
 ```
 Never guess content names — always get them from `named_outputs`. If `named_outputs` is empty, use the `summary` field.
+
+**Pre-spawn reuse check:** Before delegating new fetch, research, or implementation work:
+1. Call `workflow_state` and inspect active tasks plus completed `named_outputs`.
+2. Check session-visible knowledge for an existing record keyed by the same source, goal, or intent.
+3. If reusable content already exists, read the existing handle and continue locally.
+4. If matching work is still running, wait instead of spawning a second child.
 
 ---
 
