@@ -111,6 +111,80 @@ fn test_artifact_build_mints_session_scoped_ref() -> anyhow::Result<()> {
 }
 
 #[test]
+fn test_artifact_build_scopes_to_root_session_for_child_without_workflow() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let manifest = writer_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let agent_dir = agents_dir.join("coder.default");
+    std::fs::create_dir_all(&agent_dir)?;
+
+    let cs = ContentStore::new(&gateway_dir)?;
+    let h = cs.write(b"artifact from child")?;
+    cs.register_name("root-sess/coder.default-abc123", "main.py", &h)?;
+
+    let args = serde_json::json!({ "inputs": ["main.py"] });
+    let out = registry.execute(
+        "artifact_build",
+        &manifest,
+        &policy,
+        &agent_dir,
+        Some(&gateway_dir),
+        &args.to_string(),
+        Some("root-sess/coder.default-abc123"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
+    )?;
+
+    let v: serde_json::Value = serde_json::from_str(&out)?;
+    assert_eq!(v.get("ok"), Some(&serde_json::json!(true)));
+    let ar = v["artifact_ref"]
+        .as_str()
+        .expect("artifact_ref");
+    let scope = v["artifact_ref_scope"]
+        .as_object()
+        .expect("artifact_ref_scope object");
+
+    assert_eq!(scope.get("type").and_then(|x| x.as_str()), Some("session"));
+    assert_eq!(
+        scope.get("id").and_then(|x| x.as_str()),
+        Some("root-sess"),
+        "child session artifact must be scoped to root session, not the child session"
+    );
+
+    let resolved = store.resolve_artifact_ref(ArtifactRefScopeType::Session, "root-sess", ar)?;
+    assert!(resolved.is_some(), "ref must resolve from root session scope");
+
+    let resolved_child =
+        store.resolve_artifact_ref(ArtifactRefScopeType::Session, "root-sess/coder.default-abc123", ar)?;
+    assert!(
+        resolved_child.is_none(),
+        "ref must NOT be scoped to the child session"
+    );
+
+    let any_scope = store.resolve_artifact_ref_any_scope(ar, "root-sess/packager.default-def456")?;
+    assert!(
+        any_scope.is_some(),
+        "sibling agent must resolve artifact via root session scope"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_artifact_build_mints_workflow_scoped_ref_when_indexed() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");

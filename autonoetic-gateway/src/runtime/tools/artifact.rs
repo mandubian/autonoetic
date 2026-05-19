@@ -182,13 +182,13 @@ impl NativeTool for ArtifactBuildTool {
                     ),
                     _ => (
                         autonoetic_types::artifact::ArtifactRefScopeType::Session,
-                        sid.to_string(),
+                        root.to_string(),
                     ),
                 }
             }
             None => (
                 autonoetic_types::artifact::ArtifactRefScopeType::Session,
-                sid.to_string(),
+                root.to_string(),
             ),
         };
 
