@@ -129,6 +129,7 @@ struct SessionOverview {
     root_session_id: String,
     workflow: WorkflowOverview,
     pending_user_interactions: usize,
+    active_executions: usize,
     latest_signal: Option<String>,
 }
 
@@ -151,6 +152,12 @@ impl SessionOverview {
                 self.root_session_id.clone()
             };
             format!("workflow: n/a (session: {})", root)
+        };
+
+        let active_exec = if self.active_executions > 0 {
+            format!(" | exec:{}", self.active_executions)
+        } else {
+            String::new()
         };
 
         let ask = if self.pending_user_interactions > 0 {
@@ -178,7 +185,7 @@ impl SessionOverview {
             })
             .unwrap_or_default();
 
-        format!("{}{}{}", workflow, ask, latest_signal)
+        format!("{}{}{}{}", workflow, active_exec, ask, latest_signal)
     }
 }
 
@@ -498,6 +505,7 @@ impl App {
             || self.session_overview.workflow.running > 0
             || self.session_overview.workflow.queued > 0
             || self.session_overview.workflow.awaiting > 0
+            || self.session_overview.active_executions > 0
     }
 
     /// Same selection logic as the bottom-of-transcript indicator in `draw_messages`.
@@ -531,6 +539,12 @@ impl App {
                 "{} Waiting on approval ({} task(s))",
                 self.spinner(),
                 self.session_overview.workflow.awaiting
+            )
+        } else if self.session_overview.active_executions > 0 {
+            format!(
+                "{} Working... ({} active execution(s))",
+                self.spinner(),
+                self.session_overview.active_executions
             )
         } else {
             format!("{} Working...", self.spinner())
@@ -1471,6 +1485,8 @@ fn poll_session_snapshot(
         &root_session_id,
     )?;
 
+    let mut workflow_captured = 0usize;
+
     let workflow = if let Some(workflow_id) = workflow_id {
         let status = autonoetic_gateway::scheduler::load_workflow_run(config, None, &workflow_id)
             .ok()
@@ -1502,6 +1518,8 @@ fn poll_session_snapshot(
             }
         }
 
+        workflow_captured = running + queued + awaiting;
+
         WorkflowOverview {
             workflow_id: Some(workflow_id),
             status,
@@ -1514,11 +1532,26 @@ fn poll_session_snapshot(
         WorkflowOverview::default()
     };
 
+    // Count active executions not already represented in workflow task tracking.
+    // Catches orphaned or non-workflow child sessions that would otherwise be
+    // invisible to the working indicator.
+    let active_executions = store
+        .and_then(|s| s.list_active_executions_for_root_sqlite(root_session_id).ok())
+        .map(|execs| {
+            let active = execs
+                .iter()
+                .filter(|e| e.status == "running" || e.status == "stop_requested")
+                .count();
+            active.saturating_sub(workflow_captured)
+        })
+        .unwrap_or(0);
+
     Ok(SessionPollSnapshot {
         overview: SessionOverview {
             root_session_id: root_session_id.to_string(),
             workflow,
             pending_user_interactions: pending_interactions.len(),
+            active_executions,
             latest_signal: previous_latest_signal,
         },
         pending_interactions,
