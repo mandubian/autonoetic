@@ -169,11 +169,17 @@ pub struct PromotionRecordResponse {
 }
 
 /// Arguments for the `promotion.query` tool.
+///
+/// At least one of `artifact_id` or `artifact_ref` must be supplied. Both
+/// are optional at the serde level so callers can use either form; the
+/// runtime tool checks that at least one is present and rejects the
+/// "neither" case with a clear error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionQueryArgs {
-    /// Artifact ID to query promotion status for.
-    pub artifact_id: String,
-    /// Short artifact ref (e.g., 'ar.386f5b222421'). Alternative to artifact_id.
+    /// Canonical artifact ID (e.g., `art_a1b2c3d4`). Alternative: `artifact_ref`.
+    #[serde(default)]
+    pub artifact_id: Option<String>,
+    /// Short artifact ref (e.g., `ar.386f5b222421`). Alternative: `artifact_id`.
     #[serde(default)]
     pub artifact_ref: Option<String>,
 }
@@ -205,4 +211,51 @@ pub struct PromotionQueryResponse {
     pub sealed_evaluator_findings: Vec<Finding>,
     pub sealed_evaluator_timestamp: Option<String>,
     pub promotion_gate_version: String,
+}
+
+#[cfg(test)]
+mod promotion_query_args_tests {
+    use super::PromotionQueryArgs;
+
+    // Regression: prior version had `artifact_id: String` (required). Agents
+    // passing only `artifact_ref` got serde "missing field" errors, which
+    // contradicted the tool's input_schema (both advertised as alternatives).
+    // See session-3b4485d4 — five LoopGuard cycles burned on this mismatch.
+
+    #[test]
+    fn parses_artifact_ref_only() {
+        let args: PromotionQueryArgs =
+            serde_json::from_str(r#"{"artifact_ref": "ar.dd5058d99426"}"#).expect("should parse");
+        assert!(args.artifact_id.is_none());
+        assert_eq!(args.artifact_ref.as_deref(), Some("ar.dd5058d99426"));
+    }
+
+    #[test]
+    fn parses_artifact_id_only() {
+        let args: PromotionQueryArgs =
+            serde_json::from_str(r#"{"artifact_id": "art_dd5058d9"}"#).expect("should parse");
+        assert_eq!(args.artifact_id.as_deref(), Some("art_dd5058d9"));
+        assert!(args.artifact_ref.is_none());
+    }
+
+    #[test]
+    fn parses_both_fields() {
+        let args: PromotionQueryArgs = serde_json::from_str(
+            r#"{"artifact_id": "art_dd5058d9", "artifact_ref": "ar.dd5058d99426"}"#,
+        )
+        .expect("should parse");
+        assert_eq!(args.artifact_id.as_deref(), Some("art_dd5058d9"));
+        assert_eq!(args.artifact_ref.as_deref(), Some("ar.dd5058d99426"));
+    }
+
+    #[test]
+    fn parses_empty_object() {
+        // Serde accepts both fields missing; the runtime tool rejects "neither"
+        // with a clear error message rather than letting serde say
+        // "missing field `artifact_id`".
+        let args: PromotionQueryArgs =
+            serde_json::from_str("{}").expect("should parse empty object");
+        assert!(args.artifact_id.is_none());
+        assert!(args.artifact_ref.is_none());
+    }
 }

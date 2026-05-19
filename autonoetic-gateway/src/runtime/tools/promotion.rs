@@ -284,17 +284,17 @@ impl NativeTool for PromotionQueryTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Queries the promotion status of an artifact. Returns all role validation results (evaluator, auditor, static_evaluator, unit_test_runner, sealed_evaluator), or null if no promotion record exists.".to_string(),
+            description: "Queries the promotion status of an artifact. Returns all role validation results (evaluator, auditor, static_evaluator, unit_test_runner, sealed_evaluator), or 'No promotion record found for this artifact' if no promotion record exists. Provide EXACTLY ONE of `artifact_id` (canonical, `art_*` prefix) or `artifact_ref` (short, `ar.*` prefix) — not both, not neither. The two fields are alternative input forms for the same lookup.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "artifact_id": {
                         "type": "string",
-                        "description": "Canonical artifact ID (e.g., 'art_a1b2c3d4'). Alternative: use artifact_ref."
+                        "description": "Canonical artifact ID (e.g., 'art_a1b2c3d4'). Alternative input form to artifact_ref — pass exactly one of the two."
                     },
                     "artifact_ref": {
                         "type": "string",
-                        "description": "Short artifact ref (e.g., 'ar.386f5b222421'). Resolved server-side to the canonical artifact_id. Alternative to artifact_id."
+                        "description": "Short artifact ref (e.g., 'ar.386f5b222421'). Resolved server-side to the canonical artifact_id. Alternative input form to artifact_id — pass exactly one of the two."
                     }
                 },
                 "additionalProperties": false
@@ -327,9 +327,21 @@ impl NativeTool for PromotionQueryTool {
         let args: PromotionQueryArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let artifact_id = match (&args.artifact_id, &args.artifact_ref) {
-            (id, _) if id.starts_with("art_") => id.clone(),
-            (_, Some(ref_id)) => {
+        // Resolve artifact_id from whichever form the caller provided. Prefer
+        // an explicit `art_`-prefixed canonical id; fall back to resolving an
+        // `ar.`-prefixed ref via the gateway store. A single error message
+        // covers all bad-input cases so the LLM doesn't see one rejection
+        // shape from serde and a different shape from the runtime.
+        let artifact_id = match (args.artifact_id.as_deref(), args.artifact_ref.as_deref()) {
+            // Canonical id supplied — must have the `art_` prefix.
+            (Some(id), _) if id.starts_with("art_") => id.to_string(),
+            (Some(id), _) => anyhow::bail!(
+                "promotion_query: artifact_id must start with 'art_' (got '{}'). \
+                 If you have a short ref like 'ar.X', pass it as 'artifact_ref' instead.",
+                id
+            ),
+            // Only a short ref was supplied — resolve it via the gateway store.
+            (None, Some(ref_id)) => {
                 let Some(gs) = _gateway_store.as_ref() else {
                     anyhow::bail!("promotion_query: artifact_ref requires GatewayStore");
                 };
@@ -346,8 +358,10 @@ impl NativeTool for PromotionQueryTool {
                     })?;
                 record.artifact_id
             }
-            _ => anyhow::bail!(
-                "promotion_query: either artifact_id (starting with 'art_') or artifact_ref is required"
+            (None, None) => anyhow::bail!(
+                "promotion_query: provide either 'artifact_id' (e.g. 'art_a1b2c3d4') \
+                 or 'artifact_ref' (e.g. 'ar.386f5b222421'). Both are alternatives — \
+                 pass one, not neither."
             ),
         };
 
