@@ -70,10 +70,21 @@ Optional fields:
 
 ### 2.3 Running the harness
 
+Default (tool-using watchdog):
+
 ```bash
 autonoetic sentinel-experiment \
   --corpus path/to/sentinel-validation-corpus.yaml \
   --output path/to/results.md
+```
+
+**Recommended for complex sessions** — tool-free mode:
+
+```bash
+autonoetic sentinel-experiment \
+  --corpus path/to/sentinel-validation-corpus.yaml \
+  --output path/to/results.md \
+  --no-tools
 ```
 
 What the harness does, per session:
@@ -83,19 +94,47 @@ What the harness does, per session:
    (`watching` / `diverging` / `critical`). The session is flagged by
    Layer 1 iff it reached `diverging` or `critical`. (`watching` is
    observational only.)
-2. **Watchdog verdict** — runs the watchdog (`autonoetic watchdog
-   <session_id>` equivalent in-process) which:
-   - Reads the latest Layer 1 snapshot for context.
-   - Issues `digest_query` / `execution_search` tools to gather
-     evidence.
-   - Produces a free-text reply.
-3. **Watchdog classification** — the reply is classified as "flagged"
-   iff it contains any of: `diverging`, `divergence`, `critical`,
-   `watching`, `loop pressure`, `failure pressure`, `repetition`,
-   `stalled`, `escalat`. Silent or "looks healthy" replies count as
-   not flagged. This keyword-based classifier is deliberately simple;
-   it can be tightened later if false-positive noise becomes the
-   bottleneck.
+2. **Watchdog verdict** — one of two modes:
+   - **Default mode** runs `watchdog.default` with tools (`digest_query`,
+     `execution_search`, `agent_message`, `session_escalate`). Multi-round
+     LLM completion. Higher cost; can drill into novel evidence. Writes
+     real notification rows on the target session (see §2.4).
+   - **`--no-tools` mode** runs `watchdog-fast.default` with **zero
+     capabilities**: the harness pre-renders a structured
+     `SessionOverview` (tool histogram, recent errors, Layer 1 snapshot,
+     digest tail) into the kickoff message and accepts a single LLM
+     completion as the verdict. Cheaper by roughly an order of magnitude
+     on complex sessions; deterministic at `temperature=0.0`; writes no
+     side-effect rows on the target session (the agent has no tools to
+     call).
+3. **Watchdog classification** — two-tier:
+   - **Tier 1 (structured)**: if the reply begins with `VERDICT:
+     diverging` or `VERDICT: critical`, the session is flagged.
+     `VERDICT: healthy` / `VERDICT: watching` is not flagged. This is
+     the path taken in `--no-tools` mode (the fast watchdog is
+     instructed to emit the verdict on line 1).
+   - **Tier 2 (keyword fallback)**: free-form replies are scanned for
+     `diverging`, `divergence`, `critical`, `watching`, `loop pressure`,
+     `failure pressure`, `repetition`, `stalled`, `escalat`.
+
+### 2.3.1 Choosing between the modes
+
+- Use `--no-tools` (`watchdog-fast.default`) when:
+  - The corpus contains complex / long sessions (high token cost in
+    tool-using mode)
+  - You want zero contamination of the target session's records
+  - You want deterministic re-runs (no LLM stochasticity from
+    tool-call interleaving)
+- Use the default tool-using mode when:
+  - You want the watchdog to drill into specific causal evidence
+    beyond what the structured `SessionOverview` summarises
+  - You're tuning the `SessionOverview` itself and want to see what
+    tools the watchdog would have called
+
+If both modes disagree, that's a useful signal that the
+`SessionOverview` is missing context the tool-using watchdog found —
+the right fix is to extend the overview rather than rely on tools at
+auto-invoke time.
 
 ### 2.4 Side-effect contamination
 
