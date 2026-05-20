@@ -1828,6 +1828,21 @@ pub struct TrajectoryConfig {
     /// `context_pressure` thresholds as utilization fraction `[0.0, 1.0]`.
     #[serde(default)]
     pub context_pressure: TrajectoryContextPressureConfig,
+
+    /// When `true` (default), the monitor sends an `agent.message` to the
+    /// root planner on `Diverging` level transitions.
+    #[serde(default = "default_trajectory_notify_planner")]
+    pub notify_planner: bool,
+
+    /// When `true` (default), the monitor notifies the operator via
+    /// `user_interactions` on `Critical` level transitions.
+    #[serde(default = "default_trajectory_notify_operator")]
+    pub notify_operator: bool,
+
+    /// Maximum turns `sentinel.suppress` can request (default 10).
+    /// Serves as a safety bound on planner self-suppression.
+    #[serde(default = "default_trajectory_suppress_max_turns")]
+    pub suppress_max_turns: u32,
 }
 
 fn default_trajectory_enabled() -> bool {
@@ -1836,6 +1851,18 @@ fn default_trajectory_enabled() -> bool {
 
 fn default_trajectory_window() -> usize {
     8
+}
+
+fn default_trajectory_notify_planner() -> bool {
+    true
+}
+
+fn default_trajectory_notify_operator() -> bool {
+    true
+}
+
+fn default_trajectory_suppress_max_turns() -> u32 {
+    10
 }
 
 impl Default for TrajectoryConfig {
@@ -1848,6 +1875,9 @@ impl Default for TrajectoryConfig {
             repetition_entropy: TrajectoryRepetitionEntropyConfig::default(),
             error_burst: TrajectoryErrorBurstConfig::default(),
             context_pressure: TrajectoryContextPressureConfig::default(),
+            notify_planner: default_trajectory_notify_planner(),
+            notify_operator: default_trajectory_notify_operator(),
+            suppress_max_turns: default_trajectory_suppress_max_turns(),
         }
     }
 }
