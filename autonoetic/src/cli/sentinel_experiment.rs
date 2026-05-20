@@ -20,7 +20,7 @@
 //!   divergence level reached during the session", read from the
 //!   already-persisted `divergence.*` causal events.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,9 +28,14 @@ use anyhow::Context;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
+use autonoetic_gateway::llm::{build_driver, Message};
+use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
+use autonoetic_gateway::runtime::session_overview::SessionOverview;
+use autonoetic_gateway::runtime::tools::NativeToolRegistry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_gateway::AgentRepository;
 
-use crate::cli::watchdog::run_watchdog;
+use crate::cli::watchdog::{run_watchdog, WatchdogRun};
 
 /// CLI args for `autonoetic sentinel-experiment`.
 #[derive(Args)]
@@ -48,6 +53,19 @@ pub struct SentinelExperimentArgs {
     /// analysis without re-spending LLM tokens.
     #[arg(long)]
     pub skip_watchdog: bool,
+    /// Run the watchdog in tool-free mode: load `watchdog-fast.default`
+    /// and pass an **empty** `NativeToolRegistry` to its executor, so
+    /// no tools are exposed to the LLM at all (capabilities alone do
+    /// not guarantee tool-free execution — several tools are
+    /// always-available regardless of manifest capability set).
+    /// Bundles a pre-rendered `SessionOverview` into the kickoff
+    /// message and accepts a single LLM completion as the verdict.
+    /// Roughly an order of magnitude cheaper than the default
+    /// tool-using mode for complex sessions, and produces no
+    /// side-effect rows on the target session because there are no
+    /// callable tools.
+    #[arg(long)]
+    pub no_tools: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,19 +221,40 @@ struct Decision {
     go: bool,
 }
 
-/// Classify the watchdog's free-text reply as "flagged" vs "not flagged"
-/// based on simple keyword detection. The watchdog is instructed to stay
-/// silent (or produce a brief reply) when it judges a session healthy,
-/// and to send concrete evidence when it judges divergence.
+/// Classify the watchdog's free-text reply as "flagged" vs "not flagged".
 ///
-/// We deliberately use simple keyword matching rather than a separate
-/// LLM call so the harness stays cheap and deterministic. The decision
-/// surface (these keywords) is documented and can be tightened later.
+/// Two-tier detection:
+/// 1. **Structured `VERDICT:` line** (produced by `watchdog-fast.default`):
+///    `VERDICT: diverging` and `VERDICT: critical` → flagged;
+///    `VERDICT: healthy` and `VERDICT: watching` → not flagged. This
+///    takes priority when present since it's the agent's explicit
+///    verdict.
+/// 2. **Keyword fallback** (for the tool-using watchdog, which writes
+///    free-form prose): look for `diverging`, `divergence`, `critical`,
+///    `watching`, `loop pressure`, `failure pressure`, `repetition`,
+///    `stalled`, `escalat`.
+///
+/// We deliberately use simple matching rather than a separate LLM call
+/// so the harness stays cheap and deterministic. The decision surface
+/// is documented and can be tightened later.
 fn classify_watchdog_reply(reply: Option<&str>) -> bool {
     let Some(text) = reply else { return false };
-    let lower = text.to_lowercase();
 
-    // Positive signal: the watchdog explicitly mentions divergence levels.
+    // Tier 1: structured VERDICT: line. Case-insensitive. Looks at the
+    // first non-empty line of the reply for stability — the fast-mode
+    // SKILL.md requires the verdict on line 1.
+    for line in text.lines().take(5) {
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("verdict:") {
+            let v = rest.trim();
+            return matches!(v, "diverging" | "critical")
+                || v.starts_with("diverging ") || v.starts_with("critical ");
+        }
+    }
+
+    // Tier 2: free-form keyword fallback.
+    let lower = text.to_lowercase();
     let positive_markers = [
         "diverging",
         "divergence",
@@ -225,16 +264,98 @@ fn classify_watchdog_reply(reply: Option<&str>) -> bool {
         "failure pressure",
         "repetition",
         "stalled",
-        "escalat", // matches "escalate", "escalated", "escalating"
+        "escalat",
     ];
-    if positive_markers.iter().any(|m| lower.contains(m)) {
-        return true;
-    }
+    positive_markers.iter().any(|m| lower.contains(m))
+}
 
-    // Negative signal: watchdog ends with a "healthy" verdict and no
-    // concerning keywords. A short reply containing only "healthy"-like
-    // phrases is not flagged.
-    false
+/// Run the tool-free fast watchdog against a target session: bundles a
+/// pre-computed `SessionOverview` into the kickoff message and accepts a
+/// single LLM completion as the verdict.
+///
+/// **Tool-free is enforced by passing an empty `NativeToolRegistry` to
+/// the executor**, not by the manifest's empty `capabilities` list.
+/// Several tools (`execution_search`, `session_escalate`,
+/// `digest_annotate`, etc.) advertise `fn is_available(_) -> true`
+/// regardless of capabilities, so `capabilities: []` alone would still
+/// expose them. The empty registry forecloses that path: zero tools
+/// declared to the LLM ⇒ zero tool calls ⇒ zero side-effect rows on
+/// the target session.
+async fn run_watchdog_fast(
+    config_path: &Path,
+    target_session_id: &str,
+) -> anyhow::Result<WatchdogRun> {
+    let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_config = Arc::new(loaded_config);
+    let gateway_dir = gateway_config.agents_dir.join(".gateway");
+    let store = Arc::new(
+        GatewayStore::open(&gateway_dir)
+            .context("Failed to open GatewayStore — gateway must be initialised")?,
+    );
+
+    // Build the structured overview the watchdog will judge from.
+    let overview = SessionOverview::for_session(&store, &gateway_dir, target_session_id);
+    let overview_md = overview.render_markdown();
+
+    let repo = AgentRepository::from_config(&gateway_config);
+    let loaded = repo
+        .get_sync("watchdog-fast.default")
+        .context("Watchdog (fast) agent 'watchdog-fast.default' not found — run with a config that points to agents/specialists/watchdog-fast/")?;
+    let manifest = loaded.manifest;
+    let instructions = loaded.instructions;
+    let agent_dir = loaded.dir;
+
+    let llm_config = manifest
+        .llm_config
+        .clone()
+        .context("watchdog-fast.default is missing llm_config in SKILL.md")?;
+    let driver = build_driver(llm_config, reqwest::Client::new())?;
+
+    // Empty registry — no tools at all. The manifest's `capabilities: []`
+    // is necessary but not sufficient to disable tools because some are
+    // always-available (e.g. `session_escalate`, `execution_search`); the
+    // registry is the load-bearing isolation here.
+    let mut runtime = AgentExecutor::new(
+        manifest,
+        instructions,
+        driver,
+        agent_dir,
+        NativeToolRegistry::new(),
+        Some(store),
+    );
+    runtime = runtime
+        .with_gateway_dir(gateway_dir)
+        .with_config(gateway_config)
+        .with_initial_user_message(format!(
+            "{}\n\n\
+             ---\n\
+             Produce your verdict on the first line as one of:\n\
+             `VERDICT: healthy` | `VERDICT: watching` | `VERDICT: diverging` | `VERDICT: critical`\n\
+             Then a blank line, then a one-paragraph justification (≤ 200 words) citing concrete \
+             evidence from the overview above.",
+            overview_md,
+        ));
+
+    let mut history = vec![
+        Message::system(runtime.instructions.clone()),
+        Message::user(runtime.initial_user_message.clone()),
+    ];
+
+    let result = match runtime.execute_with_history(&mut history).await {
+        Ok(TurnOutcome::Completed(reply)) => WatchdogRun {
+            reply,
+            outcome_tag: "completed".to_string(),
+        },
+        Ok(other) => WatchdogRun {
+            reply: None,
+            outcome_tag: format!("interrupted:{:?}", other),
+        },
+        Err(e) => WatchdogRun {
+            reply: None,
+            outcome_tag: format!("error:{}", e),
+        },
+    };
+    Ok(result)
 }
 
 pub async fn handle_sentinel_experiment(
@@ -278,17 +399,28 @@ pub async fn handle_sentinel_experiment(
         // so we can compute the delta and report a cleanup checklist.
         let (pre_msgs, pre_interactions) = snapshot_side_effects(&store, &entry.session_id);
 
-        // Watchdog verdict: either run live or use the cached reply.
+        // Watchdog verdict: cached, tool-free, or full tool-using mode.
         let (watchdog_reply, watchdog_outcome, watchdog_wall_secs) = if args.skip_watchdog {
             match &entry.cached_watchdog_reply {
                 Some(cached) => (Some(cached.clone()), "cached".to_string(), None),
                 None => (None, "skipped".to_string(), None),
             }
+        } else if args.no_tools {
+            let started = Instant::now();
+            let run = match run_watchdog_fast(config_path, &entry.session_id).await {
+                Ok(r) => r,
+                Err(e) => WatchdogRun {
+                    reply: None,
+                    outcome_tag: format!("error:{}", e),
+                },
+            };
+            let elapsed = started.elapsed().as_secs_f64();
+            (run.reply, run.outcome_tag, Some(elapsed))
         } else {
             let started = Instant::now();
             let run = match run_watchdog(config_path, &entry.session_id).await {
                 Ok(r) => r,
-                Err(e) => crate::cli::watchdog::WatchdogRun {
+                Err(e) => WatchdogRun {
                     reply: None,
                     outcome_tag: format!("error:{}", e),
                 },
@@ -617,6 +749,39 @@ mod tests {
         assert!(classify_watchdog_reply(Some("This session is diverging — failure pressure is high.")));
         assert!(classify_watchdog_reply(Some("CRITICAL: planner repetition detected.")));
         assert!(classify_watchdog_reply(Some("I'm escalating this via session_escalate.")));
+    }
+
+    // ── Structured VERDICT: line (fast-watchdog output) ────────────────
+
+    #[test]
+    fn classify_structured_verdict_diverging_flags() {
+        assert!(classify_watchdog_reply(Some("VERDICT: diverging\n\nLayer 1 flagged the session ...")));
+        assert!(classify_watchdog_reply(Some("VERDICT: critical\n\n...")));
+    }
+
+    #[test]
+    fn classify_structured_verdict_healthy_does_not_flag() {
+        // Even if the justification body mentions "divergence" as a
+        // negation ("no divergence observed"), the explicit VERDICT: line
+        // takes priority.
+        assert!(!classify_watchdog_reply(Some(
+            "VERDICT: healthy\n\nNo divergence signals were observed; the session completed cleanly."
+        )));
+    }
+
+    #[test]
+    fn classify_structured_verdict_watching_does_not_flag() {
+        // `watching` is the observational band — not "flagged" for the
+        // confusion matrix (only `diverging` / `critical` flip the bit).
+        assert!(!classify_watchdog_reply(Some(
+            "VERDICT: watching\n\nOne signal in the warn band but no action band crossings."
+        )));
+    }
+
+    #[test]
+    fn classify_structured_verdict_is_case_insensitive() {
+        assert!(classify_watchdog_reply(Some("verdict: DIVERGING\n\n...")));
+        assert!(classify_watchdog_reply(Some("Verdict: Critical\n\n...")));
     }
 
     // ── Label parsing ──────────────────────────────────────────────────
