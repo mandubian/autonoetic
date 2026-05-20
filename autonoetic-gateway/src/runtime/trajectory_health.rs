@@ -342,10 +342,23 @@ fn child_failure_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSig
     })
 }
 
+/// Pick the tool with the highest failure count. Ties are broken by
+/// alphabetically smaller tool name so the result is deterministic
+/// across runs — `HashMap` iteration order is randomized and would
+/// otherwise produce flaky evidence strings and non-reproducible
+/// causal-chain payloads.
 fn worst_tool_failure(counts: &HashMap<String, u32>) -> Option<(String, u32)> {
     counts
         .iter()
-        .max_by_key(|(_, count)| **count)
+        .max_by(|(name_a, count_a), (name_b, count_b)| {
+            // Primary: higher count wins.
+            // Tie-break: alphabetically smaller name wins. `max_by` picks
+            // the element for which the comparator returns `Greater`, so
+            // when counts are equal we need to flip the name ordering.
+            count_a
+                .cmp(count_b)
+                .then_with(|| name_b.cmp(name_a))
+        })
         .map(|(name, count)| (name.clone(), *count))
 }
 
@@ -519,6 +532,37 @@ mod tests {
         assert_eq!(s.kind, DivergenceSignalKind::FailurePressure);
         assert!(s.evidence.as_deref().unwrap().contains("sandbox.exec"));
         assert!(s.evidence.as_deref().unwrap().contains("4 times"));
+    }
+
+    #[test]
+    fn worst_tool_failure_tie_breaks_on_alphabetical_name() {
+        // HashMap iteration is randomized. Without a deterministic tie-break,
+        // ties on count would flip the chosen "worst" tool across runs and
+        // make evidence strings (and replayed causal events) non-reproducible.
+        // We pin: when counts are equal, the alphabetically smaller name wins.
+        // Repeat the assertion many times — at least one shuffle would
+        // surface non-determinism if it reappeared.
+        for _ in 0..64 {
+            let mut counts: HashMap<String, u32> = HashMap::new();
+            counts.insert("zebra".into(), 4);
+            counts.insert("alpha".into(), 4);
+            counts.insert("mango".into(), 4);
+            let (name, count) = worst_tool_failure(&counts).unwrap();
+            assert_eq!(name, "alpha", "tie-break must pick alphabetically smallest");
+            assert_eq!(count, 4);
+        }
+    }
+
+    #[test]
+    fn worst_tool_failure_higher_count_beats_alphabetical_order() {
+        // Tie-break only kicks in on equal counts — a higher count must
+        // still win even when its name is alphabetically larger.
+        let mut counts: HashMap<String, u32> = HashMap::new();
+        counts.insert("alpha".into(), 2);
+        counts.insert("zebra".into(), 5);
+        let (name, count) = worst_tool_failure(&counts).unwrap();
+        assert_eq!(name, "zebra");
+        assert_eq!(count, 5);
     }
 
     #[test]
