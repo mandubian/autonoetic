@@ -12,7 +12,7 @@
 //! This pins the watchdog's "observer-only" contract: if a future capability
 //! change accidentally widened its surface, this test will fail.
 
-use autonoetic_gateway::runtime::tools::default_registry;
+use autonoetic_gateway::runtime::tools::{default_registry, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 
@@ -136,6 +136,38 @@ fn watchdog_exposed_set_does_not_include_arbitrary_sandbox_prefixes() {
         !available.contains(&"sandbox_exec".to_string()),
         "sandbox_exec should not match the 'digest_' or 'execution_' prefix \
          allowed by the watchdog manifest. Available: {:?}",
+        available
+    );
+}
+
+/// Tool-free watchdog (`watchdog-fast.default`) regression pin. The
+/// fast variant's isolation against side-effect-producing tools like
+/// `session_escalate` and `digest_annotate` (both always-available
+/// via `is_available(_) -> true`) does NOT come from its manifest's
+/// empty `capabilities` list — it comes from the harness constructing
+/// the executor with an empty `NativeToolRegistry`.
+///
+/// If this test fails after a future refactor — e.g., someone swaps
+/// the empty registry in
+/// `autonoetic/src/cli/sentinel_experiment.rs::run_watchdog_fast` back
+/// to `default_registry()` — the fast watchdog would silently regain
+/// access to `session_escalate` and start writing real
+/// `user_interactions` rows on target sessions, violating the
+/// "zero side effects" guarantee the validation doc promises.
+#[test]
+fn empty_registry_exposes_no_tools_regardless_of_manifest() {
+    let registry = NativeToolRegistry::new();
+    // The manifest doesn't matter — even a maximally-permissive one
+    // should yield zero tools through an empty registry.
+    let available = registry.available_definitions(&watchdog_manifest());
+    assert!(
+        available.is_empty(),
+        "An empty NativeToolRegistry must expose zero tools to any \
+         manifest. This is the load-bearing isolation for the \
+         tool-free fast watchdog (sentinel_experiment.rs::\
+         run_watchdog_fast). If this fires, watchdog-fast.default \
+         could call always-available tools like `session_escalate` \
+         and contaminate target sessions. Got: {:?}",
         available
     );
 }
