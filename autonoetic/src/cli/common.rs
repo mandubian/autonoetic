@@ -169,6 +169,8 @@ pub enum Commands {
     Review(ReviewArgs),
     /// Launch the divergence watchdog against a session
     Watchdog(WatchdogArgs),
+    /// Run the watchdog validation experiment (P4)
+    SentinelExperiment(crate::cli::sentinel_experiment::SentinelExperimentArgs),
 }
 
 /// Arguments for the all-in-one `run` command.

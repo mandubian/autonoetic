@@ -630,6 +630,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Watchdog(args) => {
             cli::watchdog::handle_watchdog(&config_path, &args.session_id).await?;
         }
+        Commands::SentinelExperiment(args) => {
+            cli::sentinel_experiment::handle_sentinel_experiment(&config_path, args).await?;
+        }
     }
 
     Ok(())
