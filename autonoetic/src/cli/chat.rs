@@ -236,6 +236,8 @@ enum SlashCommand {
 enum ChatOutbound {
     Chat(String),
     PolicyAuthor(String),
+    /// Query session.status for the async planner reply after workflow completion.
+    SessionStatusQuery { session_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +315,10 @@ struct App {
     /// Synthetic pending IDs added after inline approval so the spinner shows
     /// until the scheduler picks up the Runnable task.
     post_approval_pending_ids: Vec<u64>,
+    /// Internal pending IDs that correspond to session.status queries (not chat ingests).
+    pending_session_status_ids: HashSet<u64>,
+    /// Root session IDs for which we already sent a session.status query after workflow completion.
+    queried_session_status_for_workflows: HashSet<String>,
     task_lifecycles: HashMap<String, TaskLifecycle>,
     task_lifecycle_msg_idx: HashMap<String, usize>,
 }
@@ -364,6 +370,8 @@ impl App {
             pending_prompt: None,
             last_llm_context: None,
             post_approval_pending_ids: Vec::new(),
+            pending_session_status_ids: HashSet::new(),
+            queried_session_status_for_workflows: HashSet::new(),
             task_lifecycles: HashMap::new(),
             task_lifecycle_msg_idx: HashMap::new(),
         }
@@ -2114,6 +2122,10 @@ fn format_workflow_event_card(
             format!("✅ [{}] Workflow join satisfied", ts_short),
             MessageRole::SignalLow,
         )),
+        "workflow.completed" => Some((
+            format!("✅ [{}] Workflow completed — all tasks done", ts_short),
+            MessageRole::Signal,
+        )),
         "workflow.checkpoint.saved" => Some((
             format!("💾 [{}] Workflow checkpoint saved", ts_short),
             MessageRole::SignalLow,
@@ -3728,6 +3740,36 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     ));
                                 }
 
+                                // Check if this was a session.status query (workflow completion reply).
+                                let is_session_status =
+                                    app.pending_session_status_ids.remove(&internal_id);
+
+                                if is_session_status {
+                                    // Surface the planner's final reply when status == "completed".
+                                    if let Some(result) = resp.result.as_ref() {
+                                        let status = result
+                                            .get("status")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("");
+                                        let reply = result
+                                            .get("assistant_reply")
+                                            .and_then(|r| r.as_str());
+                                        if status == "completed" {
+                                            if let Some(r) = reply.filter(|s| !s.trim().is_empty()) {
+                                                app.add_message(MessageRole::Assistant, r.to_owned());
+                                            }
+                                        } else {
+                                            tracing::debug!(
+                                                target: "chat",
+                                                status,
+                                                "session.status after workflow.completed: reply not yet available"
+                                            );
+                                        }
+                                    }
+                                    needs_redraw = true;
+                                    continue;
+                                }
+
                                 if let Some(error) = resp.error {
                                     app.add_message(MessageRole::System, format!("Error: {}", error.message));
                                 } else {
@@ -3822,8 +3864,29 @@ async fn run_loop<B: ratatui::backend::Backend>(
             // User message to send
             msg = rx.recv() => {
                 if let Some((id, outbound)) = msg {
+                    // Handle session status query (fired after workflow.completed to surface planner reply).
+                    if let ChatOutbound::SessionStatusQuery { session_id: status_sid } = &outbound {
+                        let req_id = format!("session-status-{}", id);
+                        let request = GatewayJsonRpcRequest {
+                            jsonrpc: "2.0".to_string(),
+                            id: req_id.clone(),
+                            method: "session.status".to_string(),
+                            params: serde_json::json!({ "session_id": status_sid }),
+                            auth_token: Some(jsonrpc_auth_token.to_string()),
+                        };
+                        let encoded = serde_json::to_string(&request)?;
+                        write_half.write_all(encoded.as_bytes()).await?;
+                        write_half.write_all(b"\n").await?;
+                        write_half.flush().await?;
+                        pending_map.insert(req_id, id);
+                        // pending_session_status_ids was already populated in check_signals
+                        needs_redraw = true;
+                        continue;
+                    }
+
                     let message_text = match &outbound {
                         ChatOutbound::Chat(s) | ChatOutbound::PolicyAuthor(s) => s.clone(),
+                        ChatOutbound::SessionStatusQuery { .. } => unreachable!(),
                     };
                     // Pending user.ask: gateway-owned answer + resume (workflow Runnable or session checkpoint).
                     let mut skip_chat_ingest = false;
@@ -3955,6 +4018,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                             "governance-author.default".to_string(),
                             message_text.clone(),
                         ),
+                        ChatOutbound::SessionStatusQuery { .. } => unreachable!(),
                     };
 
                     let params = serde_json::json!({
@@ -5023,7 +5087,7 @@ async fn check_signals(
     config: &autonoetic_types::config::GatewayConfig,
     store: Option<&autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
     session_id: &str,
-    _tx: &tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>,
+    tx: &tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>,
 ) -> bool {
     let mut processed_any = false;
 
@@ -5269,6 +5333,32 @@ async fn check_signals(
                                             app.post_approval_pending_ids.drain(..).collect();
                                         for pid in ids {
                                             app.remove_pending(pid);
+                                        }
+                                    }
+
+                                    // When workflow completes, query session.status to surface the
+                                    // planner's final assistant_reply (stored in async_results on
+                                    // the gateway after WorkflowJoinSatisfied is processed).
+                                    if event.event_type == "workflow.completed" {
+                                        let wf_root_sid = event
+                                            .payload
+                                            .get("root_session_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or(&root_session_id);
+                                        if !app
+                                            .queried_session_status_for_workflows
+                                            .contains(wf_root_sid)
+                                        {
+                                            app.queried_session_status_for_workflows
+                                                .insert(wf_root_sid.to_string());
+                                            let query_id = app.next_id();
+                                            app.pending_session_status_ids.insert(query_id);
+                                            let _ = tx.send((
+                                                query_id,
+                                                ChatOutbound::SessionStatusQuery {
+                                                    session_id: wf_root_sid.to_string(),
+                                                },
+                                            ));
                                         }
                                     }
 
