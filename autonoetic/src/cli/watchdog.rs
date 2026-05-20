@@ -41,6 +41,13 @@ pub async fn handle_watchdog(config_path: &Path, session_id: &str) -> anyhow::Re
         .context("watchdog.default is missing llm_config in SKILL.md")?;
     let driver = build_driver(llm_config, reqwest::Client::new())?;
 
+    // Surface the latest Layer 1 trajectory health snapshot to the watchdog
+    // so it does not re-derive what the deterministic monitor already computed.
+    // We look back for the most recent `divergence.*` causal event on the
+    // target session and include its level + signal evidence in the kickoff
+    // message. Falls back gracefully when no events are present.
+    let trajectory_snapshot = build_trajectory_snapshot_summary(&store, session_id);
+
     let mut runtime = AgentExecutor::new(
         manifest,
         instructions,
@@ -54,10 +61,14 @@ pub async fn handle_watchdog(config_path: &Path, session_id: &str) -> anyhow::Re
         .with_config(gateway_config)
         .with_initial_user_message(format!(
             "Review session {} for trajectory divergence patterns.\n\
-             Use digest_query and execution_search to gather evidence, \
-             then produce a judgment. If you find critical divergence, \
-             escalate via session_escalate with high urgency.",
-            session_id
+             \n\
+             {}\n\
+             \n\
+             Use digest_query and execution_search to gather additional evidence \
+             if the snapshot above is missing or stale, then produce a judgment. \
+             If you find critical divergence, escalate via session_escalate with \
+             high urgency.",
+            session_id, trajectory_snapshot,
         ));
 
     let mut history = vec![
@@ -97,4 +108,78 @@ pub async fn handle_watchdog(config_path: &Path, session_id: &str) -> anyhow::Re
     }
 
     Ok(())
+}
+
+/// Build a short, human-readable trajectory snapshot for the kickoff
+/// message. Pulls the most recent `divergence.*` causal event from the
+/// store and renders its level + signal evidence. Returns a fallback
+/// string when no events are found so the watchdog still has a stable
+/// kickoff structure.
+fn build_trajectory_snapshot_summary(
+    store: &Arc<GatewayStore>,
+    target_session_id: &str,
+) -> String {
+    match store.search_causal_events(Some(target_session_id), None, 200) {
+        Ok(events) => {
+            let latest = events
+                .iter()
+                .find(|e| e.category == "divergence");
+            match latest {
+                Some(event) => {
+                    let level = event
+                        .payload
+                        .as_ref()
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                        .and_then(|v| v.get("level").and_then(|l| l.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_else(|| event.action.clone());
+                    let evidence: Vec<String> = event
+                        .payload
+                        .as_ref()
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                        .and_then(|v| {
+                            v.get("signals")
+                                .and_then(|s| s.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|sig| {
+                                            let kind = sig.get("kind")?.as_str()?;
+                                            let severity = sig.get("severity")?.as_str()?;
+                                            let ev = sig
+                                                .get("evidence")
+                                                .and_then(|e| e.as_str())
+                                                .unwrap_or("");
+                                            Some(format!("  - {} ({}): {}", kind, severity, ev))
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                        })
+                        .unwrap_or_default();
+                    if evidence.is_empty() {
+                        format!(
+                            "Layer 1 snapshot (most recent divergence event at {}):\n  level = {}",
+                            event.timestamp, level
+                        )
+                    } else {
+                        format!(
+                            "Layer 1 snapshot (most recent divergence event at {}):\n  level = {}\n  signals:\n{}",
+                            event.timestamp,
+                            level,
+                            evidence.join("\n")
+                        )
+                    }
+                }
+                None => {
+                    "Layer 1 snapshot: no divergence.* events recorded for this session yet. \
+                     The deterministic monitor either has not flagged anything or has not run; \
+                     gather evidence from scratch."
+                        .to_string()
+                }
+            }
+        }
+        Err(e) => format!(
+            "Layer 1 snapshot: unavailable (causal-event query failed: {}). \
+             Proceed by gathering evidence from scratch.",
+            e
+        ),
+    }
 }

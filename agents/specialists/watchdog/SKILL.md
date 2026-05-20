@@ -20,8 +20,11 @@ metadata:
       model: "google/gemini-3-flash-preview"
       temperature: 0.0
     capabilities:
-      - type: "SandboxFunctions"
-        allowed: ["digest_", "execution_"]
+      # digest_query gates on ReadAccess (see knowledge.rs::DigestQueryTool).
+      # execution_search and session_escalate are always available (no
+      # capability required); listing them here would be a no-op.
+      - type: "ReadAccess"
+        scopes: ["*"]
       - type: "AgentMessage"
         patterns: ["*"]
     execution_mode: "reasoning"

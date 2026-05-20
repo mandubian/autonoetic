@@ -2406,7 +2406,10 @@ impl AgentExecutor {
                                         );
                                     }
 
-                                    // Critical also escalates to the operator
+                                    // Critical also escalates to the operator via the
+                                    // user_interactions channel (per #241 spec — a
+                                    // non-blocking notification, not a gate). We also
+                                    // keep the causal event for durable audit.
                                     if matches!(result.health, TrajectoryHealth::Critical { .. }) {
                                         let notify_operator = cfg
                                             .map(|c| c.trajectory.notify_operator)
@@ -2424,6 +2427,60 @@ impl AgentExecutor {
                                                 })),
                                             ) {
                                                 tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to log operator_alert event");
+                                            }
+
+                                            if let Some(store) = self.gateway_store.as_ref() {
+                                                let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
+                                                let signals_summary = result
+                                                    .health
+                                                    .signals()
+                                                    .iter()
+                                                    .map(|s| {
+                                                        let kind = s.kind.as_str();
+                                                        match &s.evidence {
+                                                            Some(e) => format!("- {} ({}): {}", kind, s.severity.as_str(), e),
+                                                            None => format!("- {} ({})", kind, s.severity.as_str()),
+                                                        }
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n");
+                                                let interaction = autonoetic_types::background::UserInteraction {
+                                                    interaction_id: format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                                                    session_id: session_id.clone(),
+                                                    root_session_id: root_sid,
+                                                    agent_id: self.manifest.agent.id.clone(),
+                                                    turn_id: format!("turn-{:06}", self.turn_counter),
+                                                    kind: autonoetic_types::background::UserInteractionKind::Decision,
+                                                    question: format!(
+                                                        "Critical trajectory divergence in agent '{}' at turn {}. Acknowledge?",
+                                                        self.manifest.agent.id, self.turn_counter
+                                                    ),
+                                                    context: Some(if signals_summary.is_empty() {
+                                                        "See divergence.* events in the causal chain for details.".to_string()
+                                                    } else {
+                                                        format!("Signals:\n{}\n\nSee divergence.* events in the causal chain for full payload.", signals_summary)
+                                                    }),
+                                                    options: vec![autonoetic_types::background::UserInteractionOption {
+                                                        id: "ack".to_string(),
+                                                        label: "Acknowledge".to_string(),
+                                                        value: "acknowledged".to_string(),
+                                                    }],
+                                                    allow_freeform: false,
+                                                    status: autonoetic_types::background::UserInteractionStatus::Pending,
+                                                    answer_option_id: None,
+                                                    answer_text: None,
+                                                    answered_by: None,
+                                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                                    answered_at: None,
+                                                    expires_at: None,
+                                                    workflow_id: self.workflow_id.clone(),
+                                                    task_id: self.task_id.clone(),
+                                                    // No checkpoint — non-blocking notification.
+                                                    checkpoint_turn_id: None,
+                                                };
+                                                if let Err(e) = store.create_user_interaction(&interaction) {
+                                                    tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to create critical_divergence user_interaction");
+                                                }
                                             }
                                         }
                                     }

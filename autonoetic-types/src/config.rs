@@ -1834,9 +1834,13 @@ pub struct TrajectoryConfig {
     #[serde(default = "default_trajectory_notify_planner")]
     pub notify_planner: bool,
 
-    /// When `true` (default), the monitor emits an `operator_alert` causal
-    /// event on `Critical` level transitions (non-blocking, visible in the
-    /// causal chain for operator tooling).
+    /// When `true` (default), the monitor escalates to the operator on
+    /// `Critical` level transitions via two channels:
+    ///
+    /// 1. A non-blocking `user_interactions` row (operator can acknowledge
+    ///    via the chat TUI or REST API). The agent's turn is NOT suspended.
+    /// 2. An `operator_alert` causal event with the same payload, for
+    ///    durable audit-chain visibility.
     #[serde(default = "default_trajectory_notify_operator")]
     pub notify_operator: bool,
 
