@@ -1802,8 +1802,9 @@ pub struct TrajectoryConfig {
     #[serde(default = "default_trajectory_enabled")]
     pub enabled: bool,
 
-    /// Size of the sliding window (in turns) used by signals that depend
-    /// on recent history (`repetition_entropy`, `error_burst`).
+    /// Size of the sliding window. For `error_burst` this limits the number
+    /// of turns tracked; for `repetition_entropy` it limits the number of
+    /// individual tool-observation fingerprints (multiple per turn).
     #[serde(default = "default_trajectory_window")]
     pub window_size: usize,
 

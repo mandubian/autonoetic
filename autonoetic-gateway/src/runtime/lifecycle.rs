@@ -1314,7 +1314,9 @@ impl AgentExecutor {
             );
 
             // Stash context utilization for the trajectory monitor.
-            self.last_context_utilization = budget_breakdown.utilization_pct.map(|v| v as f32);
+            // `utilization_pct` is a 0-100 percentage; the monitor expects a
+            // 0.0-1.0 fraction.
+            self.last_context_utilization = budget_breakdown.utilization_pct.map(|v| v as f32 / 100.0);
 
             // --- Budget Enforcement + Context Compression (Context Governor) ---
             {
@@ -2326,11 +2328,18 @@ impl AgentExecutor {
                             .filter_map(|(id, _name, result)| {
                                 let tc = response.tool_calls.iter().find(|tc| tc.id == *id)?;
                                 let fp = fingerprint_tool_call(&tc.name, &tc.arguments);
-                                let failed = serde_json::from_str::<serde_json::Value>(result)
-                                    .ok()
-                                    .and_then(|v| v.get("ok")?.as_bool())
-                                    .map(|ok| !ok)
-                                    .unwrap_or(false);
+                                let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
+                                let failed = parsed.as_ref().map_or(false, |v| {
+                                    // Primary: ok:false
+                                    if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+                                        return true;
+                                    }
+                                    // Secondary: non-zero exit code (sandbox tools)
+                                    if let Some(code) = v.get("exit_code").and_then(|c| c.as_i64()) {
+                                        return code != 0;
+                                    }
+                                    false
+                                });
                                 Some(ToolObservation {
                                     fingerprint: fp,
                                     failed,

@@ -461,11 +461,12 @@ mod tests {
     }
 
     #[test]
-    fn first_tick_on_healthy_session_emits_no_level_change() {
-        // First tick after construction reports a level change *only*
-        // when the verdict is non-Healthy. A Healthy first tick should
-        // not trigger event emission downstream — there is no point in
-        // emitting a "healthy" event.
+    fn first_tick_on_healthy_session_level_changed_but_no_payload() {
+        // First tick after construction reports `level_changed = true`
+        // (no prior level to compare against), but since the verdict is
+        // `Healthy` the caller suppresses emission via
+        // `build_event_payload(None)`. The test validates this contract:
+        // changed but no payload.
         let mut mon = TrajectoryMonitor::new(cfg());
         let r = mon.tick(1, &[], None, &quiet_guard_state());
         assert!(matches!(r.health, TrajectoryHealth::Healthy));
