@@ -19,6 +19,8 @@ rules:
     tier: core
   - prefix: sandbox_exec
     tier: core
+  - prefix: sentinel_
+    tier: core
 
   # Workflow tier: orchestration and approval flow.
   - prefix: agent_spawn

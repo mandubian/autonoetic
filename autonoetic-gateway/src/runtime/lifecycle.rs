@@ -26,7 +26,7 @@ use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
 use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware};
 use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
-use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::config::{GatewayConfig, TrajectoryConfig};
 use autonoetic_types::disclosure::DisclosurePolicy;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -184,12 +184,18 @@ pub struct AgentExecutor {
     /// Context utilization fraction from the most recent prompt budget
     /// computation. Passed into the trajectory monitor each turn.
     pub last_context_utilization: Option<f32>,
+
+    /// Shared suppression target for `sentinel.suppress`. The tool writes a
+    /// turn counter here; the lifecycle reads it before emitting divergence
+    /// messages. A value of `0` means no suppression is active.
+    pub suppress_until_turn: Arc<AtomicU64>,
 }
 
 use crate::runtime::tool_dispatch::{
     loop_guard_from_config_and_manifest, tool_result_counts_as_progress,
 };
 pub use crate::runtime::tool_dispatch::determine_tool_tier_filter;
+use std::sync::atomic::AtomicU64;
 
 impl AgentExecutor {
     pub fn new(
@@ -241,6 +247,7 @@ impl AgentExecutor {
             extended_instructions: None,
             trajectory_monitor: TrajectoryMonitor::new(Default::default()),
             last_context_utilization: None,
+            suppress_until_turn: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -2007,6 +2014,7 @@ impl AgentExecutor {
                             live_report: self.live_report.clone(),
                             user_id: self.user_id.clone(),
                             artifact_id: self.artifact_id.clone(),
+                            sentinel_suppress_target: Some(self.suppress_until_turn.clone()),
                         }
                     });
                     let mut processor = ToolCallProcessor::new(
@@ -2370,6 +2378,93 @@ impl AgentExecutor {
                                         "Failed to log divergence event"
                                     );
                                 }
+                            }
+
+                            // ── P2: Planner messaging & operator escalation ──────
+                            use crate::runtime::trajectory_health::TrajectoryHealth;
+                            use std::sync::atomic::Ordering;
+
+                            let suppressed =
+                                self.turn_counter < self.suppress_until_turn.load(Ordering::Relaxed);
+                            let cfg = self.config.as_ref();
+
+                            match &result.health {
+                                TrajectoryHealth::Diverging { .. }
+                                | TrajectoryHealth::Critical { .. }
+                                    if !suppressed =>
+                                {
+                                    let notify_planner = cfg
+                                        .map(|c| c.trajectory.notify_planner)
+                                        .unwrap_or(true);
+                                    if notify_planner {
+                                        if let Some(store) = self.gateway_store.as_ref() {
+                                            let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
+                                            let now = chrono::Utc::now().to_rfc3339();
+                                            let level = result.health.level_str();
+                                            let msg_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                                            let message = format!(
+                                                "[Sentinel Notice]\n\
+                                                 Level: {}\n\
+                                                 Turn: {}\n\
+                                                 Agent: {}\n\
+                                                 The trajectory monitor has detected a divergence pattern. \
+                                                 Review the causal chain for divergence.* events.",
+                                                level,
+                                                self.turn_counter,
+                                                self.manifest.agent.id,
+                                            );
+                                            let record = crate::scheduler::gateway_store::AgentMessageRecord {
+                                                message_id: msg_id.clone(),
+                                                sender_session_id: "gateway:sentinel".to_string(),
+                                                sender_agent_id: "gateway".to_string(),
+                                                target_pattern: format!("session:{}", root_sid),
+                                                message,
+                                                created_at: now.clone(),
+                                            };
+                                            if let Err(e) = store.save_agent_message(&record) {
+                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to save divergence planner message");
+                                            } else if let Err(e) = store.insert_message_delivery(&msg_id, &root_sid) {
+                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to insert divergence message delivery");
+                                            } else {
+                                                let signal = crate::scheduler::signal::Signal::AgentMessage {
+                                                    message_id: msg_id.clone(),
+                                                    sender_session_id: "gateway:sentinel".to_string(),
+                                                    sender_agent_id: "gateway".to_string(),
+                                                    message: record.message.clone(),
+                                                    timestamp: now,
+                                                };
+                                                if let Err(e) = crate::scheduler::signal::write_signal(
+                                                    Some(store), &root_sid, &msg_id, &signal,
+                                                ) {
+                                                    tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to write divergence wake signal");
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Critical also escalates to the operator
+                                    if matches!(result.health, TrajectoryHealth::Critical { .. }) {
+                                        let notify_operator = cfg
+                                            .map(|c| c.trajectory.notify_operator)
+                                            .unwrap_or(true);
+                                        if notify_operator {
+                                            if let Err(e) = tracer.log_event(
+                                                "operator_alert",
+                                                "critical_divergence",
+                                                EntryStatus::Success,
+                                                Some(serde_json::json!({
+                                                    "level": "critical",
+                                                    "turn": self.turn_counter,
+                                                    "agent_id": self.manifest.agent.id,
+                                                    "message": "Trajectory divergence has reached critical level. Review divergence.* events in the causal chain.",
+                                                })),
+                                            ) {
+                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to log operator_alert event");
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }

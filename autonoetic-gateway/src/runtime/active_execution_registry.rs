@@ -2,6 +2,7 @@
 //! child PIDs for emergency stop.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use tokio::task::AbortHandle;
 
@@ -20,6 +21,10 @@ pub struct NativeToolRunContext {
     pub user_id: Option<String>,
     /// Artifact ID whose layers should be auto-mounted into sandbox.exec calls.
     pub artifact_id: Option<String>,
+    /// Shared suppression target for `sentinel.suppress`. The tool writes a
+    /// suppress-until turn counter here; the lifecycle reads it after tool
+    /// batches to gate divergence messaging.
+    pub sentinel_suppress_target: Option<Arc<AtomicU64>>,
 }
 
 #[derive(Clone)]
