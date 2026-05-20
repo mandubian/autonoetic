@@ -409,6 +409,10 @@ struct RevisionCreateFromIntentArgs {
     summary: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    /// When true, automatically archives any existing active revision before
+    /// creating the new one. Required when updating an already-installed agent.
+    #[serde(default)]
+    replace: bool,
 }
 
 #[derive(Debug)]
@@ -1082,7 +1086,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     },
                     "middleware": { "type": "object" },
                     "base_revision_id": { "type": "string" },
-                    "summary": { "type": "string" }
+                    "summary": { "type": "string" },
+                    "replace": { "type": "boolean", "description": "Set to true to archive the existing active revision and install this as the new one. Required when updating an already-installed agent." }
                 },
                 "required": ["agent_id", "instructions", "description", "capabilities"],
                 "additionalProperties": false
@@ -1146,35 +1151,42 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
 
         let existing = gateway_store.list_agent_revisions(&args.agent_id)?;
-        let has_active = existing.iter().any(|rev| {
-            matches!(
-                rev.status,
-                autonoetic_types::agent_revision::AgentRevisionStatus::Ready
-                    | autonoetic_types::agent_revision::AgentRevisionStatus::Candidate
-            )
-        });
-        if has_active {
-            let active: Vec<&str> = existing
-                .iter()
-                .filter(|rev| {
-                    matches!(
-                        rev.status,
-                        autonoetic_types::agent_revision::AgentRevisionStatus::Ready
-                            | autonoetic_types::agent_revision::AgentRevisionStatus::Candidate
-                    )
-                })
-                .map(|r| r.revision_id.as_str())
-                .collect();
-            return Ok(ToolError::fatal(
-                format!(
-                    "Agent '{}' already has an active revision ({}). \
-                     Use agent_exists to check before installing. \
-                     If you need to update, the existing revision must be archived first.",
-                    args.agent_id,
-                    active.join(", ")
-                ),
-                None::<String>,
-            ).to_error_response());
+        let active_revisions: Vec<String> = existing
+            .iter()
+            .filter(|rev| {
+                matches!(
+                    rev.status,
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Ready
+                        | autonoetic_types::agent_revision::AgentRevisionStatus::Candidate
+                )
+            })
+            .map(|r| r.revision_id.clone())
+            .collect();
+        if !active_revisions.is_empty() {
+            if args.replace {
+                // Archive all active revisions before installing the new one.
+                for rev_id in &active_revisions {
+                    gateway_store
+                        .update_agent_revision_status(
+                            rev_id,
+                            autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to archive existing revision {}: {}", rev_id, e)
+                        })?;
+                }
+            } else {
+                return Ok(ToolError::fatal(
+                    format!(
+                        "Agent '{}' already has an active revision ({}). \
+                         Use agent_exists to check before installing. \
+                         If you need to update, pass replace: true to archive the existing revision first.",
+                        args.agent_id,
+                        active_revisions.join(", ")
+                    ),
+                    None::<String>,
+                ).to_error_response());
+            }
         }
 
         let resolved_artifact = resolve_revision_artifact_input(
