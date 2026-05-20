@@ -11,8 +11,11 @@
 //! - The watchdog has live tools (`agent_message`, `session_escalate`)
 //!   that write to the gateway store. Running this experiment against
 //!   real sessions therefore creates real side-effect rows (notices to
-//!   planners, operator escalations). The harness reports a side-effect
-//!   summary so the operator can clean up afterward if needed.
+//!   planners, operator escalations). For each session, the harness
+//!   snapshots the undelivered-message count and pending-interaction
+//!   count before and after the watchdog runs, and reports the deltas
+//!   in a "Side-Effect Summary" section of the markdown report so the
+//!   operator can clean up afterward.
 //! - Layer 1's verdict for an archived session is "the highest
 //!   divergence level reached during the session", read from the
 //!   already-persisted `divergence.*` causal events.
@@ -116,6 +119,14 @@ pub struct ExperimentRow {
     pub watchdog_flagged: bool,
     /// Wall-clock seconds the watchdog took to produce its reply.
     pub watchdog_wall_secs: Option<f64>,
+    /// Net new `agent_messages` from `sender_session_id="gateway:sentinel"`
+    /// observed on this session after the watchdog ran. Operator-visible
+    /// side effect that may need cleanup.
+    pub new_sentinel_messages: u32,
+    /// Net new pending `user_interactions` observed on this session
+    /// after the watchdog ran. Operator-visible side effect that may
+    /// need cleanup.
+    pub new_pending_interactions: u32,
 }
 
 /// 2x2 confusion matrix counts.
@@ -263,6 +274,10 @@ pub async fn handle_sentinel_experiment(
         // Layer 1 verdict: highest divergence level reached.
         let (layer1_level, layer1_flagged) = highest_divergence_level(&store, &entry.session_id);
 
+        // Snapshot side-effect-relevant state BEFORE the watchdog runs
+        // so we can compute the delta and report a cleanup checklist.
+        let (pre_msgs, pre_interactions) = snapshot_side_effects(&store, &entry.session_id);
+
         // Watchdog verdict: either run live or use the cached reply.
         let (watchdog_reply, watchdog_outcome, watchdog_wall_secs) = if args.skip_watchdog {
             match &entry.cached_watchdog_reply {
@@ -282,6 +297,10 @@ pub async fn handle_sentinel_experiment(
             (run.reply, run.outcome_tag, Some(elapsed))
         };
 
+        let (post_msgs, post_interactions) = snapshot_side_effects(&store, &entry.session_id);
+        let new_sentinel_messages = post_msgs.saturating_sub(pre_msgs);
+        let new_pending_interactions = post_interactions.saturating_sub(pre_interactions);
+
         let watchdog_flagged = classify_watchdog_reply(watchdog_reply.as_deref());
 
         layer1.record(label, layer1_flagged);
@@ -297,6 +316,8 @@ pub async fn handle_sentinel_experiment(
             watchdog_outcome,
             watchdog_flagged,
             watchdog_wall_secs,
+            new_sentinel_messages,
+            new_pending_interactions,
         });
     }
 
@@ -325,6 +346,27 @@ pub async fn handle_sentinel_experiment(
         decision.watchdog_fpr,
     );
     Ok(())
+}
+
+/// Snapshot the counts of watchdog-attributable side-effect rows for
+/// the given session. Returns `(undelivered_sentinel_messages,
+/// pending_interactions)`. Errors are coerced to `(0, 0)` — a query
+/// failure should not abort the experiment, only forfeit the delta
+/// signal for that session.
+fn snapshot_side_effects(store: &Arc<GatewayStore>, session_id: &str) -> (u32, u32) {
+    let msgs = store
+        .fetch_undelivered_messages(session_id)
+        .map(|msgs| {
+            msgs.iter()
+                .filter(|m| m.sender_session_id.starts_with("gateway"))
+                .count() as u32
+        })
+        .unwrap_or(0);
+    let interactions = store
+        .get_pending_interactions_for_session(session_id)
+        .map(|v| v.len() as u32)
+        .unwrap_or(0);
+    (msgs, interactions)
 }
 
 /// Return the highest divergence level reached for the session, by
@@ -402,10 +444,10 @@ fn render_report(
     let _ = writeln!(out);
 
     let _ = writeln!(out, "## Per-Session Results\n");
-    let _ = writeln!(out, "| Session | Label | Layer 1 level | L1 flagged | Watchdog flagged | Watchdog outcome | Wall (s) |");
-    let _ = writeln!(out, "|---|---|---|---|---|---|---|");
+    let _ = writeln!(out, "| Session | Label | Layer 1 level | L1 flagged | Watchdog flagged | Watchdog outcome | Wall (s) | New msgs | New interactions |");
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|");
     for r in rows {
-        let _ = writeln!(out, "| `{}` | {} | {} | {} | {} | `{}` | {} |",
+        let _ = writeln!(out, "| `{}` | {} | {} | {} | {} | `{}` | {} | {} | {} |",
             r.session_id,
             r.label,
             r.layer1_highest_level.as_deref().unwrap_or("—"),
@@ -413,9 +455,41 @@ fn render_report(
             if r.watchdog_flagged { "yes" } else { "no" },
             r.watchdog_outcome,
             r.watchdog_wall_secs.map(|s| format!("{:.1}", s)).unwrap_or_else(|| "—".into()),
+            r.new_sentinel_messages,
+            r.new_pending_interactions,
         );
     }
     let _ = writeln!(out);
+
+    // ── Side-effect summary ────────────────────────────────────────────
+    let total_new_msgs: u32 = rows.iter().map(|r| r.new_sentinel_messages).sum();
+    let total_new_interactions: u32 = rows.iter().map(|r| r.new_pending_interactions).sum();
+    let sessions_with_msgs: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.new_sentinel_messages > 0)
+        .map(|r| r.session_id.as_str())
+        .collect();
+    let sessions_with_interactions: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.new_pending_interactions > 0)
+        .map(|r| r.session_id.as_str())
+        .collect();
+    let _ = writeln!(out, "## Side-Effect Summary\n");
+    let _ = writeln!(out, "The watchdog has live messaging tools — when it judges a session divergent it writes real rows to the gateway store. The experiment ran against archived sessions, so this state is contamination that may need cleanup.\n");
+    let _ = writeln!(out, "| Side-effect | Total new | Affected sessions |");
+    let _ = writeln!(out, "|---|---|---|");
+    let _ = writeln!(out, "| undelivered `agent_messages` from `gateway:sentinel` | {} | {} |",
+        total_new_msgs,
+        if sessions_with_msgs.is_empty() { "(none)".to_string() } else { sessions_with_msgs.join(", ") });
+    let _ = writeln!(out, "| pending `user_interactions` | {} | {} |",
+        total_new_interactions,
+        if sessions_with_interactions.is_empty() { "(none)".to_string() } else { sessions_with_interactions.join(", ") });
+    let _ = writeln!(out);
+    if total_new_msgs > 0 || total_new_interactions > 0 {
+        let _ = writeln!(out, "See `docs/design/divergence-sentinel-validation.md` §2.4 for the SQL cleanup snippet.\n");
+    } else {
+        let _ = writeln!(out, "No new side-effect rows recorded — the watchdog did not flag any session loudly. (Note: deltas use `fetch_undelivered_messages` + `get_pending_interactions_for_session`, so messages consumed by an active planner or interactions answered between snapshots will not be counted.)\n");
+    }
 
     if !parse_errors.is_empty() {
         let _ = writeln!(out, "## Parse errors\n");
