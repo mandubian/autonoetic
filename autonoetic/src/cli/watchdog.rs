@@ -5,13 +5,32 @@ use anyhow::Context;
 use tracing::info;
 
 use autonoetic_gateway::llm::{build_driver, Message};
-use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
+use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::AgentRepository;
 
-/// Run the divergence watchdog against a target session.
-pub async fn handle_watchdog(config_path: &Path, session_id: &str) -> anyhow::Result<()> {
+/// Structured result from a single watchdog invocation. Consumed by the
+/// `sentinel-experiment` harness; the user-facing CLI just prints `reply`.
+pub struct WatchdogRun {
+    pub reply: Option<String>,
+    /// Human-readable description of how the run terminated. `Completed`
+    /// for normal termination, otherwise an `[interrupted]` / `[suspended]`
+    /// tag with detail. Used by the harness to classify abnormal runs.
+    pub outcome_tag: String,
+}
+
+/// Programmatic entry point. Builds an isolated watchdog executor against
+/// the given session_id, runs one execute_with_history pass, and returns
+/// the captured reply.
+///
+/// The CLI wrapper [`handle_watchdog`] forwards to this and prints the
+/// reply. The experiment harness uses this directly so it can capture
+/// the reply and classify it.
+pub async fn run_watchdog(
+    config_path: &Path,
+    session_id: &str,
+) -> anyhow::Result<WatchdogRun> {
     info!(
         target: "watchdog",
         session_id = %session_id,
@@ -76,37 +95,40 @@ pub async fn handle_watchdog(config_path: &Path, session_id: &str) -> anyhow::Re
         Message::user(runtime.initial_user_message.clone()),
     ];
 
-    match runtime.execute_with_history(&mut history).await {
-        Ok(outcome) => match &outcome {
-            autonoetic_gateway::runtime::lifecycle::TurnOutcome::Completed(Some(reply)) => {
-                println!("{}", reply);
-            }
-            autonoetic_gateway::runtime::lifecycle::TurnOutcome::Completed(None) => {
-                println!("[Watchdog produced no judgment]");
-            }
-            autonoetic_gateway::runtime::lifecycle::TurnOutcome::Suspended {
-                approval_request_id,
-                ..
-            } => {
-                println!(
-                    "[Watchdog suspended for approval: {}]",
-                    approval_request_id
-                );
-            }
-            autonoetic_gateway::runtime::lifecycle::TurnOutcome::SuspendedUserInput {
-                interaction_id,
-            } => {
-                println!("[Watchdog waiting for input: {}]", interaction_id);
-            }
-            other => {
-                println!("[Watchdog interrupted: {:?}]", other);
-            }
+    let result = match runtime.execute_with_history(&mut history).await {
+        Ok(TurnOutcome::Completed(reply)) => WatchdogRun {
+            reply,
+            outcome_tag: "completed".to_string(),
         },
-        Err(e) => {
-            eprintln!("Watchdog error: {}", e);
-        }
-    }
+        Ok(TurnOutcome::Suspended { approval_request_id, .. }) => WatchdogRun {
+            reply: None,
+            outcome_tag: format!("suspended_for_approval:{}", approval_request_id),
+        },
+        Ok(TurnOutcome::SuspendedUserInput { interaction_id }) => WatchdogRun {
+            reply: None,
+            outcome_tag: format!("waiting_for_input:{}", interaction_id),
+        },
+        Ok(other) => WatchdogRun {
+            reply: None,
+            outcome_tag: format!("interrupted:{:?}", other),
+        },
+        Err(e) => WatchdogRun {
+            reply: None,
+            outcome_tag: format!("error:{}", e),
+        },
+    };
 
+    Ok(result)
+}
+
+/// Run the divergence watchdog against a target session and print the
+/// reply. Thin wrapper over [`run_watchdog`].
+pub async fn handle_watchdog(config_path: &Path, session_id: &str) -> anyhow::Result<()> {
+    let run = run_watchdog(config_path, session_id).await?;
+    match run.reply {
+        Some(reply) => println!("{}", reply),
+        None => println!("[Watchdog produced no reply — outcome: {}]", run.outcome_tag),
+    }
     Ok(())
 }
 
