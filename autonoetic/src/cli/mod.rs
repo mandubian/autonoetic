@@ -9,3 +9,4 @@ pub mod recording;
 pub mod run;
 pub mod security;
 pub mod trace;
+pub mod watchdog;

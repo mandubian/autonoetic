@@ -627,6 +627,9 @@ async fn main() -> anyhow::Result<()> {
                 cli::recording::handle_recording_cancel(&config_path, session_id)?;
             }
         },
+        Commands::Watchdog(args) => {
+            cli::watchdog::handle_watchdog(&config_path, &args.session_id).await?;
+        }
     }
 
     Ok(())

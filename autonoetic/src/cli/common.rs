@@ -167,6 +167,8 @@ pub enum Commands {
     Eval(EvalArgs),
     /// Post-promotion review status
     Review(ReviewArgs),
+    /// Launch the divergence watchdog against a session
+    Watchdog(WatchdogArgs),
 }
 
 /// Arguments for the all-in-one `run` command.
@@ -1474,6 +1476,13 @@ pub enum ReviewCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Launch the divergence watchdog against a session.
+#[derive(Args)]
+pub struct WatchdogArgs {
+    /// Target session ID to review.
+    pub session_id: String,
 }
 
 #[cfg(test)]
