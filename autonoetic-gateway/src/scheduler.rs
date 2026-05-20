@@ -1388,10 +1388,11 @@ async fn spawn_task_execution(
 
             let summary = spawn_result.assistant_reply.as_ref().map(|s| {
                 const MAX: usize = 512;
-                if s.len() <= MAX {
+                if s.chars().count() <= MAX {
                     s.clone()
                 } else {
-                    format!("{}…", &s[..MAX])
+                    let safe: String = s.chars().take(MAX).collect();
+                    format!("{}…", safe)
                 }
             });
             if let Err(e) = workflow_store::update_task_run_status(
@@ -1415,7 +1416,14 @@ async fn spawn_task_execution(
                 "completed".to_string(),
                 serde_json::json!({
                     "status": "succeeded",
-                    "result_summary": spawn_result.assistant_reply.as_ref().map(|s| &s[..s.floor_char_boundary(200)]),
+                    "result_summary": spawn_result.assistant_reply.as_ref().map(|s| {
+                        let max = 200;
+                        if s.chars().count() <= max {
+                            s.clone()
+                        } else {
+                            s.chars().take(max).collect::<String>()
+                        }
+                    }),
                 }),
             );
             let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
