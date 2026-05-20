@@ -125,6 +125,56 @@ pub fn extract_artifact_source(gw_dir: &Path, artifact_id: &str) -> String {
     artifact_code
 }
 
+/// Extract a single named file from an artifact.
+fn extract_artifact_file_source(gw_dir: &Path, artifact_id: &str, filename: &str) -> Option<String> {
+    let store = crate::artifact_store::ArtifactStore::new(gw_dir).ok()?;
+    let bundle = store.inspect(artifact_id).ok()?;
+    let content_store = crate::runtime::content_store::ContentStore::new(gw_dir).ok()?;
+    for file in &bundle.files {
+        if file.name.ends_with(&format!("/{}", filename)) || file.name == filename {
+            if let Ok(content) = content_store.read(&file.handle) {
+                return String::from_utf8(content).ok();
+            }
+        }
+    }
+    None
+}
+
+/// If the command runs a test runner against a specific test file, return
+/// the test filename. This is used to scope artifact-level remote-access
+/// analysis to only the test file, avoiding false positives from application
+/// code that imports network libraries but is never called during tests.
+fn extract_test_target_from_command(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    let after_prefix = trimmed
+        .split("&&")
+        .last()
+        .map(|s| s.trim())
+        .unwrap_or(trimmed);
+    for python_cmd in &["python3", "python", "python3.11", "python3.12"] {
+        if !after_prefix.starts_with(python_cmd) && !after_prefix.starts_with(&format!("{} ", python_cmd)) {
+            continue;
+        }
+        let after_python = after_prefix[python_cmd.len()..].trim();
+        if let Some(rest) = after_python.strip_prefix("-m unittest") {
+            let module = rest.trim().split_whitespace().next()?;
+            let module_name = module.split('.').next()?;
+            return Some(format!("{}.py", module_name));
+        }
+        if !after_python.starts_with('-') {
+            let first_arg = after_python.split_whitespace().next()?;
+            let filename = std::path::Path::new(first_arg)
+                .file_name()?
+                .to_string_lossy()
+                .to_string();
+            if (filename.starts_with("test_") || filename.ends_with("_test.py")) && filename.ends_with(".py") {
+                return Some(filename);
+            }
+        }
+    }
+    None
+}
+
 pub fn extract_and_cache_artifact_analysis(
     gw_dir: &Path,
     artifact_id: &str,
@@ -1054,17 +1104,37 @@ impl NativeTool for SandboxExecTool {
         > = None;
         let code_to_analyze = if let Some(ref aid) = explicit_mount_artifact_id {
             if let Some(gw_dir) = gateway_dir {
-                match extract_and_cache_artifact_analysis(gw_dir, aid) {
-                    Some((code, analysis)) => {
+                // When the command is a test runner, analyze only the test file
+                // instead of the full artifact. This avoids false positives from
+                // application code that imports network libraries but is never
+                // called during tests (mocked with unittest.mock.patch).
+                let test_filename = extract_test_target_from_command(&effective_command);
+                if let Some(ref test_file) = test_filename {
+                    if let Some(test_code) = extract_artifact_file_source(gw_dir, aid, test_file) {
+                        let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&test_code);
                         artifact_analysis_override = Some(analysis);
-                        code
+                        test_code
+                    } else {
+                        extract_code_for_analysis(
+                            &effective_command,
+                            agent_dir,
+                            gateway_dir,
+                            session_id,
+                        )
                     }
-                    None => extract_code_for_analysis(
-                        &effective_command,
-                        agent_dir,
-                        gateway_dir,
-                        session_id,
-                    ),
+                } else {
+                    match extract_and_cache_artifact_analysis(gw_dir, aid) {
+                        Some((code, analysis)) => {
+                            artifact_analysis_override = Some(analysis);
+                            code
+                        }
+                        None => extract_code_for_analysis(
+                            &effective_command,
+                            agent_dir,
+                            gateway_dir,
+                            session_id,
+                        ),
+                    }
                 }
             } else {
                 extract_code_for_analysis(&effective_command, agent_dir, gateway_dir, session_id)
