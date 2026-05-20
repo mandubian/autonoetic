@@ -2393,53 +2393,17 @@ impl AgentExecutor {
                                 | TrajectoryHealth::Critical { .. }
                                     if !suppressed =>
                                 {
-                                    let notify_planner = cfg
-                                        .map(|c| c.trajectory.notify_planner)
-                                        .unwrap_or(true);
-                                    if notify_planner {
-                                        if let Some(store) = self.gateway_store.as_ref() {
-                                            let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
-                                            let now = chrono::Utc::now().to_rfc3339();
-                                            let level = result.health.level_str();
-                                            let msg_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                                            let message = format!(
-                                                "[Sentinel Notice]\n\
-                                                 Level: {}\n\
-                                                 Turn: {}\n\
-                                                 Agent: {}\n\
-                                                 The trajectory monitor has detected a divergence pattern. \
-                                                 Review the causal chain for divergence.* events.",
-                                                level,
-                                                self.turn_counter,
-                                                self.manifest.agent.id,
-                                            );
-                                            let record = crate::scheduler::gateway_store::AgentMessageRecord {
-                                                message_id: msg_id.clone(),
-                                                sender_session_id: "gateway:sentinel".to_string(),
-                                                sender_agent_id: "gateway".to_string(),
-                                                target_pattern: format!("session:{}", root_sid),
-                                                message,
-                                                created_at: now.clone(),
-                                            };
-                                            if let Err(e) = store.save_agent_message(&record) {
-                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to save divergence planner message");
-                                            } else if let Err(e) = store.insert_message_delivery(&msg_id, &root_sid) {
-                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to insert divergence message delivery");
-                                            } else {
-                                                let signal = crate::scheduler::signal::Signal::AgentMessage {
-                                                    message_id: msg_id.clone(),
-                                                    sender_session_id: "gateway:sentinel".to_string(),
-                                                    sender_agent_id: "gateway".to_string(),
-                                                    message: record.message.clone(),
-                                                    timestamp: now,
-                                                };
-                                                if let Err(e) = crate::scheduler::signal::write_signal(
-                                                    Some(store), &root_sid, &msg_id, &signal,
-                                                ) {
-                                                    tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to write divergence wake signal");
-                                                }
-                                            }
-                                        }
+                                    if let Some(store) = self.gateway_store.as_ref() {
+                                        let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
+                                        Self::send_divergence_notice(
+                                            store,
+                                            &root_sid,
+                                            self.turn_counter,
+                                            &self.manifest.agent.id,
+                                            result.health.level_str(),
+                                            &self.suppress_until_turn,
+                                            cfg.map(|c| c.trajectory.notify_planner).unwrap_or(true),
+                                        );
                                     }
 
                                     // Critical also escalates to the operator
@@ -2630,6 +2594,69 @@ impl AgentExecutor {
         let outcome = Ok(TurnOutcome::Completed(reply));
         self.last_history = history.clone();
         outcome
+    }
+
+    /// Send a divergence notice to the root planner if not suppressed.
+    /// Returns true if a message was sent, false if suppressed or
+    /// notify_planner is false. Errors during persistence are logged
+    /// but not returned (best-effort delivery).
+    pub fn send_divergence_notice(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        root_session_id: &str,
+        turn_counter: u64,
+        agent_id: &str,
+        level: &str,
+        suppress_until: &AtomicU64,
+        notify_planner: bool,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        if turn_counter < suppress_until.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !notify_planner {
+            return false;
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let msg_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let message = format!(
+            "[Sentinel Notice]\n\
+             Level: {}\n\
+             Turn: {}\n\
+             Agent: {}\n\
+             The trajectory monitor has detected a divergence pattern. \
+             Review the causal chain for divergence.* events.",
+            level, turn_counter, agent_id,
+        );
+        let record = crate::scheduler::gateway_store::AgentMessageRecord {
+            message_id: msg_id.clone(),
+            sender_session_id: "gateway:sentinel".to_string(),
+            sender_agent_id: "gateway".to_string(),
+            target_pattern: format!("session:{}", root_session_id),
+            message,
+            created_at: now.clone(),
+        };
+        if let Err(e) = store.save_agent_message(&record) {
+            tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to save divergence planner message");
+            return false;
+        }
+        if let Err(e) = store.insert_message_delivery(&msg_id, root_session_id) {
+            tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to insert divergence message delivery");
+            return false;
+        }
+        let signal = crate::scheduler::signal::Signal::AgentMessage {
+            message_id: msg_id.clone(),
+            sender_session_id: "gateway:sentinel".to_string(),
+            sender_agent_id: "gateway".to_string(),
+            message: record.message,
+            timestamp: now,
+        };
+        if let Err(e) = crate::scheduler::signal::write_signal(
+            Some(store), root_session_id, &msg_id, &signal,
+        ) {
+            tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to write divergence wake signal");
+        }
+        true
     }
 }
 

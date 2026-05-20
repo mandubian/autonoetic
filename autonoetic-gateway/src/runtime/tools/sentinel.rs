@@ -98,6 +98,7 @@ impl NativeTool for SentinelSuppressTool {
         };
 
         let suppress_until = current_turn + clamped as u64;
+        let reason = args.reason.clone();
 
         let target = match run_context.and_then(|ctx| ctx.sentinel_suppress_target.as_ref()) {
             Some(t) => t,
@@ -116,7 +117,7 @@ impl NativeTool for SentinelSuppressTool {
             current_turn,
             clamped,
             suppress_until,
-            reason = args.reason.as_deref().unwrap_or(""),
+            reason = reason.as_deref().unwrap_or(""),
             "sentinel.suppress activated"
         );
 
@@ -141,13 +142,13 @@ impl NativeTool for SentinelSuppressTool {
                         "suppress_until_turn": suppress_until,
                         "current_turn": current_turn,
                         "max_allowed": max_turns,
-                        "reason": args.reason,
+                        "reason": reason.clone(),
                     })
                     .to_string(),
                 ),
                 payload_ref: None,
                 evidence_ref: None,
-                reason: args.reason.clone(),
+                reason: reason.clone(),
             };
             if let Err(e) = store.create_causal_event(&event) {
                 tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to log sentinel.suppress_activated causal event");
@@ -160,7 +161,7 @@ impl NativeTool for SentinelSuppressTool {
             "suppress_until_turn": suppress_until,
             "current_turn": current_turn,
             "max_allowed": max_turns,
-            "reason": args.reason,
+            "reason": reason,
         })
         .to_string())
     }
