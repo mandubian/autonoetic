@@ -26,7 +26,7 @@ use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
 use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware};
 use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
-use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::config::{GatewayConfig, TrajectoryConfig};
 use autonoetic_types::disclosure::DisclosurePolicy;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -2413,10 +2413,9 @@ impl AgentExecutor {
                                                 self.turn_counter,
                                                 self.manifest.agent.id,
                                             );
-                                            let msg_id_clone = msg_id.clone();
                                             let record = crate::scheduler::gateway_store::AgentMessageRecord {
-                                                message_id: msg_id_clone,
-                                                sender_session_id: format!("gateway:{}", self.manifest.agent.id),
+                                                message_id: msg_id.clone(),
+                                                sender_session_id: "gateway:sentinel".to_string(),
                                                 sender_agent_id: "gateway".to_string(),
                                                 target_pattern: format!("session:{}", root_sid),
                                                 message,
@@ -2424,18 +2423,21 @@ impl AgentExecutor {
                                             };
                                             if let Err(e) = store.save_agent_message(&record) {
                                                 tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to save divergence planner message");
+                                            } else if let Err(e) = store.insert_message_delivery(&msg_id, &root_sid) {
+                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to insert divergence message delivery");
                                             } else {
-                                                let _ = store.insert_message_delivery(&msg_id, &root_sid);
                                                 let signal = crate::scheduler::signal::Signal::AgentMessage {
                                                     message_id: msg_id.clone(),
-                                                    sender_session_id: record.sender_session_id.clone(),
-                                                    sender_agent_id: record.sender_agent_id.clone(),
+                                                    sender_session_id: "gateway:sentinel".to_string(),
+                                                    sender_agent_id: "gateway".to_string(),
                                                     message: record.message.clone(),
                                                     timestamp: now,
                                                 };
-                                                let _ = crate::scheduler::signal::write_signal(
+                                                if let Err(e) = crate::scheduler::signal::write_signal(
                                                     Some(store), &root_sid, &msg_id, &signal,
-                                                );
+                                                ) {
+                                                    tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to write divergence wake signal");
+                                                }
                                             }
                                         }
                                     }
@@ -2446,7 +2448,7 @@ impl AgentExecutor {
                                             .map(|c| c.trajectory.notify_operator)
                                             .unwrap_or(true);
                                         if notify_operator {
-                                            let _ = tracer.log_event(
+                                            if let Err(e) = tracer.log_event(
                                                 "operator_alert",
                                                 "critical_divergence",
                                                 EntryStatus::Success,
@@ -2456,7 +2458,9 @@ impl AgentExecutor {
                                                     "agent_id": self.manifest.agent.id,
                                                     "message": "Trajectory divergence has reached critical level. Review divergence.* events in the causal chain.",
                                                 })),
-                                            );
+                                            ) {
+                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to log operator_alert event");
+                                            }
                                         }
                                     }
                                 }

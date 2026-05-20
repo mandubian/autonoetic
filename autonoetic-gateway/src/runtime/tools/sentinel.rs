@@ -3,6 +3,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::config::TrajectoryConfig;
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
@@ -33,8 +34,7 @@ impl NativeTool for SentinelSuppressTool {
                     "turns": {
                         "type": "integer",
                         "description": "Number of turns to suppress divergence messages for (clamped to suppress_max_turns)",
-                        "minimum": 1,
-                        "maximum": 100
+                        "minimum": 1
                     }
                 },
                 "required": ["turns"],
@@ -73,33 +73,35 @@ impl NativeTool for SentinelSuppressTool {
 
         let max_turns = config
             .map(|c| c.trajectory.suppress_max_turns)
-            .unwrap_or(10);
+            .unwrap_or(TrajectoryConfig::default().suppress_max_turns);
         let clamped = args.turns.min(max_turns);
 
-        let current_turn: u64 = turn_id
-            .and_then(|id| id.strip_prefix("turn-"))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let current_turn: u64 = match turn_id.and_then(|id| id.strip_prefix("turn-")).and_then(|s| s.parse().ok()) {
+            Some(t) => t,
+            None => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "internal",
+                    "error": "invalid_turn_context",
+                    "message": "sentinel.suppress requires a valid turn_id (turn-<N>)".to_string(),
+                }).to_string());
+            }
+        };
 
         let suppress_until = current_turn + clamped as u64;
 
-        if let Some(ctx) = run_context {
-            if let Some(target) = &ctx.sentinel_suppress_target {
-                target.store(suppress_until, Ordering::Release);
-                tracing::debug!(
-                    target: "autonoetic::trajectory",
-                    current_turn,
-                    clamped,
-                    suppress_until,
-                    "sentinel.suppress activated"
-                );
-            } else {
-                tracing::warn!(
-                    target: "autonoetic::trajectory",
-                    "sentinel.suppress called but no shared suppression target available"
-                );
-            }
-        }
+        let target = run_context
+            .and_then(|ctx| ctx.sentinel_suppress_target.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("sentinel.suppress: suppression target unavailable (no active session context)"))?;
+
+        target.store(suppress_until, Ordering::Release);
+        tracing::debug!(
+            target: "autonoetic::trajectory",
+            current_turn,
+            clamped,
+            suppress_until,
+            "sentinel.suppress activated"
+        );
 
         Ok(serde_json::json!({
             "ok": true,

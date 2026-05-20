@@ -1830,12 +1830,13 @@ pub struct TrajectoryConfig {
     pub context_pressure: TrajectoryContextPressureConfig,
 
     /// When `true` (default), the monitor sends an `agent.message` to the
-    /// root planner on `Diverging` level transitions.
+    /// root planner on `Diverging` and `Critical` level transitions.
     #[serde(default = "default_trajectory_notify_planner")]
     pub notify_planner: bool,
 
-    /// When `true` (default), the monitor notifies the operator via
-    /// `user_interactions` on `Critical` level transitions.
+    /// When `true` (default), the monitor emits an `operator_alert` causal
+    /// event on `Critical` level transitions (non-blocking, visible in the
+    /// causal chain for operator tooling).
     #[serde(default = "default_trajectory_notify_operator")]
     pub notify_operator: bool,
 
