@@ -79,20 +79,26 @@ impl NativeTool for SentinelSuppressTool {
         let current_turn: u64 = match turn_id.and_then(|id| id.strip_prefix("turn-")).and_then(|s| s.parse().ok()) {
             Some(t) => t,
             None => {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "internal",
-                    "error": "invalid_turn_context",
-                    "message": "sentinel.suppress requires a valid turn_id (turn-<N>)".to_string(),
-                }).to_string());
+                return Ok(ToolError::resource(
+                    "sentinel.suppress requires a valid turn_id (turn-<N>) — no active turn context",
+                    Some("invoke this tool only from within an agent turn"),
+                )
+                .to_error_response());
             }
         };
 
         let suppress_until = current_turn + clamped as u64;
 
-        let target = run_context
-            .and_then(|ctx| ctx.sentinel_suppress_target.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("sentinel.suppress: suppression target unavailable (no active session context)"))?;
+        let target = match run_context.and_then(|ctx| ctx.sentinel_suppress_target.as_ref()) {
+            Some(t) => t,
+            None => {
+                return Ok(ToolError::resource(
+                    "sentinel.suppress: suppression target unavailable (no active session context)",
+                    Some("ensure the tool is invoked from a live agent session"),
+                )
+                .to_error_response());
+            }
+        };
 
         target.store(suppress_until, Ordering::Release);
         tracing::debug!(
