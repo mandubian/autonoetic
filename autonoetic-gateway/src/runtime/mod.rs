@@ -57,3 +57,4 @@ pub mod tool_call_processor;
 pub mod tool_dispatch;
 pub mod tool_tier_registry;
 pub mod tools;
+pub mod trajectory_health;
