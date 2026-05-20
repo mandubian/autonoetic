@@ -104,6 +104,65 @@ impl ExecuteLoopTermination {
     }
 }
 
+fn build_critical_divergence_interaction(
+    session_id: &str,
+    root_session_id: String,
+    agent_id: &str,
+    turn_counter: u64,
+    signals_summary: &str,
+    workflow_id: Option<String>,
+    task_id: Option<String>,
+) -> autonoetic_types::background::UserInteraction {
+    autonoetic_types::background::UserInteraction {
+        interaction_id: format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        session_id: session_id.to_string(),
+        root_session_id,
+        agent_id: agent_id.to_string(),
+        turn_id: format!("turn-{:06}", turn_counter),
+        kind: autonoetic_types::background::UserInteractionKind::Decision,
+        question: format!(
+            "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge, continue, stop, or enter a note.",
+            agent_id, turn_counter
+        ),
+        context: Some(if signals_summary.is_empty() {
+            "See divergence.* events in the causal chain for details.".to_string()
+        } else {
+            format!(
+                "Signals:\n{}\n\nSee divergence.* events in the causal chain for full payload.",
+                signals_summary
+            )
+        }),
+        options: vec![
+            autonoetic_types::background::UserInteractionOption {
+                id: "ack".to_string(),
+                label: "Acknowledge".to_string(),
+                value: "acknowledged".to_string(),
+            },
+            autonoetic_types::background::UserInteractionOption {
+                id: "continue".to_string(),
+                label: "Continue".to_string(),
+                value: "continue".to_string(),
+            },
+            autonoetic_types::background::UserInteractionOption {
+                id: "stop".to_string(),
+                label: "Stop".to_string(),
+                value: "stop".to_string(),
+            },
+        ],
+        allow_freeform: true,
+        status: autonoetic_types::background::UserInteractionStatus::Pending,
+        answer_option_id: None,
+        answer_text: None,
+        answered_by: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        answered_at: None,
+        expires_at: None,
+        workflow_id,
+        task_id,
+        checkpoint_turn_id: None,
+    }
+}
+
 pub struct AgentExecutor {
     pub manifest: AgentManifest,
     pub instructions: String,
@@ -2444,40 +2503,15 @@ impl AgentExecutor {
                                                     })
                                                     .collect::<Vec<_>>()
                                                     .join("\n");
-                                                let interaction = autonoetic_types::background::UserInteraction {
-                                                    interaction_id: format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]),
-                                                    session_id: session_id.clone(),
-                                                    root_session_id: root_sid,
-                                                    agent_id: self.manifest.agent.id.clone(),
-                                                    turn_id: format!("turn-{:06}", self.turn_counter),
-                                                    kind: autonoetic_types::background::UserInteractionKind::Decision,
-                                                    question: format!(
-                                                        "Critical trajectory divergence in agent '{}' at turn {}. Acknowledge?",
-                                                        self.manifest.agent.id, self.turn_counter
-                                                    ),
-                                                    context: Some(if signals_summary.is_empty() {
-                                                        "See divergence.* events in the causal chain for details.".to_string()
-                                                    } else {
-                                                        format!("Signals:\n{}\n\nSee divergence.* events in the causal chain for full payload.", signals_summary)
-                                                    }),
-                                                    options: vec![autonoetic_types::background::UserInteractionOption {
-                                                        id: "ack".to_string(),
-                                                        label: "Acknowledge".to_string(),
-                                                        value: "acknowledged".to_string(),
-                                                    }],
-                                                    allow_freeform: false,
-                                                    status: autonoetic_types::background::UserInteractionStatus::Pending,
-                                                    answer_option_id: None,
-                                                    answer_text: None,
-                                                    answered_by: None,
-                                                    created_at: chrono::Utc::now().to_rfc3339(),
-                                                    answered_at: None,
-                                                    expires_at: None,
-                                                    workflow_id: self.workflow_id.clone(),
-                                                    task_id: self.task_id.clone(),
-                                                    // No checkpoint — non-blocking notification.
-                                                    checkpoint_turn_id: None,
-                                                };
+                                                let interaction = build_critical_divergence_interaction(
+                                                    &session_id,
+                                                    root_sid,
+                                                    &self.manifest.agent.id,
+                                                    self.turn_counter,
+                                                    &signals_summary,
+                                                    self.workflow_id.clone(),
+                                                    self.task_id.clone(),
+                                                );
                                                 if let Err(e) = store.create_user_interaction(&interaction) {
                                                     tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to create critical_divergence user_interaction");
                                                 }
@@ -2861,6 +2895,32 @@ mod tests {
         }]);
         let foundation = compose_foundation(&manifest);
         assert!(foundation.contains("# Foundation Workflow"));
+    }
+
+    #[test]
+    fn critical_divergence_interaction_offers_options_and_freeform() {
+        let interaction = build_critical_divergence_interaction(
+            "session-1",
+            "root-1".to_string(),
+            "planner.default",
+            5,
+            "- child_failure_pressure (critical): 3 child agent tasks have failed (limit 3)",
+            Some("wf-1".to_string()),
+            Some("task-1".to_string()),
+        );
+
+        assert_eq!(
+            interaction.question,
+            "Critical trajectory divergence in agent 'planner.default' at turn 5. Choose acknowledge, continue, stop, or enter a note."
+        );
+        assert!(interaction.allow_freeform);
+        assert_eq!(interaction.options.len(), 3);
+        assert_eq!(interaction.options[0].id, "ack");
+        assert_eq!(interaction.options[1].id, "continue");
+        assert_eq!(interaction.options[2].id, "stop");
+        assert_eq!(interaction.options[2].value, "stop");
+        assert_eq!(interaction.workflow_id.as_deref(), Some("wf-1"));
+        assert_eq!(interaction.task_id.as_deref(), Some("task-1"));
     }
 
     #[test]

@@ -87,6 +87,16 @@ fn validate_nonsecret_answer_payload(answer_text: &Option<String>) -> anyhow::Re
     Ok(())
 }
 
+fn is_critical_divergence_stop_selection(
+    interaction: &autonoetic_types::background::UserInteraction,
+) -> bool {
+    interaction.kind == autonoetic_types::background::UserInteractionKind::Decision
+        && interaction
+            .question
+            .starts_with("Critical trajectory divergence in agent '")
+        && interaction.answer_option_id.as_deref() == Some("stop")
+}
+
 /// Resolve which pending interaction to answer using deterministic priority.
 pub fn resolve_interaction_id(
     store: &crate::scheduler::gateway_store::GatewayStore,
@@ -202,6 +212,33 @@ pub async fn answer_and_orchestrate_resume(
         "unexpected interaction status after apply: {:?}",
         interaction.status
     );
+
+    if is_critical_divergence_stop_selection(&interaction) {
+        let reason = format!(
+            "Operator selected stop on critical trajectory divergence interaction {} for agent {}",
+            interaction.interaction_id, interaction.agent_id
+        );
+        execution
+            .emergency_stop_root_session(
+                &interaction.root_session_id,
+                &reason,
+                "operator",
+                params.answered_by.as_deref().unwrap_or("gateway"),
+                "interaction.decision.stop",
+                None,
+            )
+            .await?;
+        return Ok(InteractionAnswerOutcome {
+            interaction_id: params.interaction_id.clone(),
+            answer_applied: true,
+            resumed: false,
+            workflow_task_unblocked: false,
+            ambiguous: false,
+            ambiguous_candidates: vec![],
+            error: None,
+            assistant_reply: None,
+        });
+    }
 
     let follow = params
         .follow_up_message
@@ -343,5 +380,54 @@ pub async fn resolve_and_answer(
             ),
             assistant_reply: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn critical_divergence_stop_selection_is_recognized() {
+        let interaction = autonoetic_types::background::UserInteraction {
+            interaction_id: "ui-1".into(),
+            session_id: "session-1".into(),
+            root_session_id: "root-1".into(),
+            agent_id: "planner.default".into(),
+            turn_id: "turn-000005".into(),
+            kind: autonoetic_types::background::UserInteractionKind::Decision,
+            question: "Critical trajectory divergence in agent 'planner.default' at turn 5. Choose acknowledge, continue, stop, or enter a note.".into(),
+            context: None,
+            options: vec![
+                autonoetic_types::background::UserInteractionOption {
+                    id: "ack".into(),
+                    label: "Acknowledge".into(),
+                    value: "acknowledged".into(),
+                },
+                autonoetic_types::background::UserInteractionOption {
+                    id: "continue".into(),
+                    label: "Continue".into(),
+                    value: "continue".into(),
+                },
+                autonoetic_types::background::UserInteractionOption {
+                    id: "stop".into(),
+                    label: "Stop".into(),
+                    value: "stop".into(),
+                },
+            ],
+            allow_freeform: true,
+            status: UserInteractionStatus::Answered,
+            answer_option_id: Some("stop".into()),
+            answer_text: None,
+            answered_by: Some("chat-tui".into()),
+            created_at: "2026-05-20T00:00:00Z".into(),
+            answered_at: Some("2026-05-20T00:00:05Z".into()),
+            expires_at: None,
+            workflow_id: Some("wf-1".into()),
+            task_id: Some("task-1".into()),
+            checkpoint_turn_id: None,
+        };
+
+        assert!(is_critical_divergence_stop_selection(&interaction));
     }
 }
