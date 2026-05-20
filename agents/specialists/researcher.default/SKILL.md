@@ -64,11 +64,13 @@ metadata:
     io:
       returns:
         type: object
+        required: ["status"]
         description: "Flexible research result object. Include only the fields that are actually available for this task; all listed properties are optional unless a caller explicitly requested a stricter shape."
         properties:
           status:
             type: string
-            description: "Optional high-level status such as ok, partial, or clarification_needed."
+            enum: ["ok", "partial", "clarification_needed"]
+            description: "High-level status of the research result."
           summary:
             type: string
             description: "Optional compact synthesis of the research result."

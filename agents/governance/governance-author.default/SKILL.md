@@ -29,6 +29,21 @@ metadata:
     io:
       returns:
         type: object
+        required: ["status"]
+        properties:
+          status:
+            type: string
+            enum: ["ok", "clarification_needed", "failed"]
+            description: "Proposal outcome."
+          proposal_id:
+            type: string
+            description: "ID of the submitted amendment proposal."
+          summary:
+            type: string
+            description: "What was proposed and why."
+          error:
+            type: string
+            description: "Error detail when status is failed."
 ---
 # Governance Author
 

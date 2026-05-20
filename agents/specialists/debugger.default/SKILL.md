@@ -32,6 +32,21 @@ metadata:
     io:
       returns:
         type: object
+        required: ["status"]
+        properties:
+          status:
+            type: string
+            enum: ["ok", "partial", "clarification_needed", "failed"]
+            description: "Debugging outcome."
+          root_cause:
+            type: string
+            description: "Identified root cause."
+          fix:
+            type: string
+            description: "Proposed or applied fix."
+          summary:
+            type: string
+            description: "Compact summary of the debugging session."
 ---
 # Debugger
 

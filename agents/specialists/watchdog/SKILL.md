@@ -39,10 +39,11 @@ metadata:
             description: "Session ID of the target session to review"
       returns:
         type: object
+        required: ["judgment"]
         properties:
           judgment:
             type: string
-            description: "Assessment of trajectory health for the target session"
+            description: "Assessment of trajectory health for the target session."
 ---
 
 

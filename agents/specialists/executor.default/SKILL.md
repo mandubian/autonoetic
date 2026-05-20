@@ -47,6 +47,21 @@ metadata:
     io:
       returns:
         type: object
+        required: ["status"]
+        properties:
+          status:
+            type: string
+            enum: ["ok", "partial", "failed", "clarification_needed"]
+            description: "Execution outcome."
+          stdout_summary:
+            type: string
+            description: "Key result extracted from command output."
+          error:
+            type: string
+            description: "Error detail when status is failed."
+          follow_up:
+            type: string
+            description: "Routing recommendation when the task exceeded executor scope."
 ---
 # Executor
 

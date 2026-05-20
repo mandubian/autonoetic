@@ -39,10 +39,12 @@ metadata:
             description: "Session ID being reviewed (informational; the full overview is in the kickoff message)."
       returns:
         type: object
+        required: ["verdict", "justification"]
         properties:
           verdict:
             type: string
-            description: "One of: healthy | watching | diverging | critical"
+            enum: ["healthy", "watching", "diverging", "critical"]
+            description: "Divergence assessment for the target session."
           justification:
             type: string
             description: "One-paragraph explanation citing concrete evidence."

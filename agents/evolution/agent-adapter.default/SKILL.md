@@ -34,6 +34,21 @@ metadata:
     io:
       returns:
         type: object
+        required: ["status"]
+        properties:
+          status:
+            type: string
+            enum: ["ok", "partial", "clarification_needed", "failed"]
+            description: "Adapter generation outcome."
+          artifact_ref:
+            type: string
+            description: "Reference to the generated wrapper artifact."
+          summary:
+            type: string
+            description: "What was adapted and how."
+          error:
+            type: string
+            description: "Error detail when status is failed."
 ---
 # Agent Adapter
 

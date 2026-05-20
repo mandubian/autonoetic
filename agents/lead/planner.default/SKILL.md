@@ -37,6 +37,21 @@ metadata:
     io:
       returns:
         type: object
+        required: ["status"]
+        properties:
+          status:
+            type: string
+            enum: ["ok", "partial", "clarification_needed", "delegated", "failed"]
+            description: "Final outcome of the planning turn."
+          summary:
+            type: string
+            description: "Compact synthesis of what was decided or produced."
+          result:
+            type: object
+            description: "Structured result payload when the planner answers directly."
+          error:
+            type: string
+            description: "Error detail when status is failed."
 ---
 # Planner
 

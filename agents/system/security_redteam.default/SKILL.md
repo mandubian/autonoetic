@@ -32,6 +32,21 @@ metadata:
     io:
       returns:
         type: object
+        required: ["status"]
+        properties:
+          status:
+            type: string
+            enum: ["ok", "clarification_needed", "failed"]
+            description: "Red-team proposal outcome."
+          proposal_id:
+            type: string
+            description: "ID of the submitted attack pattern proposal."
+          summary:
+            type: string
+            description: "What was proposed and which category it targets."
+          error:
+            type: string
+            description: "Error detail when status is failed."
 ---
 # Security Red-Team Agent
 
