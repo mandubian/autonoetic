@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use autonoetic_gateway::llm::{build_driver, Message};
 use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
 use autonoetic_gateway::runtime::session_overview::SessionOverview;
-use autonoetic_gateway::runtime::tools::default_registry;
+use autonoetic_gateway::runtime::tools::NativeToolRegistry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::AgentRepository;
 
@@ -54,11 +54,16 @@ pub struct SentinelExperimentArgs {
     #[arg(long)]
     pub skip_watchdog: bool,
     /// Run the watchdog in tool-free mode: load `watchdog-fast.default`
-    /// (zero capabilities, no tools), bundle a pre-rendered
-    /// `SessionOverview` into the kickoff message, and accept a single
-    /// LLM completion as the verdict. Roughly an order of magnitude
-    /// cheaper than the default tool-using mode for complex sessions,
-    /// and produces no side-effect rows on the target session.
+    /// and pass an **empty** `NativeToolRegistry` to its executor, so
+    /// no tools are exposed to the LLM at all (capabilities alone do
+    /// not guarantee tool-free execution — several tools are
+    /// always-available regardless of manifest capability set).
+    /// Bundles a pre-rendered `SessionOverview` into the kickoff
+    /// message and accepts a single LLM completion as the verdict.
+    /// Roughly an order of magnitude cheaper than the default
+    /// tool-using mode for complex sessions, and produces no
+    /// side-effect rows on the target session because there are no
+    /// callable tools.
     #[arg(long)]
     pub no_tools: bool,
 }
@@ -266,9 +271,16 @@ fn classify_watchdog_reply(reply: Option<&str>) -> bool {
 
 /// Run the tool-free fast watchdog against a target session: bundles a
 /// pre-computed `SessionOverview` into the kickoff message and accepts a
-/// single LLM completion as the verdict. Loads `watchdog-fast.default`
-/// (zero capabilities ⇒ no tools available ⇒ no side effects on the
-/// target session).
+/// single LLM completion as the verdict.
+///
+/// **Tool-free is enforced by passing an empty `NativeToolRegistry` to
+/// the executor**, not by the manifest's empty `capabilities` list.
+/// Several tools (`execution_search`, `session_escalate`,
+/// `digest_annotate`, etc.) advertise `fn is_available(_) -> true`
+/// regardless of capabilities, so `capabilities: []` alone would still
+/// expose them. The empty registry forecloses that path: zero tools
+/// declared to the LLM ⇒ zero tool calls ⇒ zero side-effect rows on
+/// the target session.
 async fn run_watchdog_fast(
     config_path: &Path,
     target_session_id: &str,
@@ -299,12 +311,16 @@ async fn run_watchdog_fast(
         .context("watchdog-fast.default is missing llm_config in SKILL.md")?;
     let driver = build_driver(llm_config, reqwest::Client::new())?;
 
+    // Empty registry — no tools at all. The manifest's `capabilities: []`
+    // is necessary but not sufficient to disable tools because some are
+    // always-available (e.g. `session_escalate`, `execution_search`); the
+    // registry is the load-bearing isolation here.
     let mut runtime = AgentExecutor::new(
         manifest,
         instructions,
         driver,
         agent_dir,
-        default_registry(),
+        NativeToolRegistry::new(),
         Some(store),
     );
     runtime = runtime

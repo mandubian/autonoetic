@@ -19,11 +19,13 @@ metadata:
       provider: "openrouter"
       model: "google/gemini-3-flash-preview"
       temperature: 0.0
-    # NO capabilities — the agent has no tools available. It must
-    # produce its verdict purely from the kickoff user message contents.
-    # This makes the run cheap (one completion), deterministic at
-    # temp 0.0, and free of side effects (no `agent_message`, no
-    # `session_escalate`, no causal-event emission).
+    # No capabilities declared. NOTE: this alone does NOT make the agent
+    # tool-free — several native tools (e.g. `execution_search`,
+    # `session_escalate`, `digest_annotate`) advertise themselves as
+    # always-available regardless of manifest capabilities. The true
+    # tool-free guarantee comes from the harness, which constructs the
+    # executor with an empty `NativeToolRegistry`. See
+    # `autonoetic/src/cli/sentinel_experiment.rs::run_watchdog_fast`.
     capabilities: []
     execution_mode: "reasoning"
     validation: "soft"
@@ -49,7 +51,7 @@ metadata:
 
 # Divergence Watchdog — Fast Variant
 
-You review one agent session for trajectory divergence and produce a verdict in a single response. **You have no tools.** All the evidence you need is in the kickoff user message — a structured Session Overview containing:
+You review one agent session for trajectory divergence and produce a verdict in a single response. **The harness has constructed your runtime with no tools available** — you cannot call any. All the evidence you need is in the kickoff user message — a structured Session Overview containing:
 
 - Tool histogram (which tools were called, how many times, how many failed)
 - Recent errors (newest first)

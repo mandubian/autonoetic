@@ -12,7 +12,11 @@
 //! Data sources:
 //! - `execution_traces` SQLite table → tool histogram + recent errors +
 //!   turn-count estimate + wall-clock window
-//! - `causal_events` SQLite table → most recent `divergence.*` snapshot
+//! - `causal_events` SQLite table → divergence snapshot taken at the
+//!   **highest level the session ever reached** (not its latest level).
+//!   A session that briefly hit `critical` is still meaningfully
+//!   critical even if its tail settled back to `watching`. See
+//!   [`highest_divergence_snapshot`] for the picker.
 //! - `{gateway_dir}/sessions/{root_session_id}/digest.md` on disk →
 //!   trailing excerpt (last few turns of the narrative)
 //!
@@ -133,7 +137,7 @@ impl SessionOverview {
         let recent_errors = compute_recent_errors(&traces);
 
         let trajectory_snapshot = match store.search_causal_events(Some(&root), None, 500) {
-            Ok(events) => latest_divergence_snapshot(&events),
+            Ok(events) => highest_divergence_snapshot(&events),
             Err(e) => {
                 notes.push(format!("causal_events query failed: {}", e));
                 None
@@ -328,7 +332,7 @@ fn compute_recent_errors(traces: &[ExecutionTraceRecord]) -> Vec<ErrorEntry> {
         .collect()
 }
 
-fn latest_divergence_snapshot(
+fn highest_divergence_snapshot(
     events: &[autonoetic_types::causal_chain::CausalEventRecord],
 ) -> Option<TrajectorySnapshot> {
     // Events come back ordered by timestamp DESC. Pick the highest level
@@ -567,7 +571,7 @@ mod tests {
             ev("observed", "watching", "2026-05-20T10:10:00Z", "loop_pressure"),
             ev("escalated", "critical", "2026-05-20T10:05:00Z", "failure_pressure"),
         ];
-        let snap = latest_divergence_snapshot(&events).unwrap();
+        let snap = highest_divergence_snapshot(&events).unwrap();
         assert_eq!(snap.highest_level, "critical");
         assert_eq!(snap.signals[0].kind, "failure_pressure");
     }
@@ -575,7 +579,7 @@ mod tests {
     #[test]
     fn snapshot_returns_none_with_no_divergence_events() {
         let events = vec![]; // Plus a non-divergence category would also be filtered.
-        assert!(latest_divergence_snapshot(&events).is_none());
+        assert!(highest_divergence_snapshot(&events).is_none());
     }
 
     // ── render ─────────────────────────────────────────────────────────

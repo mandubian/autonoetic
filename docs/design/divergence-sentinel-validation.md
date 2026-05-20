@@ -99,14 +99,19 @@ What the harness does, per session:
      `execution_search`, `agent_message`, `session_escalate`). Multi-round
      LLM completion. Higher cost; can drill into novel evidence. Writes
      real notification rows on the target session (see §2.4).
-   - **`--no-tools` mode** runs `watchdog-fast.default` with **zero
-     capabilities**: the harness pre-renders a structured
-     `SessionOverview` (tool histogram, recent errors, Layer 1 snapshot,
-     digest tail) into the kickoff message and accepts a single LLM
-     completion as the verdict. Cheaper by roughly an order of magnitude
-     on complex sessions; deterministic at `temperature=0.0`; writes no
-     side-effect rows on the target session (the agent has no tools to
-     call).
+   - **`--no-tools` mode** runs `watchdog-fast.default` **with an empty
+     `NativeToolRegistry`**: no tools are declared to the LLM at all.
+     (The manifest's empty `capabilities` list alone is not enough —
+     several native tools such as `execution_search`,
+     `session_escalate`, and `digest_annotate` are always-available
+     regardless of capability gating. The empty registry is the
+     load-bearing isolation.) The harness pre-renders a structured
+     `SessionOverview` (tool histogram, recent errors, Layer 1
+     snapshot, digest tail) into the kickoff message and accepts a
+     single LLM completion as the verdict. Cheaper by roughly an order
+     of magnitude on complex sessions; deterministic at
+     `temperature=0.0`; writes no side-effect rows on the target
+     session because there are no callable tools.
 3. **Watchdog classification** — two-tier:
    - **Tier 1 (structured)**: if the reply begins with `VERDICT:
      diverging` or `VERDICT: critical`, the session is flagged.
