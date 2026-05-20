@@ -843,6 +843,13 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub prompt_budget: PromptBudgetConfig,
 
+    /// In-session divergence monitor (Sentinel) configuration. Observes
+    /// loop/failure/repetition/stall/error/context signals and emits
+    /// `divergence.*` causal events on level transitions. Observational
+    /// only — does not modify session behavior.
+    #[serde(default)]
+    pub trajectory: TrajectoryConfig,
+
     /// Optional LLM model routing configuration.
     /// When set, enables intelligent model selection based on budget pressure,
     /// task complexity, and cost constraints.
@@ -1779,6 +1786,220 @@ impl Default for PromptBudgetConfig {
     }
 }
 
+/// Configuration for the in-session divergence monitor (Sentinel P1).
+///
+/// The monitor recomputes a `TrajectoryHealth` verdict every turn and
+/// emits `divergence.*` causal events on level transitions only —
+/// healthy sessions produce no events. Thresholds below carry the
+/// design-doc defaults (`docs/design/divergence-sentinel-design.md` §4).
+///
+/// Per-signal toggles let operators silence noisy signals without
+/// disabling the monitor outright.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryConfig {
+    /// Master switch. When `false`, the monitor does not run and no
+    /// `divergence.*` events are emitted.
+    #[serde(default = "default_trajectory_enabled")]
+    pub enabled: bool,
+
+    /// Size of the sliding window. For `error_burst` this limits the number
+    /// of turns tracked; for `repetition_entropy` it limits the number of
+    /// individual tool-observation fingerprints (multiple per turn).
+    #[serde(default = "default_trajectory_window")]
+    pub window_size: usize,
+
+    /// Per-signal switches. A signal disabled here is never aggregated
+    /// into `TrajectoryHealth`.
+    #[serde(default)]
+    pub signals: TrajectorySignalsToggle,
+
+    /// `digest_stall` thresholds in turns.
+    #[serde(default)]
+    pub digest_stall: TrajectoryDigestStallConfig,
+
+    /// `repetition_entropy` thresholds in bits.
+    #[serde(default)]
+    pub repetition_entropy: TrajectoryRepetitionEntropyConfig,
+
+    /// `error_burst` thresholds in error count over the window.
+    #[serde(default)]
+    pub error_burst: TrajectoryErrorBurstConfig,
+
+    /// `context_pressure` thresholds as utilization fraction `[0.0, 1.0]`.
+    #[serde(default)]
+    pub context_pressure: TrajectoryContextPressureConfig,
+}
+
+fn default_trajectory_enabled() -> bool {
+    true
+}
+
+fn default_trajectory_window() -> usize {
+    8
+}
+
+impl Default for TrajectoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_trajectory_enabled(),
+            window_size: default_trajectory_window(),
+            signals: TrajectorySignalsToggle::default(),
+            digest_stall: TrajectoryDigestStallConfig::default(),
+            repetition_entropy: TrajectoryRepetitionEntropyConfig::default(),
+            error_burst: TrajectoryErrorBurstConfig::default(),
+            context_pressure: TrajectoryContextPressureConfig::default(),
+        }
+    }
+}
+
+/// Per-signal enable/disable toggles. All default to `true`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectorySignalsToggle {
+    #[serde(default = "default_signal_on")]
+    pub loop_pressure: bool,
+    #[serde(default = "default_signal_on")]
+    pub failure_pressure: bool,
+    #[serde(default = "default_signal_on")]
+    pub child_failure_pressure: bool,
+    #[serde(default = "default_signal_on")]
+    pub digest_stall: bool,
+    #[serde(default = "default_signal_on")]
+    pub repetition_entropy: bool,
+    #[serde(default = "default_signal_on")]
+    pub error_burst: bool,
+    #[serde(default = "default_signal_on")]
+    pub context_pressure: bool,
+}
+
+fn default_signal_on() -> bool {
+    true
+}
+
+impl Default for TrajectorySignalsToggle {
+    fn default() -> Self {
+        Self {
+            loop_pressure: true,
+            failure_pressure: true,
+            child_failure_pressure: true,
+            digest_stall: true,
+            repetition_entropy: true,
+            error_burst: true,
+            context_pressure: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryDigestStallConfig {
+    #[serde(default = "default_digest_stall_warn_turns")]
+    pub warn_turns: u32,
+    #[serde(default = "default_digest_stall_critical_turns")]
+    pub critical_turns: u32,
+}
+
+fn default_digest_stall_warn_turns() -> u32 {
+    5
+}
+fn default_digest_stall_critical_turns() -> u32 {
+    8
+}
+
+impl Default for TrajectoryDigestStallConfig {
+    fn default() -> Self {
+        Self {
+            warn_turns: default_digest_stall_warn_turns(),
+            critical_turns: default_digest_stall_critical_turns(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryRepetitionEntropyConfig {
+    /// Warn when entropy of the last `window_size` tool fingerprints is
+    /// at or below this value (in bits). Low entropy means the agent is
+    /// repeating itself.
+    #[serde(default = "default_repetition_entropy_warn_bits")]
+    pub warn_bits: f32,
+    #[serde(default = "default_repetition_entropy_critical_bits")]
+    pub critical_bits: f32,
+    /// Minimum number of tool calls in the window before the signal is
+    /// evaluated. Avoids firing on a brand-new session with only one or
+    /// two calls observed.
+    #[serde(default = "default_repetition_entropy_min_observations")]
+    pub min_observations: usize,
+}
+
+fn default_repetition_entropy_warn_bits() -> f32 {
+    1.2
+}
+fn default_repetition_entropy_critical_bits() -> f32 {
+    0.5
+}
+fn default_repetition_entropy_min_observations() -> usize {
+    4
+}
+
+impl Default for TrajectoryRepetitionEntropyConfig {
+    fn default() -> Self {
+        Self {
+            warn_bits: default_repetition_entropy_warn_bits(),
+            critical_bits: default_repetition_entropy_critical_bits(),
+            min_observations: default_repetition_entropy_min_observations(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryErrorBurstConfig {
+    /// Warn when the count of error tool-results in the last
+    /// `window_size` turns reaches this number.
+    #[serde(default = "default_error_burst_warn_count")]
+    pub warn_count: u32,
+    #[serde(default = "default_error_burst_critical_count")]
+    pub critical_count: u32,
+}
+
+fn default_error_burst_warn_count() -> u32 {
+    5
+}
+fn default_error_burst_critical_count() -> u32 {
+    8
+}
+
+impl Default for TrajectoryErrorBurstConfig {
+    fn default() -> Self {
+        Self {
+            warn_count: default_error_burst_warn_count(),
+            critical_count: default_error_burst_critical_count(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryContextPressureConfig {
+    /// Warn when context utilization fraction reaches this value.
+    #[serde(default = "default_context_pressure_warn_fraction")]
+    pub warn_fraction: f32,
+    #[serde(default = "default_context_pressure_critical_fraction")]
+    pub critical_fraction: f32,
+}
+
+fn default_context_pressure_warn_fraction() -> f32 {
+    0.80
+}
+fn default_context_pressure_critical_fraction() -> f32 {
+    0.95
+}
+
+impl Default for TrajectoryContextPressureConfig {
+    fn default() -> Self {
+        Self {
+            warn_fraction: default_context_pressure_warn_fraction(),
+            critical_fraction: default_context_pressure_critical_fraction(),
+        }
+    }
+}
+
 /// Configuration for context compression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextCompressionConfig {
@@ -1922,6 +2143,7 @@ impl Default for GatewayConfig {
             max_session_turns: default_max_session_turns(),
             loop_guard: LoopGuardConfig::default(),
             prompt_budget: PromptBudgetConfig::default(),
+            trajectory: TrajectoryConfig::default(),
             llm_routing: None,
             chat: ChatConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),

@@ -36,6 +36,7 @@ use crate::runtime::budget_tracker::{
     is_retryable_empty_other_response, max_other_empty_retries,
 };
 use crate::runtime::context_governor::resolver::resolve_context_window_for_run;
+use crate::runtime::trajectory_monitor::{ToolObservation, TrajectoryMonitor};
 
 // ---------------------------------------------------------------------------
 // TurnOutcome
@@ -173,6 +174,16 @@ pub struct AgentExecutor {
     /// Optional extended instructions (after `<!-- extended -->` in SKILL.md).
     /// Written to content store for on-demand retrieval by the agent.
     pub extended_instructions: Option<String>,
+
+    /// In-session divergence monitor (Sentinel P1). Observes LoopGuard
+    /// pressure, digest stall, repetition entropy, error bursts, and
+    /// context pressure. Emits `divergence.*` causal events on level
+    /// transitions.
+    pub trajectory_monitor: TrajectoryMonitor,
+
+    /// Context utilization fraction from the most recent prompt budget
+    /// computation. Passed into the trajectory monitor each turn.
+    pub last_context_utilization: Option<f32>,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -228,6 +239,8 @@ impl AgentExecutor {
             persona: None,
             overflow_recovery: false,
             extended_instructions: None,
+            trajectory_monitor: TrajectoryMonitor::new(Default::default()),
+            last_context_utilization: None,
         }
     }
 
@@ -243,6 +256,7 @@ impl AgentExecutor {
 
     pub fn with_config(mut self, config: Arc<GatewayConfig>) -> Self {
         self.guard = loop_guard_from_config_and_manifest(Some(config.as_ref()), &self.agent_dir);
+        self.trajectory_monitor = TrajectoryMonitor::new(config.trajectory.clone());
         self.config = Some(config);
         self
     }
@@ -1299,6 +1313,11 @@ impl AgentExecutor {
                 &mut tracer,
             );
 
+            // Stash context utilization for the trajectory monitor.
+            // `utilization_pct` is a 0-100 percentage; the monitor expects a
+            // 0.0-1.0 fraction.
+            self.last_context_utilization = budget_breakdown.utilization_pct.map(|v| v as f32 / 100.0);
+
             // --- Budget Enforcement + Context Compression (Context Governor) ---
             {
                 use crate::runtime::context_governor::{
@@ -2290,6 +2309,67 @@ impl AgentExecutor {
                             }
                             if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {
                                 self.guard.register_child_failure();
+                            }
+                        }
+                    }
+
+                    // ── Trajectory Monitor ──────────────────────────────────────
+                    // After guard updates, recompute health and emit divergence
+                    // events on level transitions.
+                    {
+                        use crate::runtime::trajectory_monitor::fingerprint_tool_call;
+                        use crate::runtime::trajectory_health::{
+                            build_event_payload, DIVERGENCE_CATEGORY,
+                        };
+                        use autonoetic_types::causal_chain::EntryStatus;
+
+                        let observations: Vec<ToolObservation> = results
+                            .iter()
+                            .filter_map(|(id, _name, result)| {
+                                let tc = response.tool_calls.iter().find(|tc| tc.id == *id)?;
+                                let fp = fingerprint_tool_call(&tc.name, &tc.arguments);
+                                let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
+                                let failed = parsed.as_ref().map_or(false, |v| {
+                                    // Primary: ok:false
+                                    if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+                                        return true;
+                                    }
+                                    // Secondary: non-zero exit code (sandbox tools)
+                                    if let Some(code) = v.get("exit_code").and_then(|c| c.as_i64()) {
+                                        return code != 0;
+                                    }
+                                    false
+                                });
+                                Some(ToolObservation {
+                                    fingerprint: fp,
+                                    failed,
+                                })
+                            })
+                            .collect();
+
+                        let result = self.trajectory_monitor.tick(
+                            self.turn_counter,
+                            &observations,
+                            self.last_context_utilization,
+                            &self.guard.snapshot(),
+                        );
+
+                        if result.level_changed {
+                            if let Some(payload) = build_event_payload(&result.health) {
+                                let action = result.health.causal_action().unwrap_or("observed");
+                                if let Err(e) = tracer.log_event(
+                                    DIVERGENCE_CATEGORY,
+                                    action,
+                                    EntryStatus::Success,
+                                    Some(payload),
+                                ) {
+                                    tracing::warn!(
+                                        target: "autonoetic::trajectory",
+                                        error = %e,
+                                        level = %result.health.level_str(),
+                                        "Failed to log divergence event"
+                                    );
+                                }
                             }
                         }
                     }
