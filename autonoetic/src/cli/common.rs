@@ -171,6 +171,41 @@ pub enum Commands {
     Watchdog(WatchdogArgs),
     /// Run the watchdog validation experiment (P4)
     SentinelExperiment(crate::cli::sentinel_experiment::SentinelExperimentArgs),
+    /// Inspect or rate completed sessions (Self-Improvement loop P0)
+    Session(SessionArgs),
+}
+
+/// Arguments for the `session` subcommand group.
+#[derive(Args)]
+pub struct SessionArgs {
+    #[command(subcommand)]
+    pub command: SessionCommands,
+}
+
+#[derive(Subcommand)]
+pub enum SessionCommands {
+    /// Attach an operator rating (thumbs-up / thumbs-down) to a
+    /// session's SessionOutcome row. The rating is preserved
+    /// alongside the LLM-graded `completion` so disagreements are
+    /// recoverable for downstream analysis.
+    Rate {
+        /// Session ID to rate. Must already have a `session_outcomes`
+        /// row (auto-created at session close).
+        session_id: String,
+        /// Thumb direction.
+        #[arg(long, conflicts_with = "thumbs_down")]
+        thumbs_up: bool,
+        /// Thumb direction (the other one).
+        #[arg(long, conflicts_with = "thumbs_up")]
+        thumbs_down: bool,
+        /// Optional free-text note (≤ 500 chars).
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Print the SessionOutcome row for a session as JSON.
+    Show {
+        session_id: String,
+    },
 }
 
 /// Arguments for the all-in-one `run` command.

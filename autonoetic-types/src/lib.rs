@@ -27,6 +27,7 @@ pub mod runtime_lock;
 pub mod scheduled_job;
 pub mod schema_enforcement;
 pub mod security;
+pub mod session_outcome;
 pub mod task_board;
 pub mod task_completion;
 pub mod tool_error;

@@ -194,6 +194,63 @@ impl Default for DigestAgentConfig {
     }
 }
 
+/// Outcome grader: optional independent LLM-graded `Completion` verdict
+/// attached to each session's `SessionOutcome` row after the post-session
+/// digest runs. Self-Improvement loop P0 (#245). The grader must NOT be
+/// the agent that ran the session (ownership invariant).
+///
+/// **Two gates** must be true for grading to run: this struct's
+/// `enabled` AND the top-level `auto_learning.enabled` master switch.
+/// The auto-learning gate lets an operator mute the whole
+/// digest+grading+memory pipeline in one place; setting
+/// `outcome_grader.enabled = true` while `auto_learning.enabled = false`
+/// is a no-op (logged at the writer layer but silent at startup).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeGraderConfig {
+    /// When true AND `auto_learning.enabled` is true, run the grader
+    /// after eligible sessions complete. The auto-populated
+    /// `SessionOutcome` row (cost/tokens/turns/wall) is still written
+    /// regardless of either flag — only the LLM-graded `Completion`
+    /// field is gated.
+    #[serde(default = "default_outcome_grader_enabled")]
+    pub enabled: bool,
+    /// Skip grading when `turn_counter` is strictly below this value at
+    /// session end (short sessions are usually too thin to grade).
+    #[serde(default = "default_outcome_grader_min_turns")]
+    pub min_turns: u32,
+    /// Agent ID of the grader bundle. Must differ from the run agent's
+    /// ID at write time. Default: `outcome-grader.default`.
+    #[serde(default = "default_outcome_grader_agent_id")]
+    pub grader_agent_id: String,
+}
+
+fn default_outcome_grader_enabled() -> bool {
+    // Default OFF for safety. Operators opt in by setting
+    // `outcome_grader.enabled: true` in their gateway config. This
+    // matches the conservative default chosen for the trajectory
+    // monitor and lets existing deployments pick up the schema
+    // (auto-populated metrics) without paying any LLM cost.
+    false
+}
+
+fn default_outcome_grader_min_turns() -> u32 {
+    2
+}
+
+fn default_outcome_grader_agent_id() -> String {
+    "outcome-grader.default".to_string()
+}
+
+impl Default for OutcomeGraderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_outcome_grader_enabled(),
+            min_turns: default_outcome_grader_min_turns(),
+            grader_agent_id: default_outcome_grader_agent_id(),
+        }
+    }
+}
+
 /// Auto-learning configuration: controls the default self-improvement pipeline.
 ///
 /// When enabled, sessions automatically produce memories (via post-session digest)
@@ -808,6 +865,13 @@ pub struct GatewayConfig {
     /// Optional post-session digest (narrative + extracted memories). Off by default — enable in config.
     #[serde(default)]
     pub digest_agent: DigestAgentConfig,
+
+    /// Outcome grader: optional LLM-graded `Completion` verdict attached
+    /// to each `SessionOutcome` row. The auto-populated metrics
+    /// (cost/tokens/turns/wall) are written regardless; this gates only
+    /// the grade. Off by default.
+    #[serde(default)]
+    pub outcome_grader: OutcomeGraderConfig,
 
     /// Data retention settings (days). 0 = retain forever.
     #[serde(default)]
@@ -2171,6 +2235,7 @@ impl Default for GatewayConfig {
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
             evidence_mode: default_evidence_mode(),
             digest_agent: DigestAgentConfig::default(),
+            outcome_grader: OutcomeGraderConfig::default(),
             retention: RetentionConfig::default(),
             reclamation: ReclamationConfig::default(),
             response_validation: ResponseValidationConfig::default(),
