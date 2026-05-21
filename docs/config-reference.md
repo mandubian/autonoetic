@@ -31,12 +31,20 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trusted signer registry (`signer_id` -> base64 Ed25519 public key, 32 bytes). Used for non-`gateway:*` signer IDs. |
 | `max_concurrent_spawns` | usize | `8` | Maximum agent runtime executions allowed concurrently across all sessions. |
 | `max_pending_spawns_per_agent` | usize | `4` | Maximum pending executions admitted per target agent (includes the currently running execution). |
+| `max_spawn_depth` | u32 | `8` | System-wide ceiling for spawn-chain depth (R+3 / R-7.15). Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins. |
 | `max_pending_approvals_per_root` | usize | `50` | Maximum concurrent pending approvals per root session. When a new request would push the count above this cap, the request is rejected with `approval_flood`. Set to `0` to disable (not recommended). Controls the R+5 / R-7.17 approval flood cap. |
 | `continuation_key` | string | `null` | HMAC-SHA256 key for signing turn continuation files. When unset, the gateway derives a deterministic key from `node_id` (development convenience only). Production deployments should set this to a high-entropy secret. Rotate by changing the value — existing continuations will fail integrity verification and be rejected. |
 | `approval_timeout_secs` | u64 | `600` | Maximum seconds a workflow task can remain in `AwaitingApproval` before auto-failing. `0` disables (not recommended for production). |
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
+| `stuck_task_timeout_secs` | u64 \| null | `600` | Max seconds a `Running` workflow task can go without progress before the sweeper force-completes it. The task is **always resolved as `Succeeded`** (not `Failed`), using whatever exit evidence the sweeper can find (manifest exit, digest tail, implicit artifacts); when no evidence is found the task is still resolved as `Succeeded` to keep the parent workflow unblocked. `null` uses the default (600). Set to `0` to disable. |
+| `approval_dwell_multiplier` | f64 | `1.0` | Multiplier applied to approval dwell times (R++4). Values above `1.0` slow down approval resolution. Set to `0` to disable dwell enforcement (tests). |
+| `signal_delivery_timeout_secs` | u64 | `60` | Timeout in seconds for signal delivery responses (approval resolution, workflow join). The signal sender waits this long for the planner to finish processing the triggered `event.ingest` turn. |
 | `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
+| `capability_delta_gate_mode` | string | `"strict"` | Capability delta gating during `agent.revision.promote`: `"strict"` (any broadening requires approval), `"evolving"` (broadening inside wildcard envelopes auto-allowed), `"bootstrap"` (gating disabled, dev only). |
+| `interaction_answer_orchestration` | bool | `true` | When `true`, JSON-RPC `interaction.answer` / `interaction.resolve_and_answer` persist answers and orchestrate workflow task or session resume. When `false`, the method fails fast (legacy detection). |
+| `allow_runtime_lock_drift` | bool | `false` | Allow sessions to start when `runtime.lock` gateway section disagrees with the running binary (R+7 / R-8.12). Drift is still logged as a causal event. |
+| `trust_unsigned_bundles` | bool | `false` | Allow revision creation without a gateway signature when the identity key is unavailable (dev escape hatch). See `docs/revision-signing.md`. |
 | `profile` | string | `"standard"` | Complexity profile: `starter` (simplified UX, auto-approve safe tools), `standard` (current behavior), or `expert` (full constitutional visibility). See [Profiles](#profiles). |
 | `persona_path` | string (path) \| null | `null` | Path to a Markdown file injected into every agent's system prompt. Enables cross-agent user context and communication preferences. Relative paths resolve from the config directory. When `null`, the gateway looks for `persona.md` next to the config file (used only if it exists). |
 
@@ -289,15 +297,15 @@ See `docs/protected-agents.md` for the full manual recovery procedure.
 
 ---
 
-## Revision Promotion Approval
+## Capability Delta Gate
 
-Controls when `agent_revision_promote` requires human approval before proceeding. The gateway gates high-risk promotions (bundles with broad capabilities or detected remote access) the same way it previously gated `agent.install`.
+Controls how capability broadening during `agent.revision.promote` is gated. High-risk promotion evidence (evaluator/auditor, federation jury) is separate — see `docs/AGENTS.md` and `docs/protected-agents.md`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `revision_promote_approval_policy` | string | `"risk_based"` | `"always"`: every promotion needs approval. `"risk_based"`: only high-risk promotions (NetworkAccess, CodeExecution, background reevaluation). `"never"`: no approval gate (not recommended for production). |
+| `capability_delta_gate_mode` | string | `"strict"` | `"strict"`: any capability broadening requires explicit approval. `"evolving"`: broadening inside an existing wildcard envelope is auto-allowed. `"bootstrap"`: disable capability-delta gating (development only). |
 
-> **Note:** The old `agent_install_approval_policy` field is **removed**. Update existing `config.yaml` files to use `revision_promote_approval_policy`.
+> **Removed:** `revision_promote_approval_policy` / `agent_install_approval_policy` are no longer config fields. Promotion approval is driven by capability declarations, delta gating, protected-agent eval gates, and the sentinel promotion gate.
 
 ---
 
@@ -416,6 +424,7 @@ Controls the per-session runaway loop detection. Independent of `max_session_tur
 | `loop_guard.max_loops_without_progress` | u32 | `5` | Maximum turns without meaningful progress before suspension. Reset by any tool call returning `ok: true` with a new (tool, arguments) fingerprint. |
 | `loop_guard.max_tool_failures` | u32 | `5` | Maximum total failures per tool name before suspension. NOT reset by `register_progress()`. Catches alternating-failure patterns where the same tool keeps failing regardless of arguments. |
 | `loop_guard.max_consecutive_same_progress` | u32 | `1` | Number of consecutive identical (tool, arguments) calls allowed before repeats stop counting as progress. Default `1` means the first call counts as progress, but the second identical call does not. |
+| `loop_guard.max_child_failures` | u32 | `3` | Maximum total child-agent spawn failures before suspension. Prevents agents from repeatedly spawning failing children. |
 
 Example:
 
@@ -424,11 +433,13 @@ loop_guard:
   max_loops_without_progress: 5
   max_tool_failures: 5
   max_consecutive_same_progress: 1
+  max_child_failures: 3
 ```
 
-The loop guard trips when EITHER condition is met:
+The loop guard trips when ANY of these conditions is met:
 1. `current_loops >= max_loops_without_progress` (no meaningful progress)
 2. Any single tool's failure count reaches `max_tool_failures`
+3. Child-agent spawn failure count reaches `max_child_failures`
 
 "Meaningful progress" requires a tool call with a fingerprint different from the previous `max_consecutive_same_progress` calls. This prevents agents from spinning on the same successful-but-useless tool call indefinitely.
 
@@ -747,7 +758,17 @@ Reactive bindings from gateway events to actions. When an event fires (e.g., ses
 | `hooks[].action` | string | required | Action: `publish_report`, `deliver_signal`, `agent.spawn`, `http.callback` |
 | `hooks[].async` | bool | `false` | If true, the hook runs in a background task without blocking the event |
 | `hooks[].params` | object | `{}` | Action-specific parameters |
+| `hooks[].allowed_agents` | list | `[]` | ACL for `agent.spawn` hooks: restricts which agent IDs may be spawned. Empty list = any agent allowed. |
 | `hooks[].callback_allowlist` | list | `[]` | Required for `http.callback`. Allowlist entries use grant-target shapes such as `{ kind: "url_prefix", value: "https://hooks.example.com/autonoetic/" }` |
+
+### agent.spawn hook parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `params.agent_id` | Target agent to spawn (required). |
+| `params.message_template` | Message with `{{field}}` substitution from hook context. Always includes `{{event}}`. Event-specific fields: `request_id`, `decision` (`approval.resolved`); `close_reason`, `turn_count` (`session.closed`); `workflow_id`, `task_ids` (`workflow.join.satisfied`); `root_session_id`, `session_id`, `agent_id`, `event_id`, `rule_ids`, `primary_rule_id`, `status`, `category`, `action`, `target`, `reason`, `turn_id`, `source` (`policy.decision`). |
+
+`agent.spawn` hooks must set `async: true` — synchronous spawn is not supported.
 
 Example:
 
@@ -817,6 +838,53 @@ digest_agent:
 ```
 
 > **Note:** With the auto-learning pipeline (see below), `digest_agent.enabled` defaults to `true`.
+
+---
+
+## Context Compression
+
+Summarizes old conversation turns when approaching context limits. The hierarchical capsule strategy is the default LLM-tier reducer in the context governor pipeline.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `context_compression.enabled` | bool | `true` | Enable context compression. Requires a resolvable `llm_preset` or inline `provider`/`model`; otherwise the capsule strategy logs a warning and skips compression for the turn. |
+| `context_compression.llm_preset` | string | `null` | LLM preset name for compression (should be a cheap/fixed model, not a routing preset). |
+| `context_compression.provider` | string | `null` | Inline provider when `llm_preset` is not set. |
+| `context_compression.model` | string | `null` | Inline model when `llm_preset` is not set. |
+| `context_compression.threshold_pct` | float | `60.0` | Compress when conversation tokens exceed this percentage of the context window. |
+| `context_compression.recent_turns_to_keep` | usize | `3` | Recent turns kept in full (not summarized). |
+| `context_compression.max_summary_tokens` | usize | `500` | Maximum compressed summary size in tokens. |
+| `context_compression.min_turns_between_compression` | u64 | `3` | Minimum turns between compression operations (prevents thrashing). |
+| `context_compression.max_capsule_decisions` | usize | `30` | Capsule decisions retained before summarization (capsule strategy only). |
+| `context_compression.max_completed_tasks` | usize | `10` | Completed capsule tasks retained (capsule strategy only). |
+
+Example:
+
+```yaml
+context_compression:
+  enabled: true
+  llm_preset: haiku
+  threshold_pct: 60.0
+  recent_turns_to_keep: 3
+  max_summary_tokens: 500
+  min_turns_between_compression: 3
+  max_capsule_decisions: 30
+  max_completed_tasks: 10
+```
+
+---
+
+## Scheduled Jobs (Cron)
+
+Controls cron-style scheduled job admission and dispatch.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `scheduled_jobs.min_interval_secs` | u64 | `1` | Minimum interval between job triggers (seconds). |
+| `scheduled_jobs.max_per_root` | usize | `50` | Max scheduled jobs per root session. |
+| `scheduled_jobs.max_due_per_tick` | usize | `16` | Max due jobs processed per canonical scheduler tick. |
+
+> Sub-10s schedules are allowed only for script-mode target agents. For tight schedules (&lt;5s), reduce `background_tick_secs` to `1` for better precision.
 
 ---
 
@@ -932,12 +1000,20 @@ constitution:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
+max_spawn_depth: 8
 approval_timeout_secs: 600
 max_pending_approvals_per_root: 50
 # continuation_key: "set-me-in-production-from-a-secret-source"
 workflow_task_heartbeat_secs: 2
+stuck_task_timeout_secs: 600
+approval_dwell_multiplier: 1.0
+signal_delivery_timeout_secs: 60
 evidence_mode: full
 max_session_turns: 12
+capability_delta_gate_mode: strict
+interaction_answer_orchestration: true
+allow_runtime_lock_drift: false
+trust_unsigned_bundles: false
 
 background_scheduler_enabled: true
 background_tick_secs: 5
@@ -970,6 +1046,12 @@ session_budget:
   max_llm_rounds: 200
   max_tool_invocations: 500
 
+loop_guard:
+  max_loops_without_progress: 5
+  max_tool_failures: 5
+  max_consecutive_same_progress: 1
+  max_child_failures: 3
+
 prompt_budget:
   warn_at_pct: 80.0
   margin_tokens: 4096
@@ -982,6 +1064,14 @@ digest_agent:
   enabled: true
   min_turns: 2
   llm_preset: agentic
+
+context_compression:
+  enabled: true
+  llm_preset: haiku
+  threshold_pct: 60.0
+  recent_turns_to_keep: 3
+  max_summary_tokens: 500
+  min_turns_between_compression: 3
 
 llm_routing:
   agent_overrides:

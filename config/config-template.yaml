@@ -107,6 +107,14 @@ approval_timeout_secs: 600
 # Keeps task updated_at fresh during long-running child execution/finalization.
 # If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.
 # workflow_task_heartbeat_secs: 2
+# Optional: max seconds a Running task without progress before the sweeper
+# force-completes it. Resolution is ALWAYS `Succeeded` (not `Failed`); the
+# sweeper attaches whatever exit evidence it can find (manifest, digest,
+# implicit artifacts), and a no-evidence force-completion still resolves as
+# `Succeeded` so the parent workflow can proceed. Default: 600. Set to 0 to disable.
+# stuck_task_timeout_secs: 600
+# Multiplier applied to approval dwell times (R++4). Default: 1.0. Set to 0 to disable (tests).
+# approval_dwell_multiplier: 1.0
 
 # ── Signal Delivery ────────────────────────────────────────────────────
 # Timeout in seconds for signal delivery responses (approval resolution,
@@ -195,6 +203,14 @@ schema_enforcement:
 # full: all results (development) | errors: failures only (production) | off
 evidence_mode: full
 
+# ── Operational Flags ─────────────────────────────────────────────────
+# Whether interaction.answer orchestrates workflow task / session resume. Default: true.
+# interaction_answer_orchestration: true
+# Allow sessions to start even when runtime.lock drift is detected. Default: false.
+# allow_runtime_lock_drift: false
+# Accept unsigned agent bundle revisions (dev only). Default: false.
+# trust_unsigned_bundles: false
+
 # ── Security Sentinel ────────────────────────────────────────────────
 # System-tier read-only auditor over causal events, promotion history,
 # approvals, layer mounts, and SKILL.md bodies. Produces append-only
@@ -244,6 +260,13 @@ code_analysis:
   require_approval_for:
     - NetworkAccess
     - CodeExecution
+
+# ── Capability Delta Gate ──────────────────────────────────────────────
+# Controls how capability broadening during revision promotion is gated.
+# strict: any capability broadening requires explicit approval (default).
+# evolving: broadening inside an existing wildcard envelope is auto-allowed.
+# bootstrap: disable capability-delta gating (development only).
+# capability_delta_gate_mode: strict
 
 # ── Session Budget (optional per-session resource limits) ─────────────
 # Uncomment to cap LLM rounds, tool calls, tokens, or wall-clock time.
@@ -295,14 +318,21 @@ retention:
 max_session_turns: 12
 
 # ── Loop Guard ───────────────────────────────────────────────────────
-# Per-session circuit breaker for stuck agents. Two independent trip conditions:
-#   max_loops_without_progress: consecutive LLM rounds without any ok:true tool result
+# Per-session circuit breaker for stuck agents. Four independent trip conditions:
+#   max_loops_without_progress: consecutive LLM rounds without meaningful progress.
+#     Progress = a successful tool call whose (tool_name, normalized_arguments)
+#     fingerprint is new since the previous call (or repeats up to
+#     max_consecutive_same_progress times, subject to per-tool progress budgets).
+#     A successful tool call with the same fingerprint as the previous one does
+#     NOT reset the counter — repetition is still divergence.
 #   max_tool_failures: total failures for a single tool name (regardless of arguments/hosts)
 #   max_consecutive_same_progress: after N identical tool+args calls, stop counting as progress
+#   max_child_failures: total child-agent spawn failures before suspension
 #loop_guard:
 #  max_loops_without_progress: 5
 #  max_tool_failures: 5
 #  max_consecutive_same_progress: 1
+#  max_child_failures: 3
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
@@ -487,7 +517,9 @@ llm_preset_mapping:
 # the context governor pipeline.
 context_compression:
   enabled: true
-  llm_preset: haiku
+  llm_preset: haiku            # use a preset name, or set provider+model inline
+  # provider: anthropic         # inline provider (when not using llm_preset)
+  # model: claude-haiku-3-20250307  # inline model (when not using llm_preset)
   threshold_pct: 60.0
   recent_turns_to_keep: 3
   max_summary_tokens: 500
