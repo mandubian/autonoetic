@@ -345,9 +345,9 @@ fn prompt_select_issues(
 }
 
 /// Fork the current active revision as a Candidate, tagged with the triggering
-/// session IDs. Returns the new revision_id.
+/// session IDs. Returns the short_id usable as `agent_id@rev_<short_id>`.
 fn propose_improvement(
-    config: &autonoetic_types::config::GatewayConfig,
+    _config: &autonoetic_types::config::GatewayConfig,
     store: &GatewayStore,
     gateway_dir: &Path,
     agent_id: &str,
@@ -362,8 +362,11 @@ fn propose_improvement(
     let current_rev = store.get_agent_revision(&promoted.revision_id)?
         .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", promoted.revision_id))?;
 
-    // Build a summary of what triggered this proposal
+    // Build a summary scoped to the SELECTED sessions only
+    let selected_set: std::collections::HashSet<&str> =
+        session_ids.iter().map(|s| s.as_str()).collect();
     let session_summaries: Vec<String> = outcomes.iter()
+        .filter(|(id, _)| selected_set.contains(id.as_str()))
         .map(|(id, o)| {
             let label = match o.judged_success() {
                 Some(true) => "passed",
@@ -382,9 +385,9 @@ fn propose_improvement(
         "forked_from": current_rev.revision_id,
     });
 
-    // Generate a new revision_id
+    // Generate a unique revision_id (short ref will be used for resolution)
     let revision_id = mint_hashed_prefixed_id(
-        "rev_sha256:",
+        "prop-",
         &format!("{}-propose-{}", agent_id, uuid::Uuid::new_v4()),
     );
 
@@ -410,34 +413,40 @@ fn propose_improvement(
         signer_id: None,
     };
 
-    store.insert_agent_revision(&new_rev)
+    let short_id = store.insert_agent_revision_transactional(&new_rev)
         .with_context(|| format!("Failed to insert candidate revision for '{}'", agent_id))?;
 
-    // Also copy the agent files so the revision is runnable (same SKILL.md,
-    // runtime.lock, etc.) — the candidate shares the same artifact.
-    let rev_dir = gateway_dir.join("revisions").join(&revision_id);
-    if !rev_dir.exists() {
-        std::fs::create_dir_all(&rev_dir)
-            .with_context(|| format!("Failed to create revision directory {:?}", rev_dir))?;
-    }
+    // Copy files from the PROMOTED revision's store directory to the new
+    // candidate's directory.  This guarantees the on-disk files match the
+    // hashes we just stored (identical content, same digest).
+    let src_dir = gateway_dir
+        .join("revisions").join("agents").join(agent_id).join(&promoted.revision_id);
+    let dst_dir = gateway_dir
+        .join("revisions").join("agents").join(agent_id).join(&revision_id);
 
-    // Symlink or copy the SKILL.md from the agent's active directory
-    let agent_skill = config.agents_dir.join(agent_id).join("SKILL.md");
-    let target_skill = rev_dir.join("SKILL.md");
-    if agent_skill.exists() && !target_skill.exists() {
-        std::fs::copy(&agent_skill, &target_skill)
-            .with_context(|| format!("Failed to copy SKILL.md to {:?}", target_skill))?;
-    }
+    std::fs::create_dir_all(&dst_dir)
+        .with_context(|| format!("Failed to create revision directory {:?}", dst_dir))?;
 
-    // Symlink or copy runtime.lock
-    let agent_lock = config.agents_dir.join(agent_id).join("runtime.lock");
-    let target_lock = rev_dir.join("runtime.lock");
-    if agent_lock.exists() && !target_lock.exists() {
-        std::fs::copy(&agent_lock, &target_lock)
-            .with_context(|| format!("Failed to copy runtime.lock to {:?}", target_lock))?;
-    }
+    let skill_src = src_dir.join("SKILL.md");
+    let lock_src = src_dir.join("runtime.lock");
 
-    Ok(revision_id)
+    anyhow::ensure!(
+        skill_src.exists(),
+        "Source SKILL.md not found at {:?} — cannot fork revision",
+        skill_src
+    );
+    anyhow::ensure!(
+        lock_src.exists(),
+        "Source runtime.lock not found at {:?} — cannot fork revision",
+        lock_src
+    );
+
+    std::fs::copy(&skill_src, dst_dir.join("SKILL.md"))
+        .with_context(|| format!("Failed to copy SKILL.md to {:?}", dst_dir))?;
+    std::fs::copy(&lock_src, dst_dir.join("runtime.lock"))
+        .with_context(|| format!("Failed to copy runtime.lock to {:?}", dst_dir))?;
+
+    Ok(short_id)
 }
 
 fn run_ab_replay(
