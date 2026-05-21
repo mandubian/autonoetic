@@ -376,5 +376,135 @@ fn test_ab_replay_reinvoke_while_pending_returns_queued() {
             id,
             second_ids
         );
+    }
 }
+
+// ─── 8. End-to-end: completed comparison with divergent revisions ─────
+
+#[test]
+fn test_ab_replay_completed_comparison_with_divergent_revisions() {
+    let tmp = TempDir::new().unwrap();
+    let (store, config) = setup_env(&tmp);
+
+    // Create a pre-existing eval suite with 2 cases
+    let suite_id = "suite-e2e-test".to_string();
+    let spec_json = json!({
+        "cases": [
+            {"case_id": "t1", "message": "do task one", "assertions": {"reply_max_chars": 100}},
+            {"case_id": "t2", "message": "do task two", "assertions": {"reply_max_chars": 100}},
+        ]
+    });
+    let suite = autonoetic_types::evaluation::EvalSuiteRecord {
+        suite_id: suite_id.clone(),
+        name: "e2e-test".to_string(),
+        description: "E2E test suite".to_string(),
+        spec_json,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        origin_node_id: "gateway".to_string(),
+        evaluated_targets: vec![TARGET_AGENT.to_string()],
+        author_agent_id: None,
+        based_on_suite_id: None,
+    };
+    store.insert_eval_suite(&suite).unwrap();
+
+    // Baseline run: passes all cases
+    let baseline_run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: "eval-baseline-e2e".to_string(),
+        suite_id: suite_id.clone(),
+        subject_agent_id: TARGET_AGENT.to_string(),
+        subject_revision_id: REV_A_ID.to_string(),
+        baseline_revision_id: None,
+        status: autonoetic_types::evaluation::EvalRunStatus::Passed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({"passed": 2, "failed": 0}),
+        report_handle: None,
+        origin_node_id: "test".to_string(),
+    };
+    store.insert_eval_run(&baseline_run).unwrap();
+
+    // Candidate run: fails t2
+    let candidate_run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: "eval-candidate-e2e".to_string(),
+        suite_id: suite_id.clone(),
+        subject_agent_id: TARGET_AGENT.to_string(),
+        subject_revision_id: REV_B_ID.to_string(),
+        baseline_revision_id: Some(REV_A_ID.to_string()),
+        status: autonoetic_types::evaluation::EvalRunStatus::Failed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({"passed": 1, "failed": 1}),
+        report_handle: None,
+        origin_node_id: "test".to_string(),
+    };
+    store.insert_eval_run(&candidate_run).unwrap();
+
+    // Case results: baseline passes t1, t2; candidate passes t1, fails t2
+    for (run_id, case_id, status) in &[
+        ("eval-baseline-e2e", "t1", "passed"),
+        ("eval-baseline-e2e", "t2", "passed"),
+        ("eval-candidate-e2e", "t1", "passed"),
+        ("eval-candidate-e2e", "t2", "failed"),
+    ] {
+        store
+            .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+                eval_run_id: run_id.to_string(),
+                case_id: case_id.to_string(),
+                status: status.to_string(),
+                score: if *status == "passed" { Some(1.0) } else { Some(0.0) },
+                session_id: None,
+                notes: None,
+                output_json: json!({}),
+            })
+            .unwrap();
+    }
+
+    // Call ab_replay with the existing suite_id
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "suite_id": suite_id,
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool(store, config, args);
+    assert_eq!(v["ok"], true, "expected ok=true, got: {v}");
+    assert_eq!(v["status"], "completed", "expected completed, got: {v}");
+
+    // Summary assertions
+    let summary = &v["summary"];
+    assert_eq!(summary["baseline_passed"], 2, "baseline should pass all");
+    assert_eq!(summary["baseline_total"], 2);
+    assert_eq!(summary["candidate_passed"], 1, "candidate should pass 1");
+    assert_eq!(summary["candidate_total"], 2);
+    assert_eq!(summary["delta_passed"], -1);
+    assert_eq!(summary["regression_count"], 1);
+    assert_eq!(summary["improvement_count"], 0);
+
+    // Regression is t2: base=passed, cand=failed
+    let regressions = v["regressions"].as_array().unwrap();
+    assert_eq!(regressions.len(), 1);
+    assert_eq!(regressions[0], "t2");
+
+    // No improvements
+    let improvements = v["improvements"].as_array().unwrap();
+    assert!(improvements.is_empty());
+
+    // Holdout is empty (holdout_ratio=0)
+    let holdout = &v["holdout"];
+    assert_eq!(holdout["total_held_out"], 0);
+
+    // Stats may be None (no session outcomes) — acceptable
+    // Verify run IDs are present
+    assert_eq!(v["baseline_eval_run_id"], "eval-baseline-e2e");
+    assert_eq!(v["candidate_eval_run_id"], "eval-candidate-e2e");
 }
