@@ -302,7 +302,8 @@ For `execution_mode: "script"` on `agent_revision_create_from_intent`, you MUST 
   "execution_mode": "script",
   "script_entry": "main.py",          // REQUIRED - path to entry script
   "artifact_ref": "ar.example",      // REQUIRED - reviewed artifact containing main.py
-  "capabilities": [...]
+  "capabilities": [...],
+  "credential_services": ["my-service"]  // OPTIONAL - service names for credential env injection at spawn time (derived from the service name in the planner's hand-off)
 }
 ```
 **Missing `script_entry` will cause install to fail! Also: do NOT include `llm_config` for script agents — including it with a missing `model` field will cause install to fail.**

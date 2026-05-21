@@ -297,6 +297,7 @@ Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, 
 - `instructions`, `description`, `capabilities`, `execution_mode`
 - `llm_config` (for reasoning mode)
 - `script_entry` (for script mode)
+- `credential_services` (for script-mode agents that need credentials at spawn time, e.g. `["my-service"]` — pass the service name from the planner's delegation message)
 - Promotion evidence (evaluator_pass + auditor_pass) when gates applied, OR `Gating: none`
 
 Compose the install intent in the delegation message itself. Do NOT create iterative scratch payload files like `final_payload.txt`, `builder_payload.txt`, `request_to_builder.txt`, or similar variants unless a single scratch note is required to recover from a tool validation error.

@@ -172,9 +172,9 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 1a. After credential onboarding completes for a service with a normalized skill (≥2 API operations):
     → Evaluate: will this service be used across sessions or repeatedly? (hint: user asked to "connect", "register", "set up" — likely recurring)
     → If yes: spawn coder.default to build a script agent wrapping the service API.
-       Include in the delegation message: service name, base_url, credential_id, env_var, the list of endpoints from the normalized skill, and desired agent_id (e.g., "moltbook").
+       Include in the delegation message: service name, base_url, credential_id, env_var, the list of endpoints from the normalized skill, and desired agent_id (e.g., "my-service").
        The coder should produce a script agent that reads the credential from env and exposes service operations as structured I/O.
-    → After coder returns an artifact_ref, hand off to agent-factory.default for the full install pipeline (revision create + promote).
+     → After coder returns an artifact_ref, hand off to agent-factory.default for the full install pipeline (revision create + promote). Include the service name so agent-factory can pass it through as `credential_services: ["<service>"]` for credential injection at spawn time.
     → Future sessions: spawn the installed agent directly — no re-onboarding, no endpoint guessing, no credential_request trial-and-error.
     → If no (one-off usage): proceed with executor.default + credential_id as in step 4a.
 
