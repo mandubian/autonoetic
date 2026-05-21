@@ -107,8 +107,11 @@ approval_timeout_secs: 600
 # Keeps task updated_at fresh during long-running child execution/finalization.
 # If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.
 # workflow_task_heartbeat_secs: 2
-# Optional: max seconds a Running task without progress before force-completion.
-# Default: 600. Set to 0 to disable.
+# Optional: max seconds a Running task without progress before the sweeper
+# force-completes it. Resolution is ALWAYS `Succeeded` (not `Failed`); the
+# sweeper attaches whatever exit evidence it can find (manifest, digest,
+# implicit artifacts), and a no-evidence force-completion still resolves as
+# `Succeeded` so the parent workflow can proceed. Default: 600. Set to 0 to disable.
 # stuck_task_timeout_secs: 600
 # Multiplier applied to approval dwell times (R++4). Default: 1.0. Set to 0 to disable (tests).
 # approval_dwell_multiplier: 1.0
@@ -315,8 +318,13 @@ retention:
 max_session_turns: 12
 
 # ── Loop Guard ───────────────────────────────────────────────────────
-# Per-session circuit breaker for stuck agents. Three independent trip conditions:
-#   max_loops_without_progress: consecutive LLM rounds without any ok:true tool result
+# Per-session circuit breaker for stuck agents. Four independent trip conditions:
+#   max_loops_without_progress: consecutive LLM rounds without meaningful progress.
+#     Progress = a successful tool call whose (tool_name, normalized_arguments)
+#     fingerprint is new since the previous call (or repeats up to
+#     max_consecutive_same_progress times, subject to per-tool progress budgets).
+#     A successful tool call with the same fingerprint as the previous one does
+#     NOT reset the counter — repetition is still divergence.
 #   max_tool_failures: total failures for a single tool name (regardless of arguments/hosts)
 #   max_consecutive_same_progress: after N identical tool+args calls, stop counting as progress
 #   max_child_failures: total child-agent spawn failures before suspension
