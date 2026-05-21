@@ -20,6 +20,7 @@ pub mod continuation;
 pub mod crypto;
 pub mod curator_journal;
 pub mod disclosure;
+pub mod eval_stats;
 pub mod guard;
 pub mod history_persist;
 pub mod human_gate;

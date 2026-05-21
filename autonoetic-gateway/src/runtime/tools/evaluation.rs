@@ -1,6 +1,7 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::eval_stats::{self, CompareConfig, VariantSamples};
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
@@ -782,6 +783,23 @@ impl NativeTool for EvalCompareTool {
         let baseline_total = baseline_map.len();
         let candidate_total = candidate_map.len();
 
+        // ── Statistical comparison via bootstrap CI (eval_stats) ─────
+        let stats = build_samples_from_case_results(
+            &baseline_map,
+            &candidate_map,
+            gateway_store.as_ref(),
+        )
+        .and_then(|(baseline_samples, candidate_samples)| {
+            let config = CompareConfig::default();
+            match eval_stats::compare(&baseline_samples, &candidate_samples, &config) {
+                Ok(rec) => match serde_json::to_value(rec) {
+                    Ok(val) => Some(val),
+                    Err(e) => Some(serde_json::json!({"error": format!("serialization failure: {}", e)})),
+                },
+                Err(e) => Some(serde_json::json!({"error": e})),
+            }
+        });
+
         Ok(serde_json::json!({
             "ok": true,
             "status": "completed",
@@ -803,8 +821,64 @@ impl NativeTool for EvalCompareTool {
             "regressions": regressions,
             "improvements": improvements,
             "changed_cases": changed_cases,
+            "stats": stats,
         })
         .to_string())
+    }
+}
+
+/// Build VariantSamples from eval case results by fetching session outcomes.
+/// Returns None when fewer than 3 samples are available in either variant.
+fn build_samples_from_case_results(
+    baseline_cases: &HashMap<String, autonoetic_types::evaluation::EvalCaseResultRecord>,
+    candidate_cases: &HashMap<String, autonoetic_types::evaluation::EvalCaseResultRecord>,
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+) -> Option<(VariantSamples, VariantSamples)> {
+    fn collect(
+        cases: &HashMap<String, autonoetic_types::evaluation::EvalCaseResultRecord>,
+        store: &crate::scheduler::gateway_store::GatewayStore,
+    ) -> VariantSamples {
+        let mut completion = Vec::new();
+        let mut cost_usd = Vec::new();
+        let mut tokens = Vec::new();
+        let mut turns = Vec::new();
+        let mut wall_clock_secs = Vec::new();
+
+        for case in cases.values() {
+            let session_id = match case.session_id.as_ref() {
+                Some(id) => id,
+                None => continue,
+            };
+            let outcome = match store.get_session_outcome(session_id) {
+                Ok(Some(o)) => o,
+                _ => continue,
+            };
+            match outcome.judged_success() {
+                Some(true) => completion.push(1.0),
+                Some(false) => completion.push(0.0),
+                None => continue,
+            }
+            cost_usd.push(outcome.cost_usd);
+            tokens.push(outcome.tokens.total as f64);
+            turns.push(outcome.turns as f64);
+            wall_clock_secs.push(outcome.wall_clock_secs);
+        }
+
+        VariantSamples {
+            completion,
+            cost_usd,
+            tokens,
+            turns,
+            wall_clock_secs,
+        }
+    }
+
+    let a = collect(baseline_cases, gateway_store);
+    let b = collect(candidate_cases, gateway_store);
+    if a.sample_count() >= 3 && b.sample_count() >= 3 {
+        Some((a, b))
+    } else {
+        None
     }
 }
 

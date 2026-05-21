@@ -633,6 +633,222 @@ fn test_eval_compare_builds_completed_comparison_report() {
 }
 
 #[test]
+fn test_eval_compare_with_session_outcomes_produces_stats() {
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let baseline_rev = "rev_sha256:ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0";
+    let candidate_rev = "rev_sha256:ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd1";
+    for revision_id in [baseline_rev, candidate_rev] {
+        let rec = autonoetic_types::agent_revision::AgentRevisionRecord {
+            revision_id: revision_id.to_string(),
+            agent_id: "test-agent".to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: format!("sha256:{}", &revision_id[11..19]),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            manifest_hash: "sha256:manifest".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: "test".to_string(),
+            created_by_id: "test".to_string(),
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "test".to_string(),
+            trust_domain: "local".to_string(),
+            status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            metadata_json: json!({}),
+            short_id: "cmp".to_string(),
+            signature: None,
+            signer_id: None,
+        };
+        store.insert_agent_revision(&rec).unwrap();
+    }
+
+    let suite = autonoetic_types::evaluation::EvalSuiteRecord {
+        suite_id: "suite-stats".to_string(),
+        name: "Stats Suite".to_string(),
+        description: "desc".to_string(),
+        spec_json: json!({"cases":[
+            {"case_id":"c1","message":"m","assertions":{"reply_max_chars":10}},
+            {"case_id":"c2","message":"m","assertions":{"reply_max_chars":10}},
+            {"case_id":"c3","message":"m","assertions":{"reply_max_chars":10}},
+            {"case_id":"c4","message":"m","assertions":{"reply_max_chars":10}},
+            {"case_id":"c5","message":"m","assertions":{"reply_max_chars":10}},
+        ]}),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "test".to_string(),
+        created_by_id: "test".to_string(),
+        origin_node_id: "test".to_string(),
+        evaluated_targets: vec![],
+        author_agent_id: None,
+        based_on_suite_id: None,
+    };
+    store.insert_eval_suite(&suite).unwrap();
+
+    let baseline_run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: "eval-stats-baseline".to_string(),
+        suite_id: suite.suite_id.clone(),
+        subject_agent_id: "test-agent".to_string(),
+        subject_revision_id: baseline_rev.to_string(),
+        baseline_revision_id: None,
+        status: autonoetic_types::evaluation::EvalRunStatus::Passed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({"passed":5,"failed":0}),
+        report_handle: Some("sha256:base-report".to_string()),
+        origin_node_id: "test".to_string(),
+    };
+    let candidate_run = autonoetic_types::evaluation::EvalRunRecord {
+        eval_run_id: "eval-stats-candidate".to_string(),
+        suite_id: suite.suite_id.clone(),
+        subject_agent_id: "test-agent".to_string(),
+        subject_revision_id: candidate_rev.to_string(),
+        baseline_revision_id: Some(baseline_rev.to_string()),
+        status: autonoetic_types::evaluation::EvalRunStatus::Passed,
+        queued_at: chrono::Utc::now().to_rfc3339(),
+        started_at: None,
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+        summary_json: json!({"passed":5,"failed":0}),
+        report_handle: Some("sha256:candidate-report".to_string()),
+        origin_node_id: "test".to_string(),
+    };
+    store.insert_eval_run(&baseline_run).unwrap();
+    store.insert_eval_run(&candidate_run).unwrap();
+
+    // Create 5 case results per run, each linked to a session outcome.
+    // Baseline: all passed, slightly higher cost/tokens/turns.
+    // Candidate: all passed, cheaper on every axis = B should be preferred.
+    let session_ids: Vec<String> = (0..5).map(|i| format!("session-b-{}", i)).collect();
+    for (i, sid) in session_ids.iter().enumerate() {
+        store
+            .upsert_session_outcome_metrics(
+                sid,
+                "root-session",
+                "eval-agent",
+                None,
+                10 + i as u64,
+                1000 + (i as u64 * 10),
+                0.10 + (i as f64 * 0.01),
+                60.0 + i as f64,
+            )
+            .unwrap();
+        // Set completion via grader (different agent to pass ownership check)
+        store
+            .set_session_outcome_grade(
+                sid,
+                "outcome-grader",
+                autonoetic_types::session_outcome::Completion::Achieved,
+                None,
+            )
+            .unwrap();
+        store
+            .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+                eval_run_id: baseline_run.eval_run_id.clone(),
+                case_id: format!("c{}", i + 1),
+                status: "passed".to_string(),
+                score: Some(1.0),
+                session_id: Some(sid.clone()),
+                notes: None,
+                output_json: json!({}),
+            })
+            .unwrap();
+    }
+
+    let candidate_sessions: Vec<String> =
+        (0..5).map(|i| format!("session-c-{}", i)).collect();
+    for (i, sid) in candidate_sessions.iter().enumerate() {
+        // Candidate is cheaper: lower cost, fewer tokens, fewer turns
+        store
+            .upsert_session_outcome_metrics(
+                sid,
+                "root-session",
+                "eval-agent",
+                None,
+                8 + i as u64,
+                800 + (i as u64 * 5),
+                0.07 + (i as f64 * 0.005),
+                45.0 + i as f64,
+            )
+            .unwrap();
+        store
+            .set_session_outcome_grade(
+                sid,
+                "outcome-grader",
+                autonoetic_types::session_outcome::Completion::Achieved,
+                None,
+            )
+            .unwrap();
+        store
+            .insert_eval_case_result(&autonoetic_types::evaluation::EvalCaseResultRecord {
+                eval_run_id: candidate_run.eval_run_id.clone(),
+                case_id: format!("c{}", i + 1),
+                status: "passed".to_string(),
+                score: Some(1.0),
+                session_id: Some(sid.clone()),
+                notes: None,
+                output_json: json!({}),
+            })
+            .unwrap();
+    }
+
+    let manifest = manifest_with_capabilities(vec![Capability::Evaluation {
+        patterns: vec!["suite-*".into(), "test-agent*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir: tmp.path().join("agents"),
+        ..Default::default()
+    };
+
+    let tool = EvalCompareTool;
+    let args = json!({
+        "suite_id": "suite-stats",
+        "baseline_ref": format!("test-agent@{}", baseline_rev),
+        "candidate_ref": format!("test-agent@{}", candidate_rev),
+    });
+    let out = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["status"], "completed");
+
+    // The stats field should exist and contain a recommendation
+    let stats = parsed["stats"].as_object();
+    assert!(
+        stats.is_some(),
+        "expected 'stats' field in eval_compare output, got: {}",
+        out
+    );
+    let stats = stats.unwrap();
+    let recommendation = stats
+        .get("recommendation")
+        .and_then(|r| r.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "expected 'recommendation' in stats — if an error occurred the test data \
+                 should be fixed, not silently accepted. got: {:?}",
+                stats
+            )
+        });
+    assert_eq!(recommendation, "prefer_b");
+}
+
+#[test]
 fn test_load_from_revision_dir_succeeds_with_materialized_revision() {
     let tmp = TempDir::new().unwrap();
     let agents_dir = tmp.path().join("agents");
