@@ -30,7 +30,7 @@ metadata:
     io:
       returns:
         type: object
-        required: [design_summary]
+        required: ["design_summary"]
         properties:
           design_summary:
             type: string
@@ -56,6 +56,8 @@ metadata:
             type: array
             items:
               type: string
+          notes:
+            type: string
 ---
 # Architect
 
@@ -90,6 +92,8 @@ Your job is to **design and decompose**, not to **implement**.
 - Prototype scripts for **design validation only** (not production)
 
 ## Output Format
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
 
 ### Design Output
 

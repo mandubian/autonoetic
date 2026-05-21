@@ -46,7 +46,7 @@ metadata:
     io:
       returns:
         type: object
-        required: [status]
+        required: ["status"]
         properties:
           status:
             type: string
@@ -205,6 +205,10 @@ Report:
 - Admin proposals created
 - Agents queued for evolution (agent IDs + outcome)
 - Bookmark generation number
+
+## Output Format
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
 
 ## Error Handling
 

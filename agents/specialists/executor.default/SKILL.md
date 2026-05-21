@@ -188,11 +188,15 @@ Forbidden commands (blocked by policy): `rm`, `rmdir`, `unlink`, `sudo`, `su`, `
 
 ## Completion
 
-Your final response should contain:
+Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markdown code fences.
 
-- What you ran
-- The key result
-- Any follow-up routing recommendation if the task exceeded your scope
+```json
+{
+  "status": "ok",
+  "stdout_summary": "Computation completed successfully: ...",
+  "follow_up": "This task could be delegated to coder.default for a durable artifact."
+}
+```
 
 ## Clarification
 

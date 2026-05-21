@@ -35,7 +35,7 @@ metadata:
     io:
       returns:
         type: object
-        required: [evolved, reason]
+        required: ["evolved", "reason"]
         properties:
           evolved:
             type: boolean
@@ -68,6 +68,8 @@ You decide whether an agent flagged by the memory curator should be evolved, and
 ```
 
 ## Output
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
 
 Return a JSON object:
 

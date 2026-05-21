@@ -124,6 +124,8 @@ When returning your final response JSON, map your evaluation result to the statu
 
 ## Output Format
 
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
+
 ```json
 {
   "status": "pass" | "fail",

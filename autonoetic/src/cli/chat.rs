@@ -602,27 +602,44 @@ impl App {
         let ww = wrap_width.max(1);
         let mut count = 0usize;
         for msg in &self.messages {
-            let icon = match msg.role {
-                MessageRole::User => "> ",
-                MessageRole::Assistant => "🤖 ",
-                MessageRole::System => "ℹ ",
-                MessageRole::Signal => "🔔 ",
-                MessageRole::SignalLow => "  ",
-                MessageRole::AgentOutput => "📝 ",
-            };
-            let style = message_role_style(msg.role);
+            if let Some(ref card) = msg.rich_card {
+                let rich_lines = match card {
+                    RichCard::UserInteraction(interaction) => {
+                        render_interaction_card(interaction, wrap_width)
+                    }
+                    RichCard::Approval {
+                        request,
+                        detail,
+                        enrichment,
+                    } => render_approval_card(request, detail, enrichment, wrap_width),
+                };
+                for rl in &rich_lines {
+                    count = count.saturating_add(transcript_wrap_line_count(rl.clone(), ww));
+                }
+                count = count.saturating_add(transcript_wrap_line_count(Line::raw(""), ww));
+            } else {
+                let icon = match msg.role {
+                    MessageRole::User => "> ",
+                    MessageRole::Assistant => "🤖 ",
+                    MessageRole::System => "ℹ ",
+                    MessageRole::Signal => "🔔 ",
+                    MessageRole::SignalLow => "  ",
+                    MessageRole::AgentOutput => "📝 ",
+                };
+                let style = message_role_style(msg.role);
 
-            for (i, text_line) in msg.content.lines().enumerate() {
-                let prefix = if i == 0 { icon } else { "  " };
-                count = count.saturating_add(transcript_wrap_line_count(
-                    Line::from(vec![
-                        Span::raw(prefix),
-                        Span::styled(text_line.to_string(), style),
-                    ]),
-                    ww,
-                ));
+                for (i, text_line) in msg.content.lines().enumerate() {
+                    let prefix = if i == 0 { icon } else { "  " };
+                    count = count.saturating_add(transcript_wrap_line_count(
+                        Line::from(vec![
+                            Span::raw(prefix),
+                            Span::styled(text_line.to_string(), style),
+                        ]),
+                        ww,
+                    ));
+                }
+                count = count.saturating_add(transcript_wrap_line_count(Line::raw(""), ww));
             }
-            count = count.saturating_add(transcript_wrap_line_count(Line::raw(""), ww));
         }
         if let Some(pending_text) = self.active_work_text() {
             count = count.saturating_add(transcript_wrap_line_count(

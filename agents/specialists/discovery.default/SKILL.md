@@ -30,7 +30,7 @@ metadata:
     io:
       returns:
         type: object
-        required: [ranked_candidates, recommendation, needs_new_agent]
+        required: ["ranked_candidates", "recommendation", "needs_new_agent"]
         properties:
           ranked_candidates:
             type: array
@@ -74,6 +74,8 @@ You find installed agents that best match a task intent. You do not execute task
 5. Return structured output.
 
 ## Output
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
 
 ```json
 {

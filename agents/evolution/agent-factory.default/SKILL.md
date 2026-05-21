@@ -32,7 +32,7 @@ metadata:
     io:
       returns:
         type: object
-        required: [status]
+        required: ["status"]
         properties:
           status:
             type: string
@@ -73,14 +73,21 @@ When a pipeline stage is owned by another installed agent, your default action i
 
 ## Output
 
-On success: report back to the planner with the final agent details. Include:
-- `agent_id`: the installed agent's ID
-- `revision_id`: the revision that was installed
-- `execution_mode`: reasoning or code
-- `gating_applied`: "full" or "none"
-- A clear statement that the agent is **ready to use** and no further installation steps are needed.
+Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markdown code fences.
 
-Never claim "ready to use" unless `specialized_builder.default` actually returned a successful install result with a `revision_id`.
+```json
+{
+  "status": "ok",
+  "agent_id": "my-agent",
+  "revision_id": "r01.example",
+  "execution_mode": "reasoning",
+  "gating_applied": "audit_only"
+}
+```
+
+On success: set `status: "ok"` and include `agent_id`, `revision_id`, `execution_mode`, `gating_applied`. Never claim success unless `specialized_builder.default` returned a `revision_id`.
+
+On failure: set `status: "error"` and include the failing `stage` and `error`.
 
 **Important**: Once specialized_builder completes (whether reasoning-only or gated code path), your job is DONE. Do NOT spawn additional tasks. Report the result to the planner and stop. The planner should not attempt any further installation or promotion steps.
 

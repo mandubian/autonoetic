@@ -83,6 +83,17 @@ metadata:
           sources:
             type: array
             description: "Optional list of cited sources or source descriptors."
+          clarification_request:
+            type: object
+            description: "Required when status is clarification_needed; asks for missing user input needed to proceed."
+            properties:
+              question:
+                type: string
+                description: "The exact question the user should answer."
+              context:
+                type: string
+                description: "Brief reason why this clarification is needed."
+            required: ["question", "context"]
 ---
 # Researcher
 
@@ -133,6 +144,9 @@ When research is blocked by missing context, request clarification.
 
 ### Output Format
 
+Return a single raw JSON object that matches `io.returns`.
+Do not wrap JSON in markdown code fences (no ```json blocks).
+
 When requesting clarification, output this structure:
 
 ```json
@@ -146,3 +160,5 @@ When requesting clarification, output this structure:
 ```
 
 If you can proceed, produce your normal research findings with citations.
+
+When `status` is `clarification_needed`, include `clarification_request` with both `question` and `context`.

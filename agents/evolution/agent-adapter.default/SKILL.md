@@ -54,6 +54,10 @@ metadata:
 
 Generates wrapper agents for bridging I/O gaps between tools and targets.
 
+## Output Format
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
+
 ## Behavior
 - Analyze source and target schemas using `schema_diff.py`
 - Generate wrapper scripts using `generate_wrapper.py`

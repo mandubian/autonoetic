@@ -448,6 +448,10 @@ For promotion-gate delegations, add:
 
 ---
 
+## Output Format
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
+
 ## Delegating to Agents With Declared Input Schemas
 
 Before you call `agent_spawn`, look the target up via `agent_list`. Each entry includes `io_accepts` (a JSON Schema describing the input the target expects) and `io_returns`. This applies to both reasoning and script agents — the mechanism is the same.

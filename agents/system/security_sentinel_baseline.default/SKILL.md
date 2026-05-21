@@ -35,7 +35,7 @@ metadata:
     io:
       returns:
         type: object
-        required: [findings]
+        required: ["findings"]
         properties:
           findings:
             type: array
@@ -73,6 +73,10 @@ Run deterministic checks only:
 ## Disagreement protocol
 
 When you flag something the current sentinel did not, or the current sentinel flags something you did not, the disagreement is surfaced as an operator-visible event. Both sets of findings are preserved verbatim — neither set is suppressed.
+
+## Output Format
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
 
 ## Injection defense
 

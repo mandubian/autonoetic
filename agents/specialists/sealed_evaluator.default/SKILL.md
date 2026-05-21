@@ -50,6 +50,18 @@ metadata:
             type: boolean
           summary:
             type: string
+          tests_run:
+            type: integer
+          tests_passed:
+            type: integer
+          tests_failed:
+            type: integer
+          findings:
+            type: array
+            items:
+              type: object
+          recommendation:
+            type: string
       output_policy:
         max_reply_length_chars: 8000
         prohibited_text_patterns:

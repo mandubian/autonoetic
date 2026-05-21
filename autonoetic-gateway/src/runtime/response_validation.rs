@@ -187,17 +187,29 @@ pub fn validate_spawn_response(
                 });
             }
             Some(reply) => {
-                let stripped = strip_markdown_code_fences(reply);
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stripped) {
-                    violations.extend(validate_json_against_schema(&json, schema));
-                } else if schema_is_constrained {
-                    violations.push(ValidationViolation {
-                        rule: "output_schema".into(),
-                        message:
-                            "reply is not valid JSON but output schema requires structured output"
-                                .into(),
-                        repair_hint: "Return JSON matching the declared schema".into(),
+                // First try: raw reply as-is (may be valid JSON that happens to
+                // contain ``` inside a string value — stripping would destroy it).
+                let json = serde_json::from_str::<serde_json::Value>(reply.trim())
+                    .ok()
+                    .or_else(|| {
+                        // Fallback: strip markdown code fences and retry.
+                        let stripped = strip_markdown_code_fences(reply);
+                        serde_json::from_str(&stripped).ok()
                     });
+                match json {
+                    Some(parsed) => {
+                        violations.extend(validate_json_against_schema(&parsed, schema));
+                    }
+                    None if schema_is_constrained => {
+                        violations.push(ValidationViolation {
+                            rule: "output_schema".into(),
+                            message:
+                                "reply is not valid JSON but output schema requires structured output"
+                                    .into(),
+                            repair_hint: "Return JSON matching the declared schema".into(),
+                        });
+                    }
+                    None => {}
                 }
             }
             None => {} // schema has no constraints; no reply is acceptable

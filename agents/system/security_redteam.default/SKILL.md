@@ -104,6 +104,10 @@ Each proposal (`attack_pattern_propose`) describes:
 4. Submit via `attack_pattern_propose`.
 5. List your pending proposals via `attack_pattern_list` to avoid duplicates.
 
+## Output Format
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
+
 ## Severity guidance for proposed check layers
 
 - **Phase 1 (deterministic)** — regex, SQL, structural checks that always produce the same result. Propose as phase1 when the detection does not require reasoning.

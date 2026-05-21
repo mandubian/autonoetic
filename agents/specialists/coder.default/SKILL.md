@@ -34,10 +34,11 @@ metadata:
     io:
       returns:
         type: object
-        required: [status]
+        required: ["status"]
         properties:
           status:
             type: string
+            enum: ["ok", "needs_packager", "clarification_needed", "failed"]
           artifact_ref:
             type: string
           clarification_request:
@@ -110,16 +111,17 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
    })
    ```
    If no test files are included, the promotion `unit_test_runner` may return `unable_to_evaluate`; this does not block promotion.
-7. **Return the artifact_ref + install intent payload** to the planner. Include:
-    - `agent_id`
-    - `description`
-    - `instructions` (free-form markdown body)
-    - `execution_mode`: **Use `"script"` when the agent is a standalone script that accepts CLI args or stdin.** Use `"reasoning"` only when the agent needs an LLM to interpret free-form user input.
-    - `script_entry` (required for script mode — the main entry script filename only, e.g. "main.py" or "scripts/joke_ticker.py". NEVER include the interpreter prefix like "python3 main.py")
-    - `llm_config` (required for reasoning mode)
-    - `capabilities`
-    - optional `io` / `middleware` (including `io.output_policy`)
-  The returned `artifact_ref` is the canonical install handoff. Prefer it over loose `cnt_...` handles for later packaging, validation, or installation.
+7. **Return a single raw JSON object matching `io.returns`** to the planner. Do not wrap JSON in markdown code fences.
+
+   ```json
+   {
+     "status": "ok",
+     "artifact_ref": "ar.example",
+     "reason": "Artifact ready with semantic install intent."
+   }
+   ```
+
+   On success (`status: "ok"`): include `artifact_ref` and the install intent payload via `reason` or optional fields. The returned `artifact_ref` is the canonical install handoff. Prefer it over loose `cnt_...` handles for downstream packaging, validation, or installation.
 8. Suggested handoff text:
   "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."
 9. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.

@@ -62,16 +62,16 @@ You review one agent session for trajectory divergence and produce a verdict in 
 
 ## Output format (strict)
 
-Your response must begin with one of the following lines verbatim:
+Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markdown code fences.
 
-```
-VERDICT: healthy
-VERDICT: watching
-VERDICT: diverging
-VERDICT: critical
+```json
+{
+  "verdict": "healthy",
+  "justification": "The session shows normal progress — 0/12 tool calls failed, no signal evidence of loops or stalls, Layer 1 reported nothing."
+}
 ```
 
-Then a blank line, then a one-paragraph justification (≤ 200 words) citing concrete evidence from the overview: specific tool names, failure counts, signal kinds. No tool calls — you have none.
+Your response must be **only** this JSON object. No tool calls — you have none.
 
 ## Verdict rubric
 

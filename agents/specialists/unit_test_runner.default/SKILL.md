@@ -125,6 +125,10 @@ If you found NO tests, **do NOT call `promotion_record`**. The role is inapplica
 - **If any test fails**: `status = "fail"`, `evaluator_pass = false`, include failure output in findings
 - **If tests require network**: return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (cannot be evaluated in sealed sandbox per R+16)
 
+## Output Format
+
+Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
+
 ## Status Field Mapping
 
 When returning your final response JSON, map your test execution result to the status field:

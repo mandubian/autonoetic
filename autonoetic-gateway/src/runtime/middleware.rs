@@ -234,8 +234,11 @@ pub(crate) fn validate_against_schema(input: &str, schema: &serde_json::Value) -
         messages: Vec::new(),
     };
 
-    // Extract JSON from markdown if present
-    let json_input = extract_json_from_markdown(input);
+    // Extract JSON from markdown if present — but only as fallback when the
+    // raw input is not already valid JSON (avoid stripping ``` inside string values).
+    let json_input = serde_json::from_str::<serde_json::Value>(input.trim())
+        .map(|_| input.to_string())
+        .unwrap_or_else(|_| extract_json_from_markdown(input));
 
     let parsed_input: serde_json::Value = match serde_json::from_str(&json_input) {
         Ok(v) => v,

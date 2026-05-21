@@ -34,7 +34,7 @@ metadata:
     io:
       returns:
         type: object
-        required: [status]
+        required: ["status"]
         properties:
           status:
             type: string
@@ -190,9 +190,13 @@ sys.path.insert(0, "/tmp/venv")
 
 Or the planner/coder should have already structured imports to find packages at the mount path.
 
-Return the new `artifact_ref` to planner:
-```
-Built layered artifact: ar.example
+Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markdown code fences.
+
+```json
+{
+  "status": "ok",
+  "artifact_ref": "ar.example"
+}
 ```
 
 ## Capture Path Rules
