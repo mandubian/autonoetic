@@ -428,7 +428,7 @@ pub fn validate_suite_spec(spec: &EvalSuiteSpec) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn enqueue_eval_run(
+pub(crate) fn enqueue_eval_run(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     suite: &autonoetic_types::evaluation::EvalSuiteRecord,
     suite_id: &str,
@@ -829,7 +829,7 @@ impl NativeTool for EvalCompareTool {
 
 /// Build VariantSamples from eval case results by fetching session outcomes.
 /// Returns None when fewer than 3 samples are available in either variant.
-fn build_samples_from_case_results(
+pub(crate) fn build_samples_from_case_results(
     baseline_cases: &HashMap<String, autonoetic_types::evaluation::EvalCaseResultRecord>,
     candidate_cases: &HashMap<String, autonoetic_types::evaluation::EvalCaseResultRecord>,
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
