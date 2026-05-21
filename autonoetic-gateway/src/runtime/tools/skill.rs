@@ -341,20 +341,7 @@ fn service_slug(service: &str) -> String {
 }
 
 fn inject_as_for_service(service: &str) -> String {
-    let mut s = String::new();
-    for c in service.chars() {
-        if c.is_ascii_alphanumeric() {
-            s.push(c.to_ascii_uppercase());
-        } else {
-            s.push('_');
-        }
-    }
-    let s = s.trim_matches('_');
-    if s.is_empty() {
-        "SERVICE_SECRET".to_string()
-    } else {
-        format!("{s}_SECRET")
-    }
+    autonoetic_types::runtime_lock::inject_as_for_service(service)
 }
 
 /// When `content` is a single non-empty line that is only an `http://` or `https://` URL, the

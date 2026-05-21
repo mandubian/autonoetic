@@ -1692,6 +1692,18 @@ impl GatewayExecutionService {
                     self.active_executions.clone(),
                     crate::runtime::live_digest::base_session_id(session_id).to_string(),
                 ));
+                let credential_env = if let (Some(ref gs), gw_dir) = (
+                    self.gateway_store.as_deref(),
+                    crate::execution::gateway_root_dir(&self.config),
+                ) {
+                    crate::runtime::script_execute::resolve_credential_env(
+                        &loaded.dir,
+                        &gw_dir,
+                        gs,
+                    )
+                } else {
+                    vec![]
+                };
                 let script_result = execute_script_in_sandbox(
                     &loaded.dir,
                     &script_path,
@@ -1702,6 +1714,7 @@ impl GatewayExecutionService {
                     script_kill_scope,
                     &loaded.manifest.capabilities,
                     loaded.manifest.script_input_mode,
+                    credential_env,
                 )
                 .await;
 

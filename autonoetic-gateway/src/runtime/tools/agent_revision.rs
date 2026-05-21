@@ -46,6 +46,7 @@ fn normalize_runtime_lock(lock: RuntimeLock) -> RuntimeLock {
     normalized.layers.sort_by(|a, b| {
         (&a.mount_path, &a.layer_id, &a.digest).cmp(&(&b.mount_path, &b.layer_id, &b.digest))
     });
+    normalized.credentials.sort_by(|a, b| a.service.cmp(&b.service));
     normalized
 }
 
@@ -413,6 +414,12 @@ struct RevisionCreateFromIntentArgs {
     /// creating the new one. Required when updating an already-installed agent.
     #[serde(default)]
     replace: bool,
+    /// Service names whose credentials should be injected at spawn time.
+    /// The gateway writes these into runtime.lock.credentials and resolves
+    /// them from the vault when the agent is spawned. Only meaningful for
+    /// script-mode agents that read credentials from env vars.
+    #[serde(default)]
+    credential_services: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -996,6 +1003,7 @@ impl NativeTool for AgentRevisionCreateTool {
                 Some(agent_arts),
                 &artifact_layers_from_bundle(&bundle),
                 Some(gateway_dir),
+                None,
             )?;
             scaffolded
         } else {
@@ -1004,6 +1012,7 @@ impl NativeTool for AgentRevisionCreateTool {
                 None,
                 &artifact_layers_from_bundle(&bundle),
                 Some(gateway_dir),
+                None,
             )?
         };
 
@@ -1087,7 +1096,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "middleware": { "type": "object" },
                     "base_revision_id": { "type": "string" },
                     "summary": { "type": "string" },
-                    "replace": { "type": "boolean", "description": "Set to true to archive the existing active revision and install this as the new one. Required when updating an already-installed agent." }
+                    "replace": { "type": "boolean", "description": "Set to true to archive the existing active revision and install this as the new one. Required when updating an already-installed agent." },
+                    "credential_services": { "type": "array", "items": { "type": "string" }, "description": "Service names whose credentials the agent needs at spawn time. The env-var name is derived deterministically from the service name (e.g. 'moltbook' → MOLTBOOK_SECRET). Only meaningful for script-mode agents." }
                 },
                 "required": ["agent_id", "instructions", "description", "capabilities"],
                 "additionalProperties": false
@@ -1401,6 +1411,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             None,
             &artifact_layers,
             Some(gateway_dir),
+            if args.credential_services.is_empty() { None } else { Some(args.credential_services.clone()) },
         )?;
 
         let manifest_meta = serde_json::json!({

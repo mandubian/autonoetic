@@ -33,6 +33,7 @@ fn lock_with_build_sha(sha: &str) -> RuntimeLock {
         dependencies: vec![],
         artifacts: vec![],
         layers: vec![],
+        credentials: vec![],
     }
 }
 
@@ -55,6 +56,7 @@ fn lock_with_binary_sha(build_sha: &str, binary_sha: &str) -> RuntimeLock {
         dependencies: vec![],
         artifacts: vec![],
         layers: vec![],
+        credentials: vec![],
     }
 }
 

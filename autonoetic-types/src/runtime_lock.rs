@@ -3,6 +3,36 @@
 use crate::layer::LayerApprovalScope;
 use serde::{Deserialize, Serialize};
 
+/// Derive the default env-var injection name from a service identifier.
+/// Mirrors the gateway's `inject_as_for_service()` used by `skill_normalize`.
+///
+/// `"moltbook"` → `"MOLTBOOK_SECRET"`, `"my-api"` → `"MY_API_SECRET"`.
+pub fn inject_as_for_service(service: &str) -> String {
+    let mut s = String::new();
+    for c in service.chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_uppercase());
+        } else {
+            s.push('_');
+        }
+    }
+    let s = s.trim_matches('_');
+    if s.is_empty() {
+        "SERVICE_SECRET".to_string()
+    } else {
+        format!("{s}_SECRET")
+    }
+}
+
+/// A credential requirement declared in the runtime lock.
+/// At spawn time the gateway resolves credentials by service name
+/// and injects the secret as the env var derived by [`inject_as_for_service`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedCredentialMount {
+    /// Service name matching the `credential.service` value in the store.
+    pub service: String,
+}
+
 /// A pinned artifact reference inside the runtime lock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockedArtifact {
@@ -75,4 +105,8 @@ pub struct RuntimeLock {
     /// Pinned layer mounts forming the execution closure.
     #[serde(default)]
     pub layers: Vec<LockedLayerMount>,
+    /// Credential services this agent requires at spawn time.
+    /// The env-var name is derived deterministically via [`inject_as_for_service`].
+    #[serde(default)]
+    pub credentials: Vec<LockedCredentialMount>,
 }

@@ -105,6 +105,7 @@ fn write_runtime_lock(agent_dir: &std::path::Path, layers: Vec<LockedLayerMount>
         dependencies: vec![],
         artifacts: vec![],
         layers,
+        credentials: vec![],
     };
     let lock_yaml = serde_yaml::to_string(&lock).unwrap();
     std::fs::write(agent_dir.join("runtime.lock"), lock_yaml).unwrap();

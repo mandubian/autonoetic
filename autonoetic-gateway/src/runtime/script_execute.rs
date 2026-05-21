@@ -2,6 +2,7 @@
 
 use autonoetic_types::causal_chain::CausalEventRecord;
 use autonoetic_types::config::GatewayConfig;
+use secrecy::ExposeSecret;
 use std::path::{Path, PathBuf};
 
 const AUTONOETIC_INPUT_ENV: &str = "AUTONOETIC_INPUT";
@@ -106,6 +107,7 @@ pub(crate) async fn execute_script_in_sandbox(
     )>,
     capabilities: &[autonoetic_types::capability::Capability],
     input_mode: autonoetic_types::agent::ScriptInputMode,
+    credential_env: Vec<(String, String)>,
 ) -> anyhow::Result<String> {
     use std::io::Write;
 
@@ -165,6 +167,9 @@ pub(crate) async fn execute_script_in_sandbox(
     }
     if let Some(meta_path) = invocation_files.meta_path_sandbox.as_ref() {
         autonoetic_env.push((AUTONOETIC_META_PATH_ENV.to_string(), meta_path.clone()));
+    }
+    for (k, v) in &credential_env {
+        autonoetic_env.push((k.clone(), v.clone()));
     }
     let mut runner = match crate::sandbox::SandboxRunner::spawn_with_driver_and_dependencies_and_env(
         driver,
@@ -265,6 +270,122 @@ pub(crate) fn script_causal_event(
         evidence_ref: None,
         reason: None,
     });
+}
+
+/// Resolve credential env vars from a runtime.lock's `credentials` section.
+///
+/// For each `LockedCredentialMount`, looks up credentials by service name in
+/// the store, derives the env-var name via `inject_as_for_service()`, and
+/// resolves the secret from the vault. Returns `(env_var, secret_value)` pairs
+/// ready to inject into the sandbox environment.
+///
+/// Failures are logged and skipped — a missing credential should not block
+/// the agent spawn (the credential may not be needed this session).
+pub(crate) fn resolve_credential_env(
+    agent_dir: &Path,
+    gateway_dir: &Path,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> Vec<(String, String)> {
+    let lock_path = agent_dir.join(
+        "runtime.lock",
+    );
+    let lock: autonoetic_types::runtime_lock::RuntimeLock = match std::fs::read_to_string(&lock_path)
+    {
+        Ok(content) => match serde_yaml::from_str(&content) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(
+                    target: "script_execute",
+                    path = %lock_path.display(),
+                    error = %e,
+                    "Failed to parse runtime.lock; skipping credential resolution"
+                );
+                return vec![];
+            }
+        },
+        Err(_) => return vec![],
+    };
+
+    if lock.credentials.is_empty() {
+        return vec![];
+    }
+
+    let vault_dir = gateway_dir.parent().unwrap_or(gateway_dir);
+    if crate::vault::ensure_default_key(vault_dir).is_err() {
+        tracing::warn!(target: "script_execute", "Failed to ensure vault key; skipping credential resolution");
+        return vec![];
+    }
+    let vault_path = crate::vault::default_vault_path(vault_dir);
+    let vault = match crate::vault::Vault::load_from_file(&vault_path) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(target: "script_execute", error = %e, "Failed to load vault; skipping credential resolution");
+            return vec![];
+        }
+    };
+
+    let mut resolved = Vec::new();
+    for cm in &lock.credentials {
+        let env_var = autonoetic_types::runtime_lock::inject_as_for_service(&cm.service);
+        let creds = match store.list_credentials_by_service(&cm.service) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "script_execute",
+                    service = %cm.service,
+                    error = %e,
+                    "Failed to list credentials for service"
+                );
+                continue;
+            }
+        };
+        let matched = creds
+            .iter()
+            .filter(|c| c.inject_as.as_deref() == Some(&env_var))
+            .collect::<Vec<_>>();
+        let cred = match matched.len() {
+            0 => {
+                tracing::warn!(
+                    target: "script_execute",
+                    service = %cm.service,
+                    env_var = %env_var,
+                    "No credential found for service with matching inject_as; skipping"
+                );
+                continue;
+            }
+            1 => matched[0],
+            _ => {
+                tracing::warn!(
+                    target: "script_execute",
+                    service = %cm.service,
+                    env_var = %env_var,
+                    count = matched.len(),
+                    "Multiple credentials found for service+env_var; using first match"
+                );
+                matched[0]
+            }
+        };
+        match vault.get_secret(&cred.secret_name) {
+            Some(secret) => {
+                tracing::info!(
+                    target: "script_execute",
+                    service = %cm.service,
+                    env_var = %env_var,
+                    "Resolved credential for script agent"
+                );
+                resolved.push((env_var, secret.expose_secret().to_string()));
+            }
+            None => {
+                tracing::warn!(
+                    target: "script_execute",
+                    service = %cm.service,
+                    secret_name = %cred.secret_name,
+                    "Secret not found in vault; skipping credential injection"
+                );
+            }
+        }
+    }
+    resolved
 }
 
 #[cfg(test)]

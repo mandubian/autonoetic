@@ -13,8 +13,8 @@ use autonoetic_types::agent::{AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::layer::ArtifactLayer;
 use autonoetic_types::runtime_lock::{
-    LockedArtifact, LockedDependencySet, LockedGateway, LockedLayerMount, LockedSandbox, LockedSdk,
-    RuntimeLock,
+    LockedArtifact, LockedCredentialMount, LockedDependencySet, LockedGateway, LockedLayerMount,
+    LockedSandbox, LockedSdk, RuntimeLock,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,7 +88,7 @@ pub fn scaffold_runtime_lock(
     agent_artifacts: Option<Vec<LockedArtifact>>,
     artifact_layers: &[ArtifactLayer],
 ) -> anyhow::Result<RuntimeLock> {
-    scaffold_runtime_lock_with_scopes(agent_dependencies, agent_artifacts, artifact_layers, None)
+    scaffold_runtime_lock_with_scopes(agent_dependencies, agent_artifacts, artifact_layers, None, None)
 }
 
 /// Like `scaffold_runtime_lock` but also populates `approval_scope` on each layer
@@ -98,6 +98,7 @@ pub fn scaffold_runtime_lock_with_scopes(
     agent_artifacts: Option<Vec<LockedArtifact>>,
     artifact_layers: &[ArtifactLayer],
     gateway_dir: Option<&std::path::Path>,
+    credential_services: Option<Vec<String>>,
 ) -> anyhow::Result<RuntimeLock> {
     Ok(RuntimeLock {
         gateway: LockedGateway {
@@ -154,6 +155,11 @@ pub fn scaffold_runtime_lock_with_scopes(
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?,
+        credentials: credential_services
+            .unwrap_or_default()
+            .into_iter()
+            .map(|service| LockedCredentialMount { service })
+            .collect(),
     })
 }
 
@@ -206,6 +212,7 @@ sandbox:
 dependencies: []
 artifacts: []
 layers: []
+credentials: []
 "#,
         version = gateway_version(),
         sha = GATEWAY_BUILD_SHA256,
