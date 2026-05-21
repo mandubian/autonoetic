@@ -1,0 +1,508 @@
+use std::io::Write;
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::Context;
+use autonoetic_gateway::runtime::tools::improvement::AbReplayTool;
+use autonoetic_gateway::runtime::tools::NativeTool;
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent_revision::AgentRevisionStatus;
+use autonoetic_types::capability::Capability;
+use serde_json::json;
+
+#[derive(Debug, clap::Args)]
+pub struct ImproveArgs {
+    #[command(subcommand)]
+    pub command: ImproveCommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum ImproveCommand {
+    /// Run the self-improvement loop: select sessions → diagnose → propose → validate → deploy.
+    Run(ImproveRunArgs),
+}
+
+#[derive(Debug, clap::Args)]
+#[command(group = clap::ArgGroup::new("source").required(true).multiple(true))]
+pub struct ImproveRunArgs {
+    /// Single session to improve from.
+    #[arg(long, group = "source")]
+    pub session: Option<String>,
+    /// Number of most recent sessions for this agent.
+    #[arg(long, group = "source", requires = "agent")]
+    pub last_sessions: Option<usize>,
+    /// Sessions since this date (RFC3339 or YYYY-MM-DD).
+    #[arg(long, group = "source", requires = "agent")]
+    pub since: Option<String>,
+    /// Agent ID (required with --last-sessions or --since).
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// If true, diagnose + propose but stop before A/B replay.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// If true, refuse to deploy — output the comparison report path instead.
+    #[arg(long)]
+    pub no_prompt: bool,
+}
+
+pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> anyhow::Result<()> {
+    match command {
+        ImproveCommand::Run(args) => {
+            let session = args.session.as_deref();
+            let last_sessions = args.last_sessions;
+            let since = args.since.as_deref();
+            let agent = args.agent.as_deref();
+            let dry_run = args.dry_run;
+            let no_prompt = args.no_prompt;
+            let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
+            let gateway_dir = loaded_config.agents_dir.join(".gateway");
+            let store = Arc::new(GatewayStore::open(&gateway_dir).context(
+                "Failed to open GatewayStore — has the gateway run at this path?",
+            )?);
+
+            // 1. Select sessions
+            let session_ids = resolve_session_ids(&store, session, last_sessions, since, agent)?;
+            if session_ids.is_empty() {
+                anyhow::bail!("No matching sessions found");
+            }
+
+            // 2. Load session outcomes — each must exist and be readable
+            let mut outcomes: Vec<(String, _)> = Vec::new();
+            for id in &session_ids {
+                let outcome = store
+                    .get_session_outcome(id)
+                    .with_context(|| format!("Failed to read outcome for session '{}'", id))?
+                    .ok_or_else(|| anyhow::anyhow!("Session '{}' has no outcome record", id))?;
+                outcomes.push((id.clone(), outcome));
+            }
+
+            // 3. Print diagnosis
+            print_diagnosis(&outcomes);
+            if dry_run {
+                eprintln!("[dry-run] Stopping before propose/validate as requested.");
+                return Ok(());
+            }
+
+            // 4. Determine agent to improve from the first outcome
+            let target_agent = match outcomes.first() {
+                Some((_, o)) => o.source_agent_id.clone(),
+                None => agent
+                    .map(|a| a.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("No agent identified from sessions or --agent flag"))?,
+            };
+
+            // 5. Interactive issue selection
+            let selected = if no_prompt {
+                // In no-prompt mode, auto-select all
+                outcomes.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
+            } else {
+                prompt_select_issues(&outcomes)?
+            };
+
+            if selected.is_empty() {
+                eprintln!("No issues selected. Exiting.");
+                return Ok(());
+            }
+
+            // 6. Validate via improvement.ab_replay
+            let comparison = run_ab_replay(&loaded_config, &store, &gateway_dir, &target_agent, &selected)?;
+            println!("{}", serde_json::to_string_pretty(&comparison)?);
+
+            if comparison["status"] == "queued" {
+                eprintln!(
+                    "Eval runs queued. Re-run `autonoetic improve run --session <id>` once the \
+                     background eval runner completes to see the comparison report."
+                );
+                return Ok(());
+            }
+
+            // 7. Approval
+            if no_prompt {
+                eprintln!("[no-prompt] Refusing to deploy. Comparison report printed above.");
+                eprintln!("[no-prompt] Run without --no-prompt to approve and deploy.");
+                return Ok(());
+            }
+
+            let approved = prompt_approval(&comparison)?;
+            if !approved {
+                eprintln!("Deploy rejected by operator.");
+                return Ok(());
+            }
+
+            // 8. Deploy: promote the candidate revision
+            let candidate_ref = comparison["revision_b"].as_str().unwrap_or("candidate");
+            let rev_id = candidate_ref.split('@').nth(1).unwrap_or(candidate_ref);
+            let candidate_eval_run_id = comparison["candidate_eval_run_id"].as_str().map(|s| s.to_string());
+
+            let promote_manifest = promote_manifest();
+            let promote_policy = autonoetic_gateway::policy::PolicyEngine::new(promote_manifest.clone());
+            let promote_tool = autonoetic_gateway::runtime::tools::AgentRevisionPromoteTool;
+            let promote_args = json!({
+                "agent_id": target_agent,
+                "revision_id": rev_id,
+                "reason": "P3 improve CLI auto-deploy",
+                "required_eval_run_id": candidate_eval_run_id,
+            });
+            let promote_output = promote_tool.execute(
+                &promote_manifest,
+                &promote_policy,
+                Path::new("/tmp"),
+                Some(&gateway_dir),
+                &promote_args.to_string(),
+                None,
+                None,
+                Some(&loaded_config),
+                Some(store.clone()),
+                None,
+            )
+            .context("Failed to promote revision via AgentRevisionPromoteTool")?;
+            let promote_result: serde_json::Value = serde_json::from_str(&promote_output)
+                .context("Failed to parse promotion result")?;
+            eprintln!("Promoted `{}` to revision `{}`.", target_agent, rev_id);
+            if let Some(prev) = promote_result["previous_revision_id"].as_str() {
+                eprintln!("Previous revision was `{}`.", prev);
+                eprintln!("To rollback: autonoetic agent revision promote {} {}", target_agent, prev);
+            }
+
+            // 9. Monitor stub
+            let prev_id = promote_result["previous_revision_id"].as_str().unwrap_or("unknown");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "agent": target_agent,
+                    "promoted_revision": rev_id,
+                    "previous_revision": prev_id,
+                    "rollback_command": format!("autonoetic agent revision promote {} {}", target_agent, prev_id),
+                    "next_steps": "Monitor the next sessions for this agent via `autonoetic session show <id>`"
+                }))?
+            );
+        }
+    }
+    Ok(())
+}
+
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+
+fn resolve_session_ids(
+    store: &GatewayStore,
+    session: Option<&str>,
+    last_sessions: Option<usize>,
+    since: Option<&str>,
+    agent: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    if let Some(sid) = session {
+        return Ok(vec![sid.to_string()]);
+    }
+
+    let agent_id = agent
+        .ok_or_else(|| anyhow::anyhow!("--agent required with --last-sessions or --since"))?;
+
+    let mut session_ids = store
+        .list_sessions_for_agent(agent_id)
+        .with_context(|| format!("Failed to list sessions for agent '{}'", agent_id))?;
+
+    if let Some(since_str) = since {
+        let cutoff = parse_date_cutoff(since_str)?;
+        let mut filtered = Vec::new();
+        for id in session_ids {
+            let outcome = store
+                .get_session_outcome(&id)
+                .with_context(|| format!("Failed to read outcome for '{}'", id))?;
+            if let Some(o) = outcome {
+                if o.created_at >= cutoff {
+                    filtered.push(id);
+                }
+            }
+        }
+        session_ids = filtered;
+    }
+
+    // Sort by most recent first (outcome updated_at) — load all outcomes upfront
+    let mut with_time: Vec<(String, String)> = Vec::new();
+    for sid in &session_ids {
+        let outcome = store
+            .get_session_outcome(sid)
+            .with_context(|| format!("Failed to read outcome for sort on '{}'", sid))?
+            .map(|o| o.updated_at)
+            .unwrap_or_default();
+        with_time.push((sid.clone(), outcome));
+    }
+    with_time.sort_by(|a, b| b.1.cmp(&a.1));
+    session_ids = with_time.into_iter().map(|(id, _)| id).collect();
+
+    if let Some(n) = last_sessions {
+        session_ids.truncate(n);
+    }
+
+    Ok(session_ids)
+}
+
+fn parse_date_cutoff(s: &str) -> anyhow::Result<String> {
+    // Try RFC3339 first, then YYYY-MM-DD
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.to_rfc3339());
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let dt = d
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| anyhow::anyhow!("invalid date: {}", s))?;
+        let formatted = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+        return Ok(chrono::DateTime::parse_from_rfc3339(&format!("{}Z", formatted))
+            .map_err(|e| anyhow::anyhow!("invalid date '{}': {}", s, e))?
+            .to_rfc3339());
+    }
+    anyhow::bail!("Invalid date format '{}' — use RFC3339 or YYYY-MM-DD", s);
+}
+
+fn print_diagnosis(outcomes: &[(String, autonoetic_types::session_outcome::SessionOutcome)]) {
+    eprintln!("── Session Diagnosis ──────────────────────────────────────");
+    eprintln!("Found {} session(s) with outcomes:", outcomes.len());
+    for (sid, o) in outcomes {
+        let success = o.judged_success();
+        let success_label = match success {
+            Some(true) => "passed",
+            Some(false) => "failed",
+            None => "ungraded",
+        };
+        eprintln!(
+            "  {} | agent: {} | {} | {} turns | ${:.4} | {}s wall",
+            sid,
+            o.source_agent_id,
+            success_label,
+            o.turns,
+            o.cost_usd,
+            o.wall_clock_secs as u64,
+        );
+        if let Some(ref goal) = o.task_goal {
+            eprintln!("         goal: {}", goal);
+        }
+        if let Some(ref g) = o.grader {
+            eprintln!("         grader: {} @ {}", g.grader_agent_id, g.graded_at);
+            if let Some(ref ev) = g.evidence_summary {
+                eprintln!("         evidence: {}", ev);
+            }
+        }
+    }
+    eprintln!("───────────────────────────────────────────────────────────");
+}
+
+fn prompt_select_issues(
+    outcomes: &[(String, autonoetic_types::session_outcome::SessionOutcome)],
+) -> anyhow::Result<Vec<String>> {
+    eprintln!("Select sessions to address (comma-separated indices, or 'all'):");
+    for (i, (sid, o)) in outcomes.iter().enumerate() {
+        let success_label = match o.judged_success() {
+            Some(true) => "passed",
+            Some(false) => "failed",
+            None => "ungraded",
+        };
+        eprintln!("  [{}] {} — {} — {} turns, ${:.4}", i, sid, success_label, o.turns, o.cost_usd);
+    }
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read input")?;
+    let input = input.trim();
+
+    if input.eq_ignore_ascii_case("all") {
+        return Ok(outcomes.iter().map(|(id, _)| id.clone()).collect());
+    }
+
+    let indices: Vec<usize> = input
+        .split(',')
+        .map(|s| {
+            s.trim()
+                .parse::<usize>()
+                .map_err(|e| anyhow::anyhow!("Invalid index '{}': {}", s, e))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let selected: Vec<String> = indices
+        .iter()
+        .filter_map(|i| outcomes.get(*i).map(|(id, _)| id.clone()))
+        .collect();
+
+    if selected.is_empty() {
+        anyhow::bail!("No valid sessions selected from the given indices");
+    }
+    Ok(selected)
+}
+
+fn run_ab_replay(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: &Arc<GatewayStore>,
+    _gateway_dir: &Path,
+    agent_id: &str,
+    session_ids: &[String],
+) -> anyhow::Result<serde_json::Value> {
+    let manifest = AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "autonoetic-cli".to_string(),
+            name: "Autonoetic CLI".to_string(),
+            description: "CLI improve command".to_string(),
+        },
+        capabilities: vec![Capability::Evaluation {
+            patterns: vec!["*".into()],
+        }],
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+        sandbox_network: Default::default(),
+    };
+
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    // Build task_specs from session outcomes (use task_goal as message)
+    let mut task_specs: Vec<serde_json::Value> = Vec::new();
+    for sid in session_ids {
+        let outcome = store
+            .get_session_outcome(sid)
+            .with_context(|| format!("Failed to read outcome for '{}'", sid))?;
+        let message = outcome
+            .as_ref()
+            .and_then(|o| o.task_goal.clone())
+            .unwrap_or_else(|| format!("Replay session {}", sid));
+        task_specs.push(json!({
+            "message": message,
+            "case_id": sid.clone(),
+        }));
+    }
+
+    // revision_a = plain agent_id resolves to the currently promoted revision
+    // revision_b = resolve the latest non-promoted candidate revision, if any
+    let revisions = store.list_agent_revisions(agent_id)
+        .with_context(|| format!("Failed to list revisions for '{}'", agent_id))?;
+    let promoted = store.resolve_alias(agent_id)
+        .with_context(|| format!("Failed to resolve alias for '{}'", agent_id))?;
+    let promoted_rev = promoted.as_ref().map(|a| a.revision_id.as_str());
+    let candidate_rev = revisions
+        .iter()
+        .find(|r| {
+            Some(r.revision_id.as_str()) != promoted_rev
+                && matches!(r.status, AgentRevisionStatus::Candidate | AgentRevisionStatus::Ready)
+        })
+        .map(|r| r.revision_id.as_str());
+
+    let (revision_a, revision_b) = if let Some(cand) = candidate_rev {
+        (agent_id.to_string(), format!("{}@{}", agent_id, cand))
+    } else {
+        // No candidate found — compare against current alias (self-comparison).
+        // A proper propose step is needed to create a candidate revision first.
+        eprintln!("[warn] No candidate revision found for '{}' — comparing against itself", agent_id);
+        (agent_id.to_string(), agent_id.to_string())
+    };
+
+    let args = json!({
+        "task_specs": task_specs,
+        "agent_id": agent_id,
+        "revision_a": revision_a,
+        "revision_b": revision_b,
+        "holdout_ratio": 0.0,
+    });
+
+    let result = AbReplayTool.execute(
+        &manifest,
+        &policy,
+        Path::new("/tmp"),
+        None,
+        &args.to_string(),
+        None,
+        None,
+        Some(config),
+        Some(store.clone()),
+        None,
+    )?;
+
+    serde_json::from_str(&result).map_err(|e| anyhow::anyhow!("Failed to parse tool result: {}", e))
+}
+
+/// Manifest with AgentRevision capability, used for the promote step.
+fn promote_manifest() -> AgentManifest {
+    AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "autonoetic-cli".to_string(),
+            name: "Autonoetic CLI".to_string(),
+            description: "CLI improve command".to_string(),
+        },
+        capabilities: vec![Capability::AgentRevision {
+            patterns: vec!["*".into()],
+        }],
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+        sandbox_network: Default::default(),
+    }
+}
+
+fn prompt_approval(comparison: &serde_json::Value) -> anyhow::Result<bool> {
+    eprintln!("\n── Comparison Report ──────────────────────────────────────");
+    if let Some(summary) = comparison.get("summary") {
+        eprintln!(
+            "  Baseline: {}/{} passed | Candidate: {}/{} passed | Δ {}",
+            summary["baseline_passed"].as_i64().unwrap_or(0),
+            summary["baseline_total"].as_i64().unwrap_or(0),
+            summary["candidate_passed"].as_i64().unwrap_or(0),
+            summary["candidate_total"].as_i64().unwrap_or(0),
+            summary["delta_passed"].as_i64().unwrap_or(0),
+        );
+    }
+    let regressions = comparison["regressions"].as_array().map(|a| a.len()).unwrap_or(0);
+    let improvements = comparison["improvements"].as_array().map(|a| a.len()).unwrap_or(0);
+    if regressions > 0 {
+        eprintln!("  ⚠  {} regression(s) detected", regressions);
+    }
+    if improvements > 0 {
+        eprintln!("  ✓ {} improvement(s) detected", improvements);
+    }
+    eprintln!("───────────────────────────────────────────────────────────");
+
+    eprint!("Approve deploy? [y/N]: ");
+    std::io::stderr().flush().context("Failed to flush stderr")?;
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read input")?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}

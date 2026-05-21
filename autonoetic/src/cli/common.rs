@@ -173,6 +173,8 @@ pub enum Commands {
     SentinelExperiment(crate::cli::sentinel_experiment::SentinelExperimentArgs),
     /// Inspect or rate completed sessions (Self-Improvement loop P0)
     Session(SessionArgs),
+    /// Run the self-improvement loop (P3): diagnose, propose, validate, deploy
+    Improve(crate::cli::improve::ImproveArgs),
 }
 
 /// Arguments for the `session` subcommand group.
