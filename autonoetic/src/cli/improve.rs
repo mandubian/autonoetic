@@ -8,6 +8,7 @@ use autonoetic_gateway::runtime::tools::NativeTool;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::agent_revision::AgentRevisionStatus;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::id_format::mint_hashed_prefixed_id;
 use serde_json::json;
 
 #[derive(Debug, clap::Args)]
@@ -104,8 +105,21 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
                 return Ok(());
             }
 
-            // 6. Validate via improvement.ab_replay
-            let comparison = run_ab_replay(&loaded_config, &store, &gateway_dir, &target_agent, &selected)?;
+            // 6. Propose: create a candidate revision by forking the current one
+            let candidate_id = propose_improvement(
+                &loaded_config,
+                &store,
+                &gateway_dir,
+                &target_agent,
+                &selected,
+                &outcomes,
+            )?;
+            eprintln!("Proposed candidate revision `{}`.", candidate_id);
+
+            // 7. Validate via improvement.ab_replay
+            let comparison = run_ab_replay(
+                &loaded_config, &store, &target_agent, &selected, Some(&candidate_id),
+            )?;
             println!("{}", serde_json::to_string_pretty(&comparison)?);
 
             if comparison["status"] == "queued" {
@@ -116,7 +130,7 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
                 return Ok(());
             }
 
-            // 7. Approval
+            // 8. Approval
             if no_prompt {
                 eprintln!("[no-prompt] Refusing to deploy. Comparison report printed above.");
                 eprintln!("[no-prompt] Run without --no-prompt to approve and deploy.");
@@ -129,7 +143,7 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
                 return Ok(());
             }
 
-            // 8. Deploy: promote the candidate revision
+            // 9. Deploy: promote the candidate revision
             let candidate_ref = comparison["revision_b"].as_str().unwrap_or("candidate");
             let rev_id = candidate_ref.split('@').nth(1).unwrap_or(candidate_ref);
             let candidate_eval_run_id = comparison["candidate_eval_run_id"].as_str().map(|s| s.to_string());
@@ -164,7 +178,7 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
                 eprintln!("To rollback: autonoetic agent revision promote {} {}", target_agent, prev);
             }
 
-            // 9. Monitor stub
+            // 10. Monitor stub
             let prev_id = promote_result["previous_revision_id"].as_str().unwrap_or("unknown");
             println!(
                 "{}",
@@ -330,12 +344,117 @@ fn prompt_select_issues(
     Ok(selected)
 }
 
+/// Fork the current active revision as a Candidate, tagged with the triggering
+/// session IDs. Returns the short_id usable as `agent_id@rev_<short_id>`.
+fn propose_improvement(
+    _config: &autonoetic_types::config::GatewayConfig,
+    store: &GatewayStore,
+    gateway_dir: &Path,
+    agent_id: &str,
+    session_ids: &[String],
+    outcomes: &[(String, autonoetic_types::session_outcome::SessionOutcome)],
+) -> anyhow::Result<String> {
+    // Resolve the currently promoted revision to fork from
+    let promoted = store.resolve_alias(agent_id)
+        .with_context(|| format!("Agent '{}' has no active revision — create one first", agent_id))?
+        .ok_or_else(|| anyhow::anyhow!("Agent '{}' has no alias — create and promote a revision first", agent_id))?;
+
+    let current_rev = store.get_agent_revision(&promoted.revision_id)?
+        .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", promoted.revision_id))?;
+
+    // Build a summary scoped to the SELECTED sessions only
+    let selected_set: std::collections::HashSet<&str> =
+        session_ids.iter().map(|s| s.as_str()).collect();
+    let session_summaries: Vec<String> = outcomes.iter()
+        .filter(|(id, _)| selected_set.contains(id.as_str()))
+        .map(|(id, o)| {
+            let label = match o.judged_success() {
+                Some(true) => "passed",
+                Some(false) => "failed",
+                None => "ungraded",
+            };
+            format!("{} ({} — {})", id, label, o.task_goal.as_deref().unwrap_or("no goal"))
+        })
+        .collect();
+
+    let metadata = json!({
+        "proposed_by": "autonoetic improve",
+        "proposed_at": chrono::Utc::now().to_rfc3339(),
+        "trigger_sessions": session_ids,
+        "trigger_summary": session_summaries,
+        "forked_from": current_rev.revision_id,
+    });
+
+    // Generate a unique revision_id (short ref will be used for resolution)
+    let revision_id = mint_hashed_prefixed_id(
+        "prop-",
+        &format!("{}-propose-{}", agent_id, uuid::Uuid::new_v4()),
+    );
+
+    let new_rev = autonoetic_types::agent_revision::AgentRevisionRecord {
+        revision_id: revision_id.clone(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: Some(current_rev.revision_id.clone()),
+        artifact_id: current_rev.artifact_id.clone(),
+        content_digest: current_rev.content_digest.clone(),
+        runtime_lock_hash: current_rev.runtime_lock_hash.clone(),
+        manifest_hash: current_rev.manifest_hash.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: "cli".to_string(),
+        created_by_id: "autonoetic improve".to_string(),
+        source_kind: "improvement_proposal".to_string(),
+        source_ref: Some(format!("sessions:{}", session_ids.join(","))),
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Candidate,
+        metadata_json: metadata,
+        short_id: String::new(),
+        signature: None,
+        signer_id: None,
+    };
+
+    let short_id = store.insert_agent_revision_transactional(&new_rev)
+        .with_context(|| format!("Failed to insert candidate revision for '{}'", agent_id))?;
+
+    // Copy files from the PROMOTED revision's store directory to the new
+    // candidate's directory.  This guarantees the on-disk files match the
+    // hashes we just stored (identical content, same digest).
+    let src_dir = gateway_dir
+        .join("revisions").join("agents").join(agent_id).join(&promoted.revision_id);
+    let dst_dir = gateway_dir
+        .join("revisions").join("agents").join(agent_id).join(&revision_id);
+
+    std::fs::create_dir_all(&dst_dir)
+        .with_context(|| format!("Failed to create revision directory {:?}", dst_dir))?;
+
+    let skill_src = src_dir.join("SKILL.md");
+    let lock_src = src_dir.join("runtime.lock");
+
+    anyhow::ensure!(
+        skill_src.exists(),
+        "Source SKILL.md not found at {:?} — cannot fork revision",
+        skill_src
+    );
+    anyhow::ensure!(
+        lock_src.exists(),
+        "Source runtime.lock not found at {:?} — cannot fork revision",
+        lock_src
+    );
+
+    std::fs::copy(&skill_src, dst_dir.join("SKILL.md"))
+        .with_context(|| format!("Failed to copy SKILL.md to {:?}", dst_dir))?;
+    std::fs::copy(&lock_src, dst_dir.join("runtime.lock"))
+        .with_context(|| format!("Failed to copy runtime.lock to {:?}", dst_dir))?;
+
+    Ok(short_id)
+}
+
 fn run_ab_replay(
     config: &autonoetic_types::config::GatewayConfig,
     store: &Arc<GatewayStore>,
-    _gateway_dir: &Path,
     agent_id: &str,
     session_ids: &[String],
+    explicit_candidate: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let manifest = AgentManifest {
         version: "1.0".to_string(),
@@ -391,33 +510,36 @@ fn run_ab_replay(
     }
 
     // revision_a = plain agent_id resolves to the currently promoted revision
-    // revision_b = resolve the latest non-promoted candidate revision, if any
-    let revisions = store.list_agent_revisions(agent_id)
-        .with_context(|| format!("Failed to list revisions for '{}'", agent_id))?;
-    let promoted = store.resolve_alias(agent_id)
-        .with_context(|| format!("Failed to resolve alias for '{}'", agent_id))?;
-    let promoted_rev = promoted.as_ref().map(|a| a.revision_id.as_str());
-    let candidate_rev = revisions
-        .iter()
-        .find(|r| {
-            Some(r.revision_id.as_str()) != promoted_rev
-                && matches!(r.status, AgentRevisionStatus::Candidate | AgentRevisionStatus::Ready)
-        })
-        .map(|r| r.revision_id.as_str());
-
-    let (revision_a, revision_b) = if let Some(cand) = candidate_rev {
-        (agent_id.to_string(), format!("{}@{}", agent_id, cand))
+    // revision_b = explicit candidate (from propose step) or fallback to alias lookup
+    let revision_b = if let Some(cand) = explicit_candidate {
+        format!("{}@{}", agent_id, cand)
     } else {
-        // No candidate found — compare against current alias (self-comparison).
-        // A proper propose step is needed to create a candidate revision first.
-        eprintln!("[warn] No candidate revision found for '{}' — comparing against itself", agent_id);
-        (agent_id.to_string(), agent_id.to_string())
-    };
+        // Fallback: resolve the latest non-promoted candidate revision
+        let revisions = store.list_agent_revisions(agent_id)
+            .with_context(|| format!("Failed to list revisions for '{}'", agent_id))?;
+        let promoted = store.resolve_alias(agent_id)
+            .with_context(|| format!("Failed to resolve alias for '{}'", agent_id))?;
+        let promoted_rev = promoted.as_ref().map(|a| a.revision_id.as_str());
+        let candidate_rev = revisions
+            .iter()
+            .find(|r| {
+                Some(r.revision_id.as_str()) != promoted_rev
+                    && matches!(r.status, AgentRevisionStatus::Candidate | AgentRevisionStatus::Ready)
+            })
+            .map(|r| r.revision_id.as_str());
 
+        match candidate_rev {
+            Some(cand) => format!("{}@{}", agent_id, cand),
+            None => {
+                eprintln!("[warn] No candidate revision found for '{}' — comparing against itself", agent_id);
+                agent_id.to_string()
+            }
+        }
+    };
     let args = json!({
         "task_specs": task_specs,
         "agent_id": agent_id,
-        "revision_a": revision_a,
+        "revision_a": agent_id,
         "revision_b": revision_b,
         "holdout_ratio": 0.0,
     });
