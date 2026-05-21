@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use autonoetic_types::session_outcome::{
     Completion, GraderProvenance, OperatorRating, OperatorThumb, SessionOutcome, TokenBreakdown,
 };
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use super::GatewayStore;
@@ -50,7 +50,11 @@ impl SessionOutcomeRecord {
             source_agent_id: self.source_agent_id,
             task_goal: self.task_goal,
             completion: Completion::parse(&self.completion),
-            turns: self.turns as u64,
+            // Clamp negatives to 0. The schema column is INTEGER (signed
+            // i64) but the value is conceptually a count; treating a
+            // corrupted negative as a wrapped huge u64 would produce
+            // nonsensical metrics downstream.
+            turns: self.turns.max(0) as u64,
             tokens: TokenBreakdown {
                 total: self.tokens_total.max(0) as u64,
             },
@@ -154,14 +158,17 @@ impl GatewayStore {
         evidence_summary: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        // Ownership check against the live row.
+        // Ownership check against the live row. `.optional()` treats
+        // QueryReturnedNoRows as `None` but propagates real errors
+        // (schema corruption, IO) so they aren't silently swallowed as
+        // "row not found".
         let source_agent_id: Option<String> = conn
             .query_row(
                 "SELECT source_agent_id FROM session_outcomes WHERE session_id = ?1",
                 params![session_id],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
         let source_agent_id = source_agent_id.ok_or_else(|| {
             anyhow::anyhow!(
                 "session_outcomes row for session '{}' not found — grade cannot be attached",
@@ -233,6 +240,10 @@ impl GatewayStore {
                     created_at, updated_at \
              FROM session_outcomes WHERE session_id = ?1",
         )?;
+        // `.optional()` distinguishes "no such session" (return None) from
+        // real query errors (propagate via `?`). The earlier `.ok()`
+        // approach silently swallowed IO / schema errors as "missing row",
+        // making operator debugging harder.
         let row = stmt
             .query_row(params![session_id], |row| {
                 Ok(SessionOutcomeRecord {
@@ -256,7 +267,7 @@ impl GatewayStore {
                     updated_at: row.get(17)?,
                 })
             })
-            .ok();
+            .optional()?;
         Ok(row.map(SessionOutcomeRecord::into_domain))
     }
 }

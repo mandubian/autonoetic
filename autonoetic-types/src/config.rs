@@ -198,12 +198,20 @@ impl Default for DigestAgentConfig {
 /// attached to each session's `SessionOutcome` row after the post-session
 /// digest runs. Self-Improvement loop P0 (#245). The grader must NOT be
 /// the agent that ran the session (ownership invariant).
+///
+/// **Two gates** must be true for grading to run: this struct's
+/// `enabled` AND the top-level `auto_learning.enabled` master switch.
+/// The auto-learning gate lets an operator mute the whole
+/// digest+grading+memory pipeline in one place; setting
+/// `outcome_grader.enabled = true` while `auto_learning.enabled = false`
+/// is a no-op (logged at the writer layer but silent at startup).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutcomeGraderConfig {
-    /// When true, run the grader after eligible sessions complete.
-    /// The auto-populated `SessionOutcome` row (cost/tokens/turns/wall)
-    /// is still written when this is false — only the LLM-graded
-    /// `Completion` field is gated.
+    /// When true AND `auto_learning.enabled` is true, run the grader
+    /// after eligible sessions complete. The auto-populated
+    /// `SessionOutcome` row (cost/tokens/turns/wall) is still written
+    /// regardless of either flag — only the LLM-graded `Completion`
+    /// field is gated.
     #[serde(default = "default_outcome_grader_enabled")]
     pub enabled: bool,
     /// Skip grading when `turn_counter` is strictly below this value at

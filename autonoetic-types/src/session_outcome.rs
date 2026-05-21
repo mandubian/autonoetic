@@ -115,7 +115,12 @@ pub struct GraderProvenance {
     pub grader_agent_id: String,
     pub graded_at: String,
     /// Short evidence string the grader produced (≤ 500 chars in
-    /// practice; the type does not cap, the persistence layer does).
+    /// practice). The cap is enforced by the **writer** — the grader
+    /// reply parser truncates to 500 before calling
+    /// `set_session_outcome_grade`, and the operator-rating CLI rejects
+    /// `--note` longer than 500. The store column itself is
+    /// unbounded `TEXT` (a deliberate choice so a future P1+
+    /// change can lift the cap without a migration).
     #[serde(default)]
     pub evidence_summary: Option<String>,
 }
