@@ -2245,6 +2245,19 @@ impl GatewayExecutionService {
             )
             .as_str();
             let digest_turn_count = runtime.turn_counter;
+            // Write the auto-populated SessionOutcome row before close_session
+            // so we capture the runtime state in one place. The metrics are
+            // session-end snapshots (cumulative cost, tokens, turns,
+            // wall-clock) — best-effort write, errors logged but not
+            // propagated. Self-Improvement loop P0 (#245).
+            if let Some(store) = self.gateway_store.as_ref() {
+                crate::runtime::session_outcome_writer::write_session_outcome_metrics(
+                    &runtime,
+                    store,
+                    &resolved_session_id,
+                    agent_id,
+                );
+            }
             runtime.close_session(close_reason)?;
             {
                 let root_id = crate::runtime::live_digest::base_session_id(&resolved_session_id).to_string();
@@ -2268,6 +2281,22 @@ impl GatewayExecutionService {
             }
             let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
             crate::runtime::post_session_digest::maybe_run_post_session_digest(
+                self.config.as_ref(),
+                &self.config.agents_dir.join(".gateway"),
+                self.gateway_store.as_ref(),
+                &self.http_client,
+                &resolved_session_id,
+                agent_id,
+                digest_turn_count,
+                is_suspended,
+            )
+            .await;
+            // Outcome grader: attach an LLM-judged Completion verdict to
+            // the auto-populated SessionOutcome row. Off by default; gated
+            // on `outcome_grader.enabled`. Runs after the post-session
+            // digest so the SessionOverview snapshot the grader sees
+            // includes the latest digest tail. Self-Improvement loop P0.
+            crate::runtime::session_outcome_writer::maybe_run_outcome_grader(
                 self.config.as_ref(),
                 &self.config.agents_dir.join(".gateway"),
                 self.gateway_store.as_ref(),
@@ -2680,6 +2709,16 @@ impl GatewayExecutionService {
         )
         .as_str();
         let digest_turn_count = runtime.turn_counter;
+        // SessionOutcome metrics — auto-populated on every session close
+        // (Self-Improvement P0 #245). Mirrors the spawn-path call above.
+        if let Some(store) = self.gateway_store.as_ref() {
+            crate::runtime::session_outcome_writer::write_session_outcome_metrics(
+                &runtime,
+                store,
+                &resolved_session_id,
+                agent_id,
+            );
+        }
         runtime.close_session(close_reason)?;
         {
             let root_id =
@@ -2703,6 +2742,17 @@ impl GatewayExecutionService {
         }
         let is_checkpoint_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
         crate::runtime::post_session_digest::maybe_run_post_session_digest(
+            self.config.as_ref(),
+            &self.config.agents_dir.join(".gateway"),
+            self.gateway_store.as_ref(),
+            &self.http_client,
+            &resolved_session_id,
+            agent_id,
+            digest_turn_count,
+            is_checkpoint_suspended,
+        )
+        .await;
+        crate::runtime::session_outcome_writer::maybe_run_outcome_grader(
             self.config.as_ref(),
             &self.config.agents_dir.join(".gateway"),
             self.gateway_store.as_ref(),

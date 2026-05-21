@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 37;
+const SCHEMA_VERSION_LATEST: i64 = 38;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -522,6 +522,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_post_promotion_reviews_v35(conn)?;
     apply_escalation_code_excerpts_v36(conn)?;
     apply_stage_transitions_v37(conn)?;
+    apply_session_outcomes_v38(conn)?;
 
     Ok(())
 }
@@ -559,6 +560,62 @@ fn apply_stage_transitions_v37(conn: &mut Connection) -> Result<()> {
             "stage_transitions",
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    Ok(())
+}
+
+/// v38: `session_outcomes` — one row per session, written at session
+/// close, carrying auto-populated metrics (cost / tokens / turns / wall)
+/// and optionally an LLM-graded `Completion` + operator thumb. Backing
+/// table for the self-improvement loop's outcome signal (#245).
+fn apply_session_outcomes_v38(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 38 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_outcomes (
+            outcome_id TEXT PRIMARY KEY,
+            -- session_id is UNIQUE: one outcome row per session.
+            session_id TEXT NOT NULL UNIQUE,
+            root_session_id TEXT NOT NULL,
+            source_agent_id TEXT NOT NULL,
+            task_goal TEXT,
+            -- Auto-populated metrics. completion defaults to 'unknown'
+            -- so a row written before the grader runs is still queryable.
+            completion TEXT NOT NULL DEFAULT 'unknown',
+            turns INTEGER NOT NULL DEFAULT 0,
+            tokens_total INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0.0,
+            wall_clock_secs REAL NOT NULL DEFAULT 0.0,
+            -- Optional graded overlay. grader_agent_id MUST differ from
+            -- source_agent_id (ownership invariant, enforced at write).
+            grader_agent_id TEXT,
+            graded_at TEXT,
+            grader_evidence TEXT,
+            -- Optional operator rating overlay.
+            operator_thumb TEXT,    -- 'up' | 'down' | NULL
+            operator_note TEXT,
+            operator_rated_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_outcomes_root
+            ON session_outcomes(root_session_id);
+        CREATE INDEX IF NOT EXISTS idx_session_outcomes_agent
+            ON session_outcomes(source_agent_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_session_outcomes_completion
+            ON session_outcomes(completion);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![38_i64, "session_outcomes", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

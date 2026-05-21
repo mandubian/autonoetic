@@ -633,6 +633,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::SentinelExperiment(args) => {
             cli::sentinel_experiment::handle_sentinel_experiment(&config_path, args).await?;
         }
+        Commands::Session(args) => {
+            cli::session::handle_session(&config_path, &args.command).await?;
+        }
     }
 
     Ok(())

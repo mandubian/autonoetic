@@ -22,6 +22,7 @@ mod runtime_control;
 mod scheduled_jobs;
 pub mod security_findings;
 pub mod sentinel_disagreements;
+pub mod session_outcomes;
 mod user_interactions;
 mod user_profiles;
 mod util;
