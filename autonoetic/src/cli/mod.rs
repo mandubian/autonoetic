@@ -9,6 +9,7 @@ pub mod recording;
 pub mod run;
 pub mod security;
 pub mod sentinel_experiment;
+pub mod improve;
 pub mod session;
 pub mod trace;
 pub mod watchdog;

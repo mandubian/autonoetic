@@ -636,6 +636,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Session(args) => {
             cli::session::handle_session(&config_path, &args.command).await?;
         }
+        Commands::Improve(args) => {
+            cli::improve::handle_improve(&config_path, &args.command).await?;
+        }
     }
 
     Ok(())
