@@ -150,7 +150,68 @@ autonoetic improve --last 20-sessions --agent planner.default
 delegates to `evolution-orchestrator`, but with operator-mode behavior
 (interactive prompts, proposed changes shown inline, approval gates).
 
-## 4. The Closed Loop, Concretely
+## 4. Statistical Primer: Replays and Bootstrap
+
+The eval comparison uses **bootstrap resampling** over **replays**. Here is
+what those terms mean.
+
+### Replay
+
+A **replay** is one complete evaluation run of an agent revision against an
+eval suite. Each case in the suite produces one row of per-axis measurements:
+
+| Axis | Source | Meaning |
+|------|--------|---------|
+| `completion` | `SessionOutcome.judged_success()` | 1.0 if passed, 0.0 if failed |
+| `cost_usd` | Session outcome | Dollar cost of the session |
+| `tokens` | Session outcome | Total tokens consumed |
+| `turns` | Session outcome | Number of LLM turns |
+| `wall_clock_secs` | Session outcome | Wall-clock duration |
+
+Five replays of the same revision produce five data points per axis. The
+question `eval_compare` answers is: *are the candidate's points clearly
+better than the baseline's?*
+
+### Bootstrap Replicate
+
+A **bootstrap replicate** is a synthetic dataset created by sampling the N
+original replays **with replacement**. Some replays appear multiple times in
+the replicate, others not at all. This simulates "what if I ran the
+experiment again with the same underlying process."
+
+Algorithm:
+
+1. Start with N measured replays (each replay = one row of axis values).
+2. Pick N random row indices (with replacement) from the original set.
+3. Collect the rows at those indices → that is one replicate.
+4. Compute per-axis means on the replicate.
+5. Run the Pareto decision on those means.
+6. Repeat steps 2–5 thousands of times.
+
+The distribution of replicate outcomes approximates the sampling distribution
+of the true mean — no parametric assumptions needed (important at small N).
+
+### Row-Level Resampling
+
+The replicate must preserve **per-replay correlations**: if a replay was
+expensive *and* slow, those facts stay linked in every replicate. Step 2
+samples *row indices* rather than resampling each axis independently.
+Independent resampling would let an expensive-but-fast replay's cost pair
+with a cheap-but-slow replay's wall-clock in the same replicate, inflating
+variance and misleading the Pareto decision.
+
+### Confidence
+
+After computing the central verdict from the original (un-resampled) means,
+the Pareto decision runs on each bootstrap replicate. The **confidence
+score** is the fraction of replicates that agree with the central verdict.
+A confidence of 0.95 means: "if the experiment were re-run, the same answer
+comes out 95% of the time."
+
+`Inconclusive` is always returned with confidence 0.0 — the tool's job is to
+not guess when evidence is ambiguous.
+
+## 5. The Closed Loop, Concretely
 
 ```mermaid
 flowchart LR
@@ -220,7 +281,7 @@ flowchart LR
    tradeoff, or drop.
 7. **Deploy / rollback**: same path as above.
 
-## 5. Reward Hacking Defenses
+## 6. Reward Hacking Defenses
 
 This is the section the operator was right to flag. Without these, "cheaper
 sessions" becomes the objective and quality erodes silently.
@@ -270,7 +331,7 @@ regresses by > 15% relative to ground, an automatic `rollback proposal` is
 queued for operator approval. This is **not auto-rollback** — operator
 decides. But the proposal is automatic.
 
-## 6. Rollout Phases
+## 7. Rollout Phases
 
 | Phase | Deliverable | Why this order |
 |---|---|---|
@@ -287,7 +348,7 @@ Each phase is independently valuable. P0 alone unlocks better dashboards.
 P1 alone unlocks honest A/B reports. P2 alone unlocks operator-driven
 deliberate testing.
 
-## 7. Progressive Automation (The Path to Less Manual)
+## 8. Progressive Automation (The Path to Less Manual)
 
 The operator wants to start operator-triggered and **allow more automation
 later, progressively**. The progression has three gradations, each unlocked
@@ -302,7 +363,7 @@ by accumulated track record:
 L3 is **opt-in per agent** and never automatic for agents with code-execution
 or sandbox-escape-adjacent capabilities. Constitutional rules apply.
 
-## 8. Relationship to the Divergence Sentinel (#238)
+## 9. Relationship to the Divergence Sentinel (#238)
 
 The two designs are **complementary halves**:
 
@@ -315,7 +376,7 @@ Concretely, the sentinel's `divergence.detected` causal events are **inputs
 to the curator**, which uses them as evidence when scoring agents. A
 high-divergence agent over many sessions is a candidate for improvement.
 
-## 9. Open Questions
+## 10. Open Questions
 
 1. **Replay fidelity for non-fixtured external calls.** Sealed fixtures cover
    recorded calls. Tasks involving novel real-world side effects (sending a
@@ -336,7 +397,7 @@ high-divergence agent over many sessions is a candidate for improvement.
    forbid self-proposal? Probably yes for L3 auto-approval, possibly OK for
    L1/L2 with operator review.
 
-## 10. References
+## 11. References
 
 - `docs/design/divergence-sentinel-design.md` — sister design (in-session)
 - `docs/design/cognitive-capsule-standardization.md` — capsule format used
