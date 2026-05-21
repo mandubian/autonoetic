@@ -5,6 +5,7 @@ use crate::runtime::tools::evaluation::enqueue_eval_run;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::evaluation::EvalRunStatus;
 use autonoetic_types::tool_error::tagged;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -32,18 +33,12 @@ struct AbReplayArgs {
     agent_id: String,
     revision_a: String,
     revision_b: String,
-    #[serde(default = "default_replays")]
-    replays_per_variant: u32,
     #[serde(default = "default_holdout")]
     holdout_ratio: f64,
-    /// Optional pre-existing suite_id — skip suite creation and use this suite directly.
     #[serde(default)]
     suite_id: Option<String>,
 }
 
-fn default_replays() -> u32 {
-    5
-}
 fn default_holdout() -> f64 {
     0.3
 }
@@ -52,6 +47,13 @@ fn default_holdout() -> f64 {
 const ESTIMATED_MAX_COST_PER_SESSION: f64 = 0.05;
 /// Default per-invocation budget in USD.
 const DEFAULT_COST_CEILING: f64 = 1.0;
+
+fn is_terminal_status(status: &EvalRunStatus) -> bool {
+    matches!(
+        status,
+        EvalRunStatus::Passed | EvalRunStatus::Failed | EvalRunStatus::Cancelled
+    )
+}
 
 pub struct AbReplayTool;
 
@@ -99,10 +101,6 @@ impl NativeTool for AbReplayTool {
                     "agent_id": { "type": "string", "description": "Agent ID to replay (e.g. planner.default)" },
                     "revision_a": { "type": "string", "description": "Baseline revision ref (agent_id@rev_sha256:...)" },
                     "revision_b": { "type": "string", "description": "Candidate revision ref" },
-                    "replays_per_variant": {
-                        "type": "integer", "default": 5,
-                        "description": "Number of replays per variant (used for cost estimation)"
-                    },
                     "holdout_ratio": {
                         "type": "number", "default": 0.3,
                         "description": "Fraction of tasks held out for cross-validation"
@@ -158,8 +156,28 @@ impl NativeTool for AbReplayTool {
             ref_a.agent_id
         );
 
-        // Policy check
-        let decision = policy.can_evaluate_suite("ab-replay", &args.agent_id);
+        // Determine suite_id and case count for cost estimation
+        let (suite_id, case_count) = if let Some(sid) = &args.suite_id {
+            let suite = gateway_store
+                .get_eval_suite(sid)?
+                .ok_or_else(|| anyhow::anyhow!("Eval suite '{}' not found", sid))?;
+            let count = suite.spec_json["cases"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
+            (sid.clone(), count)
+        } else {
+            let sid = create_temp_eval_suite(
+                gateway_store.as_ref(),
+                &args.agent_id,
+                &args.task_specs,
+                &manifest.agent.id,
+            )?;
+            (sid, args.task_specs.len())
+        };
+
+        // Policy check with real suite_id
+        let decision = policy.can_evaluate_suite(&suite_id, &args.agent_id);
         if !decision.is_allowed() {
             return Err(anyhow::Error::from(
                 tagged::Tagged::permission_with_rules(
@@ -172,8 +190,8 @@ impl NativeTool for AbReplayTool {
             ));
         }
 
-        // Cost ceiling check
-        let estimated_sessions = args.task_specs.len() as f64 * args.replays_per_variant as f64 * 2.0;
+        // Cost ceiling check: 1 run per revision × 2 revisions
+        let estimated_sessions = case_count as f64 * 2.0;
         let estimated_cost = estimated_sessions * ESTIMATED_MAX_COST_PER_SESSION;
         if estimated_cost > DEFAULT_COST_CEILING {
             return Ok(serde_json::json!({
@@ -181,21 +199,32 @@ impl NativeTool for AbReplayTool {
                 "status": "cost_exceeded",
                 "estimated_cost_usd": estimated_cost,
                 "max_budget_usd": DEFAULT_COST_CEILING,
+                "case_count": case_count,
                 "message": format!(
-                    "Estimated cost ${:.2} exceeds max budget ${:.2}. \
-                     Reduce task_specs count, replays_per_variant, or increase budget.",
-                    estimated_cost, DEFAULT_COST_CEILING
+                    "Estimated cost ${:.2} exceeds max budget ${:.2} ({} cases × 2 runs × ${:.2}/session). \
+                     Reduce task count or increase budget.",
+                    estimated_cost, DEFAULT_COST_CEILING, case_count, ESTIMATED_MAX_COST_PER_SESSION
                 ),
             }).to_string());
         }
 
+        // Derive all case_ids from task_specs in order (for stable holdout)
+        let all_case_ids: Vec<String> = args
+            .task_specs
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| {
+                spec.case_id
+                    .clone()
+                    .unwrap_or_else(|| format!("task-{}", i))
+            })
+            .collect();
+
         // Holdout: pick a suffix of task_specs for held-out validation
-        let n_tasks = args.task_specs.len();
+        let n_tasks = all_case_ids.len();
         let n_holdout = (n_tasks as f64 * args.holdout_ratio).ceil() as usize;
         let n_train = n_tasks.saturating_sub(n_holdout);
-        let holdout_start = n_train;
 
-        // Validate that holdout doesn't cover all tasks
         if n_holdout > 0 && n_train == 0 {
             return Err(anyhow::anyhow!(
                 "holdout_ratio={} leaves no training tasks ({} total). \
@@ -204,31 +233,44 @@ impl NativeTool for AbReplayTool {
             ));
         }
 
-        // Determine suite_id: use existing or create temporary suite
-        let suite_id = if let Some(sid) = &args.suite_id {
-            // Verify the suite exists
-            gateway_store
-                .get_eval_suite(sid)?
-                .ok_or_else(|| anyhow::anyhow!("Eval suite '{}' not found", sid))?;
-            sid.clone()
-        } else {
-            create_temp_eval_suite(
-                gateway_store.as_ref(),
-                &args.agent_id,
-                &args.task_specs,
-                &manifest.agent.id,
-            )?
-        };
+        // Check for existing runs (any status) to detect pending runs and prevent duplicate enqueues
+        let baseline_existing =
+            gateway_store.find_latest_eval_run(&suite_id, &rev_a.revision_id)?;
+        let candidate_existing =
+            gateway_store.find_latest_eval_run(&suite_id, &rev_b.revision_id)?;
 
-        // Check for existing completed runs
-        let baseline_run =
-            gateway_store.find_latest_completed_eval_run(&suite_id, &rev_a.revision_id)?;
-        let candidate_run =
-            gateway_store.find_latest_completed_eval_run(&suite_id, &rev_b.revision_id)?;
+        // If either has a non-terminal run, return queued without enqueuing
+        let has_pending = baseline_existing
+            .as_ref()
+            .is_some_and(|r| !is_terminal_status(&r.status))
+            || candidate_existing
+                .as_ref()
+                .is_some_and(|r| !is_terminal_status(&r.status));
+
+        if has_pending {
+            let pending_ids: Vec<String> = [baseline_existing.as_ref(), candidate_existing.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter(|r| !is_terminal_status(&r.status))
+                .map(|r| r.eval_run_id.clone())
+                .collect();
+
+            return Ok(serde_json::json!({
+                "ok": true,
+                "status": "queued",
+                "suite_id": suite_id,
+                "queued_eval_run_ids": pending_ids,
+                "message": "Eval runs already pending. Re-invoke with same args once complete.",
+            }).to_string());
+        }
+
+        // Only completed runs are useful — enqueue missing
+        let baseline_completed = baseline_existing.filter(|r| is_terminal_status(&r.status));
+        let candidate_completed = candidate_existing.filter(|r| is_terminal_status(&r.status));
 
         let mut queued_ids: Vec<String> = Vec::new();
 
-        if baseline_run.is_none() {
+        if baseline_completed.is_none() {
             let suite = gateway_store.get_eval_suite(&suite_id)?.ok_or_else(|| {
                 anyhow::anyhow!("Eval suite '{}' disappeared", suite_id)
             })?;
@@ -244,7 +286,7 @@ impl NativeTool for AbReplayTool {
             queued_ids.push(run.eval_run_id);
         }
 
-        if candidate_run.is_none() {
+        if candidate_completed.is_none() {
             let suite = gateway_store.get_eval_suite(&suite_id)?.ok_or_else(|| {
                 anyhow::anyhow!("Eval suite '{}' disappeared", suite_id)
             })?;
@@ -273,8 +315,8 @@ impl NativeTool for AbReplayTool {
         }
 
         // Both runs exist and are completed → build comparison
-        let baseline_run = baseline_run.expect("checked above");
-        let candidate_run = candidate_run.expect("checked above");
+        let baseline_run = baseline_completed.expect("checked above");
+        let candidate_run = candidate_completed.expect("checked above");
 
         let baseline_cases =
             gateway_store.list_eval_case_results(&baseline_run.eval_run_id)?;
@@ -293,15 +335,11 @@ impl NativeTool for AbReplayTool {
             candidate_map.insert(c.case_id.clone(), c);
         }
 
-        // Status-based comparison across ALL cases
-        let mut case_ids = std::collections::BTreeSet::new();
-        case_ids.extend(baseline_map.keys().cloned());
-        case_ids.extend(candidate_map.keys().cloned());
-
+        // Status-based comparison across all case_ids (in task_specs order)
         let mut regressions: Vec<String> = Vec::new();
         let mut improvements: Vec<String> = Vec::new();
 
-        for case_id in &case_ids {
+        for case_id in &all_case_ids {
             let base = baseline_map.get(case_id);
             let cand = candidate_map.get(case_id);
             let base_status = base.map(|c| c.status.as_str()).unwrap_or("missing");
@@ -317,10 +355,10 @@ impl NativeTool for AbReplayTool {
         // Statistical comparison via eval_stats
         let stats = build_ab_stats(&baseline_map, &candidate_map, gateway_store.as_ref());
 
-        // Holdout-specific comparison
-        let holdout_cases: Vec<String> = case_ids
+        // Holdout-specific comparison (from task_specs ordering)
+        let holdout_cases: Vec<String> = all_case_ids
             .iter()
-            .skip(holdout_start)
+            .skip(n_train)
             .take(n_holdout)
             .cloned()
             .collect();
@@ -402,6 +440,10 @@ fn create_temp_eval_suite(
             }
             if let Some(max_chars) = spec.reply_max_chars {
                 assertions["reply_max_chars"] = serde_json::json!(max_chars);
+            }
+            // Default assertion to ensure meaningful pass/fail signal
+            if assertions == serde_json::json!({}) {
+                assertions["reply_max_chars"] = serde_json::json!(100000);
             }
             serde_json::json!({
                 "case_id": case_id,

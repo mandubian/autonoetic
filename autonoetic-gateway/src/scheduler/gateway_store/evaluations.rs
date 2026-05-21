@@ -195,6 +195,48 @@ impl GatewayStore {
         Ok(results.pop())
     }
 
+    pub fn find_latest_eval_run(
+        &self,
+        suite_id: &str,
+        subject_revision_id: &str,
+    ) -> Result<Option<EvalRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT eval_run_id, suite_id, subject_agent_id, subject_revision_id,
+                    baseline_revision_id, status, queued_at, started_at, completed_at,
+                    summary_json, report_handle, origin_node_id
+             FROM eval_runs
+             WHERE suite_id = ?1
+               AND subject_revision_id = ?2
+             ORDER BY COALESCE(completed_at, queued_at) DESC
+             LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row(params![suite_id, subject_revision_id], |row| {
+                let status_str: String = row.get(5)?;
+                let status = parse_eval_run_status(status_str.as_str());
+                let summary_json: String = row.get(9)?;
+                let summary_json =
+                    serde_json::from_str(&summary_json).unwrap_or(serde_json::Value::Null);
+                Ok(EvalRunRecord {
+                    eval_run_id: row.get(0)?,
+                    suite_id: row.get(1)?,
+                    subject_agent_id: row.get(2)?,
+                    subject_revision_id: row.get(3)?,
+                    baseline_revision_id: row.get(4)?,
+                    status,
+                    queued_at: row.get(6)?,
+                    started_at: row.get(7)?,
+                    completed_at: row.get(8)?,
+                    summary_json,
+                    report_handle: row.get(10)?,
+                    origin_node_id: row.get(11)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn find_latest_completed_eval_run(
         &self,
         suite_id: &str,

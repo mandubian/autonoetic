@@ -60,10 +60,6 @@ metadata:
           revision_b:
             type: string
             description: "Candidate revision ref"
-          replays_per_variant:
-            type: integer
-            default: 5
-            description: "Number of replays per variant"
           holdout_ratio:
             type: number
             default: 0.3
@@ -111,7 +107,6 @@ Your input is a JSON object matching `io.accepts`. The caller passes:
 - `agent_id`: the agent whose revisions are being compared
 - `revision_a`: baseline revision ref (e.g. `planner.default@rev_sha256:abc123`)
 - `revision_b`: candidate revision ref
-- `replays_per_variant`: how many times to replay each variant (default 5)
 - `holdout_ratio`: fraction of tasks held out for cross-validation (default 0.3)
 
 ## Behavior
@@ -126,7 +121,6 @@ improvement.ab_replay({
   "agent_id": "<agent_id>",
   "revision_a": "<revision_a>",
   "revision_b": "<revision_b>",
-  "replays_per_variant": <n>,
   "holdout_ratio": <ratio>,
   "suite_id": "<suite_id or omitted>"
 })
@@ -173,7 +167,7 @@ The tool returns one of three statuses:
 }
 ```
 
-**`"cost_exceeded"`** — The estimated cost exceeds the $1 ceiling. Return the error info to the caller so they can reduce scope.
+**`"cost_exceeded"`** — The estimated cost exceeds the $1 ceiling. The tool returns `ok: false` as a business-logic refusal (still within `Ok`). Pass through the response fields as-is preserving `ok: false`.
 
 ### Step 3: Polling (re-invocation)
 
@@ -187,7 +181,7 @@ Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markd
 - **completed**: pass through the tool's `completed` response fields (`status`, `summary`, `holdout`, `regressions`, `improvements`, `stats`, `cost`)
 - **cost_exceeded**: pass through the tool's `cost_exceeded` response
 
-Always set `ok: true` in your response if the tool returned without error, and include the `status` field.
+Pass through the `ok` field as returned by the tool. `queued` and `completed` responses have `ok: true`; `cost_exceeded` has `ok: false` (a business-logic refusal within a successful tool call — do not override it). Always include the `status` field.
 
 ## Interpretation Guide
 
