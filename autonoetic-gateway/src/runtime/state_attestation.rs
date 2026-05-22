@@ -244,6 +244,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SkillInstall { .. } => "SkillInstall",
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal",
         Capability::ReasoningAudit { .. } => "ReasoningAudit",
+        Capability::GithubIssueCreate { .. } => "GithubIssueCreate",
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
         Capability::SecurityRedTeam => "SecurityRedTeam",
     }

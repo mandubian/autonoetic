@@ -608,6 +608,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => {
             "budget.no_price_available.allow".to_string()
         }
+        Capability::GithubIssueCreate { .. } => "GithubIssueCreate".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
     }
 }
@@ -962,6 +963,7 @@ pub mod digest;
 pub mod evaluation;
 pub mod execution;
 pub mod federation;
+pub mod github_issue;
 pub mod improvement;
 pub mod knowledge;
 pub mod observability;
@@ -1015,6 +1017,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::observability::register_tools(&mut registry);
     crate::runtime::tools::federation::register_tools(&mut registry);
     crate::runtime::tools::improvement::register_tools(&mut registry);
+    crate::runtime::tools::github_issue::register_tools(&mut registry);
     crate::runtime::tools::promotion::register_tools(&mut registry);
     crate::runtime::tools::scheduler::register_tools(&mut registry);
     crate::runtime::tools::skill::register_tools(&mut registry);
