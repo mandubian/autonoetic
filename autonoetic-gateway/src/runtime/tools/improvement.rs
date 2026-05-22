@@ -158,17 +158,31 @@ impl NativeTool for AbReplayTool {
 
         // P4/P5 surface-change gate. The three-state policy lives in
         // `evaluate_surface_change_policy`; this block applies its
-        // verdict. The policy understands:
-        //   * no delta            → Allow (proceed normally)
-        //   * delta, not opted in → Reject (P4 prompt-only behaviour)
-        //   * delta, high-blast   → Reject (never automatable)
-        //   * delta, low-blast,   → AllowWithStrictHoldout
-        //     opted in              (proceed with coerced holdout ≥
-        //                            improve.capability_change_min_holdout)
+        // verdict and threads the audit trail into the response.
+        //
+        // `policy_applied` is set to one of six values so consumers
+        // can log/inspect what happened uniformly:
+        //   * `gate_disabled`                          — restrict_to_prompt_only=false
+        //   * `not_evaluated`                          — gate enabled but no gateway_dir
+        //   * `no_delta`                               — surfaces match
+        //   * `prompt_only_violation`                  — reject (operator not opted in)
+        //   * `high_blast_radius`                      — reject (never automatable)
+        //   * `capability_change_with_strict_holdout`  — allow + maybe coerce holdout
+        //
         // See docs/design/self-improvement-loop-validation.md §8 (P5).
-        let mut policy_applied = "no_delta".to_string();
+        let mut policy_applied = if config.improve.restrict_to_prompt_only {
+            // Will be overwritten once we actually evaluate.
+            "not_evaluated".to_string()
+        } else {
+            "gate_disabled".to_string()
+        };
         let mut holdout_coerced_from: Option<f64> = None;
         if config.improve.restrict_to_prompt_only {
+            // Validate the high-blast list against the canonical set
+            // from autonoetic-types. Typos here would silently disable
+            // detection for that kind, so we surface them loudly.
+            warn_unknown_high_blast_kinds(&config.improve.high_blast_radius_capability_kinds);
+
             // The revisions live under `gateway_dir/revisions/agents/<agent>/<rev>/`.
             // Use the `gateway_dir` parameter the runtime threads in
             // (production: JSON-RPC dispatch supplies it). When absent,
@@ -186,9 +200,14 @@ impl NativeTool for AbReplayTool {
                     )?;
                     match policy {
                         SurfaceChangePolicy::Allow => {
-                            // No delta. Holdout stays as the caller asked.
+                            policy_applied = "no_delta".to_string();
                         }
                         SurfaceChangePolicy::Reject { reason, classification } => {
+                            // policy_applied mirrors `classification` so all
+                            // responses share a single audit field. The
+                            // legacy `classification` field stays for
+                            // backward compatibility with operator
+                            // tooling already keyed on it.
                             return Ok(serde_json::json!({
                                 "ok": false,
                                 "status": "surface_drift_rejected",
@@ -196,21 +215,26 @@ impl NativeTool for AbReplayTool {
                                 "revision_a": ref_a.to_string(),
                                 "revision_b": ref_b.to_string(),
                                 "reason": reason,
+                                "policy_applied": classification.clone(),
                                 "classification": classification,
                                 "guardrail": "improve.restrict_to_prompt_only",
-                                "message": format!(
+                                "message":
                                     "Refused: candidate revision's capability/tool-tier surface differs \
-                                     from baseline ({}). To allow this comparison, either \
+                                     from baseline. To allow this comparison, either \
                                      (1) set `improve.allow_capability_changes: true` and ensure the change \
                                      is not high-blast-radius, or \
-                                     (2) promote the revision manually through the R++2 capability-delta gate.",
-                                    classification
-                                ),
+                                     (2) promote the revision manually through the R++2 capability-delta gate.".to_string(),
                             }).to_string());
                         }
                         SurfaceChangePolicy::AllowWithStrictHoldout { reason } => {
                             policy_applied = "capability_change_with_strict_holdout".to_string();
-                            let min_holdout = config.improve.capability_change_min_holdout;
+                            // Clamp the configured min into a sane range
+                            // before comparing — guards against a
+                            // misconfigured `capability_change_min_holdout`
+                            // value (e.g. >1, NaN) breaking the holdout
+                            // math downstream.
+                            let min_holdout =
+                                clamp_holdout_ratio(config.improve.capability_change_min_holdout);
                             if args.holdout_ratio < min_holdout {
                                 holdout_coerced_from = Some(args.holdout_ratio);
                                 args.holdout_ratio = min_holdout;
@@ -227,6 +251,7 @@ impl NativeTool for AbReplayTool {
                     }
                 }
                 None => {
+                    // policy_applied stays "not_evaluated" — set above.
                     tracing::warn!(
                         target: "improvement",
                         agent_id = %args.agent_id,
@@ -700,6 +725,54 @@ pub(crate) fn evaluate_surface_change_policy(
     Ok(SurfaceChangePolicy::AllowWithStrictHoldout {
         reason: diff_reason,
     })
+}
+
+/// Clamp a holdout ratio into `[0.0, 1.0]`. `NaN` becomes `0.0`. Used
+/// at the use site rather than at config load so misconfiguration is
+/// neutralized at the boundary without a hard parse error (which would
+/// fail the whole gateway start). Emits an `info` log when clamping
+/// actually changed the value, so an operator who set 1.5 by mistake
+/// gets a hint.
+fn clamp_holdout_ratio(raw: f64) -> f64 {
+    let clamped = if raw.is_nan() {
+        0.0
+    } else {
+        raw.max(0.0).min(1.0)
+    };
+    if (clamped - raw).abs() > f64::EPSILON || raw.is_nan() {
+        tracing::info!(
+            target: "improvement",
+            requested = raw,
+            clamped = clamped,
+            "improve.capability_change_min_holdout out of [0.0, 1.0] — clamped"
+        );
+    }
+    clamped
+}
+
+/// Validate the operator-supplied high-blast list against the canonical
+/// capability-kind names from `autonoetic-types`. Anything unknown
+/// (typo, casing, deprecated kind) is logged at WARN level so the
+/// operator notices the silent disablement. We don't reject the config
+/// — a single typo shouldn't fail the gateway — but the warning is
+/// loud enough to surface in any reasonable log review.
+fn warn_unknown_high_blast_kinds(configured: &[String]) {
+    let known: std::collections::HashSet<&str> =
+        autonoetic_types::capability::all_capability_kind_names()
+            .iter()
+            .copied()
+            .collect();
+    for kind in configured {
+        if !known.contains(kind.as_str()) {
+            tracing::warn!(
+                target: "improvement",
+                unknown_kind = %kind,
+                "improve.high_blast_radius_capability_kinds contains an unknown capability \
+                 kind — high-blast detection will silently miss this kind. Check spelling \
+                 against autonoetic_types::capability::all_capability_kind_names()."
+            );
+        }
+    }
 }
 
 fn tool_tier_surface(manifest: &AgentManifest) -> std::collections::BTreeSet<String> {

@@ -635,6 +635,11 @@ fn test_ab_replay_prompt_only_guard_rejects_capability_widening() {
     assert_eq!(v["ok"], false, "guardrail should reject");
     assert_eq!(v["status"], "surface_drift_rejected");
     assert_eq!(v["guardrail"], "improve.restrict_to_prompt_only");
+    // policy_applied is set on rejects too (PR #269 audit-trail
+    // uniformity). For the "not opted in" case, the classification is
+    // `prompt_only_violation`.
+    assert_eq!(v["policy_applied"], "prompt_only_violation");
+    assert_eq!(v["classification"], "prompt_only_violation");
     let reason = v["reason"].as_str().unwrap_or("");
     assert!(
         reason.contains("CodeExecution"),
@@ -893,6 +898,9 @@ fn test_ab_replay_p5_rejects_high_blast_added_kind() {
     let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
     assert_eq!(v["status"], "surface_drift_rejected", "got {:?}", v);
     assert_eq!(v["classification"], "high_blast_radius");
+    // policy_applied now mirrors classification on rejects (PR #269
+    // review fix — uniform audit field across all responses).
+    assert_eq!(v["policy_applied"], "high_blast_radius");
     let reason = v["reason"].as_str().unwrap_or("");
     assert!(
         reason.contains("CodeExecution"),
@@ -945,6 +953,9 @@ fn test_ab_replay_p5_rejects_high_blast_broadened_kind() {
     let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
     assert_eq!(v["status"], "surface_drift_rejected", "got {:?}", v);
     assert_eq!(v["classification"], "high_blast_radius");
+    // policy_applied now mirrors classification on rejects (PR #269
+    // review fix — uniform audit field across all responses).
+    assert_eq!(v["policy_applied"], "high_blast_radius");
     let reason = v["reason"].as_str().unwrap_or("");
     assert!(
         reason.contains("NetworkAccess"),
@@ -1034,5 +1045,76 @@ fn test_ab_replay_p5_low_blast_with_high_enough_holdout_is_not_coerced() {
         v["holdout_coerced_from"].is_null(),
         "caller's holdout was already above the min — no coercion; got {:?}",
         v["holdout_coerced_from"]
+    );
+}
+
+// ─── 11. Audit-trail uniformity (PR #269 review) ──────────────────────────
+//
+// `policy_applied` must reflect what actually happened across all six
+// surface-policy states, not just the no-delta default. These tests
+// pin the two "gate skipped" branches (`gate_disabled` and
+// `not_evaluated`) that earlier silently reported `no_delta`.
+
+#[test]
+fn test_ab_replay_policy_applied_gate_disabled_when_restrict_off() {
+    // Even with a real on-disk capability widening, `policy_applied`
+    // is `gate_disabled` (not `no_delta`) when the master switch is
+    // off — the policy was never consulted.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.restrict_to_prompt_only = false;
+
+    let identical_caps = r#"      - type: "Evaluation"
+        patterns: ["*"]"#;
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_A_ID, identical_caps);
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_B_ID, identical_caps);
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(
+        v["policy_applied"], "gate_disabled",
+        "expected gate_disabled when restrict_to_prompt_only=false; got {:?}",
+        v["policy_applied"]
+    );
+}
+
+#[test]
+fn test_ab_replay_policy_applied_not_evaluated_when_gateway_dir_absent() {
+    // When the gate is on but gateway_dir is None, the policy can't
+    // be evaluated. The response must say so explicitly, not pretend
+    // there was no delta.
+    let tmp = TempDir::new().unwrap();
+    let (store, config) = setup_env(&tmp);
+    // Note: existing execute_tool helper passes `None` for gateway_dir.
+    // The gate's master switch (restrict_to_prompt_only) defaults to
+    // true, so this exercises the not_evaluated branch.
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool(store, config, args);
+    assert_eq!(
+        v["policy_applied"], "not_evaluated",
+        "expected not_evaluated when gateway_dir is None; got {:?}",
+        v["policy_applied"]
     );
 }

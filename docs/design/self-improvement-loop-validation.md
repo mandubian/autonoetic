@@ -155,7 +155,8 @@ NO-GO requires filing follow-ups for whatever needs fixing first.
 
 ## 8. P5 — agent-level evolution cycles
 
-> Status: code shipped (#250 PR). Awaiting **2 capability-change cycles**.
+> Status: code shipped, awaiting **2 capability-change cycles + sign-off**.
+> Tracking issue: [#250](https://github.com/mandubian/autonoetic/issues/250).
 
 ### 8.1 What changed
 

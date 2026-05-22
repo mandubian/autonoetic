@@ -244,6 +244,42 @@ fn capability_map(caps: &[Capability]) -> BTreeMap<String, Capability> {
     out
 }
 
+/// Canonical capability-kind names — every value here matches what
+/// [`capability_type_name`] would produce for that `Capability`
+/// variant. Exported so config-validation code (e.g.,
+/// `ImproveConfig::high_blast_radius_capability_kinds`) can check
+/// operator-supplied capability names against the known set rather
+/// than silently accepting typos. Keep this list in sync with
+/// [`capability_type_name`] — both are exhaustive over the
+/// `Capability` enum.
+pub fn all_capability_kind_names() -> &'static [&'static str] {
+    &[
+        "SandboxFunctions",
+        "ReadAccess",
+        "WriteAccess",
+        "NetworkAccess",
+        "AgentSpawn",
+        "AgentMessage",
+        "BackgroundReevaluation",
+        "CodeExecution",
+        "EmergencyStop",
+        "AgentRevision",
+        "Evaluation",
+        "ApprovalQueue",
+        "SchedulerSignal",
+        "CredentialAccess",
+        "UserProfileAccess",
+        "SchedulerAccess",
+        "SkillInstall",
+        "ConstitutionalProposal",
+        "ReasoningAudit",
+        "GithubIssueCreate",
+        // BudgetNoPriceAvailableAllow uses its serialized rename:
+        "budget.no_price_available.allow",
+        "SecurityRedTeam",
+    ]
+}
+
 fn capability_type_name(cap: &Capability) -> String {
     match cap {
         Capability::SandboxFunctions { .. } => "SandboxFunctions".to_string(),
@@ -595,5 +631,60 @@ mod tests {
         let d = compute_capability_delta(&prev, &curr);
         assert_eq!(d.broadened.len(), 1);
         assert!(d.has_broadening());
+    }
+
+    #[test]
+    fn all_capability_kind_names_matches_capability_type_name() {
+        // Pin: every value `capability_type_name` produces for a real
+        // `Capability` variant must appear in `all_capability_kind_names()`.
+        // Adding a new variant without updating the list (used by
+        // ImproveConfig validation) would silently let typos through;
+        // this test fails loudly instead.
+        use std::collections::HashSet;
+        let known: HashSet<&str> = all_capability_kind_names().iter().copied().collect();
+        let samples = vec![
+            Capability::SandboxFunctions { allowed: vec![] },
+            Capability::ReadAccess { scopes: vec![] },
+            Capability::WriteAccess { scopes: vec![] },
+            Capability::NetworkAccess { hosts: vec![] },
+            Capability::AgentSpawn {
+                max_children: 1,
+                max_spawn_depth: 0,
+            },
+            Capability::AgentMessage { patterns: vec![] },
+            Capability::BackgroundReevaluation {
+                min_interval_secs: 1,
+                allow_reasoning: false,
+            },
+            Capability::CodeExecution {
+                patterns: vec![],
+                commands: vec![],
+            },
+            Capability::EmergencyStop,
+            Capability::AgentRevision { patterns: vec![] },
+            Capability::Evaluation { patterns: vec![] },
+            Capability::ApprovalQueue { patterns: vec![] },
+            Capability::SchedulerSignal { patterns: vec![] },
+            Capability::CredentialAccess { services: vec![] },
+            Capability::UserProfileAccess { scopes: vec![] },
+            Capability::SchedulerAccess { patterns: vec![] },
+            Capability::SkillInstall {
+                allowed_sources: vec![],
+            },
+            Capability::ConstitutionalProposal { patterns: vec![] },
+            Capability::ReasoningAudit { targets: vec![] },
+            Capability::GithubIssueCreate { patterns: vec![] },
+            Capability::BudgetNoPriceAvailableAllow,
+            Capability::SecurityRedTeam,
+        ];
+        for cap in &samples {
+            let name = capability_type_name(cap);
+            assert!(
+                known.contains(name.as_str()),
+                "capability_type_name() returned '{}' but it's not in all_capability_kind_names() — \
+                 add it to keep ImproveConfig high-blast validation honest",
+                name
+            );
+        }
     }
 }
