@@ -251,40 +251,109 @@ impl Default for OutcomeGraderConfig {
     }
 }
 
-/// Self-improvement loop runtime guardrails (P4 milestone — #249).
+/// Self-improvement loop runtime guardrails. P4 (#249) shipped the
+/// prompt-only safety posture; P5 (#250) lifts it selectively for
+/// agent-level changes (capability set / routing / sub-agent topology)
+/// behind stronger defenses.
 ///
-/// Today the loop's lowest-risk target is **prompt-only** edits:
-/// changes to a SKILL.md's instructions / system prompt that do not
-/// touch the manifest's `capabilities` or `allowed_tool_tiers`. P4's
-/// acceptance is gated on running 3 end-to-end cycles with these
-/// guardrails on, then collecting operator notes.
+/// The gate at A/B replay time is now a three-state policy:
 ///
-/// `restrict_to_prompt_only` is enforced at A/B replay time. When
-/// true (the default), `improvement.ab_replay` refuses to compare two
-/// revisions whose declared capability or tool-tier surfaces differ.
-/// The propose step (`autonoetic improve`) forks an identical
-/// candidate, so the only way this gate fires is if the candidate's
-/// SKILL.md was hand-edited to widen its surface — exactly the case
-/// P4 is meant to exclude.
+/// 1. **No capability delta** → proceed normally with the
+///    caller-supplied holdout (typically 0.3).
+/// 2. **Capability delta, but operator has not opted in** → reject
+///    (this is the P4 behaviour, still the default).
+/// 3. **Capability delta + opted in + low blast radius** → proceed
+///    with a **minimum holdout of `capability_change_min_holdout`**
+///    (default 0.5). The holdout is coerced up if the caller
+///    requested a lower value, with the coercion logged in the
+///    response.
+/// 4. **Capability delta + opted in + HIGH blast radius** → reject.
+///    Changes that broaden sandbox / network / code-execution /
+///    credential / scheduler / agent-revision capabilities are never
+///    eligible for the automated path. Operators promote those
+///    through the existing R++2 constitutional gate by hand.
+///
+/// `restrict_to_prompt_only` is the master switch. When `false`, the
+/// policy short-circuits to "always allow" (no defenses). Keep it
+/// `true` unless you genuinely want every capability change to skip
+/// the gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImproveConfig {
-    /// When true, `improvement.ab_replay` rejects revision pairs whose
-    /// declared `capabilities` or `allowed_tool_tiers` differ. Default
-    /// **true** (P4 safety posture). Set to `false` once you have a
-    /// validated baseline (P5+) and want to A/B-test capability
-    /// changes too.
+    /// When true (default), the surface-change policy above is
+    /// enforced at `improvement.ab_replay` time. Set to `false` only
+    /// after the loop has earned enough track record that you trust
+    /// it to evaluate capability changes without the safety
+    /// scaffolding — this is the "raw operator-driven path" for P7
+    /// auto-approve.
     #[serde(default = "default_improve_restrict_to_prompt_only")]
     pub restrict_to_prompt_only: bool,
+
+    /// P5: when true, the gate **allows** A/B comparisons where the
+    /// candidate has a non-empty capability delta vs the baseline,
+    /// provided the change is not high-blast-radius. Default `false`
+    /// — operators opt in per-deployment after the prompt-only loop
+    /// has banked some P4 track record.
+    #[serde(default = "default_improve_allow_capability_changes")]
+    pub allow_capability_changes: bool,
+
+    /// P5: minimum holdout ratio enforced when the comparison
+    /// involves a capability change. The tool coerces the caller's
+    /// `holdout_ratio` up to this value (and notes the coercion in
+    /// the response) rather than rejecting outright — capability
+    /// changes are inherently more likely to break tasks the
+    /// proposal wasn't optimized against, so a wider safety net is
+    /// the right default. Range: `[0.0, 1.0]`. Default `0.5`.
+    #[serde(default = "default_improve_capability_change_min_holdout")]
+    pub capability_change_min_holdout: f64,
+
+    /// P5: capability kinds whose addition or broadening is treated
+    /// as high-blast-radius and rejected even when
+    /// `allow_capability_changes` is true. The list reflects
+    /// "privileges whose widening breaks the sandbox or
+    /// reaches the network / shell / credentials / scheduler / agent
+    /// promotion". An operator who wants to push such a change still
+    /// can — by promoting the revision manually through the R++2
+    /// gate — but the automated loop refuses.
+    #[serde(default = "default_improve_high_blast_radius_capability_kinds")]
+    pub high_blast_radius_capability_kinds: Vec<String>,
 }
 
 fn default_improve_restrict_to_prompt_only() -> bool {
     true
 }
 
+fn default_improve_allow_capability_changes() -> bool {
+    false
+}
+
+fn default_improve_capability_change_min_holdout() -> f64 {
+    0.5
+}
+
+fn default_improve_high_blast_radius_capability_kinds() -> Vec<String> {
+    // Conservative default. Each kind here represents a "trust
+    // boundary" the loop must not cross without a human approving
+    // the promotion explicitly. Tightening this list is fine; loosening
+    // it should be done deliberately and case-by-case.
+    vec![
+        "SandboxFunctions".to_string(),
+        "NetworkAccess".to_string(),
+        "CodeExecution".to_string(),
+        "CredentialAccess".to_string(),
+        "EmergencyStop".to_string(),
+        "AgentRevision".to_string(),
+        "SchedulerAccess".to_string(),
+    ]
+}
+
 impl Default for ImproveConfig {
     fn default() -> Self {
         Self {
             restrict_to_prompt_only: default_improve_restrict_to_prompt_only(),
+            allow_capability_changes: default_improve_allow_capability_changes(),
+            capability_change_min_holdout: default_improve_capability_change_min_holdout(),
+            high_blast_radius_capability_kinds:
+                default_improve_high_blast_radius_capability_kinds(),
         }
     }
 }

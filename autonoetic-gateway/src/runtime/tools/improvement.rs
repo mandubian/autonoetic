@@ -129,7 +129,7 @@ impl NativeTool for AbReplayTool {
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
-        let args: AbReplayArgs = serde_json::from_str(arguments_json)
+        let mut args: AbReplayArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
 
         let Some(gateway_store) = gateway_store else {
@@ -156,13 +156,18 @@ impl NativeTool for AbReplayTool {
             ref_a.agent_id
         );
 
-        // P4 guardrail: when `improve.restrict_to_prompt_only` is true
-        // (default), refuse to compare revisions whose declared
-        // capability or tool-tier surfaces differ. The propose step
-        // forks an identical candidate, so this only fires when the
-        // candidate's SKILL.md was hand-edited to widen its surface —
-        // exactly the case P4's prompt-only milestone excludes. See
-        // `docs/design/self-improvement-loop-validation.md`.
+        // P4/P5 surface-change gate. The three-state policy lives in
+        // `evaluate_surface_change_policy`; this block applies its
+        // verdict. The policy understands:
+        //   * no delta            → Allow (proceed normally)
+        //   * delta, not opted in → Reject (P4 prompt-only behaviour)
+        //   * delta, high-blast   → Reject (never automatable)
+        //   * delta, low-blast,   → AllowWithStrictHoldout
+        //     opted in              (proceed with coerced holdout ≥
+        //                            improve.capability_change_min_holdout)
+        // See docs/design/self-improvement-loop-validation.md §8 (P5).
+        let mut policy_applied = "no_delta".to_string();
+        let mut holdout_coerced_from: Option<f64> = None;
         if config.improve.restrict_to_prompt_only {
             // The revisions live under `gateway_dir/revisions/agents/<agent>/<rev>/`.
             // Use the `gateway_dir` parameter the runtime threads in
@@ -171,27 +176,54 @@ impl NativeTool for AbReplayTool {
             // skip, rather than silently rejecting all comparisons.
             match gateway_dir {
                 Some(gw_dir) => {
-                    if let Some(reason) = surface_drift_reason(
+                    let policy = evaluate_surface_change_policy(
                         &repo,
                         gw_dir,
                         &args.agent_id,
                         &rev_a.revision_id,
                         &rev_b.revision_id,
-                    )? {
-                        return Ok(serde_json::json!({
-                            "ok": false,
-                            "status": "surface_drift_rejected",
-                            "agent_id": args.agent_id,
-                            "revision_a": ref_a.to_string(),
-                            "revision_b": ref_b.to_string(),
-                            "reason": reason,
-                            "guardrail": "improve.restrict_to_prompt_only",
-                            "message":
-                                "Refused: candidate revision changed the agent's capability \
-                                 or tool-tier surface. Self-improvement P4 is gated on \
-                                 prompt-only changes; set `improve.restrict_to_prompt_only: \
-                                 false` once your operator-side validation cycles are done."
-                        }).to_string());
+                        &config.improve,
+                    )?;
+                    match policy {
+                        SurfaceChangePolicy::Allow => {
+                            // No delta. Holdout stays as the caller asked.
+                        }
+                        SurfaceChangePolicy::Reject { reason, classification } => {
+                            return Ok(serde_json::json!({
+                                "ok": false,
+                                "status": "surface_drift_rejected",
+                                "agent_id": args.agent_id,
+                                "revision_a": ref_a.to_string(),
+                                "revision_b": ref_b.to_string(),
+                                "reason": reason,
+                                "classification": classification,
+                                "guardrail": "improve.restrict_to_prompt_only",
+                                "message": format!(
+                                    "Refused: candidate revision's capability/tool-tier surface differs \
+                                     from baseline ({}). To allow this comparison, either \
+                                     (1) set `improve.allow_capability_changes: true` and ensure the change \
+                                     is not high-blast-radius, or \
+                                     (2) promote the revision manually through the R++2 capability-delta gate.",
+                                    classification
+                                ),
+                            }).to_string());
+                        }
+                        SurfaceChangePolicy::AllowWithStrictHoldout { reason } => {
+                            policy_applied = "capability_change_with_strict_holdout".to_string();
+                            let min_holdout = config.improve.capability_change_min_holdout;
+                            if args.holdout_ratio < min_holdout {
+                                holdout_coerced_from = Some(args.holdout_ratio);
+                                args.holdout_ratio = min_holdout;
+                                tracing::info!(
+                                    target: "improvement",
+                                    agent_id = %args.agent_id,
+                                    requested_holdout = holdout_coerced_from.unwrap_or(0.0),
+                                    coerced_to = min_holdout,
+                                    reason = %reason,
+                                    "P5: holdout coerced up for capability-change comparison"
+                                );
+                            }
+                        }
                     }
                 }
                 None => {
@@ -199,7 +231,7 @@ impl NativeTool for AbReplayTool {
                         target: "improvement",
                         agent_id = %args.agent_id,
                         "improve.restrict_to_prompt_only is enabled but no gateway_dir \
-                         was supplied to the tool — surface-drift check skipped. \
+                         was supplied to the tool — surface-change policy not evaluated. \
                          Production callers should pass gateway_dir."
                     );
                 }
@@ -309,6 +341,8 @@ impl NativeTool for AbReplayTool {
                 "ok": true,
                 "status": "queued",
                 "suite_id": suite_id,
+                "policy_applied": policy_applied,
+                "holdout_coerced_from": holdout_coerced_from,
                 "queued_eval_run_ids": pending_ids,
                 "message": "Eval runs already pending. Re-invoke with same args once complete.",
             }).to_string());
@@ -358,6 +392,8 @@ impl NativeTool for AbReplayTool {
                 "ok": true,
                 "status": "queued",
                 "suite_id": suite_id,
+                "policy_applied": policy_applied,
+                "holdout_coerced_from": holdout_coerced_from,
                 "queued_eval_run_ids": queued_ids,
                 "message": "Queued eval runs for A/B replay. Call improvement.ab_replay again with the same args \
                             once the background eval runner completes the runs to get the comparison report.",
@@ -436,6 +472,8 @@ impl NativeTool for AbReplayTool {
             "agent_id": args.agent_id,
             "revision_a": ref_a.to_string(),
             "revision_b": ref_b.to_string(),
+            "policy_applied": policy_applied,
+            "holdout_coerced_from": holdout_coerced_from,
             "baseline_eval_run_id": baseline_run.eval_run_id,
             "candidate_eval_run_id": candidate_run.eval_run_id,
             "summary": {
@@ -542,33 +580,53 @@ fn build_ab_stats(
     }
 }
 
-/// Load two revisions' on-disk manifests and check that the candidate
-/// (rev_b) has not changed the agent's privilege surface relative to
-/// the baseline (rev_a). Returns `Ok(Some(reason))` when ANY non-trivial
-/// difference exists (i.e., the guardrail should reject), `Ok(None)`
-/// when the surfaces match. Hard errors propagate via `Err` (e.g.,
-/// SKILL.md missing, parse failure).
+/// Three-state verdict from [`evaluate_surface_change_policy`]. The
+/// caller (the gate inside `AbReplayTool::execute`) either proceeds
+/// untouched, proceeds with a coerced minimum holdout, or returns a
+/// reject response to the caller.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SurfaceChangePolicy {
+    /// No capability or tool-tier delta. Proceed normally.
+    Allow,
+    /// Reject. `classification` is `"prompt_only_violation"` (operator
+    /// has not opted in) or `"high_blast_radius"` (broadens
+    /// sandbox/network/code-exec/credentials/scheduler/revision —
+    /// never automatable). `reason` carries the concrete diff for
+    /// audit.
+    Reject {
+        reason: String,
+        classification: String,
+    },
+    /// Capability delta exists, operator opted in, change is not
+    /// high-blast-radius. Proceed but enforce
+    /// `improve.capability_change_min_holdout`. `reason` carries the
+    /// diff for the audit trail.
+    AllowWithStrictHoldout { reason: String },
+}
+
+/// Evaluate the surface-change policy (P4 prompt-only gate + P5
+/// capability-change extension) for an A/B replay.
 ///
-/// "Privilege surface" for P4 = the manifest's `capabilities` block AND
-/// the `allowed_tool_tiers` list. The comparison delegates to
-/// [`autonoetic_types::capability::compute_capability_delta`], which
-/// understands parameter-level widening (e.g., `ReadAccess` scopes
-/// `["self.*"]` → `["*"]` IS a privilege widening even though the
-/// capability kind is unchanged). The earlier kind-only comparator
-/// would have let that through — that's the bug Copilot's review on
-/// PR #267 caught.
+/// Compares baseline vs candidate manifests on:
+/// 1. `capabilities` via
+///    [`autonoetic_types::capability::compute_capability_delta`] —
+///    understands parameter-level widening, not just kind add/remove
+/// 2. `allowed_tool_tiers` set equality
 ///
-/// Any of `added`, `broadened`, `narrowed`, or `removed` from the
-/// delta trips the gate. P4's intent is **prompt-only**, so even
-/// narrowing is treated as a non-prompt change — the operator should
-/// be running narrowing through a separate review path, not this one.
-fn surface_drift_reason(
+/// Then classifies the verdict:
+/// - **No delta** → `Allow`
+/// - **Delta + `!allow_capability_changes`** → `Reject(prompt_only_violation)`
+/// - **Delta + opted in + ANY add/broaden in
+///   `high_blast_radius_capability_kinds`** → `Reject(high_blast_radius)`
+/// - **Delta + opted in + low-blast** → `AllowWithStrictHoldout`
+pub(crate) fn evaluate_surface_change_policy(
     repo: &crate::agent::repository::AgentRepository,
     gateway_dir: &std::path::Path,
     agent_id: &str,
     baseline_revision_id: &str,
     candidate_revision_id: &str,
-) -> anyhow::Result<Option<String>> {
+    improve_config: &autonoetic_types::config::ImproveConfig,
+) -> anyhow::Result<SurfaceChangePolicy> {
     let loaded_baseline =
         repo.load_from_revision_dir(gateway_dir, agent_id, baseline_revision_id)?;
     let loaded_candidate =
@@ -578,32 +636,70 @@ fn surface_drift_reason(
         &loaded_baseline.manifest.capabilities,
         &loaded_candidate.manifest.capabilities,
     );
-    if !delta.added.is_empty()
-        || !delta.broadened.is_empty()
-        || !delta.narrowed.is_empty()
-        || !delta.removed.is_empty()
-    {
-        return Ok(Some(format!(
-            "capabilities changed: added={:?}, broadened={:?}, narrowed={:?}, removed={:?}",
-            delta.added,
-            delta.broadened.iter().map(|b| b.capability_type.clone()).collect::<Vec<_>>(),
-            delta.narrowed,
-            delta.removed,
-        )));
-    }
-
     let tiers_a = tool_tier_surface(&loaded_baseline.manifest);
     let tiers_b = tool_tier_surface(&loaded_candidate.manifest);
-    if tiers_a != tiers_b {
-        let added: Vec<String> = tiers_b.difference(&tiers_a).cloned().collect();
-        let removed: Vec<String> = tiers_a.difference(&tiers_b).cloned().collect();
-        return Ok(Some(format!(
-            "allowed_tool_tiers differs: added={:?}, removed={:?}",
-            added, removed
-        )));
+    let tier_delta_added: Vec<String> = tiers_b.difference(&tiers_a).cloned().collect();
+    let tier_delta_removed: Vec<String> = tiers_a.difference(&tiers_b).cloned().collect();
+    let has_capability_delta = !delta.added.is_empty()
+        || !delta.broadened.is_empty()
+        || !delta.narrowed.is_empty()
+        || !delta.removed.is_empty();
+    let has_tier_delta = !tier_delta_added.is_empty() || !tier_delta_removed.is_empty();
+
+    if !has_capability_delta && !has_tier_delta {
+        return Ok(SurfaceChangePolicy::Allow);
     }
 
-    Ok(None)
+    let broadened_kinds: Vec<String> = delta
+        .broadened
+        .iter()
+        .map(|b| b.capability_type.clone())
+        .collect();
+    let diff_reason = format!(
+        "capabilities: added={:?}, broadened={:?}, narrowed={:?}, removed={:?}; \
+         allowed_tool_tiers: added={:?}, removed={:?}",
+        delta.added, broadened_kinds, delta.narrowed, delta.removed,
+        tier_delta_added, tier_delta_removed,
+    );
+
+    if !improve_config.allow_capability_changes {
+        return Ok(SurfaceChangePolicy::Reject {
+            reason: diff_reason,
+            classification: "prompt_only_violation".to_string(),
+        });
+    }
+
+    // P5 blast-radius classifier: ADDED kinds OR BROADENED kinds in
+    // the high-blast list = reject. Removed/narrowed kinds do NOT
+    // count as high-blast (removing privileges is safe). Tool-tier
+    // changes are not blast-classified separately — they go through
+    // the strict-holdout path unless paired with a high-blast cap
+    // change, which the cap check above already catches.
+    let high_blast: &[String] = &improve_config.high_blast_radius_capability_kinds;
+    let added_high: Vec<&str> = delta
+        .added
+        .iter()
+        .filter(|kind| high_blast.iter().any(|h| h == *kind))
+        .map(|s| s.as_str())
+        .collect();
+    let broadened_high: Vec<&str> = broadened_kinds
+        .iter()
+        .filter(|kind| high_blast.iter().any(|h| h == *kind))
+        .map(|s| s.as_str())
+        .collect();
+    if !added_high.is_empty() || !broadened_high.is_empty() {
+        return Ok(SurfaceChangePolicy::Reject {
+            reason: format!(
+                "{} | high-blast kinds touched: added={:?}, broadened={:?}",
+                diff_reason, added_high, broadened_high
+            ),
+            classification: "high_blast_radius".to_string(),
+        });
+    }
+
+    Ok(SurfaceChangePolicy::AllowWithStrictHoldout {
+        reason: diff_reason,
+    })
 }
 
 fn tool_tier_surface(manifest: &AgentManifest) -> std::collections::BTreeSet<String> {
