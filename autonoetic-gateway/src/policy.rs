@@ -790,8 +790,14 @@ impl PolicyEngine {
         for cap in &self.manifest.capabilities {
             if let Capability::GithubIssueCreate { patterns } = cap {
                 for pattern in patterns {
-                    let prefix = pattern.trim_end_matches('*');
-                    if repo.is_empty() || repo.starts_with(prefix) {
+                    if pattern == "*" {
+                        return PolicyDecision::allow("R-1.1");
+                    }
+                    if let Some(prefix) = pattern.strip_suffix('*') {
+                        if repo.starts_with(prefix) {
+                            return PolicyDecision::allow("R-1.1");
+                        }
+                    } else if repo == pattern {
                         return PolicyDecision::allow("R-1.1");
                     }
                 }
@@ -1106,5 +1112,55 @@ mod tests {
             .security_analysis
             .expect("security analysis should be present");
         assert!(analysis.threats.contains(&SecurityThreat::Destructive));
+    }
+
+    #[test]
+    fn test_can_create_github_issue_wildcard_allows_any_repo() {
+        let manifest = manifest_with_caps(vec![Capability::GithubIssueCreate {
+            patterns: vec!["*".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.can_create_github_issue("mandubian/autonoetic").is_allowed());
+        assert!(policy.can_create_github_issue("other/repo").is_allowed());
+    }
+
+    #[test]
+    fn test_can_create_github_issue_exact_match() {
+        let manifest = manifest_with_caps(vec![Capability::GithubIssueCreate {
+            patterns: vec!["mandubian/autonoetic".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.can_create_github_issue("mandubian/autonoetic").is_allowed());
+        assert!(!policy.can_create_github_issue("mandubian/autonoetic-evil").is_allowed());
+        assert!(!policy.can_create_github_issue("other/repo").is_allowed());
+    }
+
+    #[test]
+    fn test_can_create_github_issue_prefix_wildcard() {
+        let manifest = manifest_with_caps(vec![Capability::GithubIssueCreate {
+            patterns: vec!["mandubian/*".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.can_create_github_issue("mandubian/autonoetic").is_allowed());
+        assert!(policy.can_create_github_issue("mandubian/other").is_allowed());
+        assert!(!policy.can_create_github_issue("other/repo").is_allowed());
+    }
+
+    #[test]
+    fn test_can_create_github_issue_denied_without_capability() {
+        let manifest = manifest_with_caps(vec![Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(!policy.can_create_github_issue("mandubian/autonoetic").is_allowed());
+    }
+
+    #[test]
+    fn test_can_create_github_issue_empty_repo_denied_without_wildcard() {
+        let manifest = manifest_with_caps(vec![Capability::GithubIssueCreate {
+            patterns: vec!["mandubian/autonoetic".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(!policy.can_create_github_issue("").is_allowed());
     }
 }

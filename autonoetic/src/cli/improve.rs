@@ -2,6 +2,35 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Escape pipe `|` and newline characters for Markdown table cells.
+fn escape_md_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ").replace('\r', " ")
+}
+
+/// Guess the GitHub `owner/repo` from the git remote origin URL.
+/// Supports both `git@github.com:owner/repo.git` and `https://github.com/owner/repo.git`.
+fn guess_github_repo() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // git@github.com:owner/repo.git  →  owner/repo
+    // https://github.com/owner/repo.git  →  owner/repo
+    if let Some(path) = url.split("github.com").nth(1) {
+        let path = path.trim_start_matches(':').trim_start_matches('/');
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let path = path.strip_suffix('/').unwrap_or(path);
+        if let Some((owner, repo)) = path.split_once('/') {
+            return Some(format!("{}/{}", owner, repo.trim_end_matches('/')));
+        }
+    }
+    None
+}
+
 use anyhow::Context;
 use autonoetic_gateway::runtime::tools::improvement::AbReplayTool;
 use autonoetic_gateway::runtime::tools::NativeTool;
@@ -477,8 +506,46 @@ async fn handle_propose_code_fix(
         .map(|(_, o)| o.source_agent_id.clone())
         .unwrap_or_default();
 
+    // Build shared manifest, policy, and tool once (constant across sessions)
+    let manifest = AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "autonoetic-cli".to_string(),
+            name: "Autonoetic CLI".to_string(),
+            description: "CLI code-issue-proposer".to_string(),
+        },
+        capabilities: vec![Capability::GithubIssueCreate {
+            patterns: vec!["*".into()],
+        }],
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    };
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let tool = GithubIssueCreateTool;
+
     for (sid, outcome) in outcomes {
-        // Skip passed sessions unless no_prompt (for now, skip all passed)
+        // Skip passed sessions
         if outcome.judged_success() == Some(true) {
             eprintln!("[skip] Session {} passed — no issue filed.", sid);
             continue;
@@ -513,7 +580,7 @@ async fn handle_propose_code_fix(
 
         if let Some(ref grader) = outcome.grader {
             if let Some(ref summary) = grader.evidence_summary {
-                body.push_str(&format!("**Evidence:** {}\n\n", summary));
+                body.push_str(&format!("**Evidence:** {}\n\n", escape_md_cell(summary)));
             }
         }
 
@@ -522,7 +589,7 @@ async fn handle_propose_code_fix(
             body.push_str("| Action | Status | Reason |\n");
             body.push_str("|--------|--------|--------|\n");
             for ev in tool_failures.iter().take(10) {
-                let reason = ev.reason.as_deref().unwrap_or("(none)");
+                let reason = ev.reason.as_deref().map(escape_md_cell).unwrap_or_else(|| "(none)".to_string());
                 body.push_str(&format!("| `{}` | {} | {} |\n", ev.action, ev.status, reason));
             }
             body.push('\n');
@@ -537,54 +604,20 @@ async fn handle_propose_code_fix(
         body.push_str(&format!("2. Review the outcome digest at session `{}`\n", sid));
         body.push_str("3. Identify the failing tool call or schema mismatch\n");
 
-        // File the issue via github.issue.create tool
-        let manifest = AgentManifest {
-            version: "1.0".to_string(),
-            runtime: RuntimeDeclaration {
-                engine: "autonoetic".to_string(),
-                gateway_version: "0.1.0".to_string(),
-                sdk_version: "0.1.0".to_string(),
-                runtime_type: "stateful".to_string(),
-                sandbox: "bubblewrap".to_string(),
-                runtime_lock: "runtime.lock".to_string(),
-            },
-            agent: AgentIdentity {
-                id: "autonoetic-cli".to_string(),
-                name: "Autonoetic CLI".to_string(),
-                description: "CLI code-issue-proposer".to_string(),
-            },
-            capabilities: vec![Capability::GithubIssueCreate {
-                patterns: vec!["*".into()],
-            }],
-            llm_config: None,
-            limits: None,
-            background: None,
-            disclosure: None,
-            io: None,
-            middleware: None,
-            execution_mode: Default::default(),
-            script_entry: None,
-            script_input_mode: Default::default(),
-            gateway_url: None,
-            gateway_token: None,
-            allowed_tool_tiers: vec![],
-            agentskills_import: None,
-            compression: None,
-            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        };
-        let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
-        let tool = GithubIssueCreateTool;
-
         let title = format!(
             "[code-issue-proposer] Session {} — {}",
             sid,
             outcome.task_goal.as_deref().unwrap_or("code-level issue")
         );
 
+        let repo = guess_github_repo()
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine GitHub repo from git remote — set origin or pass --repo"))?;
+
         let tool_args = serde_json::json!({
             "title": title,
             "body": body,
             "labels": "code-issue-proposer",
+            "repo": repo,
         });
 
         let result = tool
@@ -623,7 +656,7 @@ async fn handle_propose_code_fix(
             target: Some(url.to_string()),
             payload: Some(serde_json::json!({
                 "session_id": sid,
-                "agent_id": target_agent,
+                "agent_id": target_agent.clone(),
                 "issue_url": url,
             }).to_string()),
             payload_ref: None,

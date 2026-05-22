@@ -76,8 +76,8 @@ This agent is strictly bounded to the following capabilities, enforced at the ga
 **This agent NEVER:**
 - Edits code or opens pull requests
 - Spawns child agents
-- Executes shell commands
-- Makes network requests outside the GitHub API
+- Has CodeExecution capability (cannot run arbitrary shell commands)
+- Makes network requests outside the configured GitHub API scope
 
 Any expansion of this capability set requires a constitutional amendment through the R++2 gate.
 
@@ -109,6 +109,4 @@ Any expansion of this capability set requires a constitutional amendment through
 3. Identify the failing tool call or schema mismatch
 ```
 
-## Rate Limiting
 
-Issue creation is limited to 5 per day per operator. This is enforced at the gateway level (configurable via `limits.max_daily_issues`).

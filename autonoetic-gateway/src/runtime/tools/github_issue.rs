@@ -18,8 +18,8 @@ struct GithubIssueCreateArgs {
     body: String,
     #[serde(default)]
     labels: Option<String>,
-    #[serde(default)]
-    repo: Option<String>,
+    /// Target repo in "owner/repo" format — required for policy scoping.
+    repo: String,
 }
 
 pub struct GithubIssueCreateTool;
@@ -60,10 +60,10 @@ impl NativeTool for GithubIssueCreateTool {
                     },
                     "repo": {
                         "type": "string",
-                        "description": "Repository to file in (default: current gh remote)"
+                        "description": "Target repo in \"owner/repo\" format"
                     }
                 },
-                "required": ["title", "body"],
+                "required": ["title", "body", "repo"],
                 "additionalProperties": false
             }),
         }
@@ -71,7 +71,7 @@ impl NativeTool for GithubIssueCreateTool {
 
     fn execute(
         &self,
-        manifest: &AgentManifest,
+        _manifest: &AgentManifest,
         policy: &PolicyEngine,
         _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
@@ -85,12 +85,11 @@ impl NativeTool for GithubIssueCreateTool {
         let args: GithubIssueCreateArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let repo = args.repo.as_deref().unwrap_or("");
-        let decision = policy.can_create_github_issue(repo);
+        let decision = policy.can_create_github_issue(&args.repo);
         if !decision.is_allowed() {
             return Err(anyhow::anyhow!(
                 "GithubIssueCreate capability denied for repo '{}': missing required capability",
-                repo
+                args.repo
             ));
         }
 
@@ -98,15 +97,11 @@ impl NativeTool for GithubIssueCreateTool {
         cmd.arg("issue").arg("create");
         cmd.arg("--title").arg(&args.title);
         cmd.arg("--body").arg(&args.body);
+        cmd.arg("--repo").arg(&args.repo);
 
         if let Some(labels) = &args.labels {
             if !labels.trim().is_empty() {
                 cmd.arg("--label").arg(labels);
-            }
-        }
-        if let Some(repo) = &args.repo {
-            if !repo.trim().is_empty() {
-                cmd.arg("--repo").arg(repo);
             }
         }
 
