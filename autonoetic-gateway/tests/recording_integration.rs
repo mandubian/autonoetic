@@ -351,6 +351,8 @@ async fn proxy_recording_mode_captures_fixture_on_miss() {
         loader,
         Some(staging_dir.clone()),
         None,
+        None,
+        None,
     )
     .await
     .expect("recording proxy must start");

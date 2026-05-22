@@ -1,6 +1,6 @@
 //! Policy denial test for the watchdog agent (closes #242 acceptance bullet).
 //!
-//! Mirrors the capability set declared in `agents/specialists/watchdog/SKILL.md`
+//! Mirrors the capability set declared in `agents/specialists/watchdog.default/SKILL.md`
 //! and asserts:
 //!
 //! 1. The four tools the watchdog needs to do its job are exposed:
@@ -16,7 +16,7 @@ use autonoetic_gateway::runtime::tools::{default_registry, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 
-/// Construct a manifest that mirrors `agents/specialists/watchdog/SKILL.md`
+/// Construct a manifest that mirrors `agents/specialists/watchdog.default/SKILL.md`
 /// exactly — same capabilities, no more. Any change to the SKILL.md
 /// capability list should be reflected here, otherwise this test stops
 /// being a faithful pin of that file.

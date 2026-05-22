@@ -48,7 +48,7 @@ async fn sealed_proxy_returns_fixture_on_hit() {
     );
 
     let loader = Arc::new(FixtureLoader::new(dir.path()));
-    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None)
+    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None, None, None)
         .await
         .expect("proxy must start");
 
@@ -81,7 +81,7 @@ async fn sealed_proxy_returns_fixture_on_hit() {
 async fn sealed_proxy_returns_unfixtured_envelope_on_miss() {
     let dir = tempdir().unwrap();
     let loader = Arc::new(FixtureLoader::new(dir.path()));
-    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None)
+    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None, None, None)
         .await
         .expect("proxy must start");
 
@@ -128,7 +128,7 @@ async fn sealed_proxy_handles_host_port_in_fixture_path() {
     );
 
     let loader = Arc::new(FixtureLoader::new(dir.path()));
-    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None)
+    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None, None, None)
         .await
         .expect("proxy must start");
     let proxy_url = handle.proxy_url();
@@ -156,7 +156,7 @@ async fn sealed_proxy_rejects_https_connect() {
     // surface a clear error rather than silently allow tunnelled traffic.
     let dir = tempdir().unwrap();
     let loader = Arc::new(FixtureLoader::new(dir.path()));
-    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None)
+    let handle = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader, None, None, None, None)
         .await
         .expect("proxy must start");
 
@@ -192,7 +192,7 @@ async fn sealed_proxy_rejects_normal_policy_at_start() {
     // early, not silently start a no-op server.
     let dir = tempdir().unwrap();
     let loader = Arc::new(FixtureLoader::new(dir.path()));
-    let err = start_sealed_proxy(SandboxNetworkPolicy::Normal, loader, None, None)
+    let err = start_sealed_proxy(SandboxNetworkPolicy::Normal, loader, None, None, None, None)
         .await
         .expect_err("Normal policy must be rejected");
     assert!(err.to_string().contains("Normal"));
@@ -206,14 +206,14 @@ async fn sealed_proxy_shuts_down_cleanly() {
     // first listener leaked).
     let dir = tempdir().unwrap();
     let loader1 = Arc::new(FixtureLoader::new(dir.path()));
-    let h1 = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader1, None, None)
+    let h1 = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader1, None, None, None, None)
         .await
         .expect("proxy 1 starts");
     let addr1 = h1.addr();
     h1.shutdown().await;
 
     let loader2 = Arc::new(FixtureLoader::new(dir.path()));
-    let h2 = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader2, None, None)
+    let h2 = start_sealed_proxy(SandboxNetworkPolicy::Sealed, loader2, None, None, None, None)
         .await
         .expect("proxy 2 starts");
     let addr2 = h2.addr();

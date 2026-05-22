@@ -17,6 +17,7 @@ fn minimal_result(reply: &str) -> SpawnResult {
         agent_id: "child-agent".to_string(),
         session_id: "sess-1".to_string(),
         assistant_reply: Some(reply.to_string()),
+        workflow_note: None,
         should_signal_background: false,
         artifacts: vec![],
         files: vec![],
