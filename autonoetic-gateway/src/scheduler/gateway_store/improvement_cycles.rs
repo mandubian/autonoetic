@@ -11,11 +11,19 @@ pub(crate) const CYCLE_COLUMNS: &str = "\
     blast_radius_score, created_at, closed_at";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImprovementCycleRecord> {
+    let level_str: String = row.get(2)?;
+    let outcome_str: String = row.get(3)?;
+    let level = level_str.parse::<ImprovementLevel>().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::<dyn std::error::Error + Send + Sync>::from(format!("invalid ImprovementLevel: {}", level_str)))
+    })?;
+    let outcome = outcome_str.parse::<CycleOutcome>().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::<dyn std::error::Error + Send + Sync>::from(format!("invalid CycleOutcome: {}", outcome_str)))
+    })?;
     Ok(ImprovementCycleRecord {
         cycle_id: row.get(0)?,
         agent_id: row.get(1)?,
-        level: row.get::<_, String>(2)?.parse().unwrap_or(ImprovementLevel::L1),
-        outcome: row.get::<_, String>(3)?.parse().unwrap_or(CycleOutcome::Cancelled),
+        level,
+        outcome,
         regression_detected: row.get::<_, i64>(4)? != 0,
         operator_decision: row.get(5)?,
         session_id: row.get(6)?,
@@ -58,7 +66,7 @@ impl super::GatewayStore {
         operator_decision: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let rows = conn.execute(
             "UPDATE improvement_cycles SET outcome = ?1, regression_detected = ?2, operator_decision = ?3, closed_at = ?4 WHERE cycle_id = ?5",
             params![
                 outcome.to_string(),
@@ -68,6 +76,7 @@ impl super::GatewayStore {
                 cycle_id,
             ],
         )?;
+        anyhow::ensure!(rows == 1, "close_improvement_cycle: cycle '{}' not found or already closed", cycle_id);
         Ok(())
     }
 

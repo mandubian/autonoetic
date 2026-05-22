@@ -177,13 +177,20 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
             }
 
             let auto_approve = check_auto_approve_eligibility(&loaded_config, &store, &target_agent);
-            let approved = if auto_approve.is_some() {
-                let regressions = comparison["regressions"].as_array().map(|a| a.is_empty()).unwrap_or(true);
-                if regressions {
+            let approved = if auto_approve {
+                let no_regressions = comparison["regressions"]
+                    .as_array()
+                    .map(|a| a.is_empty())
+                    .unwrap_or(false);
+                let blast_radius = comparison.get("surface_change_classification")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let low_blast = blast_radius == "prompt_only" || blast_radius == "low";
+                if no_regressions && low_blast {
                     eprintln!("[L3 auto-approve] Agent '{}' is L3-eligible — skipping operator prompt.", target_agent);
                     true
                 } else {
-                    eprintln!("[L3 auto-approve] Regressions detected — deferring to operator.");
+                    eprintln!("[L3 auto-approve] Regressions or high blast radius — deferring to operator.");
                     prompt_approval(&comparison)?
                 }
             } else {
@@ -246,7 +253,7 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
                 },
                 regression_detected,
                 operator_decision: "approved".to_string(),
-                session_id: Some(selected.join(",")),
+                session_id: selected.first().cloned(),
                 revision_before: Some(prev_id_for_cycle.to_string()),
                 revision_after: Some(rev_id.to_string()),
                 blast_radius_score: None,
@@ -281,22 +288,34 @@ fn check_auto_approve_eligibility(
     config: &autonoetic_types::config::GatewayConfig,
     store: &GatewayStore,
     agent_id: &str,
-) -> Option<String> {
+) -> bool {
     let improve = &config.improve;
     if !improve.auto_approve_agents.contains(&agent_id.to_string()) {
-        return None;
+        return false;
     }
-    let eligible = store.check_automation_level_eligibility(
+
+    // Constitutional hard rule: L3 never applies to agents with CodeExecution
+    // or AgentSpawn capabilities, regardless of track record. Parse the SKILL.md
+    // front-matter to check.
+    let skill_path = config.agents_dir.join(agent_id).join("SKILL.md");
+    if let Ok(content) = std::fs::read_to_string(&skill_path) {
+        if let Ok((manifest, _)) = autonoetic_gateway::runtime::parser::SkillParser::parse(&content) {
+            for cap in &manifest.capabilities {
+                match cap {
+                    autonoetic_types::capability::Capability::CodeExecution { .. }
+                    | autonoetic_types::capability::Capability::AgentSpawn { .. } => return false,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    store.check_automation_level_eligibility(
         agent_id,
         &autonoetic_types::improvement_cycle::ImprovementLevel::L3,
         improve.l2_threshold,
         improve.l3_threshold,
-    ).ok()?;
-    if eligible {
-        Some("L3_eligible".to_string())
-    } else {
-        None
-    }
+    ).unwrap_or(false)
 }
 
 fn resolve_session_ids(
