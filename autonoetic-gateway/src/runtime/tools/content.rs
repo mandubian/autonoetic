@@ -328,16 +328,18 @@ fn try_read_artifact_ref_file(
     let gs = gateway_store
         .ok_or_else(|| anyhow::anyhow!("GatewayStore required to resolve artifact refs"))?;
 
-    let ref_record = gs
-        .resolve_artifact_ref_any_scope(ref_id, session_id)?
-        .ok_or_else(|| {
-            anyhow::anyhow!("artifact_ref '{}' not found, expired, or revoked", ref_id)
-        })?;
+    let resolved =
+        crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+            ref_id,
+            session_id,
+            &gs,
+            gw_dir,
+        )?;
 
     let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
     let bundle = artifact_store
-        .inspect(&ref_record.artifact_id)
-        .map_err(|e| anyhow::anyhow!("artifact '{}' not found: {}", ref_record.artifact_id, e))?;
+        .inspect(&resolved.artifact_id)
+        .map_err(|e| anyhow::anyhow!("artifact '{}' not found: {}", resolved.artifact_id, e))?;
 
     let file_entry = bundle
         .files
@@ -348,7 +350,7 @@ fn try_read_artifact_ref_file(
             anyhow::anyhow!(
                 "file '{}' not found in artifact '{}'. Available files: {:?}",
                 filename,
-                ref_record.artifact_id,
+                resolved.artifact_id,
                 available
             )
         })?;
@@ -360,7 +362,7 @@ fn try_read_artifact_ref_file(
             anyhow::anyhow!(
                 "failed to read content for file '{}' in artifact '{}': {}",
                 filename,
-                ref_record.artifact_id,
+                resolved.artifact_id,
                 e
             )
         })

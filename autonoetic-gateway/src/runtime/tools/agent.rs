@@ -389,6 +389,7 @@ impl NativeTool for AgentSpawnTool {
         );
 
         let ts = Utc::now().to_rfc3339();
+        let spawn_reason_preview: String = kickoff_message.chars().take(200).collect();
         let task = TaskRun {
             task_id: task_id.clone(),
             workflow_id: workflow_id.clone(),
@@ -418,6 +419,7 @@ impl NativeTool for AgentSpawnTool {
                     "target_agent_id": target_agent_id,
                     "child_session_id": child_delegation_path,
                     "parent_session_id": resolved_session_id,
+                    "spawn_reason": spawn_reason_preview,
                 }),
                 occurred_at: Utc::now().to_rfc3339(),
             },

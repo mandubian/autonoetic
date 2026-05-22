@@ -22,6 +22,75 @@ fn mint_artifact_ref_id() -> String {
     )
 }
 
+const ARTIFACT_ID_PREFIX: &str = "art_";
+
+/// Resolution result that abstracts over `ar.*` short refs and `art_*` canonical IDs.
+///
+/// When the caller passes a canonical `art_*` ID, we load the artifact directly from
+/// the `ArtifactStore` and synthesize a minimal record. When they pass a short `ar.*`
+/// ref, we resolve through the normal scope hierarchy.
+pub(crate) struct ResolvedArtifact {
+    /// The canonical artifact ID (always `art_*`).
+    pub artifact_id: String,
+    /// The short ref used for display (`ar.*` if resolved from a ref, `art_*` if resolved canonically).
+    pub display_ref: String,
+    /// Manifest digest from the ref record (if resolved from `ar.*`) or the bundle itself.
+    pub manifest_digest: Option<String>,
+}
+
+/// Resolve an artifact reference that may be either a short `ar.*` ref or a canonical `art_*` ID.
+///
+/// - `ar.*` refs go through the normal scope resolution via `resolve_artifact_ref_any_scope`.
+/// - `art_*` IDs are loaded directly from `ArtifactStore`, bypassing scope resolution entirely.
+///
+/// Returns a descriptive error when the reference cannot be resolved, including a hint
+/// when a canonical ID was used but the artifact doesn't exist.
+pub(crate) fn resolve_artifact_ref_or_canonical(
+    input_ref: &str,
+    session_id: &str,
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    gateway_dir: &Path,
+) -> anyhow::Result<ResolvedArtifact> {
+    if input_ref.starts_with(ARTIFACT_ID_PREFIX) {
+        let store = crate::artifact_store::ArtifactStore::new(gateway_dir)?;
+        match store.inspect(input_ref) {
+            Ok(bundle) => Ok(ResolvedArtifact {
+                artifact_id: bundle.artifact_id.clone(),
+                display_ref: input_ref.to_string(),
+                manifest_digest: Some(bundle.artifact_manifest_digest.clone()),
+            }),
+            Err(e) => Err(anyhow::anyhow!(
+                "artifact '{}' not found in the artifact store: {}. \
+                 Canonical artifact IDs (art_*) can be used directly, but the artifact must exist.",
+                input_ref, e
+            )),
+        }
+    } else {
+        let ref_record = gateway_store
+            .resolve_artifact_ref_any_scope(input_ref, session_id)?
+            .ok_or_else(|| {
+                if input_ref.starts_with("art_") {
+                    anyhow::anyhow!(
+                        "artifact_ref '{}' not found, expired, or revoked. \
+                         This looks like a canonical artifact ID (art_*) — these can be used directly \
+                         by artifact_inspect without scope resolution.",
+                        input_ref
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "artifact_ref '{}' not found, expired, or revoked",
+                        input_ref
+                    )
+                }
+            })?;
+        Ok(ResolvedArtifact {
+            artifact_id: ref_record.artifact_id,
+            display_ref: ref_record.ref_id,
+            manifest_digest: Some(ref_record.artifact_manifest_digest),
+        })
+    }
+}
+
 pub struct ArtifactBuildTool;
 
 impl NativeTool for ArtifactBuildTool {
@@ -336,28 +405,33 @@ impl NativeTool for ArtifactInspectTool {
         };
         let sid = session_id.unwrap_or_default();
 
-        let ref_record = gs
-            .resolve_artifact_ref_any_scope(&args.artifact_ref, sid)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "artifact_ref '{}' not found, expired, or revoked",
-                    args.artifact_ref
-                )
-            })?;
+        let resolved = match resolve_artifact_ref_or_canonical(
+            &args.artifact_ref,
+            sid,
+            &gs,
+            gw_dir,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(ToolError::resource(e.to_string(), None::<String>).to_error_response());
+            }
+        };
 
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
-        let bundle = store.inspect(&ref_record.artifact_id)?;
+        let bundle = store.inspect(&resolved.artifact_id)?;
 
-        if bundle.artifact_manifest_digest != ref_record.artifact_manifest_digest {
-            return Ok(ToolError::fatal(
-                format!(
-                    "artifact_ref '{}' digest mismatch — possible tampering. Ref claims '{}', manifest has '{}'.",
-                    args.artifact_ref,
-                    ref_record.artifact_manifest_digest,
-                    bundle.artifact_manifest_digest,
-                ),
-                None::<String>,
-            ).to_error_response());
+        if let Some(ref ref_digest) = resolved.manifest_digest {
+            if bundle.artifact_manifest_digest != *ref_digest {
+                return Ok(ToolError::fatal(
+                    format!(
+                        "artifact_ref '{}' digest mismatch — possible tampering. Ref claims '{}', manifest has '{}'.",
+                        args.artifact_ref,
+                        ref_digest,
+                        bundle.artifact_manifest_digest,
+                    ),
+                    None::<String>,
+                ).to_error_response());
+            }
         }
 
         serde_json::to_string(&serde_json::json!({

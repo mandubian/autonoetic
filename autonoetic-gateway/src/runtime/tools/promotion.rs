@@ -52,7 +52,7 @@ impl NativeTool for PromotionRecordTool {
                 "properties": {
                     "artifact_id": {
                         "type": "string",
-                        "description": "Canonical artifact ID (e.g., 'art_a1b2c3d4'). Alternative: use artifact_ref."
+                        "description": "Artifact ref to record findings against. Prefer using artifact_ref (ar.*) instead."
                     },
                     "artifact_ref": {
                         "type": "string",
@@ -118,9 +118,37 @@ impl NativeTool for PromotionRecordTool {
         let args: PromotionRecordArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
+        anyhow::ensure!(
+            args.content_digest.is_none(),
+            "content_digest is gateway-owned and must not be provided to promotion.record"
+        );
+
+        let Some(gw_dir) = gateway_dir else {
+            return Ok(ToolError::resource("Promotion store requires gateway directory to be configured", None::<String>).to_error_response());
+        };
+
         // Resolve artifact_id from artifact_ref if needed.
-        let artifact_id = match (&args.artifact_id, &args.artifact_ref) {
-            (Some(id), _) if id.starts_with("art_") => id.clone(),
+        // Capture artifact_canonical_digest and user-facing ref for the response.
+        let (artifact_id, artifact_canonical_digest, user_ref) = match (&args.artifact_id, &args.artifact_ref) {
+            (Some(id), _) if id.starts_with("art_") => {
+                let digest = crate::artifact_store::ArtifactStore::new(gw_dir)
+                    .ok()
+                    .and_then(|s| s.inspect(id).ok())
+                    .map(|b| b.artifact_canonical_digest);
+                (id.clone(), digest, None::<String>)
+            }
+            (_, Some(ref_id)) if ref_id.starts_with("art_") => {
+                let digest = crate::artifact_store::ArtifactStore::new(gw_dir)
+                    .ok()
+                    .and_then(|s| s.inspect(ref_id).ok())
+                    .map(|b| b.artifact_canonical_digest);
+                (ref_id.clone(), digest, None::<String>)
+            }
+            (_, Some(ref_id)) if ref_id.starts_with("art_") => {
+                let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
+                let bundle = store.inspect(ref_id)?;
+                (ref_id.clone(), Some(bundle.artifact_canonical_digest), None::<String>)
+            }
             (_, Some(ref_id)) => {
                 let Some(gs) = gateway_store.as_ref() else {
                     anyhow::bail!("promotion_record: artifact_ref requires GatewayStore");
@@ -136,7 +164,7 @@ impl NativeTool for PromotionRecordTool {
                             ref_id
                         )
                     })?;
-                record.artifact_id
+                (record.artifact_id, Some(record.artifact_canonical_digest), Some(ref_id.to_string()))
             }
             _ => anyhow::bail!(
                 "promotion_record: either artifact_id (starting with 'art_') or artifact_ref is required"
@@ -222,10 +250,6 @@ impl NativeTool for PromotionRecordTool {
             }
         }
 
-        let Some(gw_dir) = gateway_dir else {
-            return Ok(ToolError::resource("Promotion store requires gateway directory to be configured", None::<String>).to_error_response());
-        };
-
         let causal_log_path = gw_dir.join("history").join("causal_chain.jsonl");
         if let Some(parent) = causal_log_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -265,10 +289,36 @@ impl NativeTool for PromotionRecordTool {
             args.summary.clone(),
         )?;
 
-        let response = PromotionRecordResponse {
-            ok: true,
-            promotion_record: record,
-        };
+        let response = serde_json::json!({
+            "ok": true,
+            "promotion_record": {
+                "content_digest": record.content_digest,
+                "artifact_digest": record.artifact_digest,
+                "artifact_canonical_digest": artifact_canonical_digest,
+                "artifact_ref": user_ref,
+                "evaluator_pass": record.evaluator_pass,
+                "auditor_pass": record.auditor_pass,
+                "evaluator_id": record.evaluator_id,
+                "auditor_id": record.auditor_id,
+                "evaluator_findings": record.evaluator_findings,
+                "auditor_findings": record.auditor_findings,
+                "evaluator_timestamp": record.evaluator_timestamp,
+                "auditor_timestamp": record.auditor_timestamp,
+                "static_evaluator_pass": record.static_evaluator_pass,
+                "static_evaluator_id": record.static_evaluator_id,
+                "static_evaluator_findings": record.static_evaluator_findings,
+                "static_evaluator_timestamp": record.static_evaluator_timestamp,
+                "unit_test_runner_pass": record.unit_test_runner_pass,
+                "unit_test_runner_id": record.unit_test_runner_id,
+                "unit_test_runner_findings": record.unit_test_runner_findings,
+                "unit_test_runner_timestamp": record.unit_test_runner_timestamp,
+                "sealed_evaluator_pass": record.sealed_evaluator_pass,
+                "sealed_evaluator_id": record.sealed_evaluator_id,
+                "sealed_evaluator_findings": record.sealed_evaluator_findings,
+                "sealed_evaluator_timestamp": record.sealed_evaluator_timestamp,
+                "promotion_gate_version": record.promotion_gate_version,
+            }
+        });
 
         serde_json::to_string(&response).map_err(Into::into)
     }
@@ -284,13 +334,13 @@ impl NativeTool for PromotionQueryTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Queries the promotion status of an artifact. Returns all role validation results (evaluator, auditor, static_evaluator, unit_test_runner, sealed_evaluator), or 'No promotion record found for this artifact' if no promotion record exists. Provide EXACTLY ONE of `artifact_id` (canonical, `art_*` prefix) or `artifact_ref` (short, `ar.*` prefix) — not both, not neither. The two fields are alternative input forms for the same lookup.".to_string(),
+            description: "Queries the promotion status of an artifact. Returns all role validation results (evaluator, auditor, static_evaluator, unit_test_runner, sealed_evaluator). Prefer using `artifact_ref` (short `ar.*` form) — it is the scoped agent-facing handle. The `artifact_id` field is also accepted for compatibility.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "artifact_id": {
                         "type": "string",
-                        "description": "Canonical artifact ID (e.g., 'art_a1b2c3d4'). Alternative input form to artifact_ref — pass exactly one of the two."
+                        "description": "Artifact ref. Prefer using artifact_ref (ar.*) instead."
                     },
                     "artifact_ref": {
                         "type": "string",
@@ -327,20 +377,30 @@ impl NativeTool for PromotionQueryTool {
         let args: PromotionQueryArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        // Resolve artifact_id from whichever form the caller provided. Prefer
-        // an explicit `art_`-prefixed canonical id; fall back to resolving an
-        // `ar.`-prefixed ref via the gateway store. A single error message
-        // covers all bad-input cases so the LLM doesn't see one rejection
-        // shape from serde and a different shape from the runtime.
-        let artifact_id = match (args.artifact_id.as_deref(), args.artifact_ref.as_deref()) {
-            // Canonical id supplied — must have the `art_` prefix.
-            (Some(id), _) if id.starts_with("art_") => id.to_string(),
+        let Some(gw_dir) = gateway_dir else {
+            return Ok(ToolError::resource("Promotion store requires gateway directory to be configured", None::<String>).to_error_response());
+        };
+
+        let (artifact_id, artifact_canonical_digest, user_ref) = match (args.artifact_id.as_deref(), args.artifact_ref.as_deref()) {
+            (Some(id), _) if id.starts_with("art_") => {
+                let digest = crate::artifact_store::ArtifactStore::new(gw_dir)
+                    .ok()
+                    .and_then(|s| s.inspect(id).ok())
+                    .map(|b| b.artifact_canonical_digest);
+                (id.to_string(), digest, None::<String>)
+            }
             (Some(id), _) => anyhow::bail!(
                 "promotion_query: artifact_id must start with 'art_' (got '{}'). \
                  If you have a short ref like 'ar.X', pass it as 'artifact_ref' instead.",
                 id
             ),
-            // Only a short ref was supplied — resolve it via the gateway store.
+            (None, Some(ref_id)) if ref_id.starts_with("art_") => {
+                let digest = crate::artifact_store::ArtifactStore::new(gw_dir)
+                    .ok()
+                    .and_then(|s| s.inspect(ref_id).ok())
+                    .map(|b| b.artifact_canonical_digest);
+                (ref_id.to_string(), digest, None::<String>)
+            }
             (None, Some(ref_id)) => {
                 let Some(gs) = _gateway_store.as_ref() else {
                     anyhow::bail!("promotion_query: artifact_ref requires GatewayStore");
@@ -356,7 +416,7 @@ impl NativeTool for PromotionQueryTool {
                             ref_id
                         )
                     })?;
-                record.artifact_id
+                (record.artifact_id, Some(record.artifact_canonical_digest), Some(ref_id.to_string()))
             }
             (None, None) => anyhow::bail!(
                 "promotion_query: provide either 'artifact_id' (e.g. 'art_a1b2c3d4') \
@@ -365,47 +425,46 @@ impl NativeTool for PromotionQueryTool {
             ),
         };
 
-        let Some(gw_dir) = gateway_dir else {
-            return Ok(ToolError::resource("Promotion store requires gateway directory to be configured", None::<String>).to_error_response());
-        };
-
         let store = PromotionStore::new(gw_dir)?;
 
-        let response = match store.get_promotion(&artifact_id) {
-            Some(record) => PromotionQueryResponse {
-                artifact_id: record.artifact_id,
-                content_digest: record.content_digest,
-                evaluator_pass: Some(record.evaluator_pass),
-                auditor_pass: Some(record.auditor_pass),
-                evaluator_id: record.evaluator_id,
-                auditor_id: record.auditor_id,
-                evaluator_findings: record.evaluator_findings,
-                auditor_findings: record.auditor_findings,
-                evaluator_timestamp: record.evaluator_timestamp,
-                auditor_timestamp: record.auditor_timestamp,
-                static_evaluator_pass: Some(record.static_evaluator_pass),
-                static_evaluator_id: record.static_evaluator_id,
-                static_evaluator_findings: record.static_evaluator_findings,
-                static_evaluator_timestamp: record.static_evaluator_timestamp,
-                unit_test_runner_pass: Some(record.unit_test_runner_pass),
-                unit_test_runner_id: record.unit_test_runner_id,
-                unit_test_runner_findings: record.unit_test_runner_findings,
-                unit_test_runner_timestamp: record.unit_test_runner_timestamp,
-                sealed_evaluator_pass: Some(record.sealed_evaluator_pass),
-                sealed_evaluator_id: record.sealed_evaluator_id,
-                sealed_evaluator_findings: record.sealed_evaluator_findings,
-                sealed_evaluator_timestamp: record.sealed_evaluator_timestamp,
-                promotion_gate_version: record.promotion_gate_version,
-            },
+        match store.get_promotion(&artifact_id) {
+            Some(record) => {
+                let response = serde_json::json!({
+                    "artifact_canonical_digest": artifact_canonical_digest,
+                    "artifact_ref": user_ref,
+                    "content_digest": record.content_digest,
+                    "evaluator_pass": record.evaluator_pass,
+                    "auditor_pass": record.auditor_pass,
+                    "evaluator_id": record.evaluator_id,
+                    "auditor_id": record.auditor_id,
+                    "evaluator_findings": record.evaluator_findings,
+                    "auditor_findings": record.auditor_findings,
+                    "evaluator_timestamp": record.evaluator_timestamp,
+                    "auditor_timestamp": record.auditor_timestamp,
+                    "static_evaluator_pass": record.static_evaluator_pass,
+                    "static_evaluator_id": record.static_evaluator_id,
+                    "static_evaluator_findings": record.static_evaluator_findings,
+                    "static_evaluator_timestamp": record.static_evaluator_timestamp,
+                    "unit_test_runner_pass": record.unit_test_runner_pass,
+                    "unit_test_runner_id": record.unit_test_runner_id,
+                    "unit_test_runner_findings": record.unit_test_runner_findings,
+                    "unit_test_runner_timestamp": record.unit_test_runner_timestamp,
+                    "sealed_evaluator_pass": record.sealed_evaluator_pass,
+                    "sealed_evaluator_id": record.sealed_evaluator_id,
+                    "sealed_evaluator_findings": record.sealed_evaluator_findings,
+                    "sealed_evaluator_timestamp": record.sealed_evaluator_timestamp,
+                    "promotion_gate_version": record.promotion_gate_version,
+                });
+                serde_json::to_string(&response).map_err(Into::into)
+            }
             None => {
-                return serde_json::to_string(&serde_json::json!({
-                    "artifact_id": args.artifact_id,
-                    "error": "No promotion record found for this artifact"
+                serde_json::to_string(&serde_json::json!({
+                    "error": "No promotion record found for this artifact",
+                    "artifact_canonical_digest": artifact_canonical_digest,
+                    "artifact_ref": user_ref,
                 }))
                 .map_err(Into::into)
             }
-        };
-
-        serde_json::to_string(&response).map_err(Into::into)
+        }
     }
 }

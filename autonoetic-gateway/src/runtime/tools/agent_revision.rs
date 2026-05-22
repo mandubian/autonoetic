@@ -624,7 +624,7 @@ fn create_revision_from_files(
                 "revision_id": revision_id,
                 "content_digest": existing_rev.content_digest,
                 "agent_id": common.agent_id,
-                "artifact_id": common.artifact_id,
+                "artifact_ref": common.source_ref,
                 "agent_ref": format!("{}@{}", common.agent_id, revision_id),
                 "short_ref": format!("{}@rev_{}", common.agent_id, existing_rev.short_id),
             }),
@@ -702,7 +702,7 @@ fn create_revision_from_files(
         "agent_ref": format!("{}@{}", common.agent_id, revision_id),
         "short_ref": short_ref,
         "agent_id": common.agent_id,
-        "artifact_id": common.artifact_id,
+        "artifact_ref": common.source_ref,
         "next_step": "Use agent.revision.promote to activate this revision"
     });
 
@@ -773,6 +773,12 @@ fn resolve_revision_artifact_input(
                         ref_id
                     )
                 })?;
+            if ref_id.starts_with("art_") {
+                return Ok(Some(ResolvedRevisionArtifactInput {
+                    artifact_id: ref_id.to_string(),
+                    source_ref: ref_id.to_string(),
+                }));
+            }
             let record = gateway_store
                 .resolve_artifact_ref_any_scope(ref_id, sid)?
                 .ok_or_else(|| {
@@ -787,6 +793,20 @@ fn resolve_revision_artifact_input(
     };
 
     if let Some(ref_id) = artifact_ref.filter(|value| !value.is_empty()) {
+        if ref_id.starts_with("art_") {
+            if ref_id != direct_artifact_id {
+                anyhow::ensure!(
+                    false,
+                    "artifact_ref '{}' does not match artifact_id '{}'",
+                    ref_id,
+                    direct_artifact_id,
+                );
+            }
+            return Ok(Some(ResolvedRevisionArtifactInput {
+                artifact_id: direct_artifact_id.to_string(),
+                source_ref: ref_id.to_string(),
+            }));
+        }
         let sid = session_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -842,7 +862,7 @@ impl NativeTool for AgentRevisionCreateTool {
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string", "description": "Logical agent ID for this revision" },
-                    "artifact_id": { "type": "string", "description": "Artifact ID containing the agent bundle (SKILL.md + files)" },
+                    "artifact_id": { "type": "string", "description": "Artifact ref (ar.*) containing the agent bundle (SKILL.md + files)" },
                     "base_revision_id": { "type": "string", "description": "Optional: base revision this is derived from" },
                     "summary": { "type": "string", "description": "Optional: human-readable summary of changes" }
                 },
@@ -1072,13 +1092,12 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_ref/artifact_id — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, pass the artifact_ref returned by artifact_build. artifact_id is still accepted for backward compatibility.".to_string(),
+            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_ref — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, pass the artifact_ref returned by artifact_build.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string" },
-                    "artifact_ref": { "type": "string", "description": "Preferred public artifact handle from artifact_build (for example 'ar.aabb1234ef56'). Resolved against the caller's accessible scopes." },
-                    "artifact_id": { "type": "string", "description": "Deprecated internal artifact store locator retained for backward compatibility. Prefer artifact_ref." },
+                    "artifact_ref": { "type": "string", "description": "Artifact ref from artifact_build (e.g., 'ar.aabb1234ef56'). Resolved against the caller's accessible scopes." },
                     "instructions": { "type": "string", "description": "Markdown instruction body for SKILL.md" },
                     "description": { "type": "string", "description": "Agent description for metadata.agent.description" },
                     "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
@@ -1621,7 +1640,7 @@ impl NativeTool for AgentRevisionListTool {
                     "agent_id": r.agent_id,
                     "status": format!("{:?}", r.status),
                     "created_at": r.created_at,
-                    "artifact_id": r.artifact_id,
+                    "artifact_ref": r.source_ref,
                     "base_revision_id": r.base_revision_id,
                 })
             })
@@ -1740,7 +1759,6 @@ impl NativeTool for AgentRevisionInspectTool {
                 "created_at": rev.created_at,
                 "created_by_type": rev.created_by_type,
                 "created_by_id": rev.created_by_id,
-                "artifact_id": rev.artifact_id,
                 "base_revision_id": rev.base_revision_id,
                 "content_digest": rev.content_digest,
                 "runtime_lock_hash": rev.runtime_lock_hash,
@@ -2289,11 +2307,11 @@ impl NativeTool for AgentRevisionPromoteTool {
                 };
                 anyhow::ensure!(
                     escalation.is_some(),
-                    "Promotion gate (FullJury): artifact '{}' has federation role verdicts \
-                     but no approved operator escalation for revision '{}'. \
-                     The planner must call federation.escalate and the operator must approve \
-                     before promotion.",
-                    artifact_id,
+                    "Promotion gate (FullJury): revision '{}' has federation role verdicts \
+                     but no approved operator escalation. \
+                     The planner must call federation.escalate with revision_id='{}' \
+                     and the operator must approve before promotion.",
+                    args.revision_id,
                     args.revision_id
                 );
 
@@ -3346,9 +3364,9 @@ mod capability_lenient_deser_tests {
         );
         assert_eq!(
             response_json
-                .get("artifact_id")
+                .get("artifact_ref")
                 .and_then(|value| value.as_str()),
-            Some(bundle.artifact_id.as_str())
+            Some(artifact_ref.as_str())
         );
 
         let revision_id = response_json

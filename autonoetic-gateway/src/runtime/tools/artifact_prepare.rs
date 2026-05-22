@@ -124,16 +124,14 @@ impl NativeTool for ArtifactPrepareTool {
         let sid =
             session_id.ok_or_else(|| anyhow::anyhow!("artifact.prepare requires a session_id"))?;
 
-        // Resolve artifact_ref → internal artifact_id
-        let artifact_id = store
-            .resolve_artifact_ref_any_scope(&args.artifact_ref, sid)?
-            .map(|r| r.artifact_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "artifact_ref '{}' not found, expired, or revoked",
-                    args.artifact_ref
-                )
-            })?;
+        let resolved =
+            crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+                &args.artifact_ref,
+                sid,
+                &store,
+                gw_dir,
+            )?;
+        let artifact_id = resolved.artifact_id;
 
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
         let bundle = artifact_store.inspect(&artifact_id)?;

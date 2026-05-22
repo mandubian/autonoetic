@@ -1840,6 +1840,27 @@ impl NativeTool for CredentialSetupTool {
             .to_error_response());
         }
 
+        // Dedup: if a credential already exists for this service, return it
+        // instead of creating a duplicate. This guards against the planner
+        // re-running credential onboarding for an already-set-up service.
+        {
+            let existing = store.list_credentials_by_service(&service)?;
+            if !existing.is_empty() {
+                let cred = &existing[0];
+                let mut response = json!({
+                    "ok": true,
+                    "credential_id": cred.credential_id,
+                    "service": cred.service,
+                    "existing": true,
+                    "note": "Credential already exists for this service — reusing existing credential.",
+                });
+                if let Some(inject_as) = &cred.inject_as {
+                    response["inject_as"] = json!(inject_as);
+                }
+                return Ok(response.to_string());
+            }
+        }
+
         // Network policy pre-check for all ApiCall step URLs.
         for step in &steps {
             if let CredentialSetupStep::ApiCall {

@@ -19,7 +19,10 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 #[derive(Debug, Deserialize)]
 struct FederationEscalateArgs {
     escalation_id: Option<String>,
+    #[serde(default)]
     artifact_id: String,
+    #[serde(default)]
+    artifact_ref: Option<String>,
     artifact_digest: Option<String>,
     agent_id: String,
     revision_id: String,
@@ -55,15 +58,19 @@ impl NativeTool for FederationEscalateTool {
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "required": ["artifact_id", "agent_id", "revision_id", "role_verdicts", "planner_synthesis", "root_session_id"],
+                "required": ["agent_id", "revision_id", "role_verdicts", "planner_synthesis", "root_session_id"],
                 "properties": {
                     "escalation_id": {
                         "type": "string",
                         "description": "Optional explicit ID (esc_xxxxxxxx). Auto-generated if omitted."
                     },
+                    "artifact_ref": {
+                        "type": "string",
+                        "description": "Artifact ref (ar.*) from artifact_build or promotion_query response. Preferred over artifact_id."
+                    },
                     "artifact_id": {
                         "type": "string",
-                        "description": "The artifact under review (art_xxxxxxxx)."
+                        "description": "Optional artifact identifier — the gateway resolves this from the revision record. Pass artifact_ref instead."
                     },
                     "artifact_digest": {
                         "type": "string",
@@ -133,25 +140,36 @@ impl NativeTool for FederationEscalateTool {
             .to_error_response());
         };
 
+        // Resolve artifact_ref if provided, falling back to artifact_id if not.
+        let caller_artifact_id = if let Some(ref ref_id) = args.artifact_ref {
+            let sid = _session_id.unwrap_or("");
+            store
+                .resolve_artifact_ref_any_scope(ref_id, sid)?
+                .map(|r| r.artifact_id)
+                .unwrap_or_else(|| args.artifact_id.clone())
+        } else {
+            args.artifact_id.clone()
+        };
+
         let (canonical_artifact_id, canonical_revision_id) =
             match store.get_agent_revision(&args.revision_id)? {
                 Some(rev) => {
                     let art = rev
                         .artifact_id
                         .as_deref()
-                        .unwrap_or(&args.artifact_id)
+                        .unwrap_or(&caller_artifact_id)
                         .to_string();
-                    if art != args.artifact_id {
+                    if art != caller_artifact_id && !caller_artifact_id.is_empty() {
                         tracing::warn!(
                             target: "federation",
-                            escalation_artifact_id = %args.artifact_id,
+                            escalation_artifact_id = %caller_artifact_id,
                             canonical_artifact_id = %art,
-                            "federation.escalate: LLM provided wrong artifact_id, correcting to canonical value from revision record"
+                            "federation.escalate: correcting artifact id to canonical value from revision record"
                         );
                     }
                     (art, rev.revision_id.clone())
                 }
-                None => (args.artifact_id.clone(), args.revision_id.clone()),
+                None => (caller_artifact_id.clone(), args.revision_id.clone()),
             };
 
         let escalation_id = args

@@ -176,19 +176,16 @@ impl NativeTool for UserAskTool {
                 }
             }
 
-            let pending_approvals = store
-                .get_pending_approvals_for_root(&root_session_id)
-                .unwrap_or_default();
             let pending_interactions = store
                 .get_pending_interactions_for_root_session(&root_session_id)
                 .unwrap_or_default();
-            if !pending_approvals.is_empty() || !pending_interactions.is_empty() {
+            if !pending_interactions.is_empty() {
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "conflict",
-                    "message": "user.ask is not available while gates are pending (approvals or interactions). Resolve pending gates before retrying.",
-                    "repair_hint": "Resolve or wait for pending gates, then retry user.ask.",
-                    "error": "user.ask is not available while gates are pending. Resolve pending gates before retrying."
+                    "message": "user.ask is not available while interactions are pending. Resolve pending interactions before retrying.",
+                    "repair_hint": "Resolve or wait for pending interactions, then retry user.ask.",
+                    "error": "user.ask is not available while interactions are pending. Resolve pending interactions before retrying."
                 }).to_string());
             }
         }

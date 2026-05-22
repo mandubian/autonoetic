@@ -232,15 +232,13 @@ impl NativeTool for ArtifactExecTool {
         // Resolve artifact_ref → artifact_id
         let artifact_id = if let Some(store) = &gateway_store {
             let sid = session_id.unwrap_or_default();
-            store
-                .resolve_artifact_ref_any_scope(&args.artifact_ref, sid)?
-                .map(|r| r.artifact_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "artifact_ref '{}' not found, expired, or revoked",
-                        args.artifact_ref
-                    )
-                })?
+            crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+                &args.artifact_ref,
+                sid,
+                store,
+                gw_dir,
+            )?
+            .artifact_id
         } else {
             return Ok(ToolError::resource("artifact_exec requires GatewayStore to be configured", None::<String>).to_error_response());
         };

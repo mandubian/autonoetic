@@ -815,11 +815,11 @@ impl NativeTool for SandboxExecTool {
                     },
                     "artifact_id": {
                         "type": "string",
-                        "description": "Optional canonical artifact bundle id (art_*). When set, only that bundle's files are mounted (closed boundary). For stable handles like ar.* from content/artifact_build, use artifact_ref instead — do not pass ar.* here."
+                        "description": "Optional artifact identifier. Prefer artifact_ref (ar.*) instead."
                     },
                     "artifact_ref": {
                         "type": "string",
-                        "description": "Optional artifact ref (e.g. ar.*). Resolved server-side to the canonical art_* id and mounted like artifact_id. If both artifact_id and artifact_ref are set, they must refer to the same bundle."
+                        "description": "Optional artifact ref (e.g., ar.* from artifact_build). Resolved server-side. Preferred over artifact_id."
                     },
                     "capture_paths": {
                         "type": "array",
@@ -906,18 +906,18 @@ impl NativeTool for SandboxExecTool {
                 ))
                 .into());
             };
-            let resolved = match store.resolve_artifact_ref_any_scope(aref, sid) {
-                Ok(o) => o,
-                Err(e) => return Err(tagged::Tagged::validation(e).into()),
-            };
-            let Some(artifact_id) = resolved.map(|r| r.artifact_id) else {
+            let Some(gw_d) = gateway_dir else {
                 return Err(tagged::Tagged::validation(anyhow::anyhow!(
-                    "artifact_ref '{}' not found, expired, or revoked",
-                    aref
+                    "sandbox_exec: artifact_ref requires gateway_dir"
                 ))
                 .into());
             };
-            Some(artifact_id)
+            match crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+                aref, sid, store, gw_d,
+            ) {
+                Ok(r) => Some(r.artifact_id),
+                Err(e) => return Err(tagged::Tagged::validation(e).into()),
+            }
         } else {
             None
         };
