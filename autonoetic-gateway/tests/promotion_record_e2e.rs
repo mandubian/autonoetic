@@ -14,7 +14,7 @@ use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
-use autonoetic_types::artifact::ArtifactKind;
+use autonoetic_types::artifact::{ArtifactKind, ArtifactRefRecord, ArtifactRefScopeType};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::promotion::PromotionRole;
@@ -369,4 +369,209 @@ async fn test_promotion_record_full_pass_flow() {
         .join(revision_id);
     assert!(rev_dir.join("SKILL.md").exists(), "SKILL.md materialized");
     assert!(rev_dir.join("main.py").exists(), "main.py materialized");
+}
+
+/// Promotion flow using artifact_ref (ar.*) instead of artifact_id.
+#[tokio::test]
+async fn test_promotion_record_with_artifact_ref() {
+    let temp = tempdir().expect("tempdir should create");
+    let agents_dir = temp.path().join("agents");
+    let builder_dir = agents_dir.join("specialized_builder.default");
+    std::fs::create_dir_all(&builder_dir).expect("builder dir should create");
+
+    let script_content = "#!/usr/bin/env python3\nprint('ar test')\n";
+    let (artifact_id, gateway_dir) = build_agent_bundle_artifact(temp.path(), script_content);
+
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+
+    let gw_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store"));
+
+    // Inspect the artifact to get digest fields for the ref record.
+    let artifact_store =
+        autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+    let bundle = artifact_store.inspect(&artifact_id).unwrap();
+
+    // Mint an ar.* ref manually and insert into the store.
+    // Use root-session scope so all child sessions can resolve it.
+    let ar_ref = "ar.promoe2etest01";
+    gw_store
+        .create_artifact_ref(&ArtifactRefRecord {
+            ref_id: ar_ref.to_string(),
+            scope_type: ArtifactRefScopeType::Session,
+            scope_id: "root-session-ar".to_string(),
+            artifact_id: artifact_id.clone(),
+            artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+            artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+            created_by_agent_id: "coder.default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+            revoked_at: None,
+        })
+        .expect("create artifact ref");
+
+    // --- Evaluator records pass via artifact_ref ---
+    let eval_manifest = evaluator_manifest();
+    let eval_policy = PolicyEngine::new(eval_manifest.clone());
+    let registry = default_registry();
+
+    let eval_args = serde_json::json!({
+        "artifact_ref": ar_ref,
+        "role": "sealed_evaluator",
+        "pass": true,
+        "findings": [],
+        "summary": "All tests passed (ar.* ref)"
+    });
+
+    let eval_result = registry
+        .execute(
+            "promotion_record",
+            &eval_manifest,
+            &eval_policy,
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&eval_args).unwrap(),
+            Some("root-session-ar/evaluator"),
+            None,
+            Some(&config),
+            Some(gw_store.clone()),
+            None,
+        )
+        .expect("evaluator promotion.record via ar.* ref should succeed");
+
+    let eval_parsed: serde_json::Value = serde_json::from_str(&eval_result).unwrap();
+    assert_eq!(eval_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        eval_parsed
+            .pointer("/promotion_record/artifact_ref")
+            .and_then(|v| v.as_str()),
+        Some(ar_ref),
+        "response should include the artifact_ref"
+    );
+
+    // --- Auditor records pass via artifact_ref ---
+    let audit_manifest = auditor_manifest();
+    let audit_policy = PolicyEngine::new(audit_manifest.clone());
+
+    let audit_args = serde_json::json!({
+        "artifact_ref": ar_ref,
+        "role": "auditor",
+        "pass": true,
+        "findings": [],
+        "summary": "Security audit passed (ar.* ref)"
+    });
+
+    let audit_result = registry
+        .execute(
+            "promotion_record",
+            &audit_manifest,
+            &audit_policy,
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&audit_args).unwrap(),
+            Some("root-session-ar/auditor"),
+            None,
+            Some(&config),
+            Some(gw_store.clone()),
+            None,
+        )
+        .expect("auditor promotion.record via ar.* ref should succeed");
+
+    let audit_parsed: serde_json::Value = serde_json::from_str(&audit_result).unwrap();
+    assert_eq!(audit_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        audit_parsed
+            .pointer("/promotion_record/artifact_ref")
+            .and_then(|v| v.as_str()),
+        Some(ar_ref),
+        "response should include the artifact_ref"
+    );
+
+    // Verify promotion store recorded for the canonical artifact_id.
+    let promotion_store = PromotionStore::new(&gateway_dir).expect("promotion store");
+    assert!(
+        promotion_store.has_passed(&artifact_id, &PromotionRole::SealedEvaluator),
+        "evaluator should have passed"
+    );
+    assert!(
+        promotion_store.has_passed(&artifact_id, &PromotionRole::Auditor),
+        "auditor should have passed"
+    );
+    assert!(
+        promotion_store.is_fully_promoted(&artifact_id),
+        "artifact should be fully promoted"
+    );
+
+    // --- promotion_query via artifact_ref ---
+    let query_manifest = AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "reader.default".to_string(),
+            name: "reader".to_string(),
+            description: "test".to_string(),
+        },
+        capabilities: vec![Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
+        }],
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    };
+    let query_policy = PolicyEngine::new(query_manifest.clone());
+
+    let query_args = serde_json::json!({
+        "artifact_ref": ar_ref,
+    });
+    let query_result = registry
+        .execute(
+            "promotion_query",
+            &query_manifest,
+            &query_policy,
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&query_args).unwrap(),
+            Some("root-session-ar/query"),
+            None,
+            Some(&config),
+            Some(gw_store),
+            None,
+        )
+        .expect("promotion_query via ar.* ref should succeed");
+
+    let query_parsed: serde_json::Value = serde_json::from_str(&query_result).unwrap();
+    assert_eq!(
+        query_parsed
+            .pointer("/auditor_pass")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        query_parsed
+            .get("artifact_ref")
+            .and_then(|v| v.as_str()),
+        Some(ar_ref),
+        "promotion_query should return the artifact_ref"
+    );
 }
