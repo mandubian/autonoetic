@@ -13,7 +13,7 @@ this PR) are in place. What remains is **operator action**:
 
 1. Run **3 successful end-to-end cycles** across any 3 agents.
 2. Capture the multi-axis deltas, operator notes, and any surprises.
-3. Sign off (or reject) the milestone in this document's §5.
+3. Sign off (or reject) the milestone in this document's §7.
 
 P5 (agent-level evolution) is intentionally gated on P4's outcome —
 broader scope only after the basic loop is shown to work.

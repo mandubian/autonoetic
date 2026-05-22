@@ -182,8 +182,8 @@ impl NativeTool for AbReplayTool {
                             "ok": false,
                             "status": "surface_drift_rejected",
                             "agent_id": args.agent_id,
-                            "revision_a": rev_a.revision_id,
-                            "revision_b": rev_b.revision_id,
+                            "revision_a": ref_a.to_string(),
+                            "revision_b": ref_b.to_string(),
                             "reason": reason,
                             "guardrail": "improve.restrict_to_prompt_only",
                             "message":
@@ -542,42 +542,58 @@ fn build_ab_stats(
     }
 }
 
-/// Load two revisions' on-disk manifests and check that their declared
-/// capability surfaces are equivalent. Returns `Ok(Some(reason))` when
-/// the surfaces differ (i.e., the guardrail should reject), `Ok(None)`
-/// when they match. Hard errors propagate via `Err` (e.g., SKILL.md
-/// missing, parse failure).
+/// Load two revisions' on-disk manifests and check that the candidate
+/// (rev_b) has not changed the agent's privilege surface relative to
+/// the baseline (rev_a). Returns `Ok(Some(reason))` when ANY non-trivial
+/// difference exists (i.e., the guardrail should reject), `Ok(None)`
+/// when the surfaces match. Hard errors propagate via `Err` (e.g.,
+/// SKILL.md missing, parse failure).
 ///
-/// "Surface" today = the set of `Capability` discriminants present in
-/// the manifest, plus `allowed_tool_tiers`. We don't compare every
-/// capability *parameter* (e.g., a SandboxFunctions allowlist edit
-/// counts as a surface change but two AgentSpawn capabilities with
-/// different `max_children` would NOT — that's a fine-tuning, not a
-/// surface widening). If P5+ wants finer comparisons it can extend
-/// this helper.
+/// "Privilege surface" for P4 = the manifest's `capabilities` block AND
+/// the `allowed_tool_tiers` list. The comparison delegates to
+/// [`autonoetic_types::capability::compute_capability_delta`], which
+/// understands parameter-level widening (e.g., `ReadAccess` scopes
+/// `["self.*"]` → `["*"]` IS a privilege widening even though the
+/// capability kind is unchanged). The earlier kind-only comparator
+/// would have let that through — that's the bug Copilot's review on
+/// PR #267 caught.
+///
+/// Any of `added`, `broadened`, `narrowed`, or `removed` from the
+/// delta trips the gate. P4's intent is **prompt-only**, so even
+/// narrowing is treated as a non-prompt change — the operator should
+/// be running narrowing through a separate review path, not this one.
 fn surface_drift_reason(
     repo: &crate::agent::repository::AgentRepository,
     gateway_dir: &std::path::Path,
     agent_id: &str,
-    rev_a_id: &str,
-    rev_b_id: &str,
+    baseline_revision_id: &str,
+    candidate_revision_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let loaded_a = repo.load_from_revision_dir(gateway_dir, agent_id, rev_a_id)?;
-    let loaded_b = repo.load_from_revision_dir(gateway_dir, agent_id, rev_b_id)?;
+    let loaded_baseline =
+        repo.load_from_revision_dir(gateway_dir, agent_id, baseline_revision_id)?;
+    let loaded_candidate =
+        repo.load_from_revision_dir(gateway_dir, agent_id, candidate_revision_id)?;
 
-    let surf_a = capability_surface(&loaded_a.manifest);
-    let surf_b = capability_surface(&loaded_b.manifest);
-    if surf_a != surf_b {
-        let added: Vec<String> = surf_b.difference(&surf_a).cloned().collect();
-        let removed: Vec<String> = surf_a.difference(&surf_b).cloned().collect();
+    let delta = autonoetic_types::capability::compute_capability_delta(
+        &loaded_baseline.manifest.capabilities,
+        &loaded_candidate.manifest.capabilities,
+    );
+    if !delta.added.is_empty()
+        || !delta.broadened.is_empty()
+        || !delta.narrowed.is_empty()
+        || !delta.removed.is_empty()
+    {
         return Ok(Some(format!(
-            "capability surface differs: added={:?}, removed={:?}",
-            added, removed
+            "capabilities changed: added={:?}, broadened={:?}, narrowed={:?}, removed={:?}",
+            delta.added,
+            delta.broadened.iter().map(|b| b.capability_type.clone()).collect::<Vec<_>>(),
+            delta.narrowed,
+            delta.removed,
         )));
     }
 
-    let tiers_a = tool_tier_surface(&loaded_a.manifest);
-    let tiers_b = tool_tier_surface(&loaded_b.manifest);
+    let tiers_a = tool_tier_surface(&loaded_baseline.manifest);
+    let tiers_b = tool_tier_surface(&loaded_candidate.manifest);
     if tiers_a != tiers_b {
         let added: Vec<String> = tiers_b.difference(&tiers_a).cloned().collect();
         let removed: Vec<String> = tiers_a.difference(&tiers_b).cloned().collect();
@@ -588,33 +604,6 @@ fn surface_drift_reason(
     }
 
     Ok(None)
-}
-
-/// Deterministic set of capability *discriminants* declared in the
-/// manifest. Order- and parameter-insensitive (parameters matter for
-/// runtime behavior but P4's "prompt-only" gate is about gross
-/// privilege widening, not fine-tuning).
-fn capability_surface(manifest: &AgentManifest) -> std::collections::BTreeSet<String> {
-    manifest
-        .capabilities
-        .iter()
-        .map(capability_kind)
-        .collect()
-}
-
-/// Extract the variant name from a `Capability`. Uses the `Debug`
-/// derive so this stays consistent if the enum grows new variants —
-/// listing 21 variants by hand would just rot.
-fn capability_kind(cap: &Capability) -> String {
-    let dbg = format!("{:?}", cap);
-    // Debug for an enum like `SandboxFunctions { allowed: [...] }`
-    // gives the variant name followed by whitespace, `(`, or `{` (or
-    // nothing at all for unit variants like `EmergencyStop`). Take the
-    // leading identifier characters.
-    dbg.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .next()
-        .unwrap_or("")
-        .to_string()
 }
 
 fn tool_tier_surface(manifest: &AgentManifest) -> std::collections::BTreeSet<String> {
@@ -629,16 +618,19 @@ fn tool_tier_surface(manifest: &AgentManifest) -> std::collections::BTreeSet<Str
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Tests for the P4 prompt-only guardrail. Tool-level integration sits
-// in `tests/improvement_ab_replay_integration.rs`; the unit tests here
-// pin the surface-comparison primitives.
+// Tests for the P4 prompt-only guardrail. The capability comparison
+// itself is `autonoetic_types::capability::compute_capability_delta`
+// which is tested in that crate. The tests here pin the tier helper
+// and the gate's *integration* (loading manifests + composing the
+// reject reason); behavioural tests for the gate sit in
+// `tests/improvement_ab_replay_integration.rs`.
 // ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod surface_drift_tests {
     use super::*;
     use autonoetic_types::agent::{
-        AgentIdentity, AgentManifest, RuntimeDeclaration, SandboxNetworkPolicy,
+        AgentIdentity, AgentManifest, RuntimeDeclaration, SandboxNetworkPolicy, ToolTier,
     };
 
     fn base_manifest() -> AgentManifest {
@@ -677,80 +669,7 @@ mod surface_drift_tests {
     }
 
     #[test]
-    fn surface_equal_when_capabilities_match() {
-        let mut a = base_manifest();
-        let mut b = base_manifest();
-        a.capabilities = vec![Capability::Evaluation {
-            patterns: vec!["*".into()],
-        }];
-        b.capabilities = vec![Capability::Evaluation {
-            patterns: vec!["*".into()],
-        }];
-        assert_eq!(capability_surface(&a), capability_surface(&b));
-    }
-
-    #[test]
-    fn surface_equal_ignores_capability_parameter_changes() {
-        // Same discriminant, different inner pattern → still the same
-        // surface for the P4 gate (parameter tuning ≠ surface widening).
-        // This matches the documented intent in the helper's doc.
-        let mut a = base_manifest();
-        let mut b = base_manifest();
-        a.capabilities = vec![Capability::SandboxFunctions {
-            allowed: vec!["digest_".into()],
-        }];
-        b.capabilities = vec![Capability::SandboxFunctions {
-            allowed: vec!["digest_".into(), "execution_".into()],
-        }];
-        assert_eq!(capability_surface(&a), capability_surface(&b));
-    }
-
-    #[test]
-    fn surface_differs_when_kind_added() {
-        let mut a = base_manifest();
-        let mut b = base_manifest();
-        a.capabilities = vec![Capability::Evaluation {
-            patterns: vec!["*".into()],
-        }];
-        b.capabilities = vec![
-            Capability::Evaluation {
-                patterns: vec!["*".into()],
-            },
-            Capability::AgentSpawn {
-                max_children: 1,
-                max_spawn_depth: 0,
-            },
-        ];
-        let sa = capability_surface(&a);
-        let sb = capability_surface(&b);
-        assert_ne!(sa, sb);
-        assert!(sb.contains("AgentSpawn") && !sa.contains("AgentSpawn"));
-    }
-
-    #[test]
-    fn surface_differs_when_kind_removed() {
-        let mut a = base_manifest();
-        let mut b = base_manifest();
-        a.capabilities = vec![
-            Capability::Evaluation {
-                patterns: vec!["*".into()],
-            },
-            Capability::ReadAccess {
-                scopes: vec!["*".into()],
-            },
-        ];
-        b.capabilities = vec![Capability::Evaluation {
-            patterns: vec!["*".into()],
-        }];
-        let sa = capability_surface(&a);
-        let sb = capability_surface(&b);
-        assert_ne!(sa, sb);
-        assert!(sa.contains("ReadAccess") && !sb.contains("ReadAccess"));
-    }
-
-    #[test]
     fn tier_surface_detects_added_tier() {
-        use autonoetic_types::agent::ToolTier;
         let mut a = base_manifest();
         let mut b = base_manifest();
         a.allowed_tool_tiers = vec![ToolTier::Core];
@@ -760,7 +679,6 @@ mod surface_drift_tests {
 
     #[test]
     fn tier_surface_is_order_insensitive() {
-        use autonoetic_types::agent::ToolTier;
         let mut a = base_manifest();
         let mut b = base_manifest();
         a.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
@@ -768,19 +686,13 @@ mod surface_drift_tests {
         assert_eq!(tool_tier_surface(&a), tool_tier_surface(&b));
     }
 
-    // ── capability_kind: variant-name extraction is robust ────────────
-
-    #[test]
-    fn capability_kind_extracts_variant_name_for_struct_variant() {
-        let cap = Capability::SandboxFunctions {
-            allowed: vec!["digest_".into()],
-        };
-        assert_eq!(capability_kind(&cap), "SandboxFunctions");
-    }
-
-    #[test]
-    fn capability_kind_extracts_variant_name_for_unit_variant() {
-        let cap = Capability::EmergencyStop;
-        assert_eq!(capability_kind(&cap), "EmergencyStop");
-    }
+    // The capability-comparison semantics — including the crucial
+    // "parameter widening counts" case (e.g. `ReadAccess { scopes:
+    // ["self.*"] }` → `ReadAccess { scopes: ["*"] }`) — are exercised
+    // end-to-end in `tests/improvement_ab_replay_integration.rs`:
+    //
+    //   * test_ab_replay_prompt_only_guard_rejects_capability_widening
+    //   * test_ab_replay_prompt_only_guard_rejects_parameter_widening
+    //   * test_ab_replay_prompt_only_guard_allows_identical_surface
+    //   * test_ab_replay_prompt_only_guard_can_be_disabled
 }

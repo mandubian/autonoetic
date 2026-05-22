@@ -593,28 +593,27 @@ fn execute_tool_with_gateway_dir(
 
 #[test]
 fn test_ab_replay_prompt_only_guard_rejects_capability_widening() {
-    // Set up: candidate has an extra capability that baseline doesn't.
-    // With restrict_to_prompt_only = true (default), the tool must
-    // refuse the comparison before doing any work.
+    // Tool convention (per schema): revision_a = baseline, revision_b
+    // = candidate. The candidate (B) adds CodeExecution on top of
+    // baseline (A); the gate must reject.
     let tmp = TempDir::new().unwrap();
     let (store, config) = setup_env(&tmp);
     let gateway_dir = tmp.path().join(".gateway");
 
-    // Baseline (REV_B is the alias target, treated as baseline in our
-    // existing seed). Minimal: Evaluation capability.
-    write_revision_skill_md(
-        &gateway_dir,
-        TARGET_AGENT,
-        REV_B_ID,
-        r#"      - type: "Evaluation"
-        patterns: ["*"]"#,
-    );
-    // Candidate (REV_A) has an additional CodeExecution capability —
-    // a surface widening that the gate must reject.
+    // Baseline = REV_A: minimal Evaluation capability only.
     write_revision_skill_md(
         &gateway_dir,
         TARGET_AGENT,
         REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]"#,
+    );
+    // Candidate = REV_B: adds CodeExecution. This is a capability
+    // *kind* addition (the easy case for any drift checker).
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
         r#"      - type: "Evaluation"
         patterns: ["*"]
       - type: "CodeExecution"
@@ -645,6 +644,63 @@ fn test_ab_replay_prompt_only_guard_rejects_capability_widening() {
 }
 
 #[test]
+fn test_ab_replay_prompt_only_guard_rejects_parameter_widening() {
+    // The crucial case Copilot's PR #267 review caught: same
+    // capability *kind* in both revisions, but the candidate widened
+    // the parameters. A naive kind-only comparator would let this
+    // through; `compute_capability_delta` catches it as "broadened".
+    //
+    // Baseline (A): ReadAccess scoped to "self.*".
+    // Candidate (B): ReadAccess scoped to "*" (all sessions).
+    let tmp = TempDir::new().unwrap();
+    let (store, config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "ReadAccess"
+        scopes: ["self.*"]"#,
+    );
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "ReadAccess"
+        scopes: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(
+        v["status"], "surface_drift_rejected",
+        "parameter widening must trip the gate (this is the bug Copilot caught on PR #267); got {:?}",
+        v
+    );
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("broadened") && reason.contains("ReadAccess"),
+        "rejection reason should name the broadened kind: got {}",
+        reason
+    );
+}
+
+#[test]
 fn test_ab_replay_prompt_only_guard_allows_identical_surface() {
     // Both revisions declare the same Evaluation capability. The gate
     // is on, but the surfaces match → the comparison proceeds (and
@@ -656,6 +712,7 @@ fn test_ab_replay_prompt_only_guard_allows_identical_surface() {
 
     let identical_caps = r#"      - type: "Evaluation"
         patterns: ["*"]"#;
+    // Baseline = REV_A, candidate = REV_B.
     write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_A_ID, identical_caps);
     write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_B_ID, identical_caps);
 
@@ -684,7 +741,8 @@ fn test_ab_replay_prompt_only_guard_allows_identical_surface() {
 fn test_ab_replay_prompt_only_guard_can_be_disabled() {
     // With restrict_to_prompt_only = false, the gate is skipped even
     // when surfaces differ. Pins the escape hatch for P5+ work that
-    // needs to A/B-test capability changes.
+    // needs to A/B-test capability changes. Baseline = REV_A,
+    // candidate = REV_B.
     let tmp = TempDir::new().unwrap();
     let (store, mut config) = setup_env(&tmp);
     let gateway_dir = tmp.path().join(".gateway");
@@ -693,14 +751,14 @@ fn test_ab_replay_prompt_only_guard_can_be_disabled() {
     write_revision_skill_md(
         &gateway_dir,
         TARGET_AGENT,
-        REV_B_ID,
+        REV_A_ID,
         r#"      - type: "Evaluation"
         patterns: ["*"]"#,
     );
     write_revision_skill_md(
         &gateway_dir,
         TARGET_AGENT,
-        REV_A_ID,
+        REV_B_ID,
         r#"      - type: "Evaluation"
         patterns: ["*"]
       - type: "CodeExecution"
