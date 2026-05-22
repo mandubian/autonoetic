@@ -53,7 +53,7 @@ to `GatewayConfig`. Default: `true`. Behaviour:
 | Prompt / instructions body changed; manifest `capabilities` and `allowed_tool_tiers` unchanged | ✅ A/B replay proceeds |
 | Manifest `capabilities` differ (variant added/removed) | ❌ A/B replay rejected with `surface_drift_rejected` |
 | Manifest `allowed_tool_tiers` differ | ❌ A/B replay rejected with `surface_drift_rejected` |
-| Manifest `capabilities` parameter changed (e.g. SandboxFunctions allowlist edit) | ✅ A/B replay proceeds (intentionally — parameter tuning is not surface widening) |
+| Manifest `capabilities` parameter widened/narrowed (e.g. `ReadAccess` scopes `["self.*"]` → `["*"]`) | ❌ A/B replay rejected with `surface_drift_rejected` (detected via `compute_capability_delta`) |
 
 The guardrail is a **safety floor**, not a substitute for the operator
 deciding what constitutes a meaningful prompt change. The intent: catch
@@ -61,8 +61,11 @@ mistakes where someone widens privileges without realising the loop
 treats that as a normal prompt edit.
 
 To lift the guardrail (P5+ work): set
-`improve.restrict_to_prompt_only: false` in the gateway config. Pin
-this in your config the moment you've signed off on P4 below.
+`improve.allow_capability_changes: true` in the gateway config (and
+optionally `restrict_to_prompt_only: false` to disable the gate entirely).
+Low-blast-radius capability changes are then permitted with a coerced
+minimum holdout; high-blast changes remain rejected. Pin this in your
+config the moment you've signed off on P4 below.
 
 ## 4. Cycle protocol
 
