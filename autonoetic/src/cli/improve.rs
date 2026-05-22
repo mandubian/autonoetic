@@ -2,6 +2,35 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Escape pipe `|` and newline characters for Markdown table cells.
+fn escape_md_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ").replace('\r', " ")
+}
+
+/// Guess the GitHub `owner/repo` from the git remote origin URL.
+/// Supports both `git@github.com:owner/repo.git` and `https://github.com/owner/repo.git`.
+fn guess_github_repo() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // git@github.com:owner/repo.git  →  owner/repo
+    // https://github.com/owner/repo.git  →  owner/repo
+    if let Some(path) = url.split("github.com").nth(1) {
+        let path = path.trim_start_matches(':').trim_start_matches('/');
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let path = path.strip_suffix('/').unwrap_or(path);
+        if let Some((owner, repo)) = path.split_once('/') {
+            return Some(format!("{}/{}", owner, repo.trim_end_matches('/')));
+        }
+    }
+    None
+}
+
 use anyhow::Context;
 use autonoetic_gateway::runtime::tools::improvement::AbReplayTool;
 use autonoetic_gateway::runtime::tools::NativeTool;
@@ -44,6 +73,10 @@ pub struct ImproveRunArgs {
     /// If true, refuse to deploy — output the comparison report path instead.
     #[arg(long)]
     pub no_prompt: bool,
+    /// File a GitHub issue with code-level findings from failed sessions.
+    /// Requires `gh` CLI installed and authenticated. Used in conjunction with --session.
+    #[arg(long)]
+    pub propose_code_fix: bool,
 }
 
 pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> anyhow::Result<()> {
@@ -55,6 +88,7 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
             let agent = args.agent.as_deref();
             let dry_run = args.dry_run;
             let no_prompt = args.no_prompt;
+            let propose_code_fix = args.propose_code_fix;
             let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
             let gateway_dir = loaded_config.agents_dir.join(".gateway");
             let store = Arc::new(GatewayStore::open(&gateway_dir).context(
@@ -82,6 +116,11 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
             if dry_run {
                 eprintln!("[dry-run] Stopping before propose/validate as requested.");
                 return Ok(());
+            }
+
+            // 3b. Code-fix proposal path — files a GitHub issue instead of proposing a revision
+            if propose_code_fix {
+                return handle_propose_code_fix(&loaded_config, &store, &gateway_dir, &session_ids, &outcomes, no_prompt).await;
             }
 
             // 4. Determine agent to improve from the first outcome
@@ -447,6 +486,186 @@ fn propose_improvement(
         .with_context(|| format!("Failed to copy runtime.lock to {:?}", dst_dir))?;
 
     Ok(short_id)
+}
+
+/// File a GitHub issue with code-level findings from one or more failed sessions.
+/// Requires `gh` CLI to be installed and authenticated.
+async fn handle_propose_code_fix(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: &Arc<GatewayStore>,
+    gateway_dir: &Path,
+    _session_ids: &[String],
+    outcomes: &[(String, autonoetic_types::session_outcome::SessionOutcome)],
+    _no_prompt: bool,
+) -> anyhow::Result<()> {
+    use autonoetic_gateway::runtime::tools::github_issue::GithubIssueCreateTool;
+    use autonoetic_types::causal_chain::CausalEventRecord;
+
+    let target_agent = outcomes
+        .first()
+        .map(|(_, o)| o.source_agent_id.clone())
+        .unwrap_or_default();
+
+    // Build shared manifest, policy, and tool once (constant across sessions)
+    let manifest = AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "autonoetic-cli".to_string(),
+            name: "Autonoetic CLI".to_string(),
+            description: "CLI code-issue-proposer".to_string(),
+        },
+        capabilities: vec![Capability::GithubIssueCreate {
+            patterns: vec!["*".into()],
+        }],
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    };
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let tool = GithubIssueCreateTool;
+
+    for (sid, outcome) in outcomes {
+        // Skip passed sessions
+        if outcome.judged_success() == Some(true) {
+            eprintln!("[skip] Session {} passed — no issue filed.", sid);
+            continue;
+        }
+
+        // Gather causal events for this session
+        let causal_events: Vec<CausalEventRecord> = store
+            .search_causal_events(Some(sid), None, 100)
+            .with_context(|| format!("Failed to read causal events for session '{}'", sid))?;
+
+        let tool_failures: Vec<&CausalEventRecord> = causal_events
+            .iter()
+            .filter(|e| e.status == "ERROR" || e.status == "DENIED")
+            .collect();
+
+        // Build issue body
+        let mut body = String::new();
+
+        body.push_str(&format!(
+            "## Session `{}`\n\n**Agent:** {}  \n**Goal:** {}  \n**Status:** {}  \n**Turns:** {}  \n**Cost:** ${:.4}\n\n",
+            sid,
+            outcome.source_agent_id,
+            outcome.task_goal.as_deref().unwrap_or("(no goal)"),
+            match outcome.judged_success() {
+                Some(true) => "passed",
+                Some(false) => "failed",
+                None => "ungraded",
+            },
+            outcome.turns,
+            outcome.cost_usd,
+        ));
+
+        if let Some(ref grader) = outcome.grader {
+            if let Some(ref summary) = grader.evidence_summary {
+                body.push_str(&format!("**Evidence:** {}\n\n", escape_md_cell(summary)));
+            }
+        }
+
+        if !tool_failures.is_empty() {
+            body.push_str("### Tool Failures / Denials\n\n");
+            body.push_str("| Action | Status | Reason |\n");
+            body.push_str("|--------|--------|--------|\n");
+            for ev in tool_failures.iter().take(10) {
+                let reason = ev.reason.as_deref().map(escape_md_cell).unwrap_or_else(|| "(none)".to_string());
+                body.push_str(&format!("| `{}` | {} | {} |\n", ev.action, ev.status, reason));
+            }
+            body.push('\n');
+        }
+
+        body.push_str("### Suggested Fix Area\n\n");
+        body.push_str("_This issue was auto-filed by the code-issue-proposer. Review the causal event log ");
+        body.push_str("and digest to identify the root cause in gateway code._\n\n");
+
+        body.push_str("#### Reproduction\n");
+        body.push_str(&format!("1. Run `autonoetic session trace {}`\n", sid));
+        body.push_str(&format!("2. Review the outcome digest at session `{}`\n", sid));
+        body.push_str("3. Identify the failing tool call or schema mismatch\n");
+
+        let title = format!(
+            "[code-issue-proposer] Session {} — {}",
+            sid,
+            outcome.task_goal.as_deref().unwrap_or("code-level issue")
+        );
+
+        let repo = guess_github_repo()
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine GitHub repo from git remote — set origin or pass --repo"))?;
+
+        let tool_args = serde_json::json!({
+            "title": title,
+            "body": body,
+            "labels": "code-issue-proposer",
+            "repo": repo,
+        });
+
+        let result = tool
+            .execute(
+                &manifest,
+                &policy,
+                Path::new("/tmp"),
+                Some(gateway_dir),
+                &tool_args.to_string(),
+                Some(sid),
+                None,
+                Some(config),
+                Some(store.clone()),
+                None,
+            )
+            .with_context(|| format!("Failed to file GitHub issue for session '{}'", sid))?;
+
+        let parsed: serde_json::Value = serde_json::from_str(&result)
+            .with_context(|| format!("Failed to parse tool output: {}", result))?;
+
+        let url = parsed["url"].as_str().unwrap_or("(unknown)");
+        eprintln!("Filed issue for session `{}`: {}", sid, url);
+
+        // Emit causal event for audit trail
+        let _ = store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: target_agent.clone(),
+            session_id: sid.to_string(),
+            turn_id: None,
+            event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "tool".to_string(),
+            action: "code_issue_proposed".to_string(),
+            status: "SUCCESS".to_string(),
+            enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+            target: Some(url.to_string()),
+            payload: Some(serde_json::json!({
+                "session_id": sid,
+                "agent_id": target_agent.clone(),
+                "issue_url": url,
+            }).to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("Auto-filed by code-issue-proposer via CLI".to_string()),
+        });
+    }
+
+    Ok(())
 }
 
 fn run_ab_replay(

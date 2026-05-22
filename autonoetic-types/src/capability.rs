@@ -149,6 +149,14 @@ pub enum Capability {
     #[serde(rename = "budget.no_price_available.allow")]
     BudgetNoPriceAvailableAllow,
 
+    /// Create GitHub issues via `github.issue.create`.
+    /// The `patterns` field restricts which repos can be targeted.
+    /// Use ["*"] for any repo, or specific patterns like "owner/repo".
+    GithubIssueCreate {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
+
     /// Submit adversarial attack-pattern proposals via `attack_pattern_propose`.
     /// Granted exclusively to the system-tier red-team agent. Intentionally
     /// separate from `Evaluation` — the red-team agent must NOT also author eval
@@ -257,6 +265,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SkillInstall { .. } => "SkillInstall".to_string(),
         Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
         Capability::ReasoningAudit { .. } => "ReasoningAudit".to_string(),
+        Capability::GithubIssueCreate { .. } => "GithubIssueCreate".to_string(),
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
     }
@@ -320,6 +329,10 @@ fn capability_broadening(
         (Capability::ReasoningAudit { targets: a }, Capability::ReasoningAudit { targets: b }) => {
             scope_broadening(capability_type, a, b)
         }
+        (
+            Capability::GithubIssueCreate { patterns: a },
+            Capability::GithubIssueCreate { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
         (
             Capability::CodeExecution {
                 patterns: ap,
