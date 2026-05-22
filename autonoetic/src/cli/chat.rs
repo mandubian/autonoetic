@@ -247,6 +247,10 @@ struct TaskLifecycle {
     stages: Vec<String>,
     /// The spawn reason / intent from the task.spawned event.
     spawn_reason: Option<String>,
+    /// Result summary from task.completed event payload.
+    result_summary: Option<String>,
+    /// Whether the user has toggled this lifecycle to expanded view.
+    expanded: bool,
 }
 
 struct App {
@@ -269,6 +273,7 @@ struct App {
     selecting: bool,
     sel_start: Option<(usize, usize)>, // (content_row, content_col)
     sel_end: Option<(usize, usize)>,   // (content_row, content_col)
+    click_down_screen: Option<(u16, u16)>,
     signal_resume_by_internal_id: HashMap<u64, SignalResumeRef>,
     signal_resume_inflight: HashSet<String>,
     seen_workflow_event_ids: HashSet<String>,
@@ -346,6 +351,7 @@ impl App {
             selecting: false,
             sel_start: None,
             sel_end: None,
+            click_down_screen: None,
             signal_resume_by_internal_id: HashMap::new(),
             signal_resume_inflight: HashSet::new(),
             seen_workflow_event_ids: HashSet::new(),
@@ -681,6 +687,46 @@ impl App {
         } else {
             self.scroll_offset.min(self.last_max_scroll_offset)
         }
+    }
+
+    fn toggle_lifecycle_at_content_row(&mut self, content_row: usize) -> bool {
+        let mut row: usize = 0;
+        let mut found_task_id: Option<String> = None;
+        for (msg_idx, msg) in self.messages.iter().enumerate() {
+            let msg_lines = msg.content.lines().count().max(1);
+            let blank_line = 1;
+            let msg_height = msg_lines + blank_line;
+            if content_row >= row && content_row < row + msg_height {
+                for (tid, &lc_idx) in &self.task_lifecycle_msg_idx {
+                    if lc_idx == msg_idx {
+                        found_task_id = Some(tid.clone());
+                        break;
+                    }
+                }
+                break;
+            }
+            row += msg_height;
+        }
+        if let Some(tid) = found_task_id {
+            if let Some(lc) = self.task_lifecycles.get_mut(&tid) {
+                lc.expanded = !lc.expanded;
+                if let Some(&idx) = self.task_lifecycle_msg_idx.get(&tid) {
+                    if idx < self.messages.len() {
+                        let collapsed = format_lifecycle_line(
+                            &lc.agent_suffix,
+                            &tid,
+                            &lc.stages,
+                            lc.spawn_reason.as_deref(),
+                            lc.result_summary.as_deref(),
+                            lc.expanded,
+                        );
+                        self.messages[idx].content = collapsed;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn cancel_armed(&self) -> bool {
@@ -2444,13 +2490,48 @@ fn terminal_icon_for_completion(
     }
 }
 
-fn format_lifecycle_line(agent_suffix: &str, task: &str, stages: &[String], spawn_reason: Option<&str>) -> String {
+fn format_lifecycle_line(
+    agent_suffix: &str,
+    task: &str,
+    stages: &[String],
+    spawn_reason: Option<&str>,
+    result_summary: Option<&str>,
+    expanded: bool,
+) -> String {
     let icon = lifecycle_icon_for_stage(stages.last().map(String::as_str));
     let chain = stages.join(" → ");
     let mut line = format!("{} {} ({}) {}", icon, agent_suffix.trim_start_matches(" → "), task, chain);
-    if let Some(reason) = spawn_reason {
-        let oneline = preview_spawn_reason(reason, 100);
-        line.push_str(&format!("\n   💬 {}", oneline));
+    let is_terminal = stages
+        .last()
+        .map_or(false, |s| matches!(s.as_str(), "completed" | "failed" | "cancelled") || s.contains("(gate:"));
+    if expanded {
+        if let Some(reason) = spawn_reason {
+            for ln in reason.lines() {
+                line.push_str(&format!("\n   💬 {}", ln));
+            }
+        }
+        if let Some(result) = result_summary {
+            line.push_str("\n   📋 Result:");
+            for ln in result.lines() {
+                line.push_str(&format!("\n      {}", ln));
+            }
+        }
+    } else {
+        if let Some(reason) = spawn_reason {
+            let oneline = preview_spawn_reason(reason, 100);
+            line.push_str(&format!("\n   💬 {}", oneline));
+        }
+        if is_terminal {
+            if let Some(result) = result_summary {
+                let preview = preview_spawn_reason(result, 120);
+                line.push_str(&format!("\n   📋 {}", preview));
+            }
+            if spawn_reason.map_or(false, |r| r.lines().count() > 1)
+                || result_summary.map_or(false, |r| r.lines().count() > 1)
+            {
+                line.push_str("\n   [click to expand]");
+            }
+        }
     }
     line
 }
@@ -2488,6 +2569,15 @@ fn push_workflow_event_message(
         } else {
             None
         };
+        let result_summary = if event_type == "task.completed" {
+            payload
+                .get("result_summary")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
         let should_collapse = app.task_lifecycles.contains_key(task_id);
         if should_collapse {
             let lc = app.task_lifecycles.get_mut(task_id).unwrap();
@@ -2495,7 +2585,17 @@ fn push_workflow_event_message(
             if spawn_reason.is_some() {
                 lc.spawn_reason = spawn_reason;
             }
-            let collapsed = format_lifecycle_line(&lc.agent_suffix, task_id, &lc.stages, lc.spawn_reason.as_deref());
+            if result_summary.is_some() {
+                lc.result_summary = result_summary;
+            }
+            let collapsed = format_lifecycle_line(
+                &lc.agent_suffix,
+                task_id,
+                &lc.stages,
+                lc.spawn_reason.as_deref(),
+                lc.result_summary.as_deref(),
+                lc.expanded,
+            );
             if let Some(&idx) = app.task_lifecycle_msg_idx.get(task_id) {
                 if idx < app.messages.len() {
                     app.messages[idx].content = collapsed.clone();
@@ -2508,13 +2608,22 @@ fn push_workflow_event_message(
             }
             app.add_message(role, collapsed);
         } else {
-            let collapsed = format_lifecycle_line(agent_suffix, task_id, std::slice::from_ref(&stage), spawn_reason.as_deref());
+            let collapsed = format_lifecycle_line(
+                agent_suffix,
+                task_id,
+                std::slice::from_ref(&stage),
+                spawn_reason.as_deref(),
+                result_summary.as_deref(),
+                false,
+            );
             app.task_lifecycles.insert(
                 task_id.to_string(),
                 TaskLifecycle {
                     agent_suffix: agent_suffix.to_string(),
                     stages: vec![stage],
                     spawn_reason,
+                    result_summary,
+                    expanded: false,
                 },
             );
             app.add_message(role, collapsed);
@@ -4692,19 +4801,15 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
         }
         crossterm::event::MouseEventKind::Down(btn) => {
             if btn == crossterm::event::MouseButton::Left {
-                // Only start selection if clicking in messages area (row >= 2)
                 if mouse.row >= 2 {
-                    // Convert screen coordinates to content coordinates
-                    // Layout: status (1 row) + separator (1 row) = messages start at row 2
-                    // Messages widget has left border (1 col) + prefix (2 cols) = text at col 3
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.selecting = true;
                     app.sel_start = Some((content_row, content_col));
                     app.sel_end = Some((content_row, content_col));
+                    app.click_down_screen = Some((mouse.row, mouse.column));
                     true
                 } else {
-                    // Clicked on status or separator - clear any existing selection
                     if app.sel_start.is_some() || app.sel_end.is_some() {
                         app.sel_start = None;
                         app.sel_end = None;
@@ -4719,19 +4824,29 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
         }
         crossterm::event::MouseEventKind::Up(btn) => {
             if btn == crossterm::event::MouseButton::Left && app.selecting {
-                // Only complete selection if mouse is in messages area
                 if mouse.row >= 2 {
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.sel_end = Some((content_row, content_col));
                     app.selecting = false;
+                    let was_click = app
+                        .click_down_screen
+                        .map_or(false, |(r, c)| r == mouse.row && c == mouse.column);
+                    if was_click {
+                        let toggled = app.toggle_lifecycle_at_content_row(content_row);
+                        if toggled {
+                            app.sel_start = None;
+                            app.sel_end = None;
+                            return true;
+                        }
+                    }
                     copy_selection_to_clipboard(app);
                 } else {
-                    // Mouse released outside messages area - cancel selection
                     app.selecting = false;
                     app.sel_start = None;
                     app.sel_end = None;
                 }
+                app.click_down_screen = None;
                 true
             } else {
                 false
@@ -5065,7 +5180,6 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             session_id,
             root_session_id,
             requested_by_agent_id,
-            reason,
             context,
             urgency,
             suggested_actions,
@@ -5077,7 +5191,6 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
                 format!("  root: {}", clamp_chat_field(root_session_id)),
                 format!("  requested_by: {}", clamp_chat_field(requested_by_agent_id)),
                 format!("  urgency: {}", clamp_chat_field(urgency)),
-                format!("  reason: {}", clamp_chat_field(reason)),
             ];
             if !context.is_empty() {
                 v.push("  context:".to_string());
