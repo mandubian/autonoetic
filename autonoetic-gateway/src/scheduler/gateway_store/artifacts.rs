@@ -136,6 +136,83 @@ impl GatewayStore {
         Ok(None)
     }
 
+    /// Find an active short ref (`ar.*`) for a canonical artifact ID (`art_*`)
+    /// that is resolvable from the given session. Searches scopes in priority
+    /// order: Global → Workflow → Session → Root.
+    ///
+    /// Returns `None` if no active ref exists, or if all existing refs are
+    /// expired, revoked, or scoped outside the caller's reach.
+    pub fn find_active_ref_for_artifact(
+        &self,
+        artifact_id: &str,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now();
+
+        // Collect all non-revoked refs for this artifact
+        let mut stmt = conn.prepare(
+            "SELECT ref_id, scope_type, scope_id, expires_at
+             FROM artifact_refs
+             WHERE artifact_id = ?1 AND revoked_at IS NULL
+             ORDER BY created_at DESC",
+        )?;
+
+        let candidates: Vec<(String, String, String, Option<String>)> = stmt
+            .query_map(params![artifact_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .filter(|(_, _, _, expires_at)| {
+                if let Some(exp) = expires_at {
+                    Self::parse_rfc3339_utc(exp, "expires_at")
+                        .map(|exp_dt| exp_dt > now)
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        let root_sid = crate::runtime::content_store::root_session_id(session_id);
+        let wf_candidate: Option<String> = conn
+            .query_row(
+                "SELECT workflow_id FROM workflow_index WHERE root_session_id = ?1",
+                params![root_sid],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let rank = |scope_type: &str, scope_id: &str| -> u8 {
+            if scope_type == "global" { return 0; }
+            if scope_type == "workflow" {
+                if let Some(ref wf) = wf_candidate {
+                    if scope_id == wf.as_str() { return 1; }
+                }
+                return 255;
+            }
+            if scope_type == "session" {
+                if scope_id == session_id { return 2; }
+                if scope_id == root_sid { return 3; }
+                return 255;
+            }
+            255
+        };
+
+        let best = candidates
+            .iter()
+            .map(|(ref_id, st, sid, _)| (ref_id, rank(st, sid)))
+            .filter(|(_, r)| *r < 255)
+            .min_by_key(|(_, r)| *r);
+
+        Ok(best.map(|(ref_id, _)| ref_id.clone()))
+    }
+
     pub fn list_artifact_refs_for_scope(
         &self,
         scope_type: ArtifactRefScopeType,

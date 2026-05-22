@@ -955,13 +955,19 @@ fn unblock_task_on_approval(
         },
     );
 
+    let result_summary = match (new_status, &decision.reason) {
+        (autonoetic_types::workflow::TaskRunStatus::Failed, Some(r)) => {
+            Some(format!("approval_{}: {}", approval_event_type.strip_prefix("task.").unwrap_or("rejected"), r))
+        }
+        _ => None,
+    };
     if let Err(e) = super::workflow_store::update_task_run_status(
         config,
         gateway_store,
         wf_id,
         t_id,
         new_status,
-        None,
+        result_summary,
         None,
         None,
     ) {

@@ -122,7 +122,7 @@ impl GatewayStore {
     ) -> Result<Vec<autonoetic_types::agent::CredentialRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {CREDENTIAL_COLUMNS} FROM credentials WHERE service = ?1"
+            "SELECT {CREDENTIAL_COLUMNS} FROM credentials WHERE service = ?1 ORDER BY created_at ASC"
         ))?;
         let rows = stmt.query_map(params![service], row_to_credential)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()

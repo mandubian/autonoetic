@@ -652,7 +652,13 @@ pub fn update_task_run_status(
         }
         payload
     } else {
-        serde_json::json!({ "status": status })
+        let mut payload = serde_json::json!({ "status": status });
+        if let Some(ref summary) = result_summary {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("result_summary".to_string(), serde_json::Value::String(summary.clone()));
+            }
+        }
+        payload
     };
 
     append_workflow_event(
