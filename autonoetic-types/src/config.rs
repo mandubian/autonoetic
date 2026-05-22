@@ -251,6 +251,44 @@ impl Default for OutcomeGraderConfig {
     }
 }
 
+/// Self-improvement loop runtime guardrails (P4 milestone — #249).
+///
+/// Today the loop's lowest-risk target is **prompt-only** edits:
+/// changes to a SKILL.md's instructions / system prompt that do not
+/// touch the manifest's `capabilities` or `allowed_tool_tiers`. P4's
+/// acceptance is gated on running 3 end-to-end cycles with these
+/// guardrails on, then collecting operator notes.
+///
+/// `restrict_to_prompt_only` is enforced at A/B replay time. When
+/// true (the default), `improvement.ab_replay` refuses to compare two
+/// revisions whose declared capability or tool-tier surfaces differ.
+/// The propose step (`autonoetic improve`) forks an identical
+/// candidate, so the only way this gate fires is if the candidate's
+/// SKILL.md was hand-edited to widen its surface — exactly the case
+/// P4 is meant to exclude.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImproveConfig {
+    /// When true, `improvement.ab_replay` rejects revision pairs whose
+    /// declared `capabilities` or `allowed_tool_tiers` differ. Default
+    /// **true** (P4 safety posture). Set to `false` once you have a
+    /// validated baseline (P5+) and want to A/B-test capability
+    /// changes too.
+    #[serde(default = "default_improve_restrict_to_prompt_only")]
+    pub restrict_to_prompt_only: bool,
+}
+
+fn default_improve_restrict_to_prompt_only() -> bool {
+    true
+}
+
+impl Default for ImproveConfig {
+    fn default() -> Self {
+        Self {
+            restrict_to_prompt_only: default_improve_restrict_to_prompt_only(),
+        }
+    }
+}
+
 /// Auto-learning configuration: controls the default self-improvement pipeline.
 ///
 /// When enabled, sessions automatically produce memories (via post-session digest)
@@ -872,6 +910,13 @@ pub struct GatewayConfig {
     /// the grade. Off by default.
     #[serde(default)]
     pub outcome_grader: OutcomeGraderConfig,
+
+    /// Self-improvement loop guardrails. Default posture:
+    /// `restrict_to_prompt_only = true` — the A/B replay tool will
+    /// refuse to compare two revisions whose declared capability or
+    /// tool-tier surfaces differ. See `ImproveConfig`.
+    #[serde(default)]
+    pub improve: ImproveConfig,
 
     /// Data retention settings (days). 0 = retain forever.
     #[serde(default)]
@@ -2236,6 +2281,7 @@ impl Default for GatewayConfig {
             evidence_mode: default_evidence_mode(),
             digest_agent: DigestAgentConfig::default(),
             outcome_grader: OutcomeGraderConfig::default(),
+            improve: ImproveConfig::default(),
             retention: RetentionConfig::default(),
             reclamation: ReclamationConfig::default(),
             response_validation: ResponseValidationConfig::default(),

@@ -121,7 +121,7 @@ impl NativeTool for AbReplayTool {
         manifest: &AgentManifest,
         policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -155,6 +155,56 @@ impl NativeTool for AbReplayTool {
             args.agent_id,
             ref_a.agent_id
         );
+
+        // P4 guardrail: when `improve.restrict_to_prompt_only` is true
+        // (default), refuse to compare revisions whose declared
+        // capability or tool-tier surfaces differ. The propose step
+        // forks an identical candidate, so this only fires when the
+        // candidate's SKILL.md was hand-edited to widen its surface —
+        // exactly the case P4's prompt-only milestone excludes. See
+        // `docs/design/self-improvement-loop-validation.md`.
+        if config.improve.restrict_to_prompt_only {
+            // The revisions live under `gateway_dir/revisions/agents/<agent>/<rev>/`.
+            // Use the `gateway_dir` parameter the runtime threads in
+            // (production: JSON-RPC dispatch supplies it). When absent,
+            // we cannot enforce the surface check — log a warning and
+            // skip, rather than silently rejecting all comparisons.
+            match gateway_dir {
+                Some(gw_dir) => {
+                    if let Some(reason) = surface_drift_reason(
+                        &repo,
+                        gw_dir,
+                        &args.agent_id,
+                        &rev_a.revision_id,
+                        &rev_b.revision_id,
+                    )? {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "status": "surface_drift_rejected",
+                            "agent_id": args.agent_id,
+                            "revision_a": ref_a.to_string(),
+                            "revision_b": ref_b.to_string(),
+                            "reason": reason,
+                            "guardrail": "improve.restrict_to_prompt_only",
+                            "message":
+                                "Refused: candidate revision changed the agent's capability \
+                                 or tool-tier surface. Self-improvement P4 is gated on \
+                                 prompt-only changes; set `improve.restrict_to_prompt_only: \
+                                 false` once your operator-side validation cycles are done."
+                        }).to_string());
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        target: "improvement",
+                        agent_id = %args.agent_id,
+                        "improve.restrict_to_prompt_only is enabled but no gateway_dir \
+                         was supplied to the tool — surface-drift check skipped. \
+                         Production callers should pass gateway_dir."
+                    );
+                }
+            }
+        }
 
         // Determine suite_id and case count for cost estimation
         let (suite_id, case_count) = if let Some(sid) = &args.suite_id {
@@ -490,4 +540,159 @@ fn build_ab_stats(
         Ok(rec) => serde_json::to_value(rec).ok(),
         Err(e) => Some(serde_json::json!({"error": e})),
     }
+}
+
+/// Load two revisions' on-disk manifests and check that the candidate
+/// (rev_b) has not changed the agent's privilege surface relative to
+/// the baseline (rev_a). Returns `Ok(Some(reason))` when ANY non-trivial
+/// difference exists (i.e., the guardrail should reject), `Ok(None)`
+/// when the surfaces match. Hard errors propagate via `Err` (e.g.,
+/// SKILL.md missing, parse failure).
+///
+/// "Privilege surface" for P4 = the manifest's `capabilities` block AND
+/// the `allowed_tool_tiers` list. The comparison delegates to
+/// [`autonoetic_types::capability::compute_capability_delta`], which
+/// understands parameter-level widening (e.g., `ReadAccess` scopes
+/// `["self.*"]` → `["*"]` IS a privilege widening even though the
+/// capability kind is unchanged). The earlier kind-only comparator
+/// would have let that through — that's the bug Copilot's review on
+/// PR #267 caught.
+///
+/// Any of `added`, `broadened`, `narrowed`, or `removed` from the
+/// delta trips the gate. P4's intent is **prompt-only**, so even
+/// narrowing is treated as a non-prompt change — the operator should
+/// be running narrowing through a separate review path, not this one.
+fn surface_drift_reason(
+    repo: &crate::agent::repository::AgentRepository,
+    gateway_dir: &std::path::Path,
+    agent_id: &str,
+    baseline_revision_id: &str,
+    candidate_revision_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let loaded_baseline =
+        repo.load_from_revision_dir(gateway_dir, agent_id, baseline_revision_id)?;
+    let loaded_candidate =
+        repo.load_from_revision_dir(gateway_dir, agent_id, candidate_revision_id)?;
+
+    let delta = autonoetic_types::capability::compute_capability_delta(
+        &loaded_baseline.manifest.capabilities,
+        &loaded_candidate.manifest.capabilities,
+    );
+    if !delta.added.is_empty()
+        || !delta.broadened.is_empty()
+        || !delta.narrowed.is_empty()
+        || !delta.removed.is_empty()
+    {
+        return Ok(Some(format!(
+            "capabilities changed: added={:?}, broadened={:?}, narrowed={:?}, removed={:?}",
+            delta.added,
+            delta.broadened.iter().map(|b| b.capability_type.clone()).collect::<Vec<_>>(),
+            delta.narrowed,
+            delta.removed,
+        )));
+    }
+
+    let tiers_a = tool_tier_surface(&loaded_baseline.manifest);
+    let tiers_b = tool_tier_surface(&loaded_candidate.manifest);
+    if tiers_a != tiers_b {
+        let added: Vec<String> = tiers_b.difference(&tiers_a).cloned().collect();
+        let removed: Vec<String> = tiers_a.difference(&tiers_b).cloned().collect();
+        return Ok(Some(format!(
+            "allowed_tool_tiers differs: added={:?}, removed={:?}",
+            added, removed
+        )));
+    }
+
+    Ok(None)
+}
+
+fn tool_tier_surface(manifest: &AgentManifest) -> std::collections::BTreeSet<String> {
+    // ToolTier is Hash+Eq but not Ord (foreign-type constraint). We
+    // convert to its `Debug`-derived slug so the comparison set is
+    // ordered for deterministic diff messages.
+    manifest
+        .allowed_tool_tiers
+        .iter()
+        .map(|t| format!("{:?}", t))
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Tests for the P4 prompt-only guardrail. The capability comparison
+// itself is `autonoetic_types::capability::compute_capability_delta`
+// which is tested in that crate. The tests here pin the tier helper
+// and the gate's *integration* (loading manifests + composing the
+// reject reason); behavioural tests for the gate sit in
+// `tests/improvement_ab_replay_integration.rs`.
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod surface_drift_tests {
+    use super::*;
+    use autonoetic_types::agent::{
+        AgentIdentity, AgentManifest, RuntimeDeclaration, SandboxNetworkPolicy, ToolTier,
+    };
+
+    fn base_manifest() -> AgentManifest {
+        AgentManifest {
+            version: "1.0".into(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".into(),
+                gateway_version: "0.1.0".into(),
+                sdk_version: "0.1.0".into(),
+                runtime_type: "stateful".into(),
+                sandbox: "bubblewrap".into(),
+                runtime_lock: "runtime.lock".into(),
+            },
+            agent: AgentIdentity {
+                id: "test.default".into(),
+                name: "test".into(),
+                description: "test".into(),
+            },
+            capabilities: vec![],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            sandbox_network: SandboxNetworkPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn tier_surface_detects_added_tier() {
+        let mut a = base_manifest();
+        let mut b = base_manifest();
+        a.allowed_tool_tiers = vec![ToolTier::Core];
+        b.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
+        assert_ne!(tool_tier_surface(&a), tool_tier_surface(&b));
+    }
+
+    #[test]
+    fn tier_surface_is_order_insensitive() {
+        let mut a = base_manifest();
+        let mut b = base_manifest();
+        a.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
+        b.allowed_tool_tiers = vec![ToolTier::Specialized, ToolTier::Core];
+        assert_eq!(tool_tier_surface(&a), tool_tier_surface(&b));
+    }
+
+    // The capability-comparison semantics — including the crucial
+    // "parameter widening counts" case (e.g. `ReadAccess { scopes:
+    // ["self.*"] }` → `ReadAccess { scopes: ["*"] }`) — are exercised
+    // end-to-end in `tests/improvement_ab_replay_integration.rs`:
+    //
+    //   * test_ab_replay_prompt_only_guard_rejects_capability_widening
+    //   * test_ab_replay_prompt_only_guard_rejects_parameter_widening
+    //   * test_ab_replay_prompt_only_guard_allows_identical_surface
+    //   * test_ab_replay_prompt_only_guard_can_be_disabled
 }

@@ -508,3 +508,278 @@ fn test_ab_replay_completed_comparison_with_divergent_revisions() {
     assert_eq!(v["baseline_eval_run_id"], "eval-baseline-e2e");
     assert_eq!(v["candidate_eval_run_id"], "eval-candidate-e2e");
 }
+
+// ─── 9. Prompt-only guardrail (P4) ─────────────────────────────────────────
+//
+// The `improve.restrict_to_prompt_only` flag (defaults to true) is enforced
+// at A/B replay time when a `gateway_dir` is provided. It loads the two
+// revisions' on-disk SKILL.md files and refuses the comparison if their
+// declared `capabilities` or `allowed_tool_tiers` differ.
+
+/// Write a minimal SKILL.md for a revision under
+/// `gateway_dir/revisions/agents/<agent>/<rev>/SKILL.md`, with the
+/// caller-supplied capability list in the frontmatter. Used by the
+/// surface-drift integration tests below.
+fn write_revision_skill_md(
+    gateway_dir: &Path,
+    agent_id: &str,
+    revision_id: &str,
+    capabilities_yaml: &str,
+) {
+    let dir = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(agent_id)
+        .join(revision_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let skill_md = format!(
+        r#"---
+name: "{agent}"
+description: "test agent"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "{agent}"
+      name: "{agent}"
+      description: "test agent"
+    capabilities:
+{caps}
+---
+
+# {agent}
+
+This is the test prompt body. Self-improvement loops are free to edit me.
+"#,
+        agent = agent_id,
+        caps = capabilities_yaml,
+    );
+    std::fs::write(dir.join("SKILL.md"), skill_md).unwrap();
+}
+
+fn execute_tool_with_gateway_dir(
+    store: Arc<GatewayStore>,
+    config: GatewayConfig,
+    gateway_dir: &Path,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let manifest = test_manifest(vec![Capability::Evaluation {
+        patterns: vec!["*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let result = AbReplayTool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir),
+            &args.to_string(),
+            None,
+            None,
+            Some(&config),
+            Some(store),
+            None,
+        )
+        .unwrap();
+    serde_json::from_str(&result).unwrap()
+}
+
+#[test]
+fn test_ab_replay_prompt_only_guard_rejects_capability_widening() {
+    // Tool convention (per schema): revision_a = baseline, revision_b
+    // = candidate. The candidate (B) adds CodeExecution on top of
+    // baseline (A); the gate must reject.
+    let tmp = TempDir::new().unwrap();
+    let (store, config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+
+    // Baseline = REV_A: minimal Evaluation capability only.
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]"#,
+    );
+    // Candidate = REV_B: adds CodeExecution. This is a capability
+    // *kind* addition (the easy case for any drift checker).
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "CodeExecution"
+        patterns: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(v["ok"], false, "guardrail should reject");
+    assert_eq!(v["status"], "surface_drift_rejected");
+    assert_eq!(v["guardrail"], "improve.restrict_to_prompt_only");
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("CodeExecution"),
+        "rejection reason should name the added kind: got {}",
+        reason
+    );
+}
+
+#[test]
+fn test_ab_replay_prompt_only_guard_rejects_parameter_widening() {
+    // The crucial case Copilot's PR #267 review caught: same
+    // capability *kind* in both revisions, but the candidate widened
+    // the parameters. A naive kind-only comparator would let this
+    // through; `compute_capability_delta` catches it as "broadened".
+    //
+    // Baseline (A): ReadAccess scoped to "self.*".
+    // Candidate (B): ReadAccess scoped to "*" (all sessions).
+    let tmp = TempDir::new().unwrap();
+    let (store, config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "ReadAccess"
+        scopes: ["self.*"]"#,
+    );
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "ReadAccess"
+        scopes: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(
+        v["status"], "surface_drift_rejected",
+        "parameter widening must trip the gate (this is the bug Copilot caught on PR #267); got {:?}",
+        v
+    );
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("broadened") && reason.contains("ReadAccess"),
+        "rejection reason should name the broadened kind: got {}",
+        reason
+    );
+}
+
+#[test]
+fn test_ab_replay_prompt_only_guard_allows_identical_surface() {
+    // Both revisions declare the same Evaluation capability. The gate
+    // is on, but the surfaces match → the comparison proceeds (and
+    // returns "queued" since no eval runs exist yet — that's the
+    // normal pre-A/B state, not a rejection).
+    let tmp = TempDir::new().unwrap();
+    let (store, config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+
+    let identical_caps = r#"      - type: "Evaluation"
+        patterns: ["*"]"#;
+    // Baseline = REV_A, candidate = REV_B.
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_A_ID, identical_caps);
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_B_ID, identical_caps);
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    // Should NOT be the surface_drift_rejected status — anything else
+    // (queued, completed, etc.) means the gate let it through.
+    assert_ne!(
+        v["status"], "surface_drift_rejected",
+        "gate must allow identical-surface comparisons; got {:?}",
+        v
+    );
+}
+
+#[test]
+fn test_ab_replay_prompt_only_guard_can_be_disabled() {
+    // With restrict_to_prompt_only = false, the gate is skipped even
+    // when surfaces differ. Pins the escape hatch for P5+ work that
+    // needs to A/B-test capability changes. Baseline = REV_A,
+    // candidate = REV_B.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.restrict_to_prompt_only = false;
+
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]"#,
+    );
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "CodeExecution"
+        patterns: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_ne!(
+        v["status"], "surface_drift_rejected",
+        "gate must NOT fire when restrict_to_prompt_only is false; got {:?}",
+        v
+    );
+}
