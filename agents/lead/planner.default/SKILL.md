@@ -35,6 +35,7 @@ metadata:
       - type: "AgentMessage"
         patterns: ["*"]
     io:
+      returns_enforcement: advisory
       returns:
         type: object
         required: ["status"]
@@ -52,6 +53,11 @@ metadata:
           error:
             type: string
             description: "Error detail when status is failed."
+    output_policy:
+      validation_max_loops: 2
+      repair:
+        auto: true
+        max_attempts: 2
 ---
 # Planner
 
@@ -73,9 +79,11 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
   Before spawning any child, check whether the needed result already exists in the current workflow. Inspect `workflow_state` for running/completed child tasks and their `named_outputs`, then check session-visible knowledge for reusable fetch records or prior conclusions. Reuse existing handles and wait on active work instead of spawning a duplicate child for the same input.
 
+  **Before re-running credential onboarding for a service**, call `agent_list` to check whether an agent for that service already exists (e.g., `agent_id` contains the service name). If found, spawn it directly instead of re-fetching, re-normalizing, and re-registering. This applies to **any flow** that produces durable state — check first, compute second.
+
 5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` + `workflow_wait`.
 
-6. **Artifact refs come from structured results.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles.
+6. **Artifact refs come from structured results.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles. **Note:** Tools accept both short refs (`ar.*`) and canonical IDs (`art_*`) directly. When passing refs to child agents via `agent.spawn`, prefer the short `ar.*` form — it is scoped to the session and works across child sessions.
 
 > When the gateway blocks an action, it's because of Principle 1 or 3. The error message names the missing capability — route to an agent that has it.
 
@@ -162,11 +170,16 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 
 ```
 1. Service registration / credential onboarding ("register with X", "connect to X", "set up credentials for X")
-   → researcher.default (fetch raw `skill.md` / API doc when URL is unknown or unreachable from your tools)
-   → skill_normalize(intent, content, service, source_url?) — writes `skills/<service>/SKILL.md` or returns `partial`; fix gaps or complete steps manually, then retry
-   → credential_setup(skill_url=file or http URL to normalized skill) OR credential_setup(service, steps) directly
-   → On suspended_for_user_input: user_ask with gateway question → credential_setup resume with credential_id + resume_vars
-   → Optionally spawn registration.default only if onboarding needs many operator-facing steps isolated from planner context
+    → **Preflight check**: call `agent_list` and search for an agent whose `agent_id` contains the service name (e.g., `moltbook`). If a matching agent already exists, spawn it directly and skip the entire onboarding flow.
+    → researcher.default (fetch raw `skill.md` / API doc when URL is unknown or unreachable from your tools)
+    → skill_normalize(intent, content, service, source_url?) — writes `skills/<service>/SKILL.md` or returns `partial`; fix gaps or complete steps manually, then retry
+    → credential_setup(skill_url=file or http URL to normalized skill) OR credential_setup(service, steps) directly
+    → On suspended_for_user_input: user_ask with gateway question → credential_setup resume with credential_id + resume_vars
+    → If credential_setup returns steps with status:"pending" (e.g., human_identity_claim needs a username):
+      1. Read the pending step requirements from the result.
+      2. Call `user_ask` to get the needed input from the operator — do NOT embed the question in your final reply and end the turn.
+      3. On user_ask response, resume credential_setup with credential_id + the collected input.
+    → Optionally spawn registration.default only if onboarding needs many operator-facing steps isolated from planner context
     → Do not spawn executor until you have credential_id + env_var inject name and ready_for_execution (or deliberate handoff JSON with next_action explaining blockers).
 
 1a. After credential onboarding completes for a service with a normalized skill (≥2 API operations):

@@ -455,6 +455,10 @@ pub struct SpawnResult {
     pub agent_id: String,
     pub session_id: String,
     pub assistant_reply: Option<String>,
+    /// Gateway-owned workflow note rendered separately from agent reply.
+    /// This must never be merged into `assistant_reply` because reply may be
+    /// schema-constrained (for example JSON via io.returns).
+    pub workflow_note: Option<String>,
     pub should_signal_background: bool,
     pub artifacts: Vec<ArtifactMetadata>,
     /// All named content written by the child agent during this spawn.
@@ -1688,6 +1692,7 @@ impl GatewayExecutionService {
                 );
 
                 // Execute script directly in sandbox
+                let trace_started_at = std::time::Instant::now();
                 let script_kill_scope = Some((
                     self.active_executions.clone(),
                     crate::runtime::live_digest::base_session_id(session_id).to_string(),
@@ -1746,6 +1751,30 @@ impl GatewayExecutionService {
                             "success",
                             serde_json::json!({ "result_len": output.len() }),
                         );
+                        if let Some(ref gs) = self.gateway_store {
+                            let trace = autonoetic_types::causal_chain::ExecutionTraceRecord {
+                                trace_id: uuid::Uuid::new_v4().to_string(),
+                                event_id: None,
+                                agent_id: agent_id.to_string(),
+                                session_id: session_id.to_string(),
+                                turn_id: None,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                tool_name: "sandbox_exec".to_string(),
+                                command: Some(script_entry.clone()),
+                                exit_code: Some(0),
+                                stdout: Some(output.clone()),
+                                stderr: None,
+                                duration_ms: trace_started_at.elapsed().as_millis() as i64,
+                                success: 1,
+                                error_type: None,
+                                error_summary: None,
+                                approval_required: Some(0),
+                                approval_request_id: None,
+                                arguments: Some(format!("run {}", script_entry)),
+                                result: Some(output.clone()),
+                            };
+                            let _ = gs.create_execution_trace(&trace);
+                        }
                     }
                     Err(e) => {
                         if let Some(ref mut r) = report {
@@ -1767,6 +1796,30 @@ impl GatewayExecutionService {
                             "error",
                             serde_json::json!({ "error": e.to_string() }),
                         );
+                        if let Some(ref gs) = self.gateway_store {
+                            let trace = autonoetic_types::causal_chain::ExecutionTraceRecord {
+                                trace_id: uuid::Uuid::new_v4().to_string(),
+                                event_id: None,
+                                agent_id: agent_id.to_string(),
+                                session_id: session_id.to_string(),
+                                turn_id: None,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                tool_name: "sandbox_exec".to_string(),
+                                command: Some(script_entry.clone()),
+                                exit_code: None,
+                                stdout: None,
+                                stderr: Some(e.to_string()),
+                                duration_ms: trace_started_at.elapsed().as_millis() as i64,
+                                success: 0,
+                                error_type: Some("script_execution_error".to_string()),
+                                error_summary: Some(e.to_string()),
+                                approval_required: Some(0),
+                                approval_request_id: None,
+                                arguments: Some(format!("run {}", script_entry)),
+                                result: None,
+                            };
+                            let _ = gs.create_execution_trace(&trace);
+                        }
                     }
                 }
 
@@ -1797,6 +1850,7 @@ impl GatewayExecutionService {
                     agent_id: agent_id.to_string(),
                     session_id: session_id.to_string(),
                     assistant_reply: Some(script_result),
+                    workflow_note: None,
                     should_signal_background,
                     artifacts,
                     files,
@@ -2280,6 +2334,19 @@ impl GatewayExecutionService {
                 }
             }
             let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
+            if !is_suspended {
+                if let Err(e) = crate::runtime::checkpoint::cleanup_session_checkpoints(
+                    self.config.as_ref(),
+                    &resolved_session_id,
+                ) {
+                    tracing::debug!(
+                        target: "checkpoint",
+                        session_id = %resolved_session_id,
+                        error = %e,
+                        "Failed to clean up session checkpoints after completion"
+                    );
+                }
+            }
             crate::runtime::post_session_digest::maybe_run_post_session_digest(
                 self.config.as_ref(),
                 &self.config.agents_dir.join(".gateway"),
@@ -2321,6 +2388,11 @@ impl GatewayExecutionService {
                 .await;
             }
             let llm_usage = runtime.take_llm_usage_last_run();
+            let workflow_note = if suspended_for_approval.is_none() && !suspended_for_user_input {
+                build_gateway_workflow_note(self.config.as_ref(), &resolved_session_id, assistant_reply.as_deref())
+            } else {
+                None
+            };
 
             // Extract artifacts from content store
             let artifacts = extract_artifacts_from_content_store(
@@ -2346,6 +2418,7 @@ impl GatewayExecutionService {
                 agent_id: agent_id.to_string(),
                 session_id: resolved_session_id,
                 assistant_reply,
+                workflow_note,
                 should_signal_background,
                 artifacts,
                 files,
@@ -2386,6 +2459,17 @@ impl GatewayExecutionService {
             .as_ref()
             .and_then(|manifest| manifest.io.as_ref())
             .and_then(|io| io.output_policy.clone());
+        let manifest_execution_mode = manifest_loaded
+            .as_ref()
+            .map(|m| m.execution_mode)
+            .unwrap_or_default();
+        let manifest_returns_enforcement = manifest_loaded
+            .as_ref()
+            .and_then(|manifest| manifest.io.as_ref())
+            .map(|io| {
+                io.effective_returns_enforcement(manifest_execution_mode)
+            })
+            .unwrap_or_default();
 
         if let Some(meta) = metadata {
             if meta.get("response_contract").is_some() {
@@ -2418,6 +2502,7 @@ impl GatewayExecutionService {
                     result,
                     manifest_returns_schema.as_ref(),
                     &output_policy,
+                    manifest_returns_enforcement,
                     source_agent_id,
                     workflow_id,
                     task_id,
@@ -2553,21 +2638,39 @@ impl GatewayExecutionService {
             }
         }
 
-        self.spawn_agent_once(
-            &interaction.agent_id,
-            follow_up_user_message.unwrap_or(
-                "[operator] User answered the pending question via gateway interactions.",
-            ),
-            &interaction.session_id,
-            None,
-            false,
-            None,
-            None,
-            interaction.workflow_id.as_deref(),
-            interaction.task_id.as_deref(),
-            None,
-        )
-        .await
+        let spawn_result = self
+            .spawn_agent_once(
+                &interaction.agent_id,
+                follow_up_user_message.unwrap_or(
+                    "[operator] User answered the pending question via gateway interactions.",
+                ),
+                &interaction.session_id,
+                None,
+                false,
+                None,
+                None,
+                interaction.workflow_id.as_deref(),
+                interaction.task_id.as_deref(),
+                None,
+            )
+            .await;
+
+        if spawn_result.is_err() {
+            if let Some(s) = self.gateway_store.as_ref() {
+                if let Err(release_err) =
+                    s.release_answered_standalone_interaction_resume_claim(interaction_id)
+                {
+                    tracing::warn!(
+                        target: "interaction",
+                        interaction_id = %interaction_id,
+                        error = %release_err,
+                        "Failed to release interaction resume claim after spawn failure"
+                    );
+                }
+            }
+        }
+
+        spawn_result
     }
 
     /// Respawn an agent from a previously saved checkpoint.
@@ -2811,10 +2914,17 @@ impl GatewayExecutionService {
             );
         }
 
+        let workflow_note = build_gateway_workflow_note(
+            self.config.as_ref(),
+            &resolved_session_id,
+            assistant_reply.as_deref(),
+        );
+
         Ok(SpawnResult {
             agent_id: agent_id.to_string(),
             session_id: resolved_session_id,
             assistant_reply,
+            workflow_note,
             should_signal_background: false,
             artifacts,
             files,
@@ -3321,6 +3431,23 @@ fn persist_session_context_turn(
             "Failed to persist session context after execution"
         );
     }
+}
+
+fn build_gateway_workflow_note(
+    config: &GatewayConfig,
+    session_id: &str,
+    assistant_reply: Option<&str>,
+) -> Option<String> {
+    let summary = crate::scheduler::compact_workflow_summary(config, None, session_id)
+        .ok()
+        .flatten()?;
+    let planner_empty = assistant_reply
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true);
+    Some(crate::runtime::context::workflow_status_user_message_for_chat(
+        &summary,
+        planner_empty,
+    ))
 }
 
 fn count_spawned_children_for_source_session(

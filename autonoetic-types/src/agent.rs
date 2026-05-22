@@ -493,6 +493,28 @@ pub struct SecretFieldSpec {
     pub masked: bool,
 }
 
+/// Enforcement mode for `io.returns` schema validation.
+///
+/// - `strict` (default for script agents): validation failures block the response.
+/// - `advisory` (default for LLM agents): violations are logged and emitted as
+///   causal events but do NOT block the response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoReturnsEnforcement {
+    #[default]
+    Strict,
+    Advisory,
+}
+
+impl IoReturnsEnforcement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Advisory => "advisory",
+        }
+    }
+}
+
 /// I/O schema contract for an agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentIO {
@@ -502,9 +524,28 @@ pub struct AgentIO {
     /// JSON Schema describing produced output.
     #[serde(default)]
     pub returns: Option<serde_json::Value>,
+    /// Enforcement mode for io.returns validation.
+    ///
+    /// When unset, the gateway resolves the default based on execution_mode:
+    /// script → strict, llm/reasoning → advisory.
+    #[serde(default)]
+    pub returns_enforcement: Option<IoReturnsEnforcement>,
     /// Gateway-enforced output policy (non-schema runtime constraints).
     #[serde(default)]
     pub output_policy: Option<OutputPolicy>,
+}
+
+impl AgentIO {
+    /// Resolve the effective enforcement mode for io.returns.
+    ///
+    /// If `returns_enforcement` is explicitly set, use that.
+    /// Otherwise, default to `Advisory` for reasoning agents, `Strict` for script agents.
+    pub fn effective_returns_enforcement(&self, execution_mode: ExecutionMode) -> IoReturnsEnforcement {
+        self.returns_enforcement.unwrap_or_else(|| match execution_mode {
+            ExecutionMode::Script => IoReturnsEnforcement::Strict,
+            ExecutionMode::Reasoning => IoReturnsEnforcement::Advisory,
+        })
+    }
 }
 
 /// Gateway-enforced output policy declared in manifest metadata.

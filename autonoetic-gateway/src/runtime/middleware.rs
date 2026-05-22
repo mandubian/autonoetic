@@ -478,6 +478,7 @@ Hope this helps!"#;
                 "type": "object",
                 "required": ["result"]
             })),
+            returns_enforcement: None,
             output_policy: None,
         });
 

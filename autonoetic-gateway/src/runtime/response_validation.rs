@@ -3,7 +3,7 @@
 //! When enabled, gateway checks SpawnResult against the agent's output policy.
 //! Returns violations for each failed check.
 
-use autonoetic_types::agent::OutputPolicy;
+use autonoetic_types::agent::{IoReturnsEnforcement, OutputPolicy};
 use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::GatewayConfig;
 use regex::RegexBuilder;
@@ -555,6 +555,7 @@ pub fn violations_to_final_error(
     violations: &[ValidationViolation],
     session_id: &str,
     include_session_context: bool,
+    actual_reply: Option<&str>,
 ) -> anyhow::Error {
     let summary: String = violations
         .iter()
@@ -572,12 +573,21 @@ pub fn violations_to_final_error(
             .map(|v| v.repair_hint.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        anyhow::anyhow!(
+        let mut msg = format!(
             "response validation failed: {}. Session: {}. Repair hints: {}",
             summary,
             session_id,
             hints
-        )
+        );
+        if let Some(reply) = actual_reply.filter(|r| !r.is_empty()) {
+            let snippet = if reply.len() > 200 {
+                format!("{}...", &reply[..200])
+            } else {
+                reply.to_string()
+            };
+            msg.push_str(&format!(". Agent produced: {}", snippet));
+        }
+        anyhow::anyhow!(msg)
     } else {
         anyhow::anyhow!("response validation failed: {}", summary)
     }
@@ -865,6 +875,7 @@ impl GatewayExecutionService {
         mut result: SpawnResult,
         output_schema: Option<&serde_json::Value>,
         output_policy: &autonoetic_types::agent::OutputPolicy,
+        returns_enforcement: IoReturnsEnforcement,
         source_agent_id: Option<&str>,
         workflow_id: Option<&str>,
         task_id: Option<&str>,
@@ -938,6 +949,52 @@ impl GatewayExecutionService {
             return Ok(result);
         }
 
+        // Advisory enforcement: output_schema violations are logged but not blocking.
+        // Non-schema violations (prohibited_text_pattern, required_artifacts, etc.)
+        // are still enforced.
+        if returns_enforcement == IoReturnsEnforcement::Advisory {
+            let (schema_violations, policy_violations): (Vec<_>, Vec<_>) = violations
+                .iter()
+                .partition(|v| v.rule == "output_schema");
+
+            if !schema_violations.is_empty() {
+                let summary: String = schema_violations
+                    .iter()
+                    .map(|v| format!("[{}] {}", v.rule, v.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    session_id = %result.session_id,
+                    enforcement = "advisory",
+                    violations = %summary,
+                    "response.validation.advisory: io.returns schema violations ignored (advisory mode)"
+                );
+                log_contract_enforcement_event_to_gateway(
+                    self.gateway_store().as_deref(),
+                    agent_id,
+                    &result.session_id,
+                    "io.returns.advisory",
+                    EntryStatus::Success,
+                    source_agent_id,
+                    serde_json::json!({
+                        "contract": "io.returns",
+                        "enforcement": "advisory",
+                        "result": "advisory_skip",
+                        "violations": schema_violations.iter().map(|v| &v.message).collect::<Vec<_>>(),
+                    }),
+                );
+            }
+
+            if policy_violations.is_empty() {
+                return Ok(result);
+            }
+
+            // Continue enforcement with only non-schema violations.
+            violations = policy_violations.into_iter().cloned().collect();
+        }
+
         tracing::warn!(
             target: "response_validation",
             agent_id = %agent_id,
@@ -951,6 +1008,7 @@ impl GatewayExecutionService {
                 &violations,
                 &result.session_id,
                 repair_enabled,
+                result.assistant_reply.as_deref(),
             ));
         }
 
@@ -966,6 +1024,7 @@ impl GatewayExecutionService {
                     &violations,
                     &result.session_id,
                     true,
+                    result.assistant_reply.as_deref(),
                 ));
             }
 
@@ -1017,6 +1076,7 @@ impl GatewayExecutionService {
                         &violations,
                         &result.session_id,
                         true,
+                        result.assistant_reply.as_deref(),
                     ));
                 }
             };
@@ -1102,6 +1162,7 @@ impl GatewayExecutionService {
                     &violations,
                     &result.session_id,
                     true,
+                    result.assistant_reply.as_deref(),
                 ));
             }
         }
@@ -1115,6 +1176,7 @@ impl GatewayExecutionService {
             &violations,
             &result.session_id,
             true,
+            result.assistant_reply.as_deref(),
         ))
     }
 
@@ -1277,6 +1339,7 @@ mod tests {
             agent_id: "test.agent".into(),
             session_id: "sess-1".into(),
             assistant_reply: reply.map(|s| s.to_string()),
+            workflow_note: None,
             should_signal_background: false,
             artifacts,
             files,
@@ -1479,7 +1542,7 @@ mod tests {
             message: "missing 'x.md'".into(),
             repair_hint: "create x.md".into(),
         }];
-        let e = violations_to_final_error(&violations, "sess-abc", false);
+        let e = violations_to_final_error(&violations, "sess-abc", false, None);
         let msg = e.to_string();
         assert!(msg.contains("required_artifacts"));
         assert!(msg.contains("repair_hint"));
@@ -1493,7 +1556,7 @@ mod tests {
             message: "missing 'x.md'".into(),
             repair_hint: "create x.md".into(),
         }];
-        let e = violations_to_final_error(&violations, "sess-abc", true);
+        let e = violations_to_final_error(&violations, "sess-abc", true, None);
         let msg = e.to_string();
         assert!(msg.contains("sess-abc"));
         assert!(msg.contains("Repair hints"));
