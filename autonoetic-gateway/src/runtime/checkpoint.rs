@@ -280,6 +280,35 @@ pub fn load_latest_checkpoint(
     Ok(latest.map(|(_, c)| c))
 }
 
+/// Delete all checkpoint files for a session.
+pub fn cleanup_session_checkpoints(
+    config: &GatewayConfig,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let dir = checkpoints_dir(config).join(sanitize_path_component(session_id));
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with(".checkpoint.json") {
+            std::fs::remove_file(entry.path())?;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        tracing::debug!(
+            target: "checkpoint",
+            session_id = %session_id,
+            count = count,
+            "Cleaned up session checkpoints after completion"
+        );
+    }
+    Ok(())
+}
+
 /// Delete a specific checkpoint file.
 pub fn delete_checkpoint(
     config: &GatewayConfig,
