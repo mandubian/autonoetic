@@ -25,6 +25,22 @@ pub enum WorkflowRunStatus {
     Cancelled,
 }
 
+impl WorkflowRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkflowRunStatus::Active => "active",
+            WorkflowRunStatus::WaitingChildren => "waiting_children",
+            WorkflowRunStatus::BlockedApproval => "blocked_approval",
+            WorkflowRunStatus::Resumable => "resumable",
+            WorkflowRunStatus::EmergencyStopping => "emergency_stopping",
+            WorkflowRunStatus::EmergencyStopped => "emergency_stopped",
+            WorkflowRunStatus::Completed => "completed",
+            WorkflowRunStatus::Failed => "failed",
+            WorkflowRunStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
 impl Default for WorkflowRunStatus {
     fn default() -> Self {
         Self::Active
@@ -45,6 +61,23 @@ pub enum TaskRunStatus {
     Succeeded,
     Failed,
     Cancelled,
+}
+
+impl TaskRunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskRunStatus::Pending => "pending",
+            TaskRunStatus::Runnable => "runnable",
+            TaskRunStatus::Running => "running",
+            TaskRunStatus::AwaitingApproval => "awaiting_approval",
+            TaskRunStatus::Paused => "paused",
+            TaskRunStatus::Aborting => "aborting",
+            TaskRunStatus::Aborted => "aborted",
+            TaskRunStatus::Succeeded => "succeeded",
+            TaskRunStatus::Failed => "failed",
+            TaskRunStatus::Cancelled => "cancelled",
+        }
+    }
 }
 
 impl Default for TaskRunStatus {
