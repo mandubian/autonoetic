@@ -196,7 +196,7 @@ enum TrajectoryHealth {
 
 ### Layer 2 — LLM Watchdog Agent (optional, triggerable)
 
-A new specialist agent under `agents/specialists/watchdog/` (or similar). It is
+A new specialist agent under `agents/specialists/watchdog.default/` (or similar). It is
 explicitly **not** wired into every session. It runs only when:
 
 1. The operator triggers it manually via a CLI command (`autonoetic watchdog

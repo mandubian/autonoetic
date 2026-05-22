@@ -300,7 +300,7 @@ async fn run_watchdog_fast(
     let repo = AgentRepository::from_config(&gateway_config);
     let loaded = repo
         .get_sync("watchdog-fast.default")
-        .context("Watchdog (fast) agent 'watchdog-fast.default' not found — run with a config that points to agents/specialists/watchdog-fast/")?;
+        .context("Watchdog (fast) agent 'watchdog-fast.default' not found — run with a config that points to agents/specialists/watchdog-fast.default/")?;
     let manifest = loaded.manifest;
     let instructions = loaded.instructions;
     let agent_dir = loaded.dir;
