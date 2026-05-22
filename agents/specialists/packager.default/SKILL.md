@@ -159,7 +159,7 @@ The gateway will:
 
 **CRITICAL:** When building an artifact that includes dependency layers, do NOT include the `dependencies` field. Dependencies are already installed in the layer. Including `dependencies` would cause the gateway to re-run `pip install`/`npm install` at execution time, which fails in network-isolated sandboxes.
 
-**CRITICAL:** Preserve the original artifact's `kind`. When the input artifact has a specific kind (e.g. `agent_bundle`), the layered output must use the same kind. If you omit `kind`, the gateway will auto-inherit it from the first input artifact that is an artifact ID (`art_...`), but you should pass it explicitly when known.
+**CRITICAL:** Preserve the original artifact's `kind`. When the input artifact has a specific kind (e.g. `agent_bundle`), the layered output must use the same kind. If you omit `kind`, the gateway will auto-inherit it from the first input artifact, but you should pass it explicitly when known.
 
 ```json
 {

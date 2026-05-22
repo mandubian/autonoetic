@@ -280,9 +280,9 @@ If gates required:
 3. If the unit test runner is required for this row, call `agent_spawn`
    with `agent_id="unit_test_runner.default"`, `async=true`, against the
    same `artifact_ref`. Then call `workflow_wait`.
-4. Each required gate must call `promotion_record(artifact_id=<that
+4. Each required gate must call `promotion_record(artifact_ref=<that
    artifact>, role=..., pass=true)`. specialized_builder verifies these
-   records exist against the artifact_id that is being installed.
+   records exist against the artifact_ref that is being installed.
 
 If only the auditor is required (`audit_only` gating mode, pure-skill
 rows): tell specialized_builder `"Gating: audit_only"` and pass the
