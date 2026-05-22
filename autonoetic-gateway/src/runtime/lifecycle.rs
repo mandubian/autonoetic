@@ -1159,9 +1159,12 @@ impl AgentExecutor {
         )
         .await;
         let mut latest_assistant_text: Option<String> = None;
-        // Set when compact_workflow_summary runs at hibernate so assistant_reply / persisted
-        // history show workflow progress (system prompt injection alone is UI-invisible).
-        let mut workflow_transcript_supplement: Option<String> = None;
+        let has_declared_output_contract = self
+            .manifest
+            .io
+            .as_ref()
+            .and_then(|io| io.returns.as_ref())
+            .is_some();
         let policy = PolicyEngine::new(self.manifest.clone());
         let max_empty_other_retries = max_other_empty_retries();
         let mut empty_other_retries_used = 0usize;
@@ -2578,14 +2581,16 @@ impl AgentExecutor {
                                 "Injected workflow summary at turn end"
                             );
 
-                            // Surface workflow state in the transcript and JSON-RPC `assistant_reply`
-                            // (system injection alone is invisible to typical chat UIs).
-                            let planner_empty = response.text.trim().is_empty();
-                            let note =
-                                workflow_status_user_message_for_chat(&summary, planner_empty);
-                            let note = disclosure_state.filter_reply(&note);
-                            history.push(Message::assistant(note.clone()));
-                            workflow_transcript_supplement = Some(note);
+                            // Surface workflow state in transcript/user reply only for agents
+                            // without strict output contracts. If `io.returns` exists, appending
+                            // human-readable status text can invalidate JSON-only outputs.
+                            if !has_declared_output_contract {
+                                let planner_empty = response.text.trim().is_empty();
+                                let note =
+                                    workflow_status_user_message_for_chat(&summary, planner_empty);
+                                let note = disclosure_state.filter_reply(&note);
+                                history.push(Message::assistant(note.clone()));
+                            }
                         }
 
                         // Durable planner checkpoint at turn end
@@ -2666,14 +2671,10 @@ impl AgentExecutor {
             }
         }
 
-        let mut reply = latest_assistant_text.map(|t| disclosure_state.filter_reply(&t));
-        if let Some(note) = workflow_transcript_supplement {
-            reply = match reply {
-                None => Some(note),
-                Some(t) if t.trim().is_empty() => Some(note),
-                Some(t) => Some(format!("{}\n\n{}", t, note)),
-            };
-        }
+        // Keep agent reply payload strictly equal to model output (disclosure-filtered).
+        // Gateway-generated workflow notes are tracked in history/events, not appended
+        // to the returned assistant reply payload.
+        let reply = latest_assistant_text.map(|t| disclosure_state.filter_reply(&t));
 
         self.record_ri09_last_word_response_if_applicable(
             &session_id,

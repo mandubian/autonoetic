@@ -18,6 +18,7 @@ pub struct AsyncIngestResult {
     pub session_id: String,
     pub status: AsyncIngestStatus,
     pub assistant_reply: Option<String>,
+    pub workflow_note: Option<String>,
     pub artifacts: Vec<serde_json::Value>,
     pub shared_knowledge: Vec<serde_json::Value>,
     pub error: Option<String>,
@@ -428,6 +429,7 @@ impl JsonRpcRouter {
                                 Some(serde_json::json!({
                                     "session_id": result.session_id.clone(),
                                     "assistant_reply": result.assistant_reply.clone(),
+                                    "workflow_note": result.workflow_note.clone(),
                                     "artifacts": result.artifacts.clone(),
                                     "shared_knowledge": result.shared_knowledge.clone(),
                                     "delegation_metadata": params.metadata.clone(),
@@ -440,6 +442,7 @@ impl JsonRpcRouter {
                                 "agent_id": result.agent_id,
                                 "session_id": result.session_id,
                                 "assistant_reply": result.assistant_reply,
+                                "workflow_note": result.workflow_note,
                                 "artifacts": result.artifacts,
                                 "shared_knowledge": result.shared_knowledge,
                                 "llm_usage": result.llm_usage,
@@ -590,6 +593,7 @@ impl JsonRpcRouter {
                                 session_id: session_id_clone.clone(),
                                 status: AsyncIngestStatus::Processing,
                                 assistant_reply: None,
+                                workflow_note: None,
                                 artifacts: Vec::new(),
                                 shared_knowledge: Vec::new(),
                                 error: None,
@@ -618,6 +622,7 @@ impl JsonRpcRouter {
                                             Some(serde_json::json!({
                                                 "session_id": spawn_result.session_id.clone(),
                                                 "assistant_reply": spawn_result.assistant_reply.clone(),
+                                                "workflow_note": spawn_result.workflow_note.clone(),
                                                 "artifacts": spawn_result.artifacts.clone(),
                                                 "shared_knowledge": spawn_result.shared_knowledge.clone(),
                                                 "event_type": event_type_clone,
@@ -631,6 +636,7 @@ impl JsonRpcRouter {
                                     };
                                     entry.status = status;
                                     entry.assistant_reply = spawn_result.assistant_reply;
+                                    entry.workflow_note = spawn_result.workflow_note;
                                     entry.artifacts = spawn_result
                                         .artifacts
                                         .into_iter()
@@ -691,6 +697,7 @@ impl JsonRpcRouter {
                                     Some(serde_json::json!({
                                         "session_id": result.session_id.clone(),
                                         "assistant_reply": result.assistant_reply.clone(),
+                                        "workflow_note": result.workflow_note.clone(),
                                         "artifacts": result.artifacts.clone(),
                                         "shared_knowledge": result.shared_knowledge.clone(),
                                         "event_type": event_type.clone(),
@@ -704,6 +711,7 @@ impl JsonRpcRouter {
                                     "target_agent_id": target_agent_id,
                                     "session_id": result.session_id,
                                     "assistant_reply": result.assistant_reply,
+                                    "workflow_note": result.workflow_note,
                                     "artifacts": result.artifacts,
                                     "shared_knowledge": result.shared_knowledge,
                                     "llm_usage": result.llm_usage,

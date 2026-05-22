@@ -317,6 +317,18 @@ pub async fn answer_and_orchestrate_resume(
         .await;
 
     if let Err(e) = resume_result {
+        if let Some(s) = execution.gateway_store() {
+            if let Err(release_err) =
+                s.release_answered_standalone_interaction_resume_claim(&params.interaction_id)
+            {
+                tracing::warn!(
+                    target: "interaction",
+                    interaction_id = %params.interaction_id,
+                    error = %release_err,
+                    "Failed to release interaction resume claim after resume failure"
+                );
+            }
+        }
         return Err(e);
     }
 
