@@ -245,6 +245,8 @@ struct TaskLifecycle {
     agent_suffix: String,
     /// Display labels, e.g. `completed` or `completed (gate: fail)`.
     stages: Vec<String>,
+    /// The spawn reason / intent from the task.spawned event.
+    spawn_reason: Option<String>,
 }
 
 struct App {
@@ -803,11 +805,7 @@ fn format_session_status(app: &App) -> String {
         .workflow_id
         .as_deref()
         .unwrap_or("n/a");
-    let root_session_id = if app.session_overview.root_session_id.is_empty() {
-        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id).to_string()
-    } else {
-        app.session_overview.root_session_id.clone()
-    };
+    let root_session_id = get_root_session_id(app);
     format!(
         "Session: {}\nRoot: {}\nTarget: {}\nWorkflow: {}\nPending approvals: {}\nPending questions: {}\nResolved approvals: {}\nAnswered questions: {}\nGateway: {}",
         app.session_id,
@@ -1011,11 +1009,7 @@ fn refresh_gate_history(
     store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
 ) {
     let active_session_id = app.session_id.clone();
-    let root = if app.session_overview.root_session_id.is_empty() {
-        autonoetic_gateway::runtime::content_store::root_session_id(&active_session_id).to_string()
-    } else {
-        app.session_overview.root_session_id.clone()
-    };
+    let root = get_root_session_id(app);
 
     if let Ok(all_approvals) = store.list_all_approvals_for_session(&active_session_id) {
         app.gate_history_approvals = all_approvals
@@ -1413,7 +1407,11 @@ fn format_why_explanation(
         match store.get_approval(rid) {
             Ok(Some(req)) => {
                 let mut lines = vec![format!("Approval: {}", req.request_id)];
-                lines.push(format!("Status: {:?}", req.status));
+                let status_str = req
+                    .status
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_else(|| "pending".to_string());
+                lines.push(format!("Status: {}", status_str));
                 lines.push(format!("Agent: {}", req.agent_id));
                 lines.push(String::new());
                 lines.push("Action:".to_string());
@@ -1516,7 +1514,7 @@ fn poll_session_snapshot(
         let status = autonoetic_gateway::scheduler::load_workflow_run(config, None, &workflow_id)
             .ok()
             .flatten()
-            .map(|run| format!("{:?}", run.status).to_lowercase())
+            .map(|run| run.status.as_str().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
         let mut running = 0usize;
@@ -1863,6 +1861,198 @@ fn render_approval_card(
     lines
 }
 
+/// Structured display data extracted from an agent's JSON assistant_reply.
+struct AssistantReplyDisplay {
+    display: String,
+    intent: Option<String>,
+    goal_status: Option<String>,
+}
+
+/// Parse an assistant_reply JSON string and extract summary, result, intent, goal_status.
+/// Try to extract a JSON object from a reply that has prose + JSON code fence.
+fn extract_fenced_json(text: &str) -> Option<serde_json::Value> {
+    // Find the first `{` that starts a JSON object. Bracket-match to find the end.
+    let brace_start = text.find('{')?;
+    let json_text = &text[brace_start..];
+    let mut depth = 0;
+    let mut end_pos = 0;
+    for (i, ch) in json_text.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end_pos = i + '}'.len_utf8();
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if end_pos == 0 {
+        return None;
+    }
+    let json_str = &json_text[..end_pos];
+    serde_json::from_str(json_str).ok()
+}
+
+/// Strip leading prose and trailing text/code-fences from a reply, keeping just the prose.
+fn strip_prose_around_json(text: &str) -> String {
+    let brace_start = text.find('{').unwrap_or(text.len());
+    let prefix = text[..brace_start].trim();
+    let json_end = text[brace_start..]
+        .find('}')
+        .map(|i| brace_start + i + '}'.len_utf8())
+        .unwrap_or(text.len());
+    let suffix = text[json_end..].trim();
+    // Remove trailing code fence markers
+    let suffix = suffix.trim_start_matches('`').trim();
+    if prefix.is_empty() {
+        suffix.to_string()
+    } else if suffix.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}\n{suffix}")
+    }
+}
+
+fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
+    let parsed = serde_json::from_str::<serde_json::Value>(reply).ok();
+
+    // If the full reply isn't JSON, try to extract a JSON block from markdown fences.
+    let is_fenced = parsed.is_none();
+    let fenced_json = if is_fenced { extract_fenced_json(reply) } else { None };
+    let source = parsed.or_else(|| fenced_json);
+
+    let summary = source
+        .as_ref()
+        .and_then(|v| v.get("summary").and_then(|s| s.as_str()))
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_owned());
+    let result_str = source
+        .as_ref()
+        .and_then(|v| v.get("result").map(|r| format_json_value_as_text(r)));
+
+    // When the full reply wasn't JSON but we extracted a fenced block,
+    // show the prose text (excluding the JSON block) as the display
+    // and extract summary/result from the fenced JSON.
+    let display = match (summary.as_deref(), result_str.as_deref()) {
+        (Some(s), Some(r)) if is_fenced => {
+            let prose = strip_prose_around_json(reply);
+            if prose.is_empty() {
+                format!("{}\n\n{}", s, r)
+            } else {
+                format!("{}\n\n{}\n\n{}", prose, s, r)
+            }
+        }
+        (Some(s), Some(r)) => format!("{}\n\n{}", s, r),
+        (Some(s), None) => s.to_string(),
+        (None, Some(r)) => r.to_string(),
+        (None, None) => source
+            .as_ref()
+            .filter(|v| v.is_object() || v.is_array())
+            .map(|_v| strip_prose_around_json(reply))
+            .unwrap_or_else(|| strip_prose_around_json(reply)),
+    };
+    let intent = source
+        .as_ref()
+        .and_then(|v| v.get("intent").and_then(|s| s.as_str()))
+        .map(|s| s.to_owned());
+    let goal_status = source
+        .as_ref()
+        .and_then(|v| v.get("goal_status").and_then(|s| s.as_str()))
+        .map(|s| s.to_owned());
+    AssistantReplyDisplay {
+        display,
+        intent,
+        goal_status,
+    }
+}
+
+/// Add structured intent, goal_status, and artifact_count SignalLow messages.
+fn display_assistant_metadata(
+    app: &mut App,
+    formatted: &AssistantReplyDisplay,
+    artifact_count: Option<usize>,
+) {
+    if let Some(intent) = &formatted.intent {
+        app.add_message(
+            MessageRole::SignalLow,
+            format!("🎯 Intent: {}", intent),
+        );
+    }
+    if let Some(gs) = &formatted.goal_status {
+        app.add_message(
+            MessageRole::SignalLow,
+            format!("📊 Goal: {}", gs),
+        );
+    }
+    if let Some(n) = artifact_count.filter(|c| *c > 0) {
+        app.add_message(
+            MessageRole::SignalLow,
+            format!("📦 {} artifact(s) produced", n),
+        );
+    }
+}
+
+/// Strip `response validation failed:` prefix and session noise for cleaner TUI messages.
+fn clean_validation_error(e: &str) -> String {
+    let main = e
+        .strip_prefix("response validation failed: ")
+        .unwrap_or(e);
+    let main = main.split(". Session:").next().unwrap_or(main);
+    format!("Schema validation: {}", main)
+}
+
+/// Resolve the root session ID, falling back to computation from the active session.
+fn get_root_session_id(app: &App) -> String {
+    if app.session_overview.root_session_id.is_empty() {
+        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id).to_string()
+    } else {
+        app.session_overview.root_session_id.clone()
+    }
+}
+
+/// Truncate and flatten a spawn_reason string for inline display.
+fn preview_spawn_reason(reason: &str, max_chars: usize) -> String {
+    let preview: String = reason.chars().take(max_chars).collect();
+    preview.replace('\n', " ")
+}
+
+/// Recursively format a JSON value as readable text for chat display.
+fn format_json_value_as_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .map(|item| format!("- {}", format_json_value_as_text(item)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, val)| {
+                let label = k.replace('_', " ").replace('-', " ");
+                match val {
+                    serde_json::Value::String(s) => format!("**{}:** {}", label, s),
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                        let inner = format_json_value_as_text(val);
+                        if inner.contains('\n') {
+                            format!("**{}:**\n{}", label, inner)
+                        } else {
+                            format!("**{}:** {}", label, inner)
+                        }
+                    }
+                    other => format!("**{}:** {}", label, other),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+    }
+}
+
 /// Append structured cards for new pending interactions. Returns how many were added.
 fn append_new_pending_user_interaction_prompts(
     app: &mut App,
@@ -1951,10 +2141,17 @@ fn format_workflow_event_card(
                 .get("target_agent_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or(agent_id);
-            Some((
-                format!("🚀 [{}] Task spawned: {} → {}", ts_short, task, target),
-                MessageRole::Signal,
-            ))
+            let reason = event
+                .payload
+                .get("spawn_reason")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let mut line = format!("🚀 [{}] Spawned: {} → {}", ts_short, task, target);
+            if let Some(r) = reason {
+                let oneline = preview_spawn_reason(r, 120);
+                line.push_str(&format!("\n   {}", oneline));
+            }
+            Some((line, MessageRole::Signal))
         }
         "task.queued" => Some((
             format!("📥 [{}] Task queued: {}{}", ts_short, task, agent_suffix),
@@ -2122,8 +2319,14 @@ fn format_workflow_event_card(
                 .or_else(|| event.payload.get("reason").and_then(|v| v.as_str()))
                 .filter(|s| !s.is_empty());
             let mut line = format!("❌ [{}] Task failed: {}{}", ts_short, task, agent_suffix);
-            if let Some(d) = detail {
-                line.push_str(&format!("\n   {}", clamp_chat_field(d)));
+                if let Some(d) = detail {
+                    let stripped = d.strip_prefix("event.ingest failed: ").unwrap_or(d);
+                    let clean = if stripped.starts_with("response validation failed") {
+                        clean_validation_error(stripped)
+                    } else {
+                        stripped.to_string()
+                    };
+                    line.push_str(&format!("\n   {}", clamp_chat_field(&clean)));
             }
             Some((line, MessageRole::Signal))
         }
@@ -2241,10 +2444,15 @@ fn terminal_icon_for_completion(
     }
 }
 
-fn format_lifecycle_line(agent_suffix: &str, task: &str, stages: &[String]) -> String {
+fn format_lifecycle_line(agent_suffix: &str, task: &str, stages: &[String], spawn_reason: Option<&str>) -> String {
     let icon = lifecycle_icon_for_stage(stages.last().map(String::as_str));
     let chain = stages.join(" → ");
-    format!("{} {} ({}) {}", icon, agent_suffix.trim_start_matches(" → "), task, chain)
+    let mut line = format!("{} {} ({}) {}", icon, agent_suffix.trim_start_matches(" → "), task, chain);
+    if let Some(reason) = spawn_reason {
+        let oneline = preview_spawn_reason(reason, 100);
+        line.push_str(&format!("\n   💬 {}", oneline));
+    }
+    line
 }
 
 fn lifecycle_icon_for_stage(stage: Option<&str>) -> &'static str {
@@ -2271,11 +2479,23 @@ fn push_workflow_event_message(
 ) {
     if is_collapsible_lifecycle_event(event_type).is_some() {
         let stage = lifecycle_stage_label(event_type, payload);
+        let spawn_reason = if event_type == "task.spawned" {
+            payload
+                .get("spawn_reason")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
         let should_collapse = app.task_lifecycles.contains_key(task_id);
         if should_collapse {
             let lc = app.task_lifecycles.get_mut(task_id).unwrap();
             lc.stages.push(stage);
-            let collapsed = format_lifecycle_line(&lc.agent_suffix, task_id, &lc.stages);
+            if spawn_reason.is_some() {
+                lc.spawn_reason = spawn_reason;
+            }
+            let collapsed = format_lifecycle_line(&lc.agent_suffix, task_id, &lc.stages, lc.spawn_reason.as_deref());
             if let Some(&idx) = app.task_lifecycle_msg_idx.get(task_id) {
                 if idx < app.messages.len() {
                     app.messages[idx].content = collapsed.clone();
@@ -2288,12 +2508,13 @@ fn push_workflow_event_message(
             }
             app.add_message(role, collapsed);
         } else {
-            let collapsed = format_lifecycle_line(agent_suffix, task_id, std::slice::from_ref(&stage));
+            let collapsed = format_lifecycle_line(agent_suffix, task_id, std::slice::from_ref(&stage), spawn_reason.as_deref());
             app.task_lifecycles.insert(
                 task_id.to_string(),
                 TaskLifecycle {
                     agent_suffix: agent_suffix.to_string(),
                     stages: vec![stage],
+                    spawn_reason,
                 },
             );
             app.add_message(role, collapsed);
@@ -2945,6 +3166,66 @@ fn message_role_style(role: MessageRole) -> Style {
     }
 }
 
+/// Lightweight inline markdown: **bold**, `inline code`, and heading prefix.
+/// Returns styled spans and the plain-text length (for scroll/wrap calculations).
+fn parse_inline_markdown(text: &str, base_style: Style) -> (Vec<Span<'static>>, usize) {
+    use std::fmt::Write;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        if let Some(pos) = rest.find("**") {
+            // Text before bold marker
+            if pos > 0 {
+                let before = &rest[..pos];
+                spans.push(Span::styled(before.to_string(), base_style));
+                let _ = write!(plain, "{}", before);
+            }
+            let after_marker = &rest[pos + 2..];
+            if let Some(end) = after_marker.find("**") {
+                let bold = &after_marker[..end];
+                spans.push(Span::styled(
+                    bold.to_string(),
+                    base_style.add_modifier(Modifier::BOLD),
+                ));
+                let _ = write!(plain, "{}", bold);
+                rest = &after_marker[end + 2..];
+            } else {
+                spans.push(Span::styled("**".to_string(), base_style));
+                plain.push_str("**");
+                rest = after_marker;
+            }
+        } else if let Some(pos) = rest.find('`') {
+            if pos > 0 {
+                let before = &rest[..pos];
+                spans.push(Span::styled(before.to_string(), base_style));
+                let _ = write!(plain, "{}", before);
+            }
+            let after_marker = &rest[pos + 1..];
+            if let Some(end) = after_marker.find('`') {
+                let code = &after_marker[..end];
+                spans.push(Span::styled(
+                    code.to_string(),
+                    base_style.fg(Color::Cyan).bg(Color::Black),
+                ));
+                let _ = write!(plain, "{}", code);
+                rest = &after_marker[end + 1..];
+            } else {
+                spans.push(Span::styled("`".to_string(), base_style));
+                plain.push('`');
+                rest = after_marker;
+            }
+        } else {
+            spans.push(Span::styled(rest.to_string(), base_style));
+            let _ = write!(plain, "{}", rest);
+            break;
+        }
+    }
+
+    (spans, plain.len())
+}
+
 /// Vertical line count for transcript lines as ratatui's `Paragraph::wrap(Wrap { trim: false })`
 /// will render them — must match [`draw_messages`] or follow-mode scroll drifts from the true end.
 fn transcript_wrap_line_count(paragraph_line: Line<'static>, wrap_width: u16) -> usize {
@@ -3093,10 +3374,18 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
 
                     lines.push(Line::from(spans));
                 } else if include_line {
-                    lines.push(Line::from(vec![
-                        Span::raw(prefix),
-                        Span::styled(text_line.to_string(), style),
-                    ]));
+                    let line_spans = if matches!(msg.role, MessageRole::Assistant) {
+                        let (spans, _) = parse_inline_markdown(text_line, style);
+                        let mut all = vec![Span::raw(prefix)];
+                        all.extend(spans);
+                        all
+                    } else {
+                        vec![
+                            Span::raw(prefix),
+                            Span::styled(text_line.to_string(), style),
+                        ]
+                    };
+                    lines.push(Line::from(line_spans));
                 }
 
                 if include_line && render_base_visual_row.is_none() {
@@ -3522,7 +3811,7 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     // `event.ingest` JSON-RPC round-trip). Notify the UI loop when that work finishes so we can
     // clear the same `Working...` pending row used for normal chat sends.
     let (interaction_resume_tx, mut interaction_resume_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, Option<String>)>();
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<String>, Option<String>)>();
 
     // Shared shutdown flag — set by Ctrl+C handler, checked by all loops
     let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -3682,8 +3971,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
     signal_interval: &mut tokio::time::Interval,
     shutdown: &std::sync::Arc<tokio::sync::Notify>,
     jsonrpc_auth_token: &str,
-    interaction_resume_tx: tokio::sync::mpsc::UnboundedSender<(u64, Option<String>)>,
-    interaction_resume_rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, Option<String>)>,
+    interaction_resume_tx: tokio::sync::mpsc::UnboundedSender<(u64, Option<String>, Option<String>)>,
+    interaction_resume_rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, Option<String>, Option<String>)>,
 ) -> anyhow::Result<bool> {
     let mut needs_redraw = true;
     let mut last_spinner_tick = Instant::now();
@@ -3733,10 +4022,16 @@ async fn run_loop<B: ratatui::backend::Backend>(
             }
 
             // Background `answer_and_orchestrate_resume` finished (user answered `user_ask` in TUI)
-            Some((done_pending_id, assistant_reply)) = interaction_resume_rx.recv() => {
+            Some((done_pending_id, assistant_reply, error_msg)) = interaction_resume_rx.recv() => {
                 app.remove_pending(done_pending_id);
                 if let Some(reply) = assistant_reply {
-                    app.add_message(MessageRole::Assistant, reply);
+                    let formatted = format_assistant_reply(&reply);
+                    app.add_message(MessageRole::Assistant, formatted.display);
+                } else if let Some(err) = error_msg {
+                    app.add_message(
+                        MessageRole::System,
+                        format!("⚠ Background orchestration failed: {}", err),
+                    );
                 }
                 needs_redraw = true;
             }
@@ -3771,15 +4066,44 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         let reply = result
                                             .get("assistant_reply")
                                             .and_then(|r| r.as_str());
+                                        let workflow_note = result
+                                            .get("workflow_note")
+                                            .and_then(|n| n.as_str());
                                         if status == "completed" {
                                             if let Some(r) = reply.filter(|s| !s.trim().is_empty()) {
-                                                app.add_message(MessageRole::Assistant, r.to_owned());
+                                                let formatted = format_assistant_reply(r);
+                                                display_assistant_metadata(app, &formatted, None);
+                                                app.add_message(MessageRole::Assistant, formatted.display);
+                                            }
+                                            if let Some(note) = workflow_note.filter(|s| !s.trim().is_empty()) {
+                                                app.add_message(MessageRole::SignalLow, note.to_owned());
+                                            }
+                                        } else if status == "failed" {
+                                            let error_msg = result
+                                                .get("error")
+                                                .and_then(|e| e.as_str())
+                                                .unwrap_or("Unknown failure");
+                                            if error_msg.contains("waiting for approval") {
+                                                app.add_message(
+                                                    MessageRole::SignalLow,
+                                                    "⏳ Session paused — awaiting operator approval".to_string(),
+                                                );
+                                            } else {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!("❌ Session failed: {}", error_msg),
+                                                );
                                             }
                                         } else {
-                                            tracing::debug!(
-                                                target: "chat",
-                                                status,
-                                                "session.status after workflow.completed: reply not yet available"
+                                            let status_label = match status {
+                                                "processing" => "Processing",
+                                                "suspended_approval" => "Suspended — awaiting approval",
+                                                "suspended_user_input" => "Suspended — awaiting user input",
+                                                s => s,
+                                            };
+                                            app.add_message(
+                                                MessageRole::System,
+                                                format!("⏳ Session status: {}", status_label),
                                             );
                                         }
                                     }
@@ -3788,7 +4112,38 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                 }
 
                                 if let Some(error) = resp.error {
-                                    app.add_message(MessageRole::System, format!("Error: {}", error.message));
+                                    let clean = if error.message.starts_with("agent.spawn failed") {
+                                        let body = error.message.strip_prefix("agent.spawn failed: ").unwrap_or(&error.message);
+                                        if body.starts_with("response validation failed") {
+                                            format!("❌ {}", clean_validation_error(body))
+                                        } else {
+                                            format!("❌ Spawn failed: {}", body)
+                                        }
+                                    } else if error.message.starts_with("event.ingest failed") {
+                                        let body = error.message.strip_prefix("event.ingest failed: ").unwrap_or(&error.message);
+                                        if body.starts_with("response validation failed") {
+                                            format!("❌ {}", clean_validation_error(body))
+                                        } else {
+                                            format!("❌ {}", body)
+                                        }
+                                    } else {
+                                        format!("❌ Error: {}", error.message)
+                                    };
+                                    let clean = if let Some(data) = &error.data {
+                                        let data_str = if let Some(s) = data.as_str() {
+                                            s.to_owned()
+                                        } else {
+                                            format_json_value_as_text(data)
+                                        };
+                                        if data_str.len() < 200 {
+                                            format!("{}\n📎 Detail: {}", clean, data_str)
+                                        } else {
+                                            clean
+                                        }
+                                    } else {
+                                        clean
+                                    };
+                                    app.add_message(MessageRole::Signal, clean);
                                 } else {
                                     let result_json = resp.result.as_ref();
                                     if let Some(v) = result_json {
@@ -3796,9 +4151,28 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             app.last_llm_context = Some(usage);
                                         }
                                     }
-                                    let reply = result_json
-                                        .and_then(|v| v.get("assistant_reply").and_then(|r| r.as_str().map(ToOwned::to_owned)))
-                                        .unwrap_or_else(|| "[No response]".to_string());
+                                    let raw_assistant_reply: Option<String> = result_json
+                                        .and_then(|v| v.get("assistant_reply").and_then(|r| r.as_str()))
+                                        .map(|r| r.to_owned());
+                                    let formatted = raw_assistant_reply
+                                        .as_deref()
+                                        .map(format_assistant_reply)
+                                        .unwrap_or(AssistantReplyDisplay {
+                                            display: "[No response]".to_string(),
+                                            intent: None,
+                                            goal_status: None,
+                                        });
+                                    let artifact_count = result_json
+                                        .and_then(|v| v.get("artifacts"))
+                                        .and_then(|a| a.as_array())
+                                        .map(|a| a.len());
+                                    display_assistant_metadata(app, &formatted, artifact_count);
+                                    let reply_text = formatted.display;
+                                    let workflow_note = result_json
+                                        .and_then(|v| {
+                                            v.get("workflow_note")
+                                                .and_then(|n| n.as_str().map(ToOwned::to_owned))
+                                        });
 
                                     // Try to extract user interactions directly from response (zero latency),
                                     // then fall back to store polling.
@@ -3833,9 +4207,13 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         0
                                     };
                                     let reply_is_placeholder =
-                                        reply.trim().is_empty() || reply == "[No response]";
+                                        reply_text.trim().is_empty() || reply_text == "[No response]";
 
-                                    if let Some(structured) = extract_structured_approval(&reply) {
+                                    let reply_for_extraction = raw_assistant_reply
+                                        .as_deref()
+                                        .unwrap_or(&reply_text);
+
+                                    if let Some(structured) = extract_structured_approval(reply_for_extraction) {
                                         app.session_overview.latest_signal = Some(
                                             structured
                                                 .request_id
@@ -3851,7 +4229,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 }),
                                         );
                                         app.add_message(MessageRole::Signal, structured.card);
-                                    } else if let Some(req_id) = extract_approval_request_id(&reply) {
+                                    } else if let Some(req_id) = extract_approval_request_id(reply_for_extraction) {
                                         app.session_overview.latest_signal =
                                             Some(format!("approval {}", req_id));
                                         app.add_message(
@@ -3861,7 +4239,10 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     }
 
                                     if !(new_user_prompts > 0 && reply_is_placeholder) {
-                                        app.add_message(MessageRole::Assistant, reply);
+                                        app.add_message(MessageRole::Assistant, reply_text);
+                                    }
+                                    if let Some(note) = workflow_note.filter(|s| !s.trim().is_empty()) {
+                                        app.add_message(MessageRole::SignalLow, note);
                                     }
 
                                 }
@@ -3944,6 +4325,18 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     );
                                     skip_chat_ingest = true;
                                 } else {
+                                    let trimmed = message_text.trim().to_lowercase();
+                                    let matched_option = interaction.options.iter().enumerate().find(|(i, opt)| {
+                                        opt.id == trimmed
+                                            || opt.label.to_lowercase() == trimmed
+                                            || opt.value.to_lowercase() == trimmed
+                                            || format!("{}", i + 1) == trimmed
+                                    }).map(|(_, opt)| opt);
+                                    let (opt_id, txt) = if let Some(opt) = matched_option {
+                                        (Some(opt.id.clone()), None)
+                                    } else {
+                                        (None, Some(message_text.clone()))
+                                    };
                                     use autonoetic_gateway::interaction_answer::{
                                         answer_and_orchestrate_resume, InteractionAnswerParams,
                                     };
@@ -3958,13 +4351,14 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             &exec,
                                             InteractionAnswerParams {
                                                 interaction_id: interaction_id_for_task.clone(),
-                                                answer_text: Some(answer_text.clone()),
-                                                answer_option_id: None,
+                                                answer_text: txt,
+                                                answer_option_id: opt_id,
                                                 answered_by: Some("chat-tui".to_string()),
                                                 follow_up_message: Some(answer_text),
                                             },
                                         )
                                         .await;
+                                        let error_msg = result.as_ref().err().map(|e| e.to_string());
                                         let reply = match &result {
                                             Ok(outcome) => outcome.assistant_reply.clone(),
                                             Err(_) => None,
@@ -3977,7 +4371,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 "Background interaction answer orchestration failed"
                                             );
                                         }
-                                        let _ = resume_notify.send((pending_row_id, reply));
+                                        let _ = resume_notify.send((pending_row_id, reply, error_msg));
                                     });
                                     app.add_message(
                                         MessageRole::System,
@@ -4013,12 +4407,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         &app.session_id,
                     );
 
-                    let root_session_id = if app.session_overview.root_session_id.is_empty() {
-                        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id)
-                            .to_string()
-                    } else {
-                        app.session_overview.root_session_id.clone()
-                    };
+                    let root_session_id = get_root_session_id(app);
 
                     if matches!(&outbound, ChatOutbound::PolicyAuthor(_)) {
                         if let serde_json::Value::Object(ref mut map) = metadata_value {
@@ -4113,12 +4502,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                 }
                                 HandleKeyAction::PauseSession => {
                                     app.session_paused = true;
-                                    let root_session_id = if app.session_overview.root_session_id.is_empty() {
-                                        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id)
-                                            .to_string()
-                                    } else {
-                                        app.session_overview.root_session_id.clone()
-                                    };
+                                    let root_session_id = get_root_session_id(app);
 
                                     let mut paused_tasks = 0usize;
                                     if let Some(store) = gateway_store {
@@ -4168,12 +4552,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     );
                                 }
                                 HandleKeyAction::CancelSession => {
-                                    let root_session_id = if app.session_overview.root_session_id.is_empty() {
-                                        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id)
-                                            .to_string()
-                                    } else {
-                                        app.session_overview.root_session_id.clone()
-                                    };
+                                    let root_session_id = get_root_session_id(app);
 
                                     if let Some(exec) = execution_for_interactions {
                                         match exec
@@ -4245,6 +4624,20 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 let pid = app.next_id();
                                                 app.add_pending(pid);
                                                 app.post_approval_pending_ids.push(pid);
+
+                                                // For approvals that lack workflow task events
+                                                // (e.g. session_continue, emergency_stop), send a
+                                                // session.status query to surface the final reply.
+                                                if let Ok(Some(approval)) = store.get_approval(&apr_id) {
+                                                    let status_id = app.next_id();
+                                                    app.pending_session_status_ids.insert(status_id);
+                                                    let _ = tx.send((
+                                                        status_id,
+                                                        ChatOutbound::SessionStatusQuery {
+                                                            session_id: approval.session_id,
+                                                        },
+                                                    ));
+                                                }
                                             }
                                             Err(e) => {
                                                 app.add_message(
@@ -5227,7 +5620,7 @@ async fn check_signals(
                     .map(|t| LiveTaskSummary {
                         task_id: t.task_id,
                         agent_id: t.agent_id,
-                        status: format!("{:?}", t.status).to_lowercase(),
+                        status: t.status.as_str().to_string(),
                     })
                     .collect();
             }
@@ -5338,11 +5731,18 @@ async fn check_signals(
 
                                     // Clear post-approval spinners on task lifecycle events
                                     // that indicate the scheduler resumed (or finished) work.
+                                    // Also re-query session.status to surface the final output,
+                                    // since workflow.completed may not fire again after the first
+                                    // completion (the workflow is already in terminal state).
+                                    // `task.approved` handles session-level approvals
+                                    // (session_continue, emergency_stop, etc.) that resume
+                                    // without task/workflow lifecycle events.
                                     if matches!(
                                         event.event_type.as_str(),
                                         "task.started"
                                             | "task.completed"
                                             | "task.failed"
+                                            | "task.approved"
                                             | "workflow.completed"
                                     ) && !app.post_approval_pending_ids.is_empty()
                                     {
@@ -5351,6 +5751,23 @@ async fn check_signals(
                                         for pid in ids {
                                             app.remove_pending(pid);
                                         }
+                                        // Re-allow session.status query to surface the result
+                                        // after approval resume.
+                                        let wf_root_sid = event
+                                            .payload
+                                            .get("root_session_id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or(&root_session_id);
+                                        app.queried_session_status_for_workflows
+                                            .remove(wf_root_sid);
+                                        let query_id = app.next_id();
+                                        app.pending_session_status_ids.insert(query_id);
+                                        let _ = tx.send((
+                                            query_id,
+                                            ChatOutbound::SessionStatusQuery {
+                                                session_id: wf_root_sid.to_string(),
+                                            },
+                                        ));
                                     }
 
                                     // When workflow completes, query session.status to surface the
@@ -5693,7 +6110,7 @@ mod tests {
             "started".to_string(),
             "completed (gate: fail)".to_string(),
         ];
-        let line = format_lifecycle_line("unit_test_runner.default", "task-866b7287", &stages);
+        let line = format_lifecycle_line("unit_test_runner.default", "task-866b7287", &stages, None);
         assert!(line.starts_with("⚠️"));
         assert!(line.contains("completed (gate: fail)"));
     }
