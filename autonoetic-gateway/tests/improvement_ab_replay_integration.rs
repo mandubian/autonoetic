@@ -635,6 +635,11 @@ fn test_ab_replay_prompt_only_guard_rejects_capability_widening() {
     assert_eq!(v["ok"], false, "guardrail should reject");
     assert_eq!(v["status"], "surface_drift_rejected");
     assert_eq!(v["guardrail"], "improve.restrict_to_prompt_only");
+    // policy_applied is set on rejects too (PR #269 audit-trail
+    // uniformity). For the "not opted in" case, the classification is
+    // `prompt_only_violation`.
+    assert_eq!(v["policy_applied"], "prompt_only_violation");
+    assert_eq!(v["classification"], "prompt_only_violation");
     let reason = v["reason"].as_str().unwrap_or("");
     assert!(
         reason.contains("CodeExecution"),
@@ -781,5 +786,335 @@ fn test_ab_replay_prompt_only_guard_can_be_disabled() {
         v["status"], "surface_drift_rejected",
         "gate must NOT fire when restrict_to_prompt_only is false; got {:?}",
         v
+    );
+}
+
+// ─── 10. Capability-change guardrail (P5) ──────────────────────────────────
+//
+// P5 lifts P4's prompt-only restriction selectively: when an operator opts in
+// via `improve.allow_capability_changes = true`, the gate permits comparisons
+// whose candidate has a low-blast-radius capability delta, with the holdout
+// ratio coerced up to `capability_change_min_holdout` (default 0.5). High-blast
+// changes (sandbox / network / code-exec / credential / scheduler / revision)
+// remain rejected regardless.
+
+#[test]
+fn test_ab_replay_p5_allows_low_blast_capability_change_with_strict_holdout() {
+    // Baseline: minimal Evaluation. Candidate: adds AgentMessage
+    // (low-blast — agent-to-agent communication, not a sandbox/network
+    // privilege). With allow_capability_changes=true, the gate should
+    // permit the comparison and coerce holdout up to 0.5.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.allow_capability_changes = true;
+
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]"#,
+    );
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "AgentMessage"
+        patterns: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": (0..8).map(|i| json!({
+            "message": format!("do task {}", i),
+            "case_id": format!("t{}", i),
+        })).collect::<Vec<_>>(),
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.1, // intentionally below the 0.5 minimum
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_ne!(
+        v["status"], "surface_drift_rejected",
+        "low-blast capability change with opt-in must not reject; got {:?}",
+        v
+    );
+    assert_eq!(
+        v["policy_applied"], "capability_change_with_strict_holdout",
+        "expected policy_applied=capability_change_with_strict_holdout; got {:?}",
+        v["policy_applied"]
+    );
+    // Holdout was coerced from 0.1 up to the configured minimum.
+    let coerced = v["holdout_coerced_from"].as_f64();
+    assert!(
+        coerced.is_some() && (coerced.unwrap() - 0.1).abs() < 1e-9,
+        "expected holdout_coerced_from=0.1; got {:?}",
+        v["holdout_coerced_from"]
+    );
+}
+
+#[test]
+fn test_ab_replay_p5_rejects_high_blast_added_kind() {
+    // Adding CodeExecution to a candidate is high-blast-radius (it's
+    // in the default high_blast_radius_capability_kinds list). Even
+    // with allow_capability_changes=true, the gate must reject.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.allow_capability_changes = true;
+
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]"#,
+    );
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "CodeExecution"
+        patterns: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.5,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(v["status"], "surface_drift_rejected", "got {:?}", v);
+    assert_eq!(v["classification"], "high_blast_radius");
+    // policy_applied now mirrors classification on rejects (PR #269
+    // review fix — uniform audit field across all responses).
+    assert_eq!(v["policy_applied"], "high_blast_radius");
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("CodeExecution"),
+        "rejection reason should cite CodeExecution: got {}",
+        reason
+    );
+}
+
+#[test]
+fn test_ab_replay_p5_rejects_high_blast_broadened_kind() {
+    // Broadening an existing high-blast capability is also rejected.
+    // Baseline has NetworkAccess scoped to one host; candidate widens
+    // to all hosts. NetworkAccess is in the default high-blast list,
+    // so this must reject regardless of the opt-in flag.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.allow_capability_changes = true;
+
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "NetworkAccess"
+        hosts: ["api.example.com"]"#,
+    );
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "NetworkAccess"
+        hosts: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.5,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(v["status"], "surface_drift_rejected", "got {:?}", v);
+    assert_eq!(v["classification"], "high_blast_radius");
+    // policy_applied now mirrors classification on rejects (PR #269
+    // review fix — uniform audit field across all responses).
+    assert_eq!(v["policy_applied"], "high_blast_radius");
+    let reason = v["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("NetworkAccess"),
+        "rejection reason should cite NetworkAccess: got {}",
+        reason
+    );
+}
+
+#[test]
+fn test_ab_replay_p5_opt_in_unaffected_by_no_delta() {
+    // When there's no delta, the policy is `Allow` and the gate is
+    // silent regardless of allow_capability_changes. Verifies the
+    // happy path's `policy_applied` reads `no_delta`.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.allow_capability_changes = true;
+
+    let identical_caps = r#"      - type: "Evaluation"
+        patterns: ["*"]"#;
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_A_ID, identical_caps);
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_B_ID, identical_caps);
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.3,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_ne!(v["status"], "surface_drift_rejected", "got {:?}", v);
+    assert_eq!(v["policy_applied"], "no_delta");
+    // Holdout NOT coerced — caller's 0.3 is fine when there's no delta.
+    assert!(
+        v["holdout_coerced_from"].is_null(),
+        "no coercion expected when there's no delta; got {:?}",
+        v["holdout_coerced_from"]
+    );
+}
+
+#[test]
+fn test_ab_replay_p5_low_blast_with_high_enough_holdout_is_not_coerced() {
+    // When the caller already provides a holdout ≥ the configured
+    // minimum, no coercion happens. The capability change still goes
+    // through the strict-holdout policy, just with the caller's value.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.allow_capability_changes = true;
+
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_A_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]"#,
+    );
+    write_revision_skill_md(
+        &gateway_dir,
+        TARGET_AGENT,
+        REV_B_ID,
+        r#"      - type: "Evaluation"
+        patterns: ["*"]
+      - type: "AgentMessage"
+        patterns: ["*"]"#,
+    );
+
+    let args = json!({
+        "task_specs": (0..8).map(|i| json!({
+            "message": format!("do task {}", i),
+            "case_id": format!("t{}", i),
+        })).collect::<Vec<_>>(),
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.6, // already above the 0.5 min
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(v["policy_applied"], "capability_change_with_strict_holdout");
+    assert!(
+        v["holdout_coerced_from"].is_null(),
+        "caller's holdout was already above the min — no coercion; got {:?}",
+        v["holdout_coerced_from"]
+    );
+}
+
+// ─── 11. Audit-trail uniformity (PR #269 review) ──────────────────────────
+//
+// `policy_applied` must reflect what actually happened across all six
+// surface-policy states, not just the no-delta default. These tests
+// pin the two "gate skipped" branches (`gate_disabled` and
+// `not_evaluated`) that earlier silently reported `no_delta`.
+
+#[test]
+fn test_ab_replay_policy_applied_gate_disabled_when_restrict_off() {
+    // Even with a real on-disk capability widening, `policy_applied`
+    // is `gate_disabled` (not `no_delta`) when the master switch is
+    // off — the policy was never consulted.
+    let tmp = TempDir::new().unwrap();
+    let (store, mut config) = setup_env(&tmp);
+    let gateway_dir = tmp.path().join(".gateway");
+    config.improve.restrict_to_prompt_only = false;
+
+    let identical_caps = r#"      - type: "Evaluation"
+        patterns: ["*"]"#;
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_A_ID, identical_caps);
+    write_revision_skill_md(&gateway_dir, TARGET_AGENT, REV_B_ID, identical_caps);
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool_with_gateway_dir(store, config, &gateway_dir, args);
+    assert_eq!(
+        v["policy_applied"], "gate_disabled",
+        "expected gate_disabled when restrict_to_prompt_only=false; got {:?}",
+        v["policy_applied"]
+    );
+}
+
+#[test]
+fn test_ab_replay_policy_applied_not_evaluated_when_gateway_dir_absent() {
+    // When the gate is on but gateway_dir is None, the policy can't
+    // be evaluated. The response must say so explicitly, not pretend
+    // there was no delta.
+    let tmp = TempDir::new().unwrap();
+    let (store, config) = setup_env(&tmp);
+    // Note: existing execute_tool helper passes `None` for gateway_dir.
+    // The gate's master switch (restrict_to_prompt_only) defaults to
+    // true, so this exercises the not_evaluated branch.
+
+    let args = json!({
+        "task_specs": [
+            {"message": "do task one", "case_id": "t1"},
+            {"message": "do task two", "case_id": "t2"},
+        ],
+        "agent_id": TARGET_AGENT,
+        "revision_a": format!("{}@{}", TARGET_AGENT, REV_A_ID),
+        "revision_b": format!("{}@{}", TARGET_AGENT, REV_B_ID),
+        "holdout_ratio": 0.0,
+    });
+
+    let v = execute_tool(store, config, args);
+    assert_eq!(
+        v["policy_applied"], "not_evaluated",
+        "expected not_evaluated when gateway_dir is None; got {:?}",
+        v["policy_applied"]
     );
 }

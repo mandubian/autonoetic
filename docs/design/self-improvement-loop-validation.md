@@ -153,15 +153,82 @@ not globally."_
 A GO signs off P4 and unblocks #250 (P5 — agent-level evolution). A
 NO-GO requires filing follow-ups for whatever needs fixing first.
 
-## 8. References
+## 8. P5 — agent-level evolution cycles
+
+> Status: code shipped, awaiting **2 capability-change cycles + sign-off**.
+> Tracking issue: [#250](https://github.com/mandubian/autonoetic/issues/250).
+
+### 8.1 What changed
+
+P5 extends the surface-change gate from binary (allow vs reject) to a
+three-state policy:
+
+| Candidate vs baseline | Policy | Holdout |
+|---|---|---|
+| No capability or tool-tier delta | `no_delta` → proceed | caller-supplied (default 0.3) |
+| Delta, `allow_capability_changes = false` (default) | `Reject(prompt_only_violation)` | n/a |
+| Delta, **opted in**, but adds or broadens a high-blast kind (`SandboxFunctions`, `NetworkAccess`, `CodeExecution`, `CredentialAccess`, `EmergencyStop`, `AgentRevision`, `SchedulerAccess`) | `Reject(high_blast_radius)` | n/a |
+| Delta, opted in, low-blast | `capability_change_with_strict_holdout` → proceed | **coerced up to `capability_change_min_holdout` (default 0.5)** |
+
+The tool response's `policy_applied` field surfaces which branch fired
+so the operator audit trail is clear. When holdout is coerced, the
+original value lands in `holdout_coerced_from`.
+
+### 8.2 Cycle protocol (capability changes)
+
+Same as §4, with two extra steps before validate:
+
+1. Pick a real session whose weakness is **agent-level** — e.g., the
+   planner can't reach evidence because `ReadAccess` scopes are too
+   narrow, or it can't message an agent because `AgentMessage`
+   patterns exclude the target.
+2. `autonoetic improve --session <id>` — diagnosis + (identical)
+   `Candidate` revision.
+3. Edit the candidate's SKILL.md to **only** widen the capability the
+   diagnosis pointed at. **Don't bundle prompt edits** in the same
+   cycle — that defeats attribution.
+4. Set `improve.allow_capability_changes = true` in the gateway
+   config. Re-run `autonoetic improve`. The A/B replay should accept
+   the comparison and coerce the holdout up.
+5. Approve, deploy, monitor as in §4. The existing R++2 constitutional
+   gate also fires at promote time as a second defender.
+6. Fill in the row in §8.3.
+
+### 8.3 Results (operator fills in)
+
+2 cycles for P5 sign-off, on any 2 agents. Capability changes only —
+prompt edits sit in §5.
+
+| # | Date | Agent | Capability change | A/B verdict | Confidence | Deployed? | Post-deploy regression observed? |
+|---|---|---|---|---|---|---|---|
+| 1 | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| 2 | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+
+### 8.4 Operator notes (P5-specific)
+
+_TBD — surface anything specific to capability changes: gate
+false-positives, holdout-coercion friction, high-blast classification
+calls that felt wrong, etc._
+
+### 8.5 Sign-off
+
+| Status | Operator | Date | Notes |
+|---|---|---|---|
+| **GO / NO-GO** | _TBD_ | _TBD_ | _TBD_ |
+
+A P5 GO unblocks #252 (P7 — progressive automation).
+
+## 9. References
 
 - `docs/design/self-improvement-loop-design.md` — full design context
-- Issue [#249](https://github.com/mandubian/autonoetic/issues/249) —
-  P4 tracking
+- Issues [#249](https://github.com/mandubian/autonoetic/issues/249)
+  (P4), [#250](https://github.com/mandubian/autonoetic/issues/250)
+  (P5)
 - `autonoetic/src/cli/improve.rs` — the CLI driving the cycles
-- `autonoetic-gateway/src/runtime/tools/improvement.rs` — the A/B
-  replay tool + this PR's `restrict_to_prompt_only` guardrail
+- `autonoetic-gateway/src/runtime/tools/improvement.rs` — A/B replay
+  tool + `evaluate_surface_change_policy`
 - `autonoetic-gateway/src/runtime/eval_stats.rs` — multi-axis
   statistical comparison
-- `autonoetic-types/src/config.rs::ImproveConfig` — the
-  `restrict_to_prompt_only` config flag
+- `autonoetic-types/src/config.rs::ImproveConfig` — four config
+  flags: `restrict_to_prompt_only`, `allow_capability_changes`,
+  `capability_change_min_holdout`, `high_blast_radius_capability_kinds`
