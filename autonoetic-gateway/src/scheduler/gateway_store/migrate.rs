@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 38;
+const SCHEMA_VERSION_LATEST: i64 = 39;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -523,6 +523,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_escalation_code_excerpts_v36(conn)?;
     apply_stage_transitions_v37(conn)?;
     apply_session_outcomes_v38(conn)?;
+    apply_improvement_cycles_v39(conn)?;
 
     Ok(())
 }
@@ -616,6 +617,44 @@ fn apply_session_outcomes_v38(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![38_i64, "session_outcomes", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_improvement_cycles_v39(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 39 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS improvement_cycles (
+            cycle_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            level TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            regression_detected INTEGER NOT NULL DEFAULT 0,
+            operator_decision TEXT NOT NULL DEFAULT '',
+            session_id TEXT,
+            revision_before TEXT,
+            revision_after TEXT,
+            blast_radius_score REAL,
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_improvement_cycles_agent
+            ON improvement_cycles(agent_id, level, outcome);
+        CREATE INDEX IF NOT EXISTS idx_improvement_cycles_created
+            ON improvement_cycles(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![39_i64, "improvement_cycles", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
