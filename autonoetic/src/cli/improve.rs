@@ -169,14 +169,26 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
                 return Ok(());
             }
 
-            // 8. Approval
+            // 8. Approval (skip prompt for L3-eligible agents)
             if no_prompt {
                 eprintln!("[no-prompt] Refusing to deploy. Comparison report printed above.");
                 eprintln!("[no-prompt] Run without --no-prompt to approve and deploy.");
                 return Ok(());
             }
 
-            let approved = prompt_approval(&comparison)?;
+            let auto_approve = check_auto_approve_eligibility(&loaded_config, &store, &target_agent);
+            let approved = if auto_approve.is_some() {
+                let regressions = comparison["regressions"].as_array().map(|a| a.is_empty()).unwrap_or(true);
+                if regressions {
+                    eprintln!("[L3 auto-approve] Agent '{}' is L3-eligible — skipping operator prompt.", target_agent);
+                    true
+                } else {
+                    eprintln!("[L3 auto-approve] Regressions detected — deferring to operator.");
+                    prompt_approval(&comparison)?
+                }
+            } else {
+                prompt_approval(&comparison)?
+            };
             if !approved {
                 eprintln!("Deploy rejected by operator.");
                 return Ok(());
@@ -217,6 +229,34 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
                 eprintln!("To rollback: autonoetic agent revision promote {} {}", target_agent, prev);
             }
 
+            // 10. Record L1 improvement cycle for P7 track record
+            let regression_detected = comparison["regressions"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            let prev_id_for_cycle = promote_result["previous_revision_id"].as_str().unwrap_or("unknown");
+            let cycle = autonoetic_types::improvement_cycle::ImprovementCycleRecord {
+                cycle_id: uuid::Uuid::new_v4().to_string(),
+                agent_id: target_agent.clone(),
+                level: autonoetic_types::improvement_cycle::ImprovementLevel::L1,
+                outcome: if regression_detected {
+                    autonoetic_types::improvement_cycle::CycleOutcome::Regression
+                } else {
+                    autonoetic_types::improvement_cycle::CycleOutcome::Success
+                },
+                regression_detected,
+                operator_decision: "approved".to_string(),
+                session_id: Some(selected.join(",")),
+                revision_before: Some(prev_id_for_cycle.to_string()),
+                revision_after: Some(rev_id.to_string()),
+                blast_radius_score: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                closed_at: Some(chrono::Utc::now().to_rfc3339()),
+            };
+            if let Err(e) = store.insert_improvement_cycle(&cycle) {
+                eprintln!("[warn] Failed to record improvement cycle: {}", e);
+            }
+
             // 10. Monitor stub
             let prev_id = promote_result["previous_revision_id"].as_str().unwrap_or("unknown");
             println!(
@@ -236,6 +276,28 @@ pub async fn handle_improve(config_path: &Path, command: &ImproveCommand) -> any
 }
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+
+fn check_auto_approve_eligibility(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: &GatewayStore,
+    agent_id: &str,
+) -> Option<String> {
+    let improve = &config.improve;
+    if !improve.auto_approve_agents.contains(&agent_id.to_string()) {
+        return None;
+    }
+    let eligible = store.check_automation_level_eligibility(
+        agent_id,
+        &autonoetic_types::improvement_cycle::ImprovementLevel::L3,
+        improve.l2_threshold,
+        improve.l3_threshold,
+    ).ok()?;
+    if eligible {
+        Some("L3_eligible".to_string())
+    } else {
+        None
+    }
+}
 
 fn resolve_session_ids(
     store: &GatewayStore,

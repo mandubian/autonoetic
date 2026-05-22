@@ -316,6 +316,30 @@ pub struct ImproveConfig {
     /// gate — but the automated loop refuses.
     #[serde(default = "default_improve_high_blast_radius_capability_kinds")]
     pub high_blast_radius_capability_kinds: Vec<String>,
+
+    /// P7: number of successful L1 cycles (no regressions) required to unlock
+    /// L2 auto-trigger for an agent. Default: 10.
+    #[serde(default = "default_improve_l2_threshold")]
+    pub l2_threshold: u64,
+
+    /// P7: number of successful L2 cycles (no regressions) required to unlock
+    /// L3 auto-approve for an agent. Default: 20.
+    #[serde(default = "default_improve_l3_threshold")]
+    pub l3_threshold: u64,
+
+    /// P7: explicit per-agent opt-in allowlist for L3 auto-approve.
+    /// Agents listed here may be auto-approved at L3 **if** they have also
+    /// earned enough L2 track record. Never wildcarded.
+    /// L3 never applies to agents with CodeExecution, AgentSpawn (broad),
+    /// or sandbox-escape-adjacent capabilities regardless of this list.
+    #[serde(default)]
+    pub auto_approve_agents: Vec<String>,
+
+    /// P7: maximum blast-radius score (0.0–1.0) for L3 auto-approval.
+    /// Revisions scoring above this threshold require operator approval
+    /// even if the agent is on the auto-approve list. Default: 0.3.
+    #[serde(default = "default_improve_l3_blast_radius_threshold")]
+    pub l3_blast_radius_threshold: f64,
 }
 
 fn default_improve_restrict_to_prompt_only() -> bool {
@@ -331,10 +355,6 @@ fn default_improve_capability_change_min_holdout() -> f64 {
 }
 
 fn default_improve_high_blast_radius_capability_kinds() -> Vec<String> {
-    // Conservative default. Each kind here represents a "trust
-    // boundary" the loop must not cross without a human approving
-    // the promotion explicitly. Tightening this list is fine; loosening
-    // it should be done deliberately and case-by-case.
     vec![
         "SandboxFunctions".to_string(),
         "NetworkAccess".to_string(),
@@ -346,6 +366,18 @@ fn default_improve_high_blast_radius_capability_kinds() -> Vec<String> {
     ]
 }
 
+fn default_improve_l2_threshold() -> u64 {
+    10
+}
+
+fn default_improve_l3_threshold() -> u64 {
+    20
+}
+
+fn default_improve_l3_blast_radius_threshold() -> f64 {
+    0.3
+}
+
 impl Default for ImproveConfig {
     fn default() -> Self {
         Self {
@@ -354,6 +386,10 @@ impl Default for ImproveConfig {
             capability_change_min_holdout: default_improve_capability_change_min_holdout(),
             high_blast_radius_capability_kinds:
                 default_improve_high_blast_radius_capability_kinds(),
+            l2_threshold: default_improve_l2_threshold(),
+            l3_threshold: default_improve_l3_threshold(),
+            auto_approve_agents: Vec::new(),
+            l3_blast_radius_threshold: default_improve_l3_blast_radius_threshold(),
         }
     }
 }

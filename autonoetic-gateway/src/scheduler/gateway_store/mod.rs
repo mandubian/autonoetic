@@ -9,6 +9,7 @@ mod escalations;
 mod evaluations;
 mod gate_messages;
 mod hook_deliveries;
+mod improvement_cycles;
 mod memory;
 mod messages;
 mod migrate;

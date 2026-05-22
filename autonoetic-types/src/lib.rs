@@ -17,6 +17,7 @@ pub mod escalation;
 pub mod evaluation;
 pub mod hooks;
 pub mod id_format;
+pub mod improvement_cycle;
 pub mod layer;
 pub mod memory;
 pub mod notification;
