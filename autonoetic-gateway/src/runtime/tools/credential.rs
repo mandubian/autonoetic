@@ -1216,11 +1216,15 @@ struct CredentialSetupArgs {
     allowed_hosts: Option<Vec<String>>,
     /// Optional: approval reference after operator provides secrets via approval channel.
     approval_ref: Option<String>,
-    /// NEW: URL to a skill.md whose `autonoetic.onboarding` section drives registration.
+    /// URL to a skill.md whose `autonoetic.onboarding` section drives registration.
     skill_url: Option<String>,
-    /// NEW: Answers from a prior `user_input` suspension, keyed by `var_name`.
+    /// Answers from a prior `user_input` suspension, keyed by `var_name`.
     /// Required when resuming with `credential_id`.
     resume_vars: Option<HashMap<String, String>>,
+    /// Optional label distinguishing multiple credentials for the same service.
+    /// When provided, dedup is scoped to (service, label) instead of just service.
+    #[serde(default)]
+    label: Option<String>,
 }
 
 /// Persisted state between `credential.setup` calls for multi-step onboarding.
@@ -1424,6 +1428,10 @@ impl NativeTool for CredentialSetupTool {
                     "approval_ref": {
                         "type": "string",
                         "description": "Approval request ID from a completed credential.setup approval (UserPrompt or remote-access gate)."
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Optional label distinguishing multiple credentials for the same service (e.g. 'agent-a', 'agent-b'). Dedup is scoped to (service, label)."
                     }
                 }
             }),
@@ -1451,6 +1459,7 @@ impl NativeTool for CredentialSetupTool {
         _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: CredentialSetupArgs = serde_json::from_str(arguments_json)?;
+        let setup_label = args.label.clone();
 
         let Some(store) = gateway_store else {
             return Ok(autonoetic_types::tool_error::ToolError::resource(
@@ -1573,6 +1582,7 @@ impl NativeTool for CredentialSetupTool {
                 &vault_path,
                 _session_id,
                 _config,
+                None,
             );
         }
 
@@ -1840,22 +1850,24 @@ impl NativeTool for CredentialSetupTool {
             .to_error_response());
         }
 
-        // Dedup: if a credential already exists for this service, return it
-        // instead of creating a duplicate. This guards against the planner
-        // re-running credential onboarding for an already-set-up service.
+        // Dedup: if a credential already exists for this (service, label),
+        // return it instead of creating a duplicate.
         {
             let existing = store.list_credentials_by_service(&service)?;
-            if !existing.is_empty() {
-                let cred = &existing[0];
+            let matched = existing.iter().find(|c| c.label == args.label);
+            if let Some(cred) = matched {
                 let mut response = json!({
                     "ok": true,
                     "credential_id": cred.credential_id,
                     "service": cred.service,
                     "existing": true,
-                    "note": "Credential already exists for this service — reusing existing credential.",
+                    "note": "Credential already exists for this service/label — reusing existing credential.",
                 });
                 if let Some(inject_as) = &cred.inject_as {
                     response["inject_as"] = json!(inject_as);
+                }
+                if let Some(label) = &cred.label {
+                    response["label"] = json!(label);
                 }
                 return Ok(response.to_string());
             }
@@ -2022,6 +2034,7 @@ impl NativeTool for CredentialSetupTool {
             &vault_path,
             _session_id,
             _config,
+            setup_label.as_deref(),
         )
     }
 }
@@ -2049,6 +2062,7 @@ fn execute_steps(
     vault_path: &Path,
     session_id: Option<&str>,
     config: Option<&autonoetic_types::config::GatewayConfig>,
+    label: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut secret_names: Vec<String> = Vec::new();
     let mut step_results: Vec<serde_json::Value> = Vec::new();
@@ -2341,6 +2355,7 @@ fn execute_steps(
             refresh_extract_access_token: None,
             refresh_extract_refresh_token: None,
             refresh_extract_expires_in: None,
+            label: label.map(str::to_string),
         };
         store.upsert_credential(&cred)?;
     }

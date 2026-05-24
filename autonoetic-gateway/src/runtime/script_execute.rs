@@ -279,12 +279,26 @@ pub(crate) fn script_causal_event(
 /// resolves the secret from the vault. Returns `(env_var, secret_value)` pairs
 /// ready to inject into the sandbox environment.
 ///
+/// `spawn_bindings` provides credential overrides from `agent_spawn` — entries
+/// here take precedence over runtime.lock entries for the same service.
+///
 /// Failures are logged and skipped — a missing credential should not block
 /// the agent spawn (the credential may not be needed this session).
 pub(crate) fn resolve_credential_env(
     agent_dir: &Path,
     gateway_dir: &Path,
     store: &crate::scheduler::gateway_store::GatewayStore,
+) -> Vec<(String, String)> {
+    resolve_credential_env_with_bindings(agent_dir, gateway_dir, store, &[])
+}
+
+/// Like [`resolve_credential_env`] but accepts spawn-time credential bindings
+/// that override runtime.lock entries for matching services.
+pub(crate) fn resolve_credential_env_with_bindings(
+    agent_dir: &Path,
+    gateway_dir: &Path,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    spawn_bindings: &[autonoetic_types::runtime_lock::LockedCredentialMount],
 ) -> Vec<(String, String)> {
     let lock_path = agent_dir.join(
         "runtime.lock",
@@ -306,9 +320,27 @@ pub(crate) fn resolve_credential_env(
         Err(_) => return vec![],
     };
 
-    if lock.credentials.is_empty() {
+    if lock.credentials.is_empty() && spawn_bindings.is_empty() {
         return vec![];
     }
+
+    // Merge: spawn_bindings override lock.credentials for matching services.
+    let merged: Vec<autonoetic_types::runtime_lock::LockedCredentialMount> = {
+        let mut result: Vec<autonoetic_types::runtime_lock::LockedCredentialMount> = Vec::new();
+        let binding_services: std::collections::HashSet<&str> = spawn_bindings
+            .iter()
+            .map(|b| b.service.as_str())
+            .collect();
+        for cm in &lock.credentials {
+            if !binding_services.contains(cm.service.as_str()) {
+                result.push(cm.clone());
+            }
+        }
+        for b in spawn_bindings {
+            result.push(b.clone());
+        }
+        result
+    };
 
     let vault_dir = gateway_dir.parent().unwrap_or(gateway_dir);
     if crate::vault::ensure_default_key(vault_dir).is_err() {
@@ -325,8 +357,52 @@ pub(crate) fn resolve_credential_env(
     };
 
     let mut resolved = Vec::new();
-    for cm in &lock.credentials {
+    for cm in &merged {
         let env_var = autonoetic_types::runtime_lock::inject_as_for_service(&cm.service);
+
+        // If a specific credential_id is declared in runtime.lock, resolve directly.
+        if let Some(ref cred_id) = cm.credential_id {
+            match store.get_credential(cred_id) {
+                Ok(Some(cred)) => {
+                    if let Some(secret) = vault.get_secret(&cred.secret_name) {
+                        tracing::info!(
+                            target: "script_execute",
+                            service = %cm.service,
+                            credential_id = %cred_id,
+                            env_var = %env_var,
+                            "Resolved credential by ID for script agent"
+                        );
+                        resolved.push((env_var, secret.expose_secret().to_string()));
+                    } else {
+                        tracing::warn!(
+                            target: "script_execute",
+                            service = %cm.service,
+                            credential_id = %cred_id,
+                            secret_name = %cred.secret_name,
+                            "Secret not found in vault for pinned credential_id"
+                        );
+                    }
+                    continue;
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        target: "script_execute",
+                        credential_id = %cred_id,
+                        "Pinned credential_id not found in store; falling back to service resolution"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "script_execute",
+                        credential_id = %cred_id,
+                        error = %e,
+                        "Failed to look up pinned credential_id"
+                    );
+                }
+            }
+        }
+
+        // Fallback: resolve by service name (first match).
         let creds = match store.list_credentials_by_service(&cm.service) {
             Ok(c) => c,
             Err(e) => {
@@ -360,7 +436,7 @@ pub(crate) fn resolve_credential_env(
                     service = %cm.service,
                     env_var = %env_var,
                     count = matched.len(),
-                    "Multiple credentials found for service+env_var; using first match"
+                    "Multiple credentials found for service+env_var; using first match. Pin a credential_id in runtime.lock to disambiguate."
                 );
                 matched[0]
             }

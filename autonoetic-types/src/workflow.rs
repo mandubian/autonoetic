@@ -187,6 +187,10 @@ pub struct QueuedTaskRun {
     #[serde(default = "default_true")]
     pub blocks_planner: bool,
     pub enqueued_at: String,
+    /// Spawn-time credential bindings: maps service name to credential_id.
+    /// These override runtime.lock resolution for the child agent.
+    #[serde(default)]
+    pub credential_bindings: Vec<crate::runtime_lock::LockedCredentialMount>,
 }
 
 /// Append-only workflow event (mirrors plan `WorkflowEvent` concept).

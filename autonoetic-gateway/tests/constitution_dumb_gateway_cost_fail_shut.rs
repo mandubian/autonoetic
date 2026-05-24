@@ -107,6 +107,7 @@ async fn catalog_unavailable_with_price_cap_refuses_session_start() -> anyhow::R
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -170,6 +171,7 @@ async fn catalog_unavailable_without_price_cap_starts_normally() -> anyhow::Resu
             None,
             None,
             None,
+        &[],
         )
         .await?;
 
@@ -232,6 +234,7 @@ async fn override_capability_allows_unpriced_price_capped_session() -> anyhow::R
             None,
             None,
             None,
+        &[],
         )
         .await?;
 

@@ -88,6 +88,7 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
         join_group: None,
         blocks_planner: true,
         enqueued_at: chrono::Utc::now().to_rfc3339(),
+        credential_bindings: vec![],
     };
     workflow_store::enqueue_task(&config, Some(store.as_ref()), &stale_queued)?;
 

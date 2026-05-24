@@ -37,10 +37,11 @@ fn row_to_credential(
         refresh_extract_access_token: row.get(11)?,
         refresh_extract_refresh_token: row.get(13)?,
         refresh_extract_expires_in: row.get(14)?,
+        label: row.get(15)?,
     })
 }
 
-const CREDENTIAL_COLUMNS: &str = "credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts, refresh_token_secret_name, refresh_url, refresh_method, refresh_headers, refresh_extract_access_token, refresh_extract_refresh_token, refresh_extract_expires_in";
+const CREDENTIAL_COLUMNS: &str = "credential_id, service, secret_name, inject_as, created_by_agent, expires_at, shared_with, allowed_hosts, refresh_token_secret_name, refresh_url, refresh_method, refresh_headers, refresh_extract_access_token, refresh_extract_refresh_token, refresh_extract_expires_in, label";
 
 impl GatewayStore {
     pub fn upsert_credential(
@@ -59,7 +60,7 @@ impl GatewayStore {
         conn.execute(
             &format!(
                 "INSERT INTO credentials ({CREDENTIAL_COLUMNS}, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(credential_id) DO UPDATE SET
                 service = excluded.service,
                 secret_name = excluded.secret_name,
@@ -74,6 +75,7 @@ impl GatewayStore {
                 refresh_extract_access_token = excluded.refresh_extract_access_token,
                 refresh_extract_refresh_token = excluded.refresh_extract_refresh_token,
                 refresh_extract_expires_in = excluded.refresh_extract_expires_in,
+                label = excluded.label,
                 updated_at = excluded.updated_at"
             ),
             params![
@@ -92,6 +94,7 @@ impl GatewayStore {
                 cred.refresh_extract_access_token,
                 cred.refresh_extract_refresh_token,
                 cred.refresh_extract_expires_in,
+                cred.label,
                 now,
                 now,
             ],

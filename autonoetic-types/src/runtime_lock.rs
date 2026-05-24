@@ -31,6 +31,10 @@ pub fn inject_as_for_service(service: &str) -> String {
 pub struct LockedCredentialMount {
     /// Service name matching the `credential.service` value in the store.
     pub service: String,
+    /// Optional specific credential ID to inject at spawn time.
+    /// When absent, resolve by service name (first match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
 }
 
 /// A pinned artifact reference inside the runtime lock.

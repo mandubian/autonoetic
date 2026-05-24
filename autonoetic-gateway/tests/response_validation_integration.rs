@@ -121,6 +121,7 @@ async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<(
             None,
             None,
             None,
+        &[],
         )
         .await?;
     assert!(result.assistant_reply.is_some());
@@ -169,6 +170,7 @@ async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> 
             None,
             None,
             None,
+        &[],
         )
         .await?;
     assert!(result.assistant_reply.is_some());
@@ -222,6 +224,7 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -288,6 +291,7 @@ async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<(
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -346,6 +350,7 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -397,6 +402,7 @@ async fn test_manifest_io_returns_passes_without_explicit_output_policy() -> any
             None,
             None,
             None,
+        &[],
         )
         .await?;
 
@@ -458,6 +464,7 @@ async fn test_manifest_io_returns_rejects_and_logs_without_explicit_output_polic
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -535,6 +542,7 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -588,6 +596,7 @@ async fn test_response_validation_skipped_on_suspended_session() -> anyhow::Resu
             None,
             None,
             None,
+        &[],
         )
         .await?;
     assert!(result.suspended_for_approval.is_none());
@@ -640,6 +649,7 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -719,6 +729,7 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -825,6 +836,7 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await;
 

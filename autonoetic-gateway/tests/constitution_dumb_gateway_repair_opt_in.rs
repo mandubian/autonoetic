@@ -114,6 +114,7 @@ async fn repair_disabled_by_default_without_manifest_opt_in() -> anyhow::Result<
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -178,6 +179,7 @@ async fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();
@@ -241,6 +243,7 @@ async fn repair_attempts_are_capped_by_system_ceiling() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await
         .unwrap_err();

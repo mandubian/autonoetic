@@ -158,7 +158,7 @@ pub fn scaffold_runtime_lock_with_scopes(
         credentials: credential_services
             .unwrap_or_default()
             .into_iter()
-            .map(|service| LockedCredentialMount { service })
+            .map(|service| LockedCredentialMount { service, credential_id: None })
             .collect(),
     })
 }

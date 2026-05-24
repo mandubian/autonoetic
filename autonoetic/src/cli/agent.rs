@@ -2222,6 +2222,7 @@ fn handle_credential_put(
         refresh_extract_access_token: None,
         refresh_extract_refresh_token: None,
         refresh_extract_expires_in: None,
+        label: None,
     };
     store.upsert_credential(&cred)?;
 

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 39;
+const SCHEMA_VERSION_LATEST: i64 = 40;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -524,6 +524,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_stage_transitions_v37(conn)?;
     apply_session_outcomes_v38(conn)?;
     apply_improvement_cycles_v39(conn)?;
+    apply_credential_label_v40(conn)?;
 
     Ok(())
 }
@@ -655,6 +656,30 @@ fn apply_improvement_cycles_v39(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![39_i64, "improvement_cycles", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_credential_label_v40(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 40 {
+        return Ok(());
+    }
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('credentials') WHERE name = 'label'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute("ALTER TABLE credentials ADD COLUMN label TEXT DEFAULT NULL", [])?;
+    }
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![40_i64, "credential_label", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

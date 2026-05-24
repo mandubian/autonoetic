@@ -1005,6 +1005,7 @@ pub async fn process_queued_workflow_tasks(
         let wf_id = queued_task.workflow_id.clone();
         let t_id = queued_task.task_id.clone();
         let cfg = config.clone();
+        let cred_bindings = queued_task.credential_bindings.clone();
 
         let join = tokio::spawn({
             let reg = reg.clone();
@@ -1027,7 +1028,7 @@ pub async fn process_queued_workflow_tasks(
                     tid: tid_for_reg,
                 };
                 spawn_task_execution(
-                    exec, cfg, wf_id, t_id, agent_id, message, session_id, source_id, metadata,
+                    exec, cfg, wf_id, t_id, agent_id, message, session_id, source_id, metadata, cred_bindings,
                 )
                 .await;
             }
@@ -1054,6 +1055,7 @@ async fn spawn_task_execution(
     session_id: String,
     source_id: String,
     metadata: Option<serde_json::Value>,
+    credential_bindings: Vec<autonoetic_types::runtime_lock::LockedCredentialMount>,
 ) {
     let store = exec.gateway_store();
     let store = store.as_deref();
@@ -1206,6 +1208,7 @@ async fn spawn_task_execution(
             Some(&wf_id),
             Some(&t_id),
             None,
+            &credential_bindings,
         )
         .await;
 
@@ -1687,6 +1690,7 @@ pub async fn process_runnable_workflow_tasks(
                 join_group: task.join_group.clone(),
                 blocks_planner,
                 enqueued_at: chrono::Utc::now().to_rfc3339(),
+                credential_bindings: vec![],
             };
             workflow_store::enqueue_task(&config, store, &queued)?;
         }
@@ -1924,6 +1928,7 @@ async fn process_due_scheduled_jobs(
             join_group: None,
             blocks_planner: false,
             enqueued_at: now_rfc.clone(),
+            credential_bindings: vec![],
         };
 
         if let Err(e) = workflow_store::enqueue_task(&config, Some(store.as_ref()), &queued) {

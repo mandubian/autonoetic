@@ -293,6 +293,7 @@ async fn test_approval_continuation_suspends_and_resumes() -> anyhow::Result<()>
             None, // no workflow_id (non-workflow path)
             Some(task_id),
             None,
+        &[],
         )
         .await?;
 
@@ -359,6 +360,7 @@ async fn test_approval_continuation_suspends_and_resumes() -> anyhow::Result<()>
             None,
             Some(task_id),
             None,
+        &[],
         )
         .await?;
 
@@ -481,6 +483,7 @@ async fn test_approval_continuation_file_deleted_on_cancellation() -> anyhow::Re
             None,
             Some(task_id),
             None,
+        &[],
         )
         .await?;
 
@@ -611,6 +614,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
             Some(workflow_id),
             Some(approval_task_id),
             None,
+        &[],
         )
         .await?;
     let suspended_request_id = first_result
@@ -718,6 +722,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
             Some(workflow_id),
             Some(approval_task_id),
             None,
+        &[],
         )
         .await?;
     assert!(
@@ -858,6 +863,7 @@ async fn test_approval_timeout_fails_task_and_satisfies_join() -> anyhow::Result
             Some(workflow_id),
             Some(task_id),
             None,
+        &[],
         )
         .await?;
     assert!(
@@ -1013,6 +1019,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
             Some(workflow_id),
             Some(task_id),
             None,
+        &[],
         )
         .await?;
     let request_id = first_result
@@ -1066,6 +1073,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
             Some(workflow_id),
             Some(task_id),
             None,
+        &[],
         )
         .await?;
     assert!(
@@ -1208,6 +1216,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
             Some(workflow_id),
             Some(task_a),
             None,
+        &[],
         )
         .await?
         .suspended_for_approval
@@ -1224,6 +1233,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
             Some(workflow_id),
             Some(task_b),
             None,
+        &[],
         )
         .await?
         .suspended_for_approval
@@ -1284,6 +1294,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
             Some(workflow_id),
             Some(task_a),
             None,
+        &[],
         )
         .await?;
     assert!(resumed_a.suspended_for_approval.is_none());
@@ -1340,6 +1351,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
             Some(workflow_id),
             Some(task_b),
             None,
+        &[],
         )
         .await?;
     assert!(resumed_b.suspended_for_approval.is_none());
@@ -1477,6 +1489,7 @@ async fn test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join() -
             Some(workflow_id),
             Some(task_id),
             None,
+        &[],
         )
         .await?;
     assert!(

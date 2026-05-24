@@ -136,6 +136,7 @@ async fn spawn_refused_at_system_ceiling() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await;
     // May fail for other reasons (no LLM stub), but should NOT fail with depth error
@@ -164,6 +165,7 @@ async fn spawn_refused_at_system_ceiling() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await;
     match &result {
@@ -191,6 +193,7 @@ async fn spawn_refused_at_system_ceiling() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await;
     assert!(result.is_err(), "spawn at depth 2 should be rejected");
@@ -241,6 +244,7 @@ async fn spawn_refused_at_agent_ceiling_when_tighter() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await;
     match &result {
@@ -268,6 +272,7 @@ async fn spawn_refused_at_agent_ceiling_when_tighter() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await;
     assert!(
@@ -315,6 +320,7 @@ async fn spawn_refused_at_depth_zero_no_capability() -> anyhow::Result<()> {
             None,
             None,
             None,
+        &[],
         )
         .await;
     assert!(

@@ -2449,6 +2449,7 @@ mod tests {
             join_group: None,
             blocks_planner: true,
             enqueued_at: now_rfc3339(),
+            credential_bindings: vec![],
         };
         enqueue_task(&cfg, None, &queued).unwrap();
 
@@ -2494,6 +2495,7 @@ mod tests {
                 join_group: Some("main".to_string()),
                 blocks_planner: true,
                 enqueued_at: now_rfc3339(),
+                credential_bindings: vec![],
             };
             enqueue_task(&cfg, None, &queued).unwrap();
         }
@@ -2763,6 +2765,7 @@ mod tests {
             join_group: None,
             blocks_planner: true,
             enqueued_at: now_rfc3339(),
+            credential_bindings: vec![],
         };
         enqueue_task(&cfg, None, &queued).unwrap();
 
@@ -3089,6 +3092,7 @@ mod tests {
                 join_group: None,
                 blocks_planner: false,
                 enqueued_at: now_rfc3339(),
+                credential_bindings: vec![],
             };
             enqueue_task(&cfg, None, &queued).unwrap();
         }
@@ -3179,6 +3183,7 @@ mod tests {
             join_group: None,
             blocks_planner: true,
             enqueued_at: now_rfc3339(),
+            credential_bindings: vec![],
         };
         enqueue_task(&cfg, None, &queued).unwrap();
         acquire_task_claim(&cfg, None, &wf.workflow_id, &queued.task_id, 60)

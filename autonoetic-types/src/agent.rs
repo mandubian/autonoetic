@@ -412,6 +412,10 @@ pub struct CredentialRecord {
     pub created_by_agent: Option<String>,
     /// Optional expiry timestamp (ISO 8601).
     pub expires_at: Option<String>,
+    /// Optional label distinguishing multiple credentials for the same service.
+    /// E.g. "agent-a", "agent-b". When absent, the credential is unlabeled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Agents this credential is shared with.
     #[serde(default)]
     pub shared_with: Vec<String>,

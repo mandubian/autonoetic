@@ -49,6 +49,10 @@ struct SpawnAgentArgs {
     /// mount the artifact's dependency layers (read-only).
     #[serde(default)]
     artifact_id: Option<String>,
+    /// Spawn-time credential bindings. Each entry maps a service name to a
+    /// specific credential_id, overriding runtime.lock resolution for the child.
+    #[serde(default)]
+    credential_bindings: Vec<autonoetic_types::runtime_lock::LockedCredentialMount>,
 }
 
 /// Keeps a workflow task's `updated_at` fresh while synchronous `agent.spawn` blocks.
@@ -139,7 +143,19 @@ impl NativeTool for AgentSpawnTool {
                     "metadata": { "type": "object" },
                     "session_id": { "type": "string" },
                     "async": { "type": "boolean", "description": "If true, enqueue for background execution and return immediately with task_id. Default: false (synchronous)." },
-                    "join_group": { "type": "string", "description": "Optional group name for join semantics. Tasks in the same group are awaited together before planner resumes." }
+                    "join_group": { "type": "string", "description": "Optional group name for join semantics. Tasks in the same group are awaited together before planner resumes." },
+                    "credential_bindings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "service": { "type": "string", "description": "Service name (e.g. 'moltbook')" },
+                                "credential_id": { "type": "string", "description": "Specific credential ID to inject for this service" }
+                            },
+                            "required": ["service", "credential_id"]
+                        },
+                        "description": "Bind specific credentials to the child agent. Overrides runtime.lock service-level resolution."
+                    }
                 },
                 "required": ["agent_id", "message"],
                 "additionalProperties": false
@@ -420,6 +436,7 @@ impl NativeTool for AgentSpawnTool {
                     "child_session_id": child_delegation_path,
                     "parent_session_id": resolved_session_id,
                     "spawn_reason": spawn_reason_preview,
+                    "spawn_reason_full": kickoff_message,
                 }),
                 occurred_at: Utc::now().to_rfc3339(),
             },
@@ -480,6 +497,7 @@ impl NativeTool for AgentSpawnTool {
             join_group: args.join_group,
             blocks_planner: true,
             enqueued_at: Utc::now().to_rfc3339(),
+            credential_bindings: args.credential_bindings,
         };
         crate::scheduler::enqueue_task(gw_config, gateway_store.as_deref(), &queued)?;
 

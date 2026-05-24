@@ -217,6 +217,7 @@ async fn execute_case(
             None,
             None,
             None,
+            &[],
         )
         .await;
 

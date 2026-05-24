@@ -328,6 +328,7 @@ pub async fn run_fast_scheduler_tick_at(
             join_group: None,
             blocks_planner: false,
             enqueued_at: now_rfc.clone(),
+            credential_bindings: vec![],
         };
 
         if let Err(e) = workflow_store::enqueue_task(&config, Some(store.as_ref()), &queued) {
