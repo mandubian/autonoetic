@@ -90,20 +90,14 @@ fn validate_nonsecret_answer_payload(answer_text: &Option<String>) -> anyhow::Re
 fn is_critical_divergence_stop_selection(
     interaction: &autonoetic_types::background::UserInteraction,
 ) -> bool {
-    interaction.kind == autonoetic_types::background::UserInteractionKind::Decision
-        && interaction
-            .question
-            .starts_with("Critical trajectory divergence in agent '")
+    interaction.kind == autonoetic_types::background::UserInteractionKind::DivergenceSentinel
         && interaction.answer_option_id.as_deref() == Some("stop")
 }
 
-fn is_divergence_decision(
+fn is_divergence_sentinel(
     interaction: &autonoetic_types::background::UserInteraction,
 ) -> bool {
-    interaction.kind == autonoetic_types::background::UserInteractionKind::Decision
-        && interaction
-            .question
-            .starts_with("Critical trajectory divergence in agent '")
+    interaction.kind == autonoetic_types::background::UserInteractionKind::DivergenceSentinel
 }
 
 /// Resolve which pending interaction to answer using deterministic priority.
@@ -249,7 +243,7 @@ pub async fn answer_and_orchestrate_resume(
         });
     }
 
-    if is_divergence_decision(&interaction) {
+    if is_divergence_sentinel(&interaction) {
         tracing::info!(
             target: "interaction",
             interaction_id = %interaction.interaction_id,
@@ -438,8 +432,8 @@ mod tests {
             root_session_id: "root-1".into(),
             agent_id: "planner.default".into(),
             turn_id: "turn-000005".into(),
-            kind: autonoetic_types::background::UserInteractionKind::Decision,
-            question: "Critical trajectory divergence in agent 'planner.default' at turn 5. Choose acknowledge, continue, stop, or enter a note.".into(),
+            kind: autonoetic_types::background::UserInteractionKind::DivergenceSentinel,
+            question: "Critical trajectory divergence in agent 'planner.default' at turn 5.".into(),
             context: None,
             options: vec![
                 autonoetic_types::background::UserInteractionOption {

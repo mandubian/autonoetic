@@ -746,6 +746,7 @@ fn parse_interaction_kind(kind: &str) -> UserInteractionKind {
         "decision" => UserInteractionKind::Decision,
         "proposal" => UserInteractionKind::Proposal,
         "confirmation" => UserInteractionKind::Confirmation,
+        "divergence_sentinel" => UserInteractionKind::DivergenceSentinel,
         _ => UserInteractionKind::Clarification,
     }
 }

@@ -762,6 +762,8 @@ pub enum UserInteractionKind {
     Proposal,
     /// "Do you want to proceed with this?"
     Confirmation,
+    /// Sentinel-detected critical trajectory divergence — non-blocking notification.
+    DivergenceSentinel,
 }
 
 impl std::fmt::Display for UserInteractionKind {
@@ -771,6 +773,7 @@ impl std::fmt::Display for UserInteractionKind {
             Self::Decision => write!(f, "decision"),
             Self::Proposal => write!(f, "proposal"),
             Self::Confirmation => write!(f, "confirmation"),
+            Self::DivergenceSentinel => write!(f, "divergence_sentinel"),
         }
     }
 }
@@ -782,6 +785,7 @@ impl UserInteractionKind {
             Self::Decision => "decision",
             Self::Proposal => "proposal",
             Self::Confirmation => "confirmation",
+            Self::DivergenceSentinel => "divergence_sentinel",
         }
     }
 }

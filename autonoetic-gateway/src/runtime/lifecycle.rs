@@ -119,7 +119,7 @@ fn build_critical_divergence_interaction(
         root_session_id,
         agent_id: agent_id.to_string(),
         turn_id: format!("turn-{:06}", turn_counter),
-        kind: autonoetic_types::background::UserInteractionKind::Decision,
+        kind: autonoetic_types::background::UserInteractionKind::DivergenceSentinel,
         question: format!(
             "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge, continue, stop, or enter a note.",
             agent_id, turn_counter

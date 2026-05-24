@@ -73,6 +73,7 @@ impl GatewayStore {
                     "decision" => UserInteractionKind::Decision,
                     "proposal" => UserInteractionKind::Proposal,
                     "confirmation" => UserInteractionKind::Confirmation,
+                    "divergence_sentinel" => UserInteractionKind::DivergenceSentinel,
                     _ => {
                         return Err(rusqlite::Error::FromSqlConversionFailure(
                             7,
