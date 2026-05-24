@@ -31,8 +31,6 @@ metadata:
           - "digest.query"
       - type: "GithubIssueCreate"
         patterns: ["*"]
-    limits:
-      max_session_price_usd: 0.05
     validation: "soft"
     io:
       trigger: "Manual via 'autonoetic improve --session <id> --propose-code-fix' or delegated by evolution-steward on code_level classification."
