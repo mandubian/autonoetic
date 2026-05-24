@@ -66,6 +66,9 @@ fn make_checkpoint(
         estimated_cost_usd: 0.001,
         compression_metadata: None,
         capsule_state: None,
+        assistant_message: None,
+        pending_action: None,
+        suspended_at: None,
     }
 }
 

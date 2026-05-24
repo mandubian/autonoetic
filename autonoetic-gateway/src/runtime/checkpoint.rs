@@ -157,6 +157,21 @@ pub struct SessionCheckpoint {
     /// Current state capsule for hierarchical summarization (Phase 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule_state: Option<crate::runtime::context_governor::capsule::StateCapsule>,
+
+    // --- Approval continuation fields (for TurnContinuation unification) ---
+    /// The assistant message containing the tool call(s) that triggered approval.
+    /// Re-appended to history on resume before the tool result messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<Message>,
+
+    /// The `ScheduledAction` pending approval — stored for TOCTOU verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_action: Option<autonoetic_types::background::ScheduledAction>,
+
+    /// Wall-clock timestamp of suspension (RFC3339). Used by the scheduler
+    /// timeout checker to fail tasks that wait too long for approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<String>,
 }
 
 impl SessionCheckpoint {
@@ -535,6 +550,9 @@ mod tests {
             estimated_cost_usd: 0.001,
             compression_metadata: None,
             capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
         };
 
         save_checkpoint(&config, &checkpoint).expect("should save");
@@ -588,6 +606,9 @@ mod tests {
             estimated_cost_usd: 0.001,
             compression_metadata: None,
             capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
         };
 
         let mut c2 = c1.clone();
@@ -649,6 +670,9 @@ mod tests {
                 estimated_cost_usd: 0.001,
                 compression_metadata: None,
                 capsule_state: None,
+                assistant_message: None,
+                pending_action: None,
+                suspended_at: None,
             };
             save_checkpoint(&config, &checkpoint).unwrap();
         }

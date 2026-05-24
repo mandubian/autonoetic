@@ -325,6 +325,9 @@ fn test_session_snapshot_fork() {
         estimated_cost_usd: 0.002,
         compression_metadata: None,
         capsule_state: None,
+        assistant_message: None,
+        pending_action: None,
+        suspended_at: None,
     };
     save_checkpoint(&config, &cp).unwrap();
 

@@ -709,6 +709,9 @@ impl AgentExecutor {
                 None
             },
             capsule_state: self.capsule_state.clone(),
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
         }
     }
 

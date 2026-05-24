@@ -44,6 +44,9 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
         estimated_cost_usd: 0.0,
         compression_metadata: None,
         capsule_state: None,
+        assistant_message: None,
+        pending_action: None,
+        suspended_at: None,
     }
 }
 

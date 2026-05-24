@@ -185,6 +185,9 @@ mod session_resume_tests {
             estimated_cost_usd: 0.0,
             compression_metadata: None,
             capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
         };
         let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
         assert_eq!(id, "tid-99");
