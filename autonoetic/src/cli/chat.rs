@@ -245,9 +245,11 @@ struct TaskLifecycle {
     agent_suffix: String,
     /// Display labels, e.g. `completed` or `completed (gate: fail)`.
     stages: Vec<String>,
-    /// The spawn reason / intent from the task.spawned event.
+    /// The spawn reason / intent from the task.spawned event (200-char preview).
     spawn_reason: Option<String>,
-    /// Result summary from task.completed event payload.
+    /// Full spawn reason from task.spawned event (for expand).
+    spawn_reason_full: Option<String>,
+    /// Result summary from task.completed/failed event payload.
     result_summary: Option<String>,
     /// Whether the user has toggled this lifecycle to expanded view.
     expanded: bool,
@@ -717,6 +719,7 @@ impl App {
                             &tid,
                             &lc.stages,
                             lc.spawn_reason.as_deref(),
+                            lc.spawn_reason_full.as_deref(),
                             lc.result_summary.as_deref(),
                             lc.expanded,
                         );
@@ -794,10 +797,22 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
                     Ok(SlashCommand::SessionSwitch(rest.trim().to_string()))
                 }
             }
-            Some(other) => Err(format!(
-                "Unknown /session subcommand '{}'. Try /session, /session new, or /session switch <session-id>.",
-                other
-            )),
+            Some(other) => {
+                if other.starts_with("session-") {
+                    let rest = parts.collect::<Vec<_>>().join(" ");
+                    let full_id = if rest.is_empty() {
+                        other.to_string()
+                    } else {
+                        format!("{} {}", other, rest)
+                    };
+                    Ok(SlashCommand::SessionSwitch(full_id.trim().to_string()))
+                } else {
+                    Err(format!(
+                        "Unknown /session subcommand '{}'. Try /session, /session new, or /session switch <session-id>.",
+                        other
+                    ))
+                }
+            }
         },
         "/why" => {
             let rest = parts.collect::<Vec<_>>().join(" ");
@@ -870,9 +885,16 @@ fn generate_session_id() -> String {
     format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8])
 }
 
+fn open_gateway_store(
+    config: &autonoetic_types::config::GatewayConfig,
+) -> anyhow::Result<GatewayStore> {
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config);
+    GatewayStore::open(&gateway_dir)
+}
+
 fn resolve_latest_session(config_path: &Path, config: &GatewayConfig) -> String {
-    // Try trace files first (fast, no DB needed)
-    let sessions = load_known_sessions(config_path, "", "");
+    let gw_store = open_gateway_store(config).ok();
+    let sessions = load_known_sessions(config_path, "", "", gw_store.as_ref());
     if let Some(entry) = sessions.into_iter().next() {
         eprintln!("Resuming session: {}", entry.session_id);
         return entry.session_id;
@@ -900,6 +922,7 @@ fn load_known_sessions(
     config_path: &Path,
     current_session_id: &str,
     current_target_hint: &str,
+    gateway_store: Option<&GatewayStore>,
 ) -> Vec<KnownSessionEntry> {
     let mut by_session: BTreeMap<String, KnownSessionEntry> = BTreeMap::new();
     if let Ok(traces) = super::trace::load_agent_traces(config_path, None) {
@@ -925,6 +948,34 @@ fn load_known_sessions(
             if entry.last_timestamp.as_ref().is_none_or(|ts| summary.last_timestamp > *ts) {
                 entry.last_timestamp = Some(summary.last_timestamp.clone());
                 entry.primary_agent_id = Some(summary.agent_id.clone());
+            }
+        }
+    }
+
+    if let Some(store) = gateway_store {
+        if let Ok(db_sessions) = store.list_recent_sessions(200) {
+            for (session_id, agent_id, last_ts) in db_sessions {
+                let entry = by_session
+                    .entry(session_id.clone())
+                    .or_insert_with(|| KnownSessionEntry {
+                        session_id: session_id.clone(),
+                        primary_agent_id: Some(agent_id.clone()),
+                        agent_ids: vec![agent_id.clone()],
+                        first_timestamp: None,
+                        last_timestamp: None,
+                        event_count: 0,
+                    });
+                if !entry.agent_ids.contains(&agent_id) {
+                    entry.agent_ids.push(agent_id.clone());
+                    entry.agent_ids.sort();
+                }
+                if entry.last_timestamp.as_ref().is_none_or(|ts| last_ts > *ts) {
+                    entry.last_timestamp = Some(last_ts.clone());
+                    entry.primary_agent_id = Some(agent_id.clone());
+                }
+                if entry.first_timestamp.as_ref().is_none_or(|ts| last_ts < *ts) {
+                    entry.first_timestamp = Some(last_ts.clone());
+                }
             }
         }
     }
@@ -1211,8 +1262,12 @@ fn switch_session(
     refresh_session_snapshot(app, config, gateway_store);
 }
 
-fn begin_session_picker(app: &mut App, config_path: &Path) {
-    let sessions = load_known_sessions(config_path, &app.session_id, &app.target_hint);
+fn begin_session_picker(
+    app: &mut App,
+    config_path: &Path,
+    gateway_store: Option<&GatewayStore>,
+) {
+    let sessions = load_known_sessions(config_path, &app.session_id, &app.target_hint, gateway_store);
     let card = format_known_sessions_card(app, &sessions);
     app.pending_prompt = Some(PendingPrompt::SessionSelection { sessions });
     app.add_message(MessageRole::System, card);
@@ -1273,6 +1328,16 @@ fn handle_prompt_submission(
                     session.primary_agent_id,
                     "picker",
                 );
+            } else if trimmed.starts_with("session-") {
+                switch_session(
+                    app,
+                    config,
+                    gateway_store,
+                    pending_map,
+                    trimmed.to_string(),
+                    None,
+                    "picker",
+                );
             } else {
                 app.add_message(
                     MessageRole::System,
@@ -1321,7 +1386,7 @@ fn handle_slash_command_submission(
             true
         }
         SlashCommand::Session => {
-            begin_session_picker(app, config_path);
+            begin_session_picker(app, config_path, gateway_store);
             true
         }
         SlashCommand::SessionNew(name) => {
@@ -1346,7 +1411,7 @@ fn handle_slash_command_submission(
             true
         }
         SlashCommand::SessionSwitch(session_id) => {
-            let target_hint = load_known_sessions(config_path, &app.session_id, &app.target_hint)
+            let target_hint = load_known_sessions(config_path, &app.session_id, &app.target_hint, gateway_store)
                 .into_iter()
                 .find(|session| session.session_id == session_id)
                 .and_then(|session| session.primary_agent_id);
@@ -1895,6 +1960,13 @@ fn render_approval_card(
     }
 
     lines.push(rich_box_empty(width));
+    if let Some(ref phrase) = req.confirm_phrase {
+        let phrase_style = Style::default().fg(Color::Yellow);
+        for wl in word_wrap_text(&format!("Confirm phrase: '{}'", phrase), text_width) {
+            lines.push(rich_box_mid_styled(&wl, width, phrase_style));
+        }
+        lines.push(rich_box_empty(width));
+    }
     let hint_style = Style::default().fg(Color::Green);
     for dl in detail.lines() {
         for wl in word_wrap_text(dl, text_width) {
@@ -2495,6 +2567,7 @@ fn format_lifecycle_line(
     task: &str,
     stages: &[String],
     spawn_reason: Option<&str>,
+    spawn_reason_full: Option<&str>,
     result_summary: Option<&str>,
     expanded: bool,
 ) -> String {
@@ -2504,9 +2577,10 @@ fn format_lifecycle_line(
     let is_terminal = stages
         .last()
         .map_or(false, |s| matches!(s.as_str(), "completed" | "failed" | "cancelled") || s.contains("(gate:"));
+    let full_reason = spawn_reason_full.unwrap_or(spawn_reason.unwrap_or(""));
     if expanded {
-        if let Some(reason) = spawn_reason {
-            for ln in reason.lines() {
+        if !full_reason.is_empty() {
+            for ln in full_reason.lines() {
                 line.push_str(&format!("\n   💬 {}", ln));
             }
         }
@@ -2526,11 +2600,11 @@ fn format_lifecycle_line(
                 let preview = preview_spawn_reason(result, 120);
                 line.push_str(&format!("\n   📋 {}", preview));
             }
-            if spawn_reason.map_or(false, |r| r.lines().count() > 1)
-                || result_summary.map_or(false, |r| r.lines().count() > 1)
-            {
-                line.push_str("\n   [click to expand]");
-            }
+        }
+        let has_full_content = spawn_reason_full.is_some()
+            || result_summary.map_or(false, |r| r.lines().count() > 1);
+        if has_full_content {
+            line.push_str("\n   [click to expand]");
         }
     }
     line
@@ -2569,10 +2643,20 @@ fn push_workflow_event_message(
         } else {
             None
         };
-        let result_summary = if event_type == "task.completed" {
+        let spawn_reason_full = if event_type == "task.spawned" {
+            payload
+                .get("spawn_reason_full")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        let result_summary = if event_type == "task.completed" || event_type == "task.failed" {
             payload
                 .get("result_summary")
                 .and_then(|v| v.as_str())
+                .or_else(|| payload.get("reason").and_then(|v| v.as_str()))
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
         } else {
@@ -2585,6 +2669,9 @@ fn push_workflow_event_message(
             if spawn_reason.is_some() {
                 lc.spawn_reason = spawn_reason;
             }
+            if spawn_reason_full.is_some() {
+                lc.spawn_reason_full = spawn_reason_full;
+            }
             if result_summary.is_some() {
                 lc.result_summary = result_summary;
             }
@@ -2593,6 +2680,7 @@ fn push_workflow_event_message(
                 task_id,
                 &lc.stages,
                 lc.spawn_reason.as_deref(),
+                lc.spawn_reason_full.as_deref(),
                 lc.result_summary.as_deref(),
                 lc.expanded,
             );
@@ -2613,6 +2701,7 @@ fn push_workflow_event_message(
                 task_id,
                 std::slice::from_ref(&stage),
                 spawn_reason.as_deref(),
+                spawn_reason_full.as_deref(),
                 result_summary.as_deref(),
                 false,
             );
@@ -2622,6 +2711,7 @@ fn push_workflow_event_message(
                     agent_suffix: agent_suffix.to_string(),
                     stages: vec![stage],
                     spawn_reason,
+                    spawn_reason_full,
                     result_summary,
                     expanded: false,
                 },
@@ -3741,8 +3831,9 @@ async fn handle_chat_test_mode(
                     println!("Session: {}\nTarget: {}", current_session_id, current_target_hint);
                 }
                 Ok(SlashCommand::Session) => {
+                    let gw_store = open_gateway_store(_config).ok();
                     let sessions =
-                        load_known_sessions(config_path, &current_session_id, &current_target_hint);
+                        load_known_sessions(config_path, &current_session_id, &current_target_hint, gw_store.as_ref());
                     let mut probe_app = App::new(
                         current_session_id.clone(),
                         current_target_hint.clone(),
@@ -3759,8 +3850,9 @@ async fn handle_chat_test_mode(
                     println!("Switched to new session {}", current_session_id);
                 }
                 Ok(SlashCommand::SessionSwitch(session_id)) => {
+                    let gw_store = open_gateway_store(_config).ok();
                     if let Some(target_hint) =
-                        load_known_sessions(config_path, &current_session_id, &current_target_hint)
+                        load_known_sessions(config_path, &current_session_id, &current_target_hint, gw_store.as_ref())
                             .into_iter()
                             .find(|session| session.session_id == session_id)
                             .and_then(|session| session.primary_agent_id)
@@ -4178,11 +4270,23 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         let workflow_note = result
                                             .get("workflow_note")
                                             .and_then(|n| n.as_str());
+                                        let is_terminal = status == "completed" || status == "failed";
+                                        if is_terminal {
+                                            let ids: Vec<u64> = app.post_approval_pending_ids.drain(..).collect();
+                                            for pid in ids {
+                                                app.remove_pending(pid);
+                                            }
+                                        }
                                         if status == "completed" {
                                             if let Some(r) = reply.filter(|s| !s.trim().is_empty()) {
                                                 let formatted = format_assistant_reply(r);
-                                                display_assistant_metadata(app, &formatted, None);
-                                                app.add_message(MessageRole::Assistant, formatted.display);
+                                                let is_duplicate = app.messages.iter().rev().take(5).any(|m| {
+                                                    matches!(m.role, MessageRole::Assistant) && m.content == formatted.display
+                                                });
+                                                if !is_duplicate {
+                                                    display_assistant_metadata(app, &formatted, None);
+                                                    app.add_message(MessageRole::Assistant, formatted.display);
+                                                }
                                             }
                                             if let Some(note) = workflow_note.filter(|s| !s.trim().is_empty()) {
                                                 app.add_message(MessageRole::SignalLow, note.to_owned());
@@ -4703,11 +4807,29 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                     }
                                 }
                                 HandleKeyAction::ApproveInline(apr_id) => {
-                                    // Handle inline approval
                                     if let Some(store) = gateway_store {
                                         let approver_level =
                                             autonoetic_types::background::ApprovalLevel::Operator;
-                                        match autonoetic_gateway::scheduler::approve_request(
+                                        let mut options =
+                                            autonoetic_gateway::scheduler::ApproveOptions::default();
+                                        if let Ok(Some(ref approval)) = store.get_approval(&apr_id) {
+                                            if let Some(ref phrase) = approval.confirm_phrase {
+                                                options.confirm_phrase = Some(phrase.clone());
+                                            }
+                                            if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+                                                added_capabilities,
+                                                broadened_capabilities,
+                                                ..
+                                            } = &approval.action
+                                            {
+                                                options.acknowledged_capabilities =
+                                                    added_capabilities.iter()
+                                                        .chain(broadened_capabilities.iter())
+                                                        .cloned()
+                                                        .collect();
+                                            }
+                                        }
+                                        match autonoetic_gateway::scheduler::approve_request_with_options(
                                             config,
                                             Some(store),
                                             &apr_id,
@@ -4716,6 +4838,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             None,
                                             Some(&approver_level),
                                             None,
+                                            options,
                                         ) {
                                             Ok(_decision) => {
                                                 app.pending_approval_ids
@@ -5440,6 +5563,10 @@ fn format_store_approval_card(
         lines.push(String::new());
         lines.push(autonoetic_types::constitution_glossary::format_enforced_rules(&inferred_rules));
     }
+    if let Some(ref phrase) = req.confirm_phrase {
+        lines.push(String::new());
+        lines.push(format!("Confirm phrase: '{}'", phrase));
+    }
     lines.push(String::new());
     lines.push(approval_instructions.to_string());
     lines.join("\n")
@@ -5844,12 +5971,10 @@ async fn check_signals(
 
                                     // Clear post-approval spinners on task lifecycle events
                                     // that indicate the scheduler resumed (or finished) work.
-                                    // Also re-query session.status to surface the final output,
-                                    // since workflow.completed may not fire again after the first
-                                    // completion (the workflow is already in terminal state).
-                                    // `task.approved` handles session-level approvals
-                                    // (session_continue, emergency_stop, etc.) that resume
-                                    // without task/workflow lifecycle events.
+                                    // Only send a session.status query for non-completion events;
+                                    // the dedicated workflow.completed handler below handles that case
+                                    // to avoid duplicate assistant reply display.
+                                    let is_completion_event = event.event_type == "workflow.completed";
                                     if matches!(
                                         event.event_type.as_str(),
                                         "task.started"
@@ -5864,23 +5989,23 @@ async fn check_signals(
                                         for pid in ids {
                                             app.remove_pending(pid);
                                         }
-                                        // Re-allow session.status query to surface the result
-                                        // after approval resume.
-                                        let wf_root_sid = event
-                                            .payload
-                                            .get("root_session_id")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or(&root_session_id);
-                                        app.queried_session_status_for_workflows
-                                            .remove(wf_root_sid);
-                                        let query_id = app.next_id();
-                                        app.pending_session_status_ids.insert(query_id);
-                                        let _ = tx.send((
-                                            query_id,
-                                            ChatOutbound::SessionStatusQuery {
-                                                session_id: wf_root_sid.to_string(),
-                                            },
-                                        ));
+                                        if !is_completion_event {
+                                            let wf_root_sid = event
+                                                .payload
+                                                .get("root_session_id")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or(&root_session_id);
+                                            app.queried_session_status_for_workflows
+                                                .remove(wf_root_sid);
+                                            let query_id = app.next_id();
+                                            app.pending_session_status_ids.insert(query_id);
+                                            let _ = tx.send((
+                                                query_id,
+                                                ChatOutbound::SessionStatusQuery {
+                                                    session_id: wf_root_sid.to_string(),
+                                                },
+                                            ));
+                                        }
                                     }
 
                                     // When workflow completes, query session.status to surface the
@@ -6223,7 +6348,7 @@ mod tests {
             "started".to_string(),
             "completed (gate: fail)".to_string(),
         ];
-        let line = format_lifecycle_line("unit_test_runner.default", "task-866b7287", &stages, None);
+        let line = format_lifecycle_line("unit_test_runner.default", "task-866b7287", &stages, None, None, None, false);
         assert!(line.starts_with("⚠️"));
         assert!(line.contains("completed (gate: fail)"));
     }
