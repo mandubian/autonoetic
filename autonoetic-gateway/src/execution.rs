@@ -15,7 +15,6 @@ use crate::runtime::script_execute::{execute_script_in_sandbox, script_causal_ev
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
 use crate::runtime::session_resume::{
-    resume_answered_user_interaction_from_loaded_checkpoint,
     should_auto_resume_checkpoint_yield_reason,
 };
 use crate::runtime::session_report::SessionReportWriter;
@@ -584,6 +583,7 @@ impl GatewayExecutionService {
                             None,
                             None,
                             None,
+                            &[],
                         )
                         .await
                     {
@@ -965,7 +965,7 @@ impl GatewayExecutionService {
             category: "background".to_string(),
             action: format!("emergency_stop.initiated:{}", stop_id),
             status: "success".to_string(),
-            enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+            enforced_rules: vec!["R+++3".to_string(), "R-7.1".to_string()],
             target: None,
             payload: Some(
                 serde_json::json!({
@@ -1369,14 +1369,47 @@ impl GatewayExecutionService {
                             }
                         }
                     }
-                    Ok(resume_answered_user_interaction_from_loaded_checkpoint(
-                        runtime,
-                        session_id,
-                        message,
-                        checkpoint,
-                        &interaction,
-                    )
-                    .await?)
+
+                    tracing::info!(
+                        target: "user_interaction",
+                        session_id = %session_id,
+                        interaction_id = %interaction.interaction_id,
+                        "Resuming session from user.ask checkpoint with stored answer"
+                    );
+
+                    checkpoint.restore_into(runtime);
+
+                    let mut history = checkpoint.history.clone();
+                    crate::runtime::session_resume::inject_answered_user_interaction_into_history(
+                        &mut history, &checkpoint, &interaction,
+                    )?;
+                    if let Some(gw) = runtime.gateway_dir.as_ref() {
+                        let base =
+                            crate::runtime::live_digest::base_session_id(session_id).to_string();
+                        let answer_summary = match (
+                            interaction.answer_text.as_deref(),
+                            interaction.answer_option_id.as_deref(),
+                        ) {
+                            (Some(t), _) if !t.trim().is_empty() => t.trim().to_string(),
+                            (_, Some(oid)) if !oid.is_empty() => {
+                                format!("selected option `{oid}`")
+                            }
+                            _ => "(answered)".to_string(),
+                        };
+                        crate::runtime::live_digest::append_user_ask_answer_best_effort(
+                            gw,
+                            &base,
+                            &interaction.interaction_id,
+                            &answer_summary,
+                        );
+                    }
+                    if !message.trim().is_empty() {
+                        history.push(crate::llm::Message::user(message.to_string()));
+                    }
+                    let initial_msg = checkpoint.initial_user_message();
+                    let outcome =
+                        execute_with_history_close_on_error(runtime, &mut history).await?;
+                    Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
                 }
             }
         } else if let crate::runtime::checkpoint::YieldReason::HumanEscalation {
@@ -1504,6 +1537,8 @@ impl GatewayExecutionService {
         task_id: Option<&str>,
         // Artifact ID whose layers should be auto-mounted in the child's sandbox.
         artifact_id: Option<&str>,
+        // Spawn-time credential bindings that override runtime.lock resolution.
+        credential_bindings: &[autonoetic_types::runtime_lock::LockedCredentialMount],
     ) -> anyhow::Result<SpawnResult> {
         let span = tracing::info_span!(
             "spawn_agent_once",
@@ -1517,6 +1552,7 @@ impl GatewayExecutionService {
         anyhow::ensure!(!agent_id.trim().is_empty(), "agent_id must not be empty");
         anyhow::ensure!(!message.trim().is_empty(), "message must not be empty");
 
+        let cred_bindings = credential_bindings.to_vec();
         let mut result = self
             .execute_with_reliability_controls(agent_id, || async move {
                 let repo = AgentRepository::from_config(&self.config);
@@ -1701,10 +1737,11 @@ impl GatewayExecutionService {
                     self.gateway_store.as_deref(),
                     crate::execution::gateway_root_dir(&self.config),
                 ) {
-                    crate::runtime::script_execute::resolve_credential_env(
+                    crate::runtime::script_execute::resolve_credential_env_with_bindings(
                         &loaded.dir,
                         &gw_dir,
                         gs,
+                        &cred_bindings,
                     )
                 } else {
                     vec![]
@@ -2565,18 +2602,20 @@ impl GatewayExecutionService {
         Ok(result)
     }
 
-    /// Resume execution after a `user.ask` interaction was answered in the gateway store.
+    /// Resume execution after a `user.ask` interaction was answered.
     ///
-    /// Validates the latest session checkpoint is a `UserInputRequired` yield for this
-    /// `interaction_id`, then runs the normal spawn path which injects the stored answer as the
-    /// pending `user.ask` tool result and continues the agent loop.
+    /// Loads the interaction to extract session/agent/workflow identity, then
+    /// delegates to `spawn_agent_once` which handles checkpoint loading and the
+    /// `UserInputRequired` resume branch (answer injection + continued execution).
+    ///
+    /// Returns a structured error `session_waiting_for_approval:{session}:{id}` when
+    /// the latest checkpoint has shifted to `ApprovalRequired` — the scheduler uses
+    /// this to defer the resume to the approval path.
     pub async fn resume_from_user_interaction(
         &self,
         interaction_id: &str,
         follow_up_user_message: Option<&str>,
     ) -> anyhow::Result<SpawnResult> {
-        use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
-
         let store = self.gateway_store.as_ref().ok_or_else(|| {
             anyhow::anyhow!("GatewayStore is required to resume user interactions")
         })?;
@@ -2593,48 +2632,40 @@ impl GatewayExecutionService {
             );
         }
 
-        let checkpoint = load_latest_checkpoint(self.config.as_ref(), &interaction.session_id)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("No checkpoint for session '{}'", interaction.session_id)
-            })?;
-
-        match &checkpoint.yield_reason {
-            YieldReason::UserInputRequired {
-                interaction_id: cid,
-            } => {
-                anyhow::ensure!(
-                    cid == &interaction.interaction_id,
-                    "Checkpoint is for interaction '{}', not '{}'",
-                    cid,
-                    interaction.interaction_id
-                );
-            }
-            YieldReason::ApprovalRequired {
-                approval_request_id,
-            } => {
-                // The session was suspended for an approval gate after the user interaction was
-                // answered (e.g. max-turn limit tripped during the resume turn). The approval
-                // path owns the resume from here; skip silently so the scheduler does not spam
-                // logs retrying this interaction on every tick.
-                tracing::debug!(
-                    target: "scheduler",
-                    interaction_id = %interaction.interaction_id,
-                    session_id = %interaction.session_id,
-                    approval_request_id = %approval_request_id,
-                    "Skipping user-interaction resume: session is now waiting for approval"
-                );
-                return Err(anyhow::anyhow!(
-                    "session_waiting_for_approval:{}:{}",
-                    interaction.session_id,
-                    approval_request_id
-                ));
-            }
-            other => {
-                anyhow::bail!(
-                    "Latest checkpoint for session '{}' is not UserInputRequired (got {:?})",
-                    interaction.session_id,
-                    other
-                );
+        // Pre-check: if the latest checkpoint shifted away from UserInputRequired,
+        // return early so the scheduler can defer or report appropriately.
+        use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
+        if let Some(cp) = load_latest_checkpoint(self.config.as_ref(), &interaction.session_id)? {
+            match &cp.yield_reason {
+                YieldReason::UserInputRequired { interaction_id: cid } => {
+                    anyhow::ensure!(
+                        cid == &interaction.interaction_id,
+                        "Checkpoint is for interaction '{}', not '{}'",
+                        cid,
+                        interaction.interaction_id
+                    );
+                }
+                YieldReason::ApprovalRequired { approval_request_id } => {
+                    tracing::debug!(
+                        target: "scheduler",
+                        interaction_id = %interaction.interaction_id,
+                        session_id = %interaction.session_id,
+                        approval_request_id = %approval_request_id,
+                        "Skipping user-interaction resume: session is now waiting for approval"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "session_waiting_for_approval:{}:{}",
+                        interaction.session_id,
+                        approval_request_id
+                    ));
+                }
+                other => {
+                    anyhow::bail!(
+                        "Latest checkpoint for session '{}' is not UserInputRequired (got {:?})",
+                        interaction.session_id,
+                        other
+                    );
+                }
             }
         }
 
@@ -2652,6 +2683,7 @@ impl GatewayExecutionService {
                 interaction.workflow_id.as_deref(),
                 interaction.task_id.as_deref(),
                 None,
+                &[],
             )
             .await;
 

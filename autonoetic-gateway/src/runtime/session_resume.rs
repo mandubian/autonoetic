@@ -1,9 +1,6 @@
-//! Session resume helpers for checkpoint, continuation, and user interaction resume paths.
+//! Session resume helpers for checkpoint and user interaction resume paths.
 
-use crate::execution::execute_with_history_close_on_error;
 use crate::llm::Message;
-use crate::runtime::lifecycle::AgentExecutor;
-use crate::runtime::live_digest::base_session_id;
 use autonoetic_types::background::{UserInteraction, UserInteractionStatus};
 
 pub(crate) fn should_auto_resume_checkpoint_yield_reason(
@@ -104,81 +101,6 @@ pub(crate) fn inject_answered_user_interaction_into_history(
     let json = build_user_ask_answer_tool_result_json(interaction)?;
     history.push(Message::tool_result(call_id, tool_name, json));
     Ok(())
-}
-
-pub(crate) async fn resume_answered_user_interaction_from_loaded_checkpoint(
-    runtime: &mut AgentExecutor,
-    session_id: &str,
-    message: &str,
-    checkpoint: crate::runtime::checkpoint::SessionCheckpoint,
-    interaction: &UserInteraction,
-) -> anyhow::Result<(
-    crate::runtime::lifecycle::TurnOutcome,
-    String,
-    Option<String>,
-)> {
-    anyhow::ensure!(
-        interaction.session_id == session_id,
-        "interaction session_id '{}' does not match spawn session_id '{}'",
-        interaction.session_id,
-        session_id
-    );
-    anyhow::ensure!(
-        interaction.agent_id == runtime.manifest.agent.id,
-        "interaction agent_id '{}' does not match spawned agent '{}'",
-        interaction.agent_id,
-        runtime.manifest.agent.id
-    );
-
-    let yield_iid = match &checkpoint.yield_reason {
-        crate::runtime::checkpoint::YieldReason::UserInputRequired { interaction_id } => {
-            interaction_id.clone()
-        }
-        _ => anyhow::bail!("checkpoint yield reason is not UserInputRequired"),
-    };
-    anyhow::ensure!(
-        yield_iid == interaction.interaction_id,
-        "checkpoint interaction_id '{}' does not match row '{}'",
-        yield_iid,
-        interaction.interaction_id
-    );
-
-    tracing::info!(
-        target: "user_interaction",
-        session_id = %session_id,
-        interaction_id = %interaction.interaction_id,
-        "Resuming session from user.ask checkpoint with stored answer"
-    );
-
-    checkpoint.restore_into(runtime);
-
-    let mut history = checkpoint.history.clone();
-    inject_answered_user_interaction_into_history(&mut history, &checkpoint, interaction)?;
-    if let Some(gw) = runtime.gateway_dir.as_ref() {
-        let base = base_session_id(session_id).to_string();
-        let answer_summary = match (
-            interaction.answer_text.as_deref(),
-            interaction.answer_option_id.as_deref(),
-        ) {
-            (Some(t), _) if !t.trim().is_empty() => t.trim().to_string(),
-            (_, Some(oid)) if !oid.is_empty() => format!("selected option `{oid}`"),
-            _ => "(answered)".to_string(),
-        };
-        crate::runtime::live_digest::append_user_ask_answer_best_effort(
-            gw,
-            &base,
-            &interaction.interaction_id,
-            &answer_summary,
-        );
-    }
-    if !message.trim().is_empty() {
-        history.push(Message::user(message.to_string()));
-    }
-
-    let initial_msg = checkpoint.initial_user_message();
-
-    let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
-    Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
 }
 
 #[cfg(test)]

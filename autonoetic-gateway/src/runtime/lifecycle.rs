@@ -712,19 +712,30 @@ impl AgentExecutor {
         }
     }
 
-    /// Save a checkpoint if config is available. Logs errors as warnings.
-    fn save_checkpoint_if_possible(&self, checkpoint: &SessionCheckpoint) {
+    /// Build and persist a checkpoint for the given yield reason.
+    ///
+    /// Single entry point for all checkpoint saves — replaces every inline
+    /// `build_checkpoint` + `save_checkpoint_if_possible` pair in the execute loop.
+    fn save_yield_checkpoint(
+        &self,
+        history: &[Message],
+        turn_id: &str,
+        yield_reason: YieldReason,
+        pending_tool_state: Option<PendingToolState>,
+    ) -> SessionCheckpoint {
+        let cp = self.build_checkpoint(history, turn_id, yield_reason, pending_tool_state);
         if let Some(config) = self.config.as_ref() {
-            if let Err(e) = save_checkpoint(config, checkpoint) {
+            if let Err(e) = save_checkpoint(config, &cp) {
                 tracing::warn!(
                     target: "checkpoint",
-                    session_id = %checkpoint.session_id,
-                    turn_id = %checkpoint.turn_id,
+                    session_id = %cp.session_id,
+                    turn_id = %cp.turn_id,
                     error = %e,
                     "Failed to save session checkpoint"
                 );
             }
         }
+        cp
     }
 
     /// When an Ri-0.9 last-word gateway notice was injected this wake and the
@@ -914,7 +925,7 @@ impl AgentExecutor {
                         approval_request_id = %request_id,
                         "Session reached max turns limit; approval required to continue"
                     );
-                    let cp = self.build_checkpoint(
+                    let _ = self.save_yield_checkpoint(
                         history,
                         &turn_id,
                         YieldReason::ApprovalRequired {
@@ -922,7 +933,6 @@ impl AgentExecutor {
                         },
                         None,
                     );
-                    self.save_checkpoint_if_possible(&cp);
                     return Ok(TurnOutcome::Suspended {
                         approval_request_id: request_id,
                         continuation: None,
@@ -1181,9 +1191,8 @@ impl AgentExecutor {
         loop {
             // Loop guard check — save checkpoint before propagating max-turns error
             if let Err(e) = self.guard.check_loop() {
-                let cp =
-                    self.build_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);
-                self.save_checkpoint_if_possible(&cp);
+                let _ =
+                    self.save_yield_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);
                 return Err(e);
             }
 
@@ -1218,7 +1227,9 @@ impl AgentExecutor {
             }
 
             if let Some(ds) = self.degraded_sessions.as_ref() {
-                let in_set = ds.lock().await.contains(&session_id);
+                let set = ds.lock().await;
+                let in_set = set.contains(&session_id)
+                    || set.contains(crate::runtime::content_store::root_session_id(&session_id));
                 if in_set && self.session_state == autonoetic_types::agent::SessionState::Normal {
                     self.session_state = autonoetic_types::agent::SessionState::Degraded;
                 } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
@@ -1228,13 +1239,12 @@ impl AgentExecutor {
 
             if !ri_0_6_snapshot_checked {
                 if let Err(e) = self.check_ri_0_6_turn_snapshot(&session_id, &turn_id) {
-                    let cp = self.build_checkpoint(
+                    let _ = self.save_yield_checkpoint(
                         history,
                         &turn_id,
                         YieldReason::Error(e.to_string()),
                         None,
                     );
-                    self.save_checkpoint_if_possible(&cp);
                     return Err(e);
                 }
                 ri_0_6_snapshot_checked = true;
@@ -1243,13 +1253,12 @@ impl AgentExecutor {
             // Budget check — save checkpoint before propagating budget-exhausted error
             if let Some(budget) = self.session_budget.as_ref() {
                 if let Err(e) = budget.check_pre_llm(&session_id) {
-                    let cp = self.build_checkpoint(
+                    let _ = self.save_yield_checkpoint(
                         history,
                         &turn_id,
                         YieldReason::BudgetExhausted,
                         None,
                     );
-                    self.save_checkpoint_if_possible(&cp);
                     return Err(e);
                 }
             }
@@ -1257,13 +1266,12 @@ impl AgentExecutor {
             // Root session tree budget check (R+4 / R-6.21)
             if let Some(root_budget) = self.root_session_budget.as_ref() {
                 if let Err(e) = root_budget.check_pre_llm(root_session_id) {
-                    let cp = self.build_checkpoint(
+                    let _ = self.save_yield_checkpoint(
                         history,
                         &turn_id,
                         YieldReason::BudgetExhausted,
                         None,
                     );
-                    self.save_checkpoint_if_possible(&cp);
                     return Err(e);
                 }
             }
@@ -1738,20 +1746,18 @@ impl AgentExecutor {
                     .enforce_cost_catalog_preflight(&actual_model, allow_unpriced_budget)
                     .await
                 {
-                    let cp =
-                        self.build_checkpoint(history, &turn_id, YieldReason::BudgetExhausted, None);
-                    self.save_checkpoint_if_possible(&cp);
+                    let _ =
+                        self.save_yield_checkpoint(history, &turn_id, YieldReason::BudgetExhausted, None);
                     return Err(e);
                 }
                 if let Some(root_budget) = self.root_session_budget.as_ref() {
                     if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
-                        let cp = self.build_checkpoint(
+                        let _ = self.save_yield_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::BudgetExhausted,
                             None,
                         );
-                        self.save_checkpoint_if_possible(&cp);
                         return Err(e);
                     }
                 }
@@ -1785,24 +1791,22 @@ impl AgentExecutor {
                                 .enforce_cost_catalog_preflight(fb_model, allow_unpriced_budget)
                                 .await
                             {
-                                let cp = self.build_checkpoint(
+                                let _ = self.save_yield_checkpoint(
                                     history,
                                     &turn_id,
                                     YieldReason::BudgetExhausted,
                                     None,
                                 );
-                                self.save_checkpoint_if_possible(&cp);
                                 return Err(e);
                             }
                             if let Some(root_budget) = self.root_session_budget.as_ref() {
                                 if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
-                                    let cp = self.build_checkpoint(
+                                    let _ = self.save_yield_checkpoint(
                                         history,
                                         &turn_id,
                                         YieldReason::BudgetExhausted,
                                         None,
                                     );
-                                    self.save_checkpoint_if_possible(&cp);
                                     return Err(e);
                                 }
                             }
@@ -1878,13 +1882,12 @@ impl AgentExecutor {
                         estimated_cost_usd,
                         allow_unpriced_budget,
                     ) {
-                        let cp = self.build_checkpoint(
+                        let _ = self.save_yield_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::BudgetExhausted,
                             None,
                         );
-                        self.save_checkpoint_if_possible(&cp);
                         return Err(e);
                     }
                 }
@@ -1899,13 +1902,12 @@ impl AgentExecutor {
                         estimated_cost_usd,
                         allow_unpriced_budget,
                     ) {
-                        let cp = self.build_checkpoint(
+                        let _ = self.save_yield_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::BudgetExhausted,
                             None,
                         );
-                        self.save_checkpoint_if_possible(&cp);
                         return Err(e);
                     }
                 }
@@ -2030,13 +2032,12 @@ impl AgentExecutor {
                         if let Err(e) = budget
                             .reserve_tool_invocations(&session_id, response.tool_calls.len() as u64)
                         {
-                            let cp = self.build_checkpoint(
+                            let _ = self.save_yield_checkpoint(
                                 history,
                                 &turn_id,
                                 YieldReason::BudgetExhausted,
                                 None,
                             );
-                            self.save_checkpoint_if_possible(&cp);
                             return Err(e);
                         }
                     }
@@ -2047,13 +2048,12 @@ impl AgentExecutor {
                         if let Err(e) = root_budget
                             .reserve_tool_invocations(&root, response.tool_calls.len() as u64)
                         {
-                            let cp = self.build_checkpoint(
+                            let _ = self.save_yield_checkpoint(
                                 history,
                                 &turn_id,
                                 YieldReason::BudgetExhausted,
                                 None,
                             );
-                            self.save_checkpoint_if_possible(&cp);
                             return Err(e);
                         }
                     }
@@ -2197,7 +2197,7 @@ impl AgentExecutor {
                         );
 
                         // Also save a checkpoint for general respawn capability
-                        let cp = self.build_checkpoint(
+                        let _ = self.save_yield_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::ApprovalRequired {
@@ -2205,7 +2205,6 @@ impl AgentExecutor {
                             },
                             None,
                         );
-                        self.save_checkpoint_if_possible(&cp);
 
                         let _ = tracer.end_digest_turn();
                         return Ok(TurnOutcome::Suspended {
@@ -2265,7 +2264,7 @@ impl AgentExecutor {
                             remaining_tool_calls: remaining_calls.clone(),
                         });
 
-                        let cp = self.build_checkpoint(
+                        let _ = self.save_yield_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::UserInputRequired {
@@ -2273,7 +2272,6 @@ impl AgentExecutor {
                             },
                             pending_tool_state,
                         );
-                        self.save_checkpoint_if_possible(&cp);
 
                         tracing::info!(
                             target: "user_interaction",
@@ -2315,7 +2313,7 @@ impl AgentExecutor {
                     });
 
                     if let Some(request_id) = escalation_info {
-                        let cp = self.build_checkpoint(
+                        let _ = self.save_yield_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::HumanEscalation {
@@ -2323,7 +2321,6 @@ impl AgentExecutor {
                             },
                             None,
                         );
-                        self.save_checkpoint_if_possible(&cp);
 
                         tracing::info!(
                             target: "escalation",
@@ -2647,9 +2644,8 @@ impl AgentExecutor {
                     }
 
                     // Save checkpoint at hibernation yield point
-                    let cp =
-                        self.build_checkpoint(history, &turn_id, YieldReason::Hibernation, None);
-                    self.save_checkpoint_if_possible(&cp);
+                    let _ =
+                        self.save_yield_checkpoint(history, &turn_id, YieldReason::Hibernation, None);
                     if let Some(config) = self.config.as_ref() {
                         // Prune old checkpoints, keep last 3
                         let _ = prune_checkpoints(config, &session_id, 3);

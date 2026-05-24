@@ -169,11 +169,15 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 ## Decision Flow
 
 ```
-1. Service registration / credential onboarding ("register with X", "connect to X", "set up credentials for X")
-    → **Preflight check**: call `agent_list` and search for an agent whose `agent_id` contains the service name (e.g., `moltbook`). If a matching agent already exists, spawn it directly and skip the entire onboarding flow.
+ 1. Service registration / credential onboarding ("register with X", "connect to X", "set up credentials for X")
+    → **Preflight check**: call `agent_list` and search for an agent whose `agent_id` contains the service name (e.g., `moltbook`).
+      → If an agent exists AND the user wants to use the existing account: spawn it directly and skip onboarding.
+      → If an agent exists AND the user wants a SECOND/ADDITIONAL account: skip researcher and skill_normalize — the skill is already known. Go directly to `credential_setup(service, label="<account_name>")` with a unique label to create a distinct credential.
+      → If no agent exists: proceed with full onboarding below.
     → researcher.default (fetch raw `skill.md` / API doc when URL is unknown or unreachable from your tools)
     → skill_normalize(intent, content, service, source_url?) — writes `skills/<service>/SKILL.md` or returns `partial`; fix gaps or complete steps manually, then retry
     → credential_setup(skill_url=file or http URL to normalized skill) OR credential_setup(service, steps) directly
+       Use a `label` when you need multiple credentials for the same service (e.g., separate accounts, environments).
     → On suspended_for_user_input: user_ask with gateway question → credential_setup resume with credential_id + resume_vars
     → If credential_setup returns steps with status:"pending" (e.g., human_identity_claim needs a username):
       1. Read the pending step requirements from the result.
@@ -181,6 +185,9 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
       3. On user_ask response, resume credential_setup with credential_id + the collected input.
     → Optionally spawn registration.default only if onboarding needs many operator-facing steps isolated from planner context
     → Do not spawn executor until you have credential_id + env_var inject name and ready_for_execution (or deliberate handoff JSON with next_action explaining blockers).
+
+ 1b. When skill_normalize fails with "NetworkAccess does not allow host":
+    → The URL is reachable but YOU lack NetworkAccess. Delegate to `researcher.default` (which has NetworkAccess) to fetch the content. Pass it the URL and ask it to return the raw content. Then retry skill_normalize with the fetched content. Do NOT fall back to writing manual registration scripts — that bypasses the credential vault and exposes secrets to LLM context.
 
 1a. After credential onboarding completes for a service with a normalized skill (≥2 API operations):
     → Evaluate: will this service be used across sessions or repeatedly? (hint: user asked to "connect", "register", "set up" — likely recurring)
@@ -270,7 +277,7 @@ If you observe any of these, prefer revision creation + promotion over repeated 
 
 ```
 artifact_build → agent_revision_create_from_intent → agent_revision_promote
-(spawn specialized_builder.default for the install step)
+(spawn agent-factory.default with the artifact_ref — it handles install internally)
 ```
 
 If a suitable artifact already exists, reuse that same `artifact_ref` for packaging/install instead of rebuilding from loose files.
@@ -346,7 +353,7 @@ federation.escalate({
 ```
 
 The operator will review the escalation via `admin.escalation_list` and respond via `admin.escalation_resolve`. Once resolved, re-check the escalation status with `promotion_query` or by respawning the federation roles with the same artifact. The operator may:
-- **Approve**: proceed to `specialized_builder.default` for install
+- **Approve**: spawn `agent-factory.default` with the artifact_ref — it handles install internally
 - **Request sealed eval**: spawn `sealed_evaluator.default`, collect verdict, re-escalate
 - **Fix**: route findings to `coder.default`, re-run federation after fixes
 - **Reject**: report to user, do NOT promote
@@ -356,7 +363,7 @@ The operator will review the escalation via `admin.escalation_list` and respond 
 **Step 4: Handle operator decision**
 
 After escalating, wait for the operator's response. The gateway resolves the escalation status when the operator decides. Check `knowledge_recall` or `workflow_state` for the resolution. The operator may:
-- **Approve** → proceed to `specialized_builder.default` for install
+- **Approve** → spawn `agent-factory.default` with the artifact_ref — it handles install internally
 - **Request sealed eval** → spawn `sealed_evaluator.default` with the artifact and optionally a `fixture_set_ref`, collect its verdict, re-escalate to operator
 - **Fix** → route findings to `coder.default`, re-run federation after fixes
 - **Reject** → report to user, do NOT promote

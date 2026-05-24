@@ -97,6 +97,15 @@ fn is_critical_divergence_stop_selection(
         && interaction.answer_option_id.as_deref() == Some("stop")
 }
 
+fn is_divergence_decision(
+    interaction: &autonoetic_types::background::UserInteraction,
+) -> bool {
+    interaction.kind == autonoetic_types::background::UserInteractionKind::Decision
+        && interaction
+            .question
+            .starts_with("Critical trajectory divergence in agent '")
+}
+
 /// Resolve which pending interaction to answer using deterministic priority.
 pub fn resolve_interaction_id(
     store: &crate::scheduler::gateway_store::GatewayStore,
@@ -228,6 +237,28 @@ pub async fn answer_and_orchestrate_resume(
                 None,
             )
             .await?;
+        return Ok(InteractionAnswerOutcome {
+            interaction_id: params.interaction_id.clone(),
+            answer_applied: true,
+            resumed: false,
+            workflow_task_unblocked: false,
+            ambiguous: false,
+            ambiguous_candidates: vec![],
+            error: None,
+            assistant_reply: None,
+        });
+    }
+
+    if is_divergence_decision(&interaction) {
+        tracing::info!(
+            target: "interaction",
+            interaction_id = %interaction.interaction_id,
+            session_id = %interaction.session_id,
+            answer = ?interaction.answer_option_id.as_deref().or(interaction.answer_text.as_deref()),
+            "Divergence sentinel acknowledged — session continues running"
+        );
+        let _ = store
+            .try_claim_answered_standalone_interaction_resume(&params.interaction_id);
         return Ok(InteractionAnswerOutcome {
             interaction_id: params.interaction_id.clone(),
             answer_applied: true,

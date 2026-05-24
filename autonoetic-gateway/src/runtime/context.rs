@@ -528,23 +528,41 @@ impl AgentExecutor {
             return Ok(None);
         }
 
-        let store = self.gateway_store.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Ri-0.5 violation: degraded session '{}' has no gateway store for evidence lookup",
-                session_id
-            )
-        })?;
+        let store = match self.gateway_store.as_ref() {
+            Some(s) => s,
+            None => {
+                return Ok(Some(format!(
+                    "[Ri-0.5 DEGRADED NOTICE] Session '{}' is in degraded mode. \
+                     Trigger evidence unavailable (no gateway store).",
+                    session_id
+                )));
+            }
+        };
 
+        let root_sid = crate::runtime::content_store::root_session_id(session_id);
         let degraded_event = store
             .search_causal_events(Some(session_id), None, 128)?
             .into_iter()
             .find(|event| event.category == "session" && event.action == "session.degraded")
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Ri-0.5 violation: degraded session '{}' missing session.degraded causal event",
-                    session_id
-                )
-            })?;
+            .or_else(|| {
+                if root_sid != session_id {
+                    store
+                        .search_causal_events(Some(root_sid), None, 128)
+                        .ok()?
+                        .into_iter()
+                        .find(|e| e.category == "session" && e.action == "session.degraded")
+                } else {
+                    None
+                }
+            });
+
+        let Some(degraded_event) = degraded_event else {
+            return Ok(Some(format!(
+                "[Ri-0.5 DEGRADED NOTICE] Session '{}' is in degraded mode. \
+                 session.degraded causal event not found.",
+                session_id
+            )));
+        };
 
         anyhow::ensure!(
             !degraded_event.enforced_rules.is_empty(),
