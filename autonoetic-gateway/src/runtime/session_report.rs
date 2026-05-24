@@ -1470,28 +1470,34 @@ fn render_live_markdown(state: &SessionReportState) -> String {
     }
     let _ = writeln!(out);
 
-    let pending_approvals: Vec<_> = collect_all_approvals(state)
-        .into_iter()
-        .filter(|a| a.status == "pending")
-        .collect();
-    let _ = writeln!(out, "## Open Approvals");
+    let all_approvals = collect_all_approvals(state);
+    let _ = writeln!(out, "## Approvals");
     let _ = writeln!(out);
-    if pending_approvals.is_empty() {
+    if all_approvals.is_empty() {
         let _ = writeln!(out, "_(none)_");
     } else {
         let _ = writeln!(
             out,
-            "| Time | Agent | Request ID | Kind | Summary | Reason |"
+            "| Time | Agent | Request ID | Kind | Status | Summary | Reason |"
         );
-        let _ = writeln!(out, "|---|---|---|---|---|---|");
-        for a in &pending_approvals {
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|");
+        for a in &all_approvals {
+            let status_str = match a.status.as_str() {
+                "pending" => "PENDING".to_string(),
+                _ => format!(
+                    "{}: {}",
+                    a.status.to_uppercase(),
+                    a.decision.as_deref().unwrap_or("unknown")
+                ),
+            };
             let _ = writeln!(
                 out,
-                "| {} | `{}` | `{}` | {} | {} | {} |",
+                "| {} | `{}` | `{}` | {} | {} | {} | {} |",
                 format_timestamp(Some(&a.created_at)),
                 a.agent_id,
                 a.request_id,
                 a.kind,
+                status_str,
                 truncate_chars(&a.summary, OUTPUT_PREVIEW_DISPLAY_CHARS),
                 a.reason.as_deref().unwrap_or("—"),
             );
@@ -1945,21 +1951,27 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
         out.push_str("</tbody></table>\n");
     }
 
-    let pending_approvals: Vec<_> = collect_all_approvals(state)
-        .into_iter()
-        .filter(|a| a.status == "pending")
-        .collect();
-    out.push_str("<h2>Open Approvals</h2>\n");
-    if pending_approvals.is_empty() {
+    let html_approvals = collect_all_approvals(state);
+    out.push_str("<h2>Approvals</h2>\n");
+    if html_approvals.is_empty() {
         out.push_str("<p class=\"section-note\">none</p>\n");
     } else {
-        out.push_str("<table><thead><tr><th style=\"width:15%\">Time</th><th style=\"width:12%\">Agent</th><th style=\"width:12%\">Request ID</th><th style=\"width:8%\">Kind</th><th>Summary</th><th>Reason</th></tr></thead><tbody>\n");
-        for a in &pending_approvals {
-            out.push_str(&format!("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+        out.push_str("<table><thead><tr><th style=\"width:13%\">Time</th><th style=\"width:10%\">Agent</th><th style=\"width:10%\">Request ID</th><th style=\"width:7%\">Kind</th><th style=\"width:10%\">Status</th><th>Summary</th><th>Reason</th></tr></thead><tbody>\n");
+        for a in &html_approvals {
+            let status_str = match a.status.as_str() {
+                "pending" => "PENDING".to_string(),
+                _ => format!(
+                    "{}: {}",
+                    a.status.to_uppercase(),
+                    a.decision.as_deref().unwrap_or("unknown")
+                ),
+            };
+            out.push_str(&format!("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
                 format_timestamp(Some(&a.created_at)),
                 escape_html(&a.agent_id),
                 escape_html(&a.request_id),
                 escape_html(&a.kind),
+                escape_html(&status_str),
                 truncate_html(&a.summary, OUTPUT_PREVIEW_DISPLAY_CHARS),
                 a.reason.as_deref().unwrap_or("—"),
             ));

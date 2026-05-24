@@ -83,11 +83,15 @@ pub fn causal_event_notifies_policy_decision(event: &CausalEventRecord) -> bool 
     if s.eq_ignore_ascii_case("DENIED") || s.eq_ignore_ascii_case("ERROR") {
         return true;
     }
+    let has_non_baseline_rule = event
+        .enforced_rules
+        .iter()
+        .any(|r| r.as_str() != RULE_ID_EVENT_ATTRIBUTION);
     if s.eq_ignore_ascii_case("SUCCESS") {
-        return event
-            .enforced_rules
-            .iter()
-            .any(|r| r.as_str() != RULE_ID_EVENT_ATTRIBUTION);
+        return has_non_baseline_rule;
+    }
+    if s.eq_ignore_ascii_case("active") {
+        return has_non_baseline_rule;
     }
     false
 }

@@ -1192,9 +1192,29 @@ impl GatewayStore {
         }
         Ok(results)
     }
-}
 
-#[cfg(test)]
+    pub fn list_recent_sessions(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, agent_id, MAX(timestamp) as last_ts
+             FROM causal_events
+             GROUP BY session_id
+             ORDER BY last_ts DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+}
 mod fts_fallback_tests {
     use super::*;
 

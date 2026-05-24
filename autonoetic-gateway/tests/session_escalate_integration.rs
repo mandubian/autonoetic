@@ -382,6 +382,7 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
             None,
             Some(task_id),
             None,
+        &[],
         )
         .await?;
     assert!(
@@ -464,6 +465,7 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
             None,
             Some(task_id),
             None,
+        &[],
         )
         .await?;
 
