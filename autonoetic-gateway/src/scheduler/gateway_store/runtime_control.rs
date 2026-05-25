@@ -189,4 +189,25 @@ impl GatewayStore {
         }
         Ok(out)
     }
+
+    pub fn list_active_session_turn_counts(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, agent_id, turn_count
+             FROM session_transcripts
+             WHERE root_session_id = ?1 AND status = 'active'
+             ORDER BY turn_count DESC",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
 }

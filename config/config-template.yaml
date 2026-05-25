@@ -99,7 +99,7 @@ response_validation:
 
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
-approval_timeout_secs: 600
+approval_timeout_secs: 3600
 # Maximum concurrent pending approvals per root session (R+5). Default: 50.
 # Excess requests are rejected immediately with approval_flood.
 # max_pending_approvals_per_root: 50

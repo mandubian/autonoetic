@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 use unicode_width::UnicodeWidthStr;
@@ -131,6 +131,7 @@ struct SessionOverview {
     pending_user_interactions: usize,
     active_executions: usize,
     latest_signal: Option<String>,
+    active_sessions: Vec<(String, String, i64)>,
 }
 
 impl SessionOverview {
@@ -185,7 +186,22 @@ impl SessionOverview {
             })
             .unwrap_or_default();
 
-        format!("{}{}{}{}", workflow, active_exec, ask, latest_signal)
+        let turns = if self.active_sessions.is_empty() {
+            String::new()
+        } else {
+            let parts: Vec<String> = self.active_sessions.iter().take(3).map(|(_, agent, turns)| {
+                let agent_short = agent.split('.').next().unwrap_or(agent);
+                format!("{}:t{}", agent_short, turns)
+            }).collect();
+            let suffix = if self.active_sessions.len() > 3 {
+                format!(" +{}", self.active_sessions.len() - 3)
+            } else {
+                String::new()
+            };
+            format!(" | turns:{}{}", parts.join(","), suffix)
+        };
+
+        format!("{}{}{}{}{}", workflow, active_exec, ask, turns, latest_signal)
     }
 }
 
@@ -218,6 +234,17 @@ enum PendingPrompt {
     NewSessionName,
 }
 
+#[derive(Debug, Clone)]
+enum PendingItem {
+    Approval(Box<ApprovalRequest>),
+    Interaction(Box<UserInteraction>),
+}
+
+struct PendingOverlay {
+    items: Vec<PendingItem>,
+    selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SlashCommand {
     Help,
@@ -230,6 +257,7 @@ enum SlashCommand {
     Why(Option<String>),
     Persona(Option<String>),
     Policy(String),
+    Pending,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +358,7 @@ struct App {
     queried_session_status_for_workflows: HashSet<String>,
     task_lifecycles: HashMap<String, TaskLifecycle>,
     task_lifecycle_msg_idx: HashMap<String, usize>,
+    pending_overlay: Option<PendingOverlay>,
 }
 
 impl App {
@@ -384,6 +413,7 @@ impl App {
             queried_session_status_for_workflows: HashSet::new(),
             task_lifecycles: HashMap::new(),
             task_lifecycle_msg_idx: HashMap::new(),
+            pending_overlay: None,
         }
     }
 
@@ -533,18 +563,25 @@ impl App {
         if !self.has_active_work() {
             return None;
         }
+
+        let primary_activity = self.current_activity_summary();
+
         let text = if !self.pending.is_empty() {
+            let activity = primary_activity.as_deref().map(|a| format!(" │ {}", a)).unwrap_or_default();
             format!(
-                "{} Working... ({} pending, {}s)",
+                "{} Working... ({} pending, {}s){}",
                 self.spinner(),
                 self.pending.len(),
-                self.oldest_secs()
+                self.oldest_secs(),
+                activity
             )
         } else if !self.pending_approval_ids.is_empty() {
+            let activity = primary_activity.as_deref().map(|a| format!(" │ {}", a)).unwrap_or_default();
             format!(
-                "{} Waiting for approval ({} pending)",
+                "{} Waiting for approval ({} pending){}",
                 self.spinner(),
-                self.pending_approval_ids.len()
+                self.pending_approval_ids.len(),
+                activity
             )
         } else if self.session_overview.pending_user_interactions > 0 {
             format!(
@@ -553,21 +590,40 @@ impl App {
                 self.session_overview.pending_user_interactions
             )
         } else if self.session_overview.workflow.awaiting > 0 {
+            let activity = primary_activity.as_deref().map(|a| format!(" │ {}", a)).unwrap_or_default();
             format!(
-                "{} Waiting on approval ({} task(s))",
+                "{} Waiting on approval ({} task(s)){}",
                 self.spinner(),
-                self.session_overview.workflow.awaiting
+                self.session_overview.workflow.awaiting,
+                activity
             )
         } else if self.session_overview.active_executions > 0 {
+            let activity = primary_activity.as_deref().map(|a| format!(" │ {}", a)).unwrap_or_default();
             format!(
-                "{} Working... ({} active execution(s))",
+                "{} Working... ({} active execution(s)){}",
                 self.spinner(),
-                self.session_overview.active_executions
+                self.session_overview.active_executions,
+                activity
             )
         } else {
-            format!("{} Working...", self.spinner())
+            let activity = primary_activity.as_deref().map(|a| format!(" │ {}", a)).unwrap_or_default();
+            format!("{} Working...{}", self.spinner(), activity)
         };
         Some(text)
+    }
+
+    fn current_activity_summary(&self) -> Option<String> {
+        let sessions = &self.session_overview.active_sessions;
+        if sessions.is_empty() {
+            return None;
+        }
+        let (session_id, agent_id, turns) = sessions.first()?;
+        let agent_short = agent_id.split('.').next().unwrap_or(agent_id);
+        let mut summary = format!("{}:t{}", agent_short, turns);
+        if sessions.len() > 1 {
+            summary.push_str(&format!(" +{} more", sessions.len() - 1));
+        }
+        Some(summary)
     }
 
     fn tick_spinner(&mut self) {
@@ -839,6 +895,7 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
                 Ok(SlashCommand::Persona(Some(rest.trim().to_string())))
             }
         }
+        "/pending" | "/approvals" => Ok(SlashCommand::Pending),
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -850,6 +907,7 @@ fn format_help_card() -> String {
         "  /session new [name]    Create and switch to a new session",
         "  /session switch <id>   Switch to an existing session",
         "  /status                Show current session details",
+        "  /pending               Open pending approvals & interactions overlay (Ctrl+P)",
         "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
         "  /policy <text>          Route natural language governance requests to governance-author.default",
         "  /persona [text]        Show or set session persona (user context/preferences)",
@@ -1501,6 +1559,45 @@ fn handle_slash_command_submission(
             );
             true
         }
+        SlashCommand::Pending => {
+            if let Some(store) = gateway_store {
+                let root = autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id);
+                let mut items: Vec<PendingItem> = Vec::new();
+
+                if let Ok(mut approvals) = autonoetic_gateway::scheduler::pending_approval_requests_for_root(
+                    config, Some(store), &root,
+                ) {
+                    approvals.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                    for req in approvals {
+                        items.push(PendingItem::Approval(Box::new(req)));
+                    }
+                }
+
+                if let Ok(interactions) = list_pending_user_interactions_for_terminal_session(store, &app.session_id) {
+                    for ui in interactions {
+                        items.push(PendingItem::Interaction(Box::new(ui)));
+                    }
+                }
+
+                if items.is_empty() {
+                    app.add_message(
+                        MessageRole::System,
+                        "No pending approvals or interactions.".to_string(),
+                    );
+                } else {
+                    app.pending_overlay = Some(PendingOverlay {
+                        items,
+                        selected: 0,
+                    });
+                }
+            } else {
+                app.add_message(
+                    MessageRole::System,
+                    "Gateway store not available.".to_string(),
+                );
+            }
+            true
+        }
     }
 }
 
@@ -1680,6 +1777,10 @@ fn poll_session_snapshot(
         })
         .unwrap_or(0);
 
+    let active_sessions = store
+        .and_then(|s| s.list_active_session_turn_counts(&root_session_id).ok())
+        .unwrap_or_default();
+
     Ok(SessionPollSnapshot {
         overview: SessionOverview {
             root_session_id: root_session_id.to_string(),
@@ -1687,6 +1788,7 @@ fn poll_session_snapshot(
             pending_user_interactions: pending_interactions.len(),
             active_executions,
             latest_signal: previous_latest_signal,
+            active_sessions,
         },
         pending_interactions,
     })
@@ -3093,6 +3195,221 @@ fn draw(f: &mut Frame, app: &App) {
     // tracking the input column. If IME support becomes a requirement,
     // re-introduce set_cursor_position and instead drop the software cursor
     // span in draw_input so the OS cursor is the sole indicator.
+
+    if let Some(ref overlay) = app.pending_overlay {
+        draw_pending_overlay(f, overlay, area);
+    }
+}
+
+fn draw_pending_overlay(f: &mut Frame, overlay: &PendingOverlay, area: Rect) {
+    let overlay_height = area.height.min(28);
+    let overlay_width = (area.width - 4).min(90);
+    let overlay_rect = Rect::new(
+        (area.width.saturating_sub(overlay_width)) / 2,
+        (area.height.saturating_sub(overlay_height)) / 2,
+        overlay_width,
+        overlay_height,
+    );
+
+    f.render_widget(Clear, overlay_rect);
+
+    let border_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(
+            " Pending Items ({}) │ ↑↓ j/k: nav │ a: approve │ Enter: answer │ Esc: close ",
+            overlay.items.len()
+        ))
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let inner = border_block.inner(overlay_rect);
+    f.render_widget(border_block, overlay_rect);
+
+    if overlay.items.is_empty() {
+        let p = Paragraph::new("No pending approvals or interactions.")
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(p, inner);
+        return;
+    }
+
+    let list_height = (inner.height / 2).max(3);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(list_height), Constraint::Min(3)])
+        .split(inner);
+
+    let list_lines: Vec<Line> = overlay
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let is_selected = i == overlay.selected;
+            let style = if is_selected {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let marker = if is_selected { "▶ " } else { "  " };
+            match item {
+                PendingItem::Approval(req) => {
+                    let label = action_summary(&req.action);
+                    let id_short = &req.request_id[..req.request_id.len().min(16)];
+                    Line::from(vec![
+                        Span::styled(marker.to_string(), style),
+                        Span::styled(format!("⏸ {:16} ", id_short), style),
+                        Span::styled(label.to_string(), Style::default().fg(Color::White)),
+                    ])
+                }
+                PendingItem::Interaction(ui) => {
+                    let id_short = &ui.interaction_id[..ui.interaction_id.len().min(16)];
+                    let kind_str = format!("{}", ui.kind);
+                    Line::from(vec![
+                        Span::styled(marker.to_string(), style),
+                        Span::styled(format!("🔔 {:16} ", id_short), style),
+                        Span::styled(kind_str, Style::default().fg(Color::Magenta)),
+                    ])
+                }
+            }
+        })
+        .collect();
+
+    let visible_start = if overlay.selected >= list_height as usize {
+        overlay.selected - list_height as usize + 1
+    } else {
+        0
+    };
+    let visible_items: Vec<Line> = list_lines
+        .into_iter()
+        .skip(visible_start)
+        .take(list_height as usize)
+        .collect();
+    let list_p = Paragraph::new(visible_items);
+    f.render_widget(list_p, chunks[0]);
+
+    let detail_lines = if let Some(item) = overlay.items.get(overlay.selected) {
+        match item {
+            PendingItem::Approval(req) => {
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    "APPROVAL",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(format!("ID:       {}", req.request_id)));
+                lines.push(Line::from(format!("Agent:    {}", req.agent_id)));
+                lines.push(Line::from(format!("Session:  {}", req.session_id)));
+                lines.push(Line::from(format!("Created:  {}", req.created_at)));
+                if let Some(r) = req.reason.as_deref() {
+                    let reason_preview: String = r.chars().take(120).collect();
+                    lines.push(Line::from(format!("Reason:   {}", reason_preview)));
+                }
+                lines.push(Line::from(""));
+                let action_lines = format_scheduled_action_detail_lines(&req.action);
+                for al in action_lines.iter().take(6) {
+                    let preview: String = al.chars().take((inner.width as usize).saturating_sub(2)).collect();
+                    lines.push(Line::from(Span::styled(
+                        preview,
+                        Style::default().fg(Color::White),
+                    )));
+                }
+                if let Some(ref risk) = req.risk_summary {
+                    lines.push(Line::from(""));
+                    let mut parts = Vec::new();
+                    if risk.host_count > 0 {
+                        parts.push(format!("{} host(s)", risk.host_count));
+                    }
+                    if !risk.dangerous_patterns.is_empty() {
+                        parts.push(format!("{} risk(s)", risk.dangerous_patterns.len()));
+                    }
+                    if !parts.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!("Risk: {}", parts.join(" | ")),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Press [a] to approve",
+                    Style::default().fg(Color::Green),
+                )));
+                lines
+            }
+            PendingItem::Interaction(ui) => {
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    format!("INTERACTION ({})", ui.kind),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(format!("ID:       {}", ui.interaction_id)));
+                lines.push(Line::from(format!("Agent:    {}", ui.agent_id)));
+                lines.push(Line::from(format!("Session:  {}", ui.session_id)));
+                lines.push(Line::from(""));
+
+                let q_preview: String = ui.question.chars().take(200).collect();
+                lines.push(Line::from(Span::styled(
+                    "Question:",
+                    Style::default().fg(Color::White),
+                )));
+                for ln in q_preview.lines().take(3) {
+                    lines.push(Line::from(format!("  {}", ln)));
+                }
+
+                if !ui.options.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "Options:",
+                        Style::default().fg(Color::White),
+                    )));
+                    for (i, opt) in ui.options.iter().enumerate() {
+                        lines.push(Line::from(format!(
+                            "  {}. {} — {}",
+                            i + 1,
+                            opt.label,
+                            opt.value
+                        )));
+                    }
+                }
+
+                if ui.allow_freeform {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "Freeform input accepted",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                lines.push(Line::from(""));
+                if !ui.options.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "Press [1-9] to select option, or [Enter] to answer with freeform text",
+                        Style::default().fg(Color::Green),
+                    )));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        "Press [Enter] to answer with freeform text",
+                        Style::default().fg(Color::Green),
+                    )));
+                }
+                lines
+            }
+        }
+    } else {
+        vec![Line::from(Span::styled(
+            "No selection",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    };
+
+    let detail_p = Paragraph::new(detail_lines)
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(detail_p, chunks[1]);
 }
 
 fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
@@ -3729,16 +4046,26 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![Span::styled(
+    let prefix = Span::styled(
         app.input_prefix(),
         Style::default().fg(Color::Green),
-    )];
+    );
 
-    if app.input.is_empty() {
-        spans.push(Span::styled(" ", Style::default().bg(Color::White)));
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let text = if app.input.is_empty() {
+        let mut lines = wrap_spans(&[prefix], inner_width);
+        if let Some(last) = lines.last_mut() {
+            let mut last_spans = std::mem::take(last);
+            last_spans.spans.push(Span::styled(" ", Style::default().bg(Color::White)));
+            *lines.last_mut().unwrap() = last_spans;
+        }
+        Text::from(lines)
     } else {
         let before = &app.input[..app.cursor_pos];
         let after = &app.input[app.cursor_pos..];
+
+        let mut spans = vec![prefix];
 
         if !before.is_empty() {
             spans.push(Span::raw(before.to_string()));
@@ -3756,14 +4083,56 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::raw(after[c_len..].to_string()));
             }
         }
+
+        Text::from(wrap_spans(&spans, inner_width))
+    };
+
+    let p = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut current_line: Vec<Span<'static>> = vec![];
+    let mut current_width: usize = 0;
+
+    for span in spans {
+        let mut chars: Vec<(char, Style)> = Vec::new();
+        for c in span.content.chars() {
+            chars.push((c, span.style));
+        }
+        if chars.is_empty() {
+            continue;
+        }
+
+        let mut i = 0;
+        while i < chars.len() {
+            let (c, style) = &chars[i];
+            let s = c.to_string();
+            let cw = UnicodeWidthStr::width(s.as_str());
+            if current_width + cw > max_width && !current_line.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut current_line)));
+                current_width = 0;
+            }
+            current_width += cw;
+            current_line.push(Span::styled(c.to_string(), *style));
+            i += 1;
+        }
     }
 
-    let p = Paragraph::new(Line::from(spans)).block(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    f.render_widget(p, area);
+    if !current_line.is_empty() {
+        lines.push(Line::from(current_line));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(vec![]));
+    }
+    lines
 }
 
 /// Wait until `deadline` while checking for Ctrl+C via both the shutdown
@@ -3871,9 +4240,12 @@ async fn handle_chat_test_mode(
                 Ok(SlashCommand::Persona(_)) => {
                     println!("/persona is not supported in test mode.");
                 }
-                Ok(SlashCommand::Policy(_)) => {
-                    println!("/policy is not supported in test mode.");
-                }
+                 Ok(SlashCommand::Policy(_)) => {
+                     println!("/policy is not supported in test mode.");
+                 }
+                 Ok(SlashCommand::Pending) => {
+                     println!("/pending is not supported in test mode.");
+                 }
                 Err(error) => {
                     println!("{}", error);
                 }
@@ -4884,6 +5256,159 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             "Gateway store not available for inline approval.".to_string(),
                                         );
                                     }
+                                    }
+                                HandleKeyAction::OpenPendingOverlay => {
+                                    if let Some(store) = gateway_store {
+                                        let root = autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id);
+                                        let mut items: Vec<PendingItem> = Vec::new();
+
+                                        if let Ok(mut approvals) = autonoetic_gateway::scheduler::pending_approval_requests_for_root(
+                                            config, Some(store), &root,
+                                        ) {
+                                            approvals.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                                            for req in approvals {
+                                                items.push(PendingItem::Approval(Box::new(req)));
+                                            }
+                                        }
+
+                                        if let Ok(interactions) = list_pending_user_interactions_for_terminal_session(store, &app.session_id) {
+                                            for ui in interactions {
+                                                items.push(PendingItem::Interaction(Box::new(ui)));
+                                            }
+                                        }
+
+                                        if items.is_empty() {
+                                            app.add_message(
+                                                MessageRole::System,
+                                                "No pending approvals or interactions.".to_string(),
+                                            );
+                                        } else {
+                                            app.pending_overlay = Some(PendingOverlay {
+                                                items,
+                                                selected: 0,
+                                            });
+                                        }
+                                    } else {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            "Gateway store not available.".to_string(),
+                                        );
+                                    }
+                                }
+                                HandleKeyAction::OverlayApprove(idx) => {
+                                    if let Some(store) = gateway_store {
+                                        if let Some(PendingItem::Approval(req)) = app.pending_overlay.as_ref().and_then(|o| o.items.get(idx)) {
+                                            let apr_id = req.request_id.clone();
+                                            let approver_level =
+                                                autonoetic_types::background::ApprovalLevel::Operator;
+                                            let mut options =
+                                                autonoetic_gateway::scheduler::ApproveOptions::default();
+                                            if let Ok(Some(ref approval)) = store.get_approval(&apr_id) {
+                                                if let Some(ref phrase) = approval.confirm_phrase {
+                                                    options.confirm_phrase = Some(phrase.clone());
+                                                }
+                                                if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+                                                    added_capabilities,
+                                                    broadened_capabilities,
+                                                    ..
+                                                } = &approval.action
+                                                {
+                                                    options.acknowledged_capabilities =
+                                                        added_capabilities.iter()
+                                                            .chain(broadened_capabilities.iter())
+                                                            .cloned()
+                                                            .collect();
+                                                }
+                                            }
+                                            match autonoetic_gateway::scheduler::approve_request_with_options(
+                                                config,
+                                                Some(store),
+                                                &apr_id,
+                                                "chat-tui",
+                                                None,
+                                                None,
+                                                Some(&approver_level),
+                                                None,
+                                                options,
+                                            ) {
+                                                Ok(_decision) => {
+                                                    app.pending_approval_ids.retain(|id| id != &apr_id);
+                                                    app.add_message(
+                                                        MessageRole::System,
+                                                        format!("Approved: {}", apr_id),
+                                                    );
+                                                    let pid = app.next_id();
+                                                    app.add_pending(pid);
+                                                    app.post_approval_pending_ids.push(pid);
+                                                    if let Ok(Some(approval)) = store.get_approval(&apr_id) {
+                                                        let status_id = app.next_id();
+                                                        app.pending_session_status_ids.insert(status_id);
+                                                        let _ = tx.send((
+                                                            status_id,
+                                                            ChatOutbound::SessionStatusQuery {
+                                                                session_id: approval.session_id,
+                                                            },
+                                                        ));
+                                                    }
+                                                    if let Some(ref mut overlay) = app.pending_overlay {
+                                                        overlay.items.remove(idx);
+                                                        if overlay.selected >= overlay.items.len() && overlay.selected > 0 {
+                                                            overlay.selected -= 1;
+                                                        }
+                                                        if overlay.items.is_empty() {
+                                                            app.pending_overlay = None;
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    app.add_message(
+                                                        MessageRole::System,
+                                                        format!("Failed to approve: {}", e),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                HandleKeyAction::OverlayAnswerInteraction { index, option_id } => {
+                                    if let Some(_store) = gateway_store {
+                                        if let Some(PendingItem::Interaction(ui)) = app.pending_overlay.as_ref().and_then(|o| o.items.get(index)) {
+                                            let interaction_id = ui.interaction_id.clone();
+                                            let resolved_option_id = option_id.clone();
+                                            if let Some(ref exec) = execution_for_interactions {
+                                                let exec = std::sync::Arc::clone(exec);
+                                                tokio::spawn(async move {
+                                                    use autonoetic_gateway::interaction_answer::{
+                                                        answer_and_orchestrate_resume, InteractionAnswerParams,
+                                                    };
+                                                    let _ = answer_and_orchestrate_resume(
+                                                        &exec,
+                                                        InteractionAnswerParams {
+                                                            interaction_id: interaction_id.clone(),
+                                                            answer_option_id: resolved_option_id,
+                                                            answer_text: None,
+                                                            answered_by: Some("chat-tui-overlay".to_string()),
+                                                            follow_up_message: None,
+                                                        },
+                                                    )
+                                                    .await;
+                                                });
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!("Answered interaction: {}", ui.interaction_id),
+                                                );
+                                                if let Some(ref mut overlay) = app.pending_overlay {
+                                                    overlay.items.remove(index);
+                                                    if overlay.selected >= overlay.items.len() && overlay.selected > 0 {
+                                                        overlay.selected -= 1;
+                                                    }
+                                                    if overlay.items.is_empty() {
+                                                        app.pending_overlay = None;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 HandleKeyAction::Continue => {}
                             }
@@ -4999,6 +5524,74 @@ enum HandleKeyAction {
     ApproveInline(String),
     PauseSession,
     CancelSession,
+    OpenPendingOverlay,
+    OverlayApprove(usize),
+    OverlayAnswerInteraction { index: usize, option_id: Option<String> },
+}
+
+fn handle_overlay_key(
+    key: crossterm::event::KeyEvent,
+    app: &mut App,
+) -> anyhow::Result<HandleKeyAction> {
+    let overlay = match app.pending_overlay.as_mut() {
+        Some(o) => o,
+        None => return Ok(HandleKeyAction::Continue),
+    };
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.pending_overlay = None;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if overlay.selected > 0 {
+                overlay.selected -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if overlay.selected + 1 < overlay.items.len() {
+                overlay.selected += 1;
+            }
+        }
+        KeyCode::Char('a') => {
+            let idx = overlay.selected;
+            if let Some(PendingItem::Approval(_)) = overlay.items.get(idx) {
+                return Ok(HandleKeyAction::OverlayApprove(idx));
+            }
+        }
+        KeyCode::Char('r') => {
+            let idx = overlay.selected;
+            if let Some(PendingItem::Approval(_)) = overlay.items.get(idx) {
+                app.pending_overlay = None;
+                app.add_message(
+                    MessageRole::System,
+                    "Use `autonoetic gateway approvals reject <id>` to reject.".to_string(),
+                );
+            }
+        }
+        KeyCode::Enter => {
+            let idx = overlay.selected;
+            if let Some(PendingItem::Interaction(_)) = overlay.items.get(idx) {
+                return Ok(HandleKeyAction::OverlayAnswerInteraction {
+                    index: idx,
+                    option_id: None,
+                });
+            }
+        }
+        KeyCode::Char(c) if c >= '1' && c <= '9' => {
+            let idx = overlay.selected;
+            if let Some(PendingItem::Interaction(ui)) = overlay.items.get(idx) {
+                let opt_idx = (c as usize) - ('1' as usize);
+                if let Some(opt) = ui.options.get(opt_idx) {
+                    return Ok(HandleKeyAction::OverlayAnswerInteraction {
+                        index: idx,
+                        option_id: Some(opt.id.clone()),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(HandleKeyAction::Continue)
 }
 
 fn handle_key(
@@ -5006,6 +5599,10 @@ fn handle_key(
     app: &mut App,
     _tx: &tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>,
 ) -> anyhow::Result<HandleKeyAction> {
+    if app.pending_overlay.is_some() {
+        return handle_overlay_key(key, app);
+    }
+
     match key.code {
         // Quit
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -5112,6 +5709,11 @@ fn handle_key(
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.follow_output = true;
             app.scroll_offset = app.last_max_scroll_offset;
+        }
+
+        // Open pending approvals/interactions overlay
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Ok(HandleKeyAction::OpenPendingOverlay);
         }
 
         _ => {}

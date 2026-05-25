@@ -125,43 +125,41 @@ impl PromotionStore {
             }
         }
 
-        let role_name = match role {
+        let role_name = role.as_str();
+
+        match role {
             PromotionRole::Evaluator => {
                 record.evaluator_id = Some(agent_id.to_string());
                 record.evaluator_pass = pass;
                 record.evaluator_findings = findings;
                 record.evaluator_timestamp = Some(timestamp);
-                "evaluator"
             }
             PromotionRole::Auditor => {
                 record.auditor_id = Some(agent_id.to_string());
                 record.auditor_pass = pass;
                 record.auditor_findings = findings;
                 record.auditor_timestamp = Some(timestamp);
-                "auditor"
             }
             PromotionRole::StaticEvaluator => {
                 record.static_evaluator_id = Some(agent_id.to_string());
                 record.static_evaluator_pass = pass;
                 record.static_evaluator_findings = findings;
                 record.static_evaluator_timestamp = Some(timestamp);
-                "static_evaluator"
             }
             PromotionRole::UnitTestRunner => {
                 record.unit_test_runner_id = Some(agent_id.to_string());
                 record.unit_test_runner_pass = pass;
                 record.unit_test_runner_findings = findings;
                 record.unit_test_runner_timestamp = Some(timestamp);
-                "unit_test_runner"
             }
             PromotionRole::SealedEvaluator => {
                 record.sealed_evaluator_id = Some(agent_id.to_string());
                 record.sealed_evaluator_pass = pass;
                 record.sealed_evaluator_findings = findings;
                 record.sealed_evaluator_timestamp = Some(timestamp);
-                "sealed_evaluator"
             }
-        };
+        }
+
         tracing::info!(
             target: "promotion_store",
             artifact_id = %artifact_id,
@@ -251,13 +249,10 @@ impl PromotionStore {
     pub fn has_passed(&self, artifact_id: &str, role: &PromotionRole) -> bool {
         let records = self.records.lock().unwrap();
         if let Some(record) = records.get(artifact_id) {
-            match role {
-                PromotionRole::Evaluator => record.evaluator_pass,
-                PromotionRole::Auditor => record.auditor_pass,
-                PromotionRole::StaticEvaluator => record.static_evaluator_pass,
-                PromotionRole::UnitTestRunner => record.unit_test_runner_pass,
-                PromotionRole::SealedEvaluator => record.sealed_evaluator_pass,
-            }
+            record
+                .get_role_result(role.as_str())
+                .map(|(pass, _)| pass)
+                .unwrap_or(false)
         } else {
             false
         }

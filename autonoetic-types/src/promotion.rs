@@ -51,82 +51,76 @@ impl PromotionRole {
 
 /// Promotion record linking validation results to an artifact.
 ///
-/// TODO: When a 6th role is added, refactor to `HashMap<PromotionRole, RoleVerdict>`
-/// per plan §3.3. Custom `Deserialize` reads both old flat format and new map.
-/// On first write after upgrade, normalise to the new format. No data migration
-/// script needed; read-time migration only.
+/// Role-specific fields are hardcoded for security — the gateway knows exactly
+/// which slots exist and which agents may write to them. Adding a new role
+/// requires adding a field here plus a match arm in `get_role_result()`, but
+/// no gateway code changes (callers use `get_role_result` instead of matching
+/// on field names).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionRecord {
-    /// Artifact ID this promotion applies to (e.g., "art_a1b2c3d4").
     pub artifact_id: String,
-    /// SHA256 digest of the artifact at review time (for integrity verification).
     #[serde(default)]
     pub artifact_digest: Option<String>,
-    /// Canonical revision content digest this promotion evidence is bound to.
     #[serde(default)]
     pub content_digest: Option<String>,
-    /// Agent who validated (evaluator.default).
     #[serde(default)]
     pub evaluator_id: Option<String>,
-    /// Whether evaluator passed.
     #[serde(default)]
     pub evaluator_pass: bool,
-    /// Findings from evaluator.
     #[serde(default)]
     pub evaluator_findings: Vec<Finding>,
-    /// Timestamp of evaluator validation (ISO 8601).
     #[serde(default)]
     pub evaluator_timestamp: Option<String>,
-    /// Agent who audited (auditor.default).
     #[serde(default)]
     pub auditor_id: Option<String>,
-    /// Whether auditor passed.
     #[serde(default)]
     pub auditor_pass: bool,
-    /// Findings from auditor.
     #[serde(default)]
     pub auditor_findings: Vec<Finding>,
-    /// Timestamp of auditor validation (ISO 8601).
     #[serde(default)]
     pub auditor_timestamp: Option<String>,
-    /// Static evaluator agent (static_evaluator.default).
     #[serde(default)]
     pub static_evaluator_id: Option<String>,
-    /// Whether static evaluator passed.
     #[serde(default)]
     pub static_evaluator_pass: bool,
-    /// Findings from static evaluator.
     #[serde(default)]
     pub static_evaluator_findings: Vec<Finding>,
-    /// Timestamp of static evaluator validation (ISO 8601).
     #[serde(default)]
     pub static_evaluator_timestamp: Option<String>,
-    /// Unit test runner agent (unit_test_runner.default).
     #[serde(default)]
     pub unit_test_runner_id: Option<String>,
-    /// Whether unit test runner passed.
     #[serde(default)]
     pub unit_test_runner_pass: bool,
-    /// Findings from unit test runner.
     #[serde(default)]
     pub unit_test_runner_findings: Vec<Finding>,
-    /// Timestamp of unit test runner validation (ISO 8601).
     #[serde(default)]
     pub unit_test_runner_timestamp: Option<String>,
-    /// Sealed evaluator agent (sealed_evaluator.default).
     #[serde(default)]
     pub sealed_evaluator_id: Option<String>,
-    /// Whether sealed evaluator passed.
     #[serde(default)]
     pub sealed_evaluator_pass: bool,
-    /// Findings from sealed evaluator.
     #[serde(default)]
     pub sealed_evaluator_findings: Vec<Finding>,
-    /// Timestamp of sealed evaluator validation (ISO 8601).
     #[serde(default)]
     pub sealed_evaluator_timestamp: Option<String>,
-    /// Version of promotion gate schema.
     pub promotion_gate_version: String,
+}
+
+impl PromotionRecord {
+    /// Look up a role's verdict by role name string.
+    ///
+    /// Centralizes the role→field mapping so callers (`validate_promotion_record`,
+    /// `has_passed`) don't duplicate match arms. Returns `(pass, &findings)`.
+    pub fn get_role_result(&self, role: &str) -> Option<(bool, &[Finding])> {
+        match role {
+            "evaluator" => Some((self.evaluator_pass, &self.evaluator_findings)),
+            "auditor" => Some((self.auditor_pass, &self.auditor_findings)),
+            "static_evaluator" => Some((self.static_evaluator_pass, &self.static_evaluator_findings)),
+            "unit_test_runner" => Some((self.unit_test_runner_pass, &self.unit_test_runner_findings)),
+            "sealed_evaluator" => Some((self.sealed_evaluator_pass, &self.sealed_evaluator_findings)),
+            _ => None,
+        }
+    }
 }
 
 /// Arguments for the `promotion.record` tool.
@@ -250,12 +244,51 @@ mod promotion_query_args_tests {
 
     #[test]
     fn parses_empty_object() {
-        // Serde accepts both fields missing; the runtime tool rejects "neither"
-        // with a clear error message rather than letting serde say
-        // "missing field `artifact_id`".
         let args: PromotionQueryArgs =
             serde_json::from_str("{}").expect("should parse empty object");
         assert!(args.artifact_id.is_none());
         assert!(args.artifact_ref.is_none());
+    }
+}
+
+#[cfg(test)]
+mod promotion_record_tests {
+    use super::PromotionRecord;
+
+    #[test]
+    fn loads_old_json_without_new_fields() {
+        let old_json = r#"{
+            "artifact_id": "art_abc",
+            "evaluator_pass": true,
+            "evaluator_id": "evaluator.default",
+            "evaluator_findings": [],
+            "evaluator_timestamp": "2026-01-01T00:00:00Z",
+            "auditor_pass": false,
+            "promotion_gate_version": "1.0"
+        }"#;
+        let record: PromotionRecord =
+            serde_json::from_str(old_json).expect("old JSON should still load");
+        assert!(record.evaluator_pass);
+        assert!(!record.auditor_pass);
+    }
+
+    #[test]
+    fn get_role_result_returns_correct_slots() {
+        let record: PromotionRecord = serde_json::from_str(r#"{
+            "artifact_id": "art_test",
+            "evaluator_pass": true,
+            "auditor_pass": false,
+            "static_evaluator_pass": true,
+            "unit_test_runner_pass": true,
+            "sealed_evaluator_pass": false,
+            "promotion_gate_version": "2.0"
+        }"#).expect("should load");
+
+        assert_eq!(record.get_role_result("evaluator").map(|(p, f)| (p, f.is_empty())), Some((true, true)));
+        assert_eq!(record.get_role_result("auditor").map(|(p, f)| (p, f.is_empty())), Some((false, true)));
+        assert_eq!(record.get_role_result("static_evaluator").map(|(p, f)| (p, f.is_empty())), Some((true, true)));
+        assert_eq!(record.get_role_result("unit_test_runner").map(|(p, f)| (p, f.is_empty())), Some((true, true)));
+        assert_eq!(record.get_role_result("sealed_evaluator").map(|(p, f)| (p, f.is_empty())), Some((false, true)));
+        assert!(record.get_role_result("unknown_role").is_none());
     }
 }

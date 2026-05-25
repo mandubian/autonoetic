@@ -300,25 +300,19 @@ pub fn validate_promotion_record(
             });
         }
         Some(record) => {
-            let passed = match promotion_role {
-                "evaluator" => record.evaluator_pass,
-                "auditor" => record.auditor_pass,
-                _ => {
+            let (passed, findings) = match record.get_role_result(promotion_role) {
+                Some(v) => v,
+                None => {
                     violations.push(ValidationViolation {
                         rule: "promotion_record".into(),
                         message: format!("unknown promotion role '{}'", promotion_role),
-                        repair_hint: "Use 'evaluator' or 'auditor'".into(),
+                        repair_hint: "Use a known promotion role name (evaluator, auditor, static_evaluator, unit_test_runner, sealed_evaluator)".into(),
                     });
                     return violations;
                 }
             };
 
             if !passed {
-                let findings = match promotion_role {
-                    "evaluator" => &record.evaluator_findings,
-                    "auditor" => &record.auditor_findings,
-                    _ => &Vec::<autonoetic_types::promotion::Finding>::new(),
-                };
                 let findings_summary = if findings.is_empty() {
                     "no findings provided".to_string()
                 } else {
@@ -1180,6 +1174,20 @@ impl GatewayExecutionService {
         ))
     }
 
+    fn resolve_artifact_ref_to_id(
+        &self,
+        artifact_ref: &str,
+        session_id: &str,
+    ) -> Option<String> {
+        self.gateway_store()
+            .and_then(|gs| {
+                gs.resolve_artifact_ref_any_scope(artifact_ref, session_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.artifact_id)
+            })
+    }
+
     pub(crate) async fn validate_promotion_gate(
         &self,
         agent_id: &str,
@@ -1202,8 +1210,11 @@ impl GatewayExecutionService {
             return Ok(result);
         }
 
-        let promotion_artifact_id = metadata
-            .and_then(|m| m.get("promotion_artifact_id"))
+        let raw_artifact_id = metadata
+            .and_then(|m| {
+                m.get("promotion_artifact_id")
+                    .or_else(|| m.get("promotion_artifact_ref"))
+            })
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let promotion_role = metadata
@@ -1211,10 +1222,21 @@ impl GatewayExecutionService {
             .and_then(|v| v.as_str())
             .unwrap_or("evaluator");
 
+        let promotion_artifact_id = if raw_artifact_id.starts_with("ar.")
+            || raw_artifact_id.starts_with("ar_")
+        {
+            match self.resolve_artifact_ref_to_id(raw_artifact_id, &result.session_id) {
+                Some(id) => id,
+                None => raw_artifact_id.to_string(),
+            }
+        } else {
+            raw_artifact_id.to_string()
+        };
+
         let gateway_dir = self.config().agents_dir.join(".gateway");
         let promotion_violations = validate_promotion_record(
             Some(&gateway_dir),
-            promotion_artifact_id,
+            &promotion_artifact_id,
             promotion_role,
         );
 
@@ -1279,7 +1301,7 @@ impl GatewayExecutionService {
 
                     let remaining = validate_promotion_record(
                         Some(&gateway_dir),
-                        promotion_artifact_id,
+                        &promotion_artifact_id,
                         promotion_role,
                     );
                     result = repaired;

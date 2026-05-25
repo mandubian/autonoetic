@@ -1912,7 +1912,7 @@ fn default_max_background_due_per_tick() -> usize {
 }
 
 fn default_approval_timeout_secs() -> u64 {
-    600
+    3600
 }
 
 fn default_max_pending_approvals_per_root() -> usize {
