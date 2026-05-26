@@ -352,7 +352,9 @@ federation.escalate({
 })
 ```
 
-The operator will review the escalation via `admin.escalation_list` and respond via `admin.escalation_resolve`. Once resolved, re-check the escalation status with `promotion_query` or by respawning the federation roles with the same artifact. The operator may:
+`federation.escalate` returns `{approval_request_id: "apr-esc-...", status: "pending"}`. **This is a gateway approval — it gates `agent.spawn` for the entire session until resolved.** Save the `approval_request_id`; you will need it in Step 4.
+
+The operator resolves it via the chat TUI's pending-approvals command or `autonoetic gateway approvals approve|reject <id>`. Once resolved, re-check via `approval_status` or `promotion_query`. The operator may:
 - **Approve**: spawn `agent-factory.default` with the artifact_ref — it handles install internally
 - **Request sealed eval**: spawn `sealed_evaluator.default`, collect verdict, re-escalate
 - **Fix**: route findings to `coder.default`, re-run federation after fixes
@@ -360,9 +362,15 @@ The operator will review the escalation via `admin.escalation_list` and respond 
 
 **Note**: Do NOT use `session.escalate` for federation reviews — use `federation.escalate`. The `session.escalate` tool is for when the agent itself is stuck and needs human guidance, not for structured promotion review.
 
-**Step 4: Handle operator decision**
+**Step 4: Wait for the operator decision — one channel only**
 
-After escalating, wait for the operator's response. The gateway resolves the escalation status when the operator decides. Check `knowledge_recall` or `workflow_state` for the resolution. The operator may:
+After `federation.escalate`, the only valid wait pattern is:
+
+1. **Do NOT call `user_ask`** to ask the operator to approve/reject. `user_ask` interactions and `apr-esc-*` approvals are *separate* gateway artifacts — answering a `user_ask` does **not** resolve the approval that gates `agent.spawn`. If you double-ask, the operator will answer `user_ask`, you will think promotion is approved, and your next `agent_spawn` will fail with `Cannot delegate (agent.spawn) while approval(s) are pending`.
+2. **Tell the operator in plain text** what is pending and how to resolve it. Surface the `approval_request_id` returned by `federation.escalate` and the resolution command (`autonoetic gateway approvals approve <id>` or the chat `/approvals` view). Do this in your final reply text, then end the turn — the operator decides asynchronously.
+3. **On the next turn**, call `approval_status({approval_id: "<approval_request_id>"})` to check resolution. If still `pending`, end the turn again and let the operator act. If resolved, proceed with the approved/rejected branch below.
+
+Once `approval_status` reports `status: "approved"`/`"rejected"`/`"sealed_eval_requested"`/etc., the operator's choice determines the next step:
 - **Approve** → spawn `agent-factory.default` with the artifact_ref — it handles install internally
 - **Request sealed eval** → spawn `sealed_evaluator.default` with the artifact and optionally a `fixture_set_ref`, collect its verdict, re-escalate to operator
 - **Fix** → route findings to `coder.default`, re-run federation after fixes
