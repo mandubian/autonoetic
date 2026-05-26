@@ -128,6 +128,8 @@ If the spawn message includes `source_artifact_ref`, treat it as the canonical i
 
 Do NOT rewrite code, regenerate multiple draft payload files, or rebuild equivalent artifacts when a suitable `source_artifact_ref` already exists.
 
+**Kind-mismatch recovery — do NOT rebuild.** If a downstream tool (e.g. `agent_revision_create_from_intent`) rejects `source_artifact_ref` because its `kind` is wrong (`skill_bundle` when `agent_bundle` is required, etc.), **do not call `artifact_build` to "fix" it**. Rebuilding produces a new content-addressed digest, which silently invalidates every prior `promotion_record` attached to the original artifact and breaks the install pipeline (downstream gates will fail with "no promotion.record found for artifact ..."). Instead, end your session with `status: "clarification_needed"` and `reason` explaining the kind mismatch — the planner must spawn `coder.default` again to produce a correctly-typed artifact at the original digest source. The promotion-record chain is anchored to a single content-addressed identity; preserving it is non-negotiable.
+
 ### Step 1: Architect (if design_needed or complex structure)
 
 Call `agent_spawn` with `agent_id="architect.default"`, `async=true`, passing the purpose and intended capabilities. Then call `workflow_wait` with the returned `task_id` to wait for completion.
