@@ -12,6 +12,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InteractionAnswerOutcome {
     pub interaction_id: String,
+    pub session_id: Option<String>,
+    pub root_session_id: Option<String>,
     pub answer_applied: bool,
     pub resumed: bool,
     pub workflow_task_unblocked: bool,
@@ -171,6 +173,8 @@ pub async fn answer_and_orchestrate_resume(
         if existing.status == UserInteractionStatus::Answered {
             return Ok(InteractionAnswerOutcome {
                 interaction_id: params.interaction_id.clone(),
+                session_id: Some(existing.session_id.clone()),
+                root_session_id: Some(existing.root_session_id.clone()),
                 answer_applied: false,
                 resumed: false,
                 workflow_task_unblocked: false,
@@ -233,6 +237,8 @@ pub async fn answer_and_orchestrate_resume(
             .await?;
         return Ok(InteractionAnswerOutcome {
             interaction_id: params.interaction_id.clone(),
+            session_id: Some(interaction.session_id.clone()),
+            root_session_id: Some(interaction.root_session_id.clone()),
             answer_applied: true,
             resumed: false,
             workflow_task_unblocked: false,
@@ -255,6 +261,8 @@ pub async fn answer_and_orchestrate_resume(
             .try_claim_answered_standalone_interaction_resume(&params.interaction_id);
         return Ok(InteractionAnswerOutcome {
             interaction_id: params.interaction_id.clone(),
+            session_id: Some(interaction.session_id.clone()),
+            root_session_id: Some(interaction.root_session_id.clone()),
             answer_applied: true,
             resumed: false,
             workflow_task_unblocked: false,
@@ -326,6 +334,8 @@ pub async fn answer_and_orchestrate_resume(
         }
         return Ok(InteractionAnswerOutcome {
             interaction_id: params.interaction_id.clone(),
+            session_id: Some(interaction.session_id.clone()),
+            root_session_id: Some(interaction.root_session_id.clone()),
             answer_applied: true,
             resumed: unblocked,
             workflow_task_unblocked: unblocked,
@@ -371,6 +381,8 @@ pub async fn answer_and_orchestrate_resume(
 
     Ok(InteractionAnswerOutcome {
         interaction_id: params.interaction_id.clone(),
+        session_id: Some(interaction.session_id.clone()),
+        root_session_id: Some(interaction.root_session_id.clone()),
         answer_applied: true,
         resumed: true,
         workflow_task_unblocked: false,
@@ -406,6 +418,8 @@ pub async fn resolve_and_answer(
         }
         Err(candidates) => Ok(InteractionAnswerOutcome {
             interaction_id: String::new(),
+            session_id: None,
+            root_session_id: None,
             answer_applied: false,
             resumed: false,
             workflow_task_unblocked: false,

@@ -363,10 +363,23 @@ impl JsonRpcRouter {
                 match crate::interaction_answer::answer_and_orchestrate_resume(&execution, params)
                     .await
                 {
-                    Ok(out) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::to_value(out).unwrap_or_else(|_| serde_json::json!({})),
-                    ),
+                    Ok(out) => {
+                        {
+                            let mut map = self.async_results.lock().await;
+                            if let Some(sid) = &out.session_id {
+                                map.remove(sid);
+                            }
+                            if let Some(root) = &out.root_session_id {
+                                if root != out.session_id.as_deref().unwrap_or("") {
+                                    map.remove(root);
+                                }
+                            }
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::to_value(out).unwrap_or_else(|_| serde_json::json!({})),
+                        )
+                    }
                     Err(e) => JsonRpcResponse::error(req.id, -32000, e.to_string()),
                 }
             }
@@ -384,10 +397,23 @@ impl JsonRpcRouter {
                     };
                 let execution = self.execution.clone();
                 match crate::interaction_answer::resolve_and_answer(&execution, params).await {
-                    Ok(out) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::to_value(out).unwrap_or_else(|_| serde_json::json!({})),
-                    ),
+                    Ok(out) => {
+                        {
+                            let mut map = self.async_results.lock().await;
+                            if let Some(sid) = &out.session_id {
+                                map.remove(sid);
+                            }
+                            if let Some(root) = &out.root_session_id {
+                                if root != out.session_id.as_deref().unwrap_or("") {
+                                    map.remove(root);
+                                }
+                            }
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::to_value(out).unwrap_or_else(|_| serde_json::json!({})),
+                        )
+                    }
                     Err(e) => JsonRpcResponse::error(req.id, -32000, e.to_string()),
                 }
             }
