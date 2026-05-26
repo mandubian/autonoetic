@@ -131,7 +131,10 @@ struct SessionOverview {
     pending_user_interactions: usize,
     active_executions: usize,
     latest_signal: Option<String>,
-    active_sessions: Vec<(String, String, i64)>,
+    /// (session_id, agent_id, turn_count, status) for each in-progress session
+    /// under the root. Status is one of "active" (currently executing a turn)
+    /// or "suspended" (paused between turns or awaiting external input).
+    active_sessions: Vec<(String, String, i64, String)>,
 }
 
 impl SessionOverview {
@@ -189,9 +192,10 @@ impl SessionOverview {
         let turns = if self.active_sessions.is_empty() {
             String::new()
         } else {
-            let parts: Vec<String> = self.active_sessions.iter().take(3).map(|(_, agent, turns)| {
+            let parts: Vec<String> = self.active_sessions.iter().take(3).map(|(_, agent, turns, status)| {
                 let agent_short = agent.split('.').next().unwrap_or(agent);
-                format!("{}:t{}", agent_short, turns)
+                let paused = if status == "suspended" { " (paused)" } else { "" };
+                format!("{}:t{}{}", agent_short, turns, paused)
             }).collect();
             let suffix = if self.active_sessions.len() > 3 {
                 format!(" +{}", self.active_sessions.len() - 3)
@@ -617,9 +621,12 @@ impl App {
         if sessions.is_empty() {
             return None;
         }
-        let (session_id, agent_id, turns) = sessions.first()?;
+        let (_session_id, agent_id, turns, status) = sessions.first()?;
         let agent_short = agent_id.split('.').next().unwrap_or(agent_id);
         let mut summary = format!("{}:t{}", agent_short, turns);
+        if status == "suspended" {
+            summary.push_str(" (paused)");
+        }
         if sessions.len() > 1 {
             summary.push_str(&format!(" +{} more", sessions.len() - 1));
         }

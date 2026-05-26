@@ -190,19 +190,34 @@ impl GatewayStore {
         Ok(out)
     }
 
+    /// Return in-progress sessions under `root_session_id`, including both
+    /// currently-executing ('active') and paused ('suspended') transcripts.
+    ///
+    /// A session is flipped to `'suspended'` whenever the agent yields with a
+    /// "suspended" close reason — including normal mid-conversation turn ends
+    /// — and is *not* automatically flipped back to `'active'` on resume.
+    /// For the chat UI's activity indicator, the operator-facing notion of
+    /// "in the conversation" covers both states, so both are returned. The
+    /// status string is included as the fourth tuple element so callers can
+    /// distinguish paused sessions when rendering.
     pub fn list_active_session_turn_counts(
         &self,
         root_session_id: &str,
-    ) -> Result<Vec<(String, String, i64)>> {
+    ) -> Result<Vec<(String, String, i64, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT session_id, agent_id, turn_count
+            "SELECT session_id, agent_id, turn_count, status
              FROM session_transcripts
-             WHERE root_session_id = ?1 AND status = 'active'
+             WHERE root_session_id = ?1 AND status IN ('active', 'suspended')
              ORDER BY turn_count DESC",
         )?;
         let rows = stmt.query_map(params![root_session_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
