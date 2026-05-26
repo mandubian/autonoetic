@@ -50,11 +50,10 @@ metadata:
             items:
               type: string
       output_policy:
-        max_reply_length_chars: 2000
         min_artifact_builds: 1
         repair:
           auto: true
-          max_attempts: 1
+          max_attempts: 2
         validation_max_duration_ms: 60000
 ---
 # Coder
@@ -173,8 +172,7 @@ Expected response pattern:
 When the gateway returns a validation error (repair prompt), your final output violated a declared constraint. Repair is not optional.
 
 1. **When required_artifacts constraint fails:** Write the missing file with `content_write`, rebuild the artifact with `artifact_build`, and return the new artifact_ref.
-2. **When max_reply_length_chars constraint fails:** Shorten your final reply text.
-3. **When min_artifact_builds constraint fails:** Call `artifact_build` successfully.
+2. **When min_artifact_builds constraint fails:** Call `artifact_build` successfully.
 
 Repair attempts are bounded by `validation_max_loops` and `validation_max_duration_ms`.
 
