@@ -363,6 +363,8 @@ struct App {
     task_lifecycles: HashMap<String, TaskLifecycle>,
     task_lifecycle_msg_idx: HashMap<String, usize>,
     pending_overlay: Option<PendingOverlay>,
+    wrap_width: u16,
+    messages_area_row_end: u16,
 }
 
 impl App {
@@ -418,6 +420,8 @@ impl App {
             task_lifecycles: HashMap::new(),
             task_lifecycle_msg_idx: HashMap::new(),
             pending_overlay: None,
+            wrap_width: 80,
+            messages_area_row_end: 0,
         }
     }
 
@@ -754,13 +758,54 @@ impl App {
         }
     }
 
+    fn in_messages_area(&self, row: u16) -> bool {
+        row >= 2 && row < self.messages_area_row_end
+    }
+
     fn toggle_lifecycle_at_content_row(&mut self, content_row: usize) -> bool {
+        let ww = self.wrap_width.max(1);
         let mut row: usize = 0;
         let mut found_task_id: Option<String> = None;
         for (msg_idx, msg) in self.messages.iter().enumerate() {
-            let msg_lines = msg.content.lines().count().max(1);
-            let blank_line = 1;
-            let msg_height = msg_lines + blank_line;
+            let msg_height = if let Some(ref card) = msg.rich_card {
+                let rich_lines = match card {
+                    RichCard::UserInteraction(interaction) => {
+                        render_interaction_card(interaction, ww)
+                    }
+                    RichCard::Approval {
+                        request,
+                        detail,
+                        enrichment,
+                    } => render_approval_card(request, detail, enrichment, ww),
+                };
+                let mut h = 0usize;
+                for rl in &rich_lines {
+                    h = h.saturating_add(transcript_wrap_line_count(rl.clone(), ww));
+                }
+                h.saturating_add(transcript_wrap_line_count(Line::raw(""), ww))
+            } else {
+                let icon = match msg.role {
+                    MessageRole::User => "> ",
+                    MessageRole::Assistant => "🤖 ",
+                    MessageRole::System => "ℹ ",
+                    MessageRole::Signal => "🔔 ",
+                    MessageRole::SignalLow => "  ",
+                    MessageRole::AgentOutput => "📝 ",
+                };
+                let style = message_role_style(msg.role);
+                let mut h = 0usize;
+                for (i, text_line) in msg.content.lines().enumerate() {
+                    let prefix = if i == 0 { icon } else { "  " };
+                    h = h.saturating_add(transcript_wrap_line_count(
+                        Line::from(vec![
+                            Span::raw(prefix),
+                            Span::styled(text_line.to_string(), style),
+                        ]),
+                        ww,
+                    ));
+                }
+                h.saturating_add(transcript_wrap_line_count(Line::raw(""), ww))
+            };
             if content_row >= row && content_row < row + msg_height {
                 for (tid, &lc_idx) in &self.task_lifecycle_msg_idx {
                     if lc_idx == msg_idx {
@@ -770,7 +815,7 @@ impl App {
                 }
                 break;
             }
-            row += msg_height;
+            row = row.saturating_add(msg_height);
         }
         if let Some(tid) = found_task_id {
             if let Some(lc) = self.task_lifecycles.get_mut(&tid) {
@@ -4572,6 +4617,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
             let layout = compute_chat_layout(area);
             let messages_height = layout.messages.height as usize;
             let messages_content_width = layout.messages.width.saturating_sub(1);
+            app.wrap_width = messages_content_width;
+            app.messages_area_row_end = layout.messages.y.saturating_add(layout.messages.height);
             app.last_max_scroll_offset = app
                 .content_line_count(messages_content_width)
                 .saturating_sub(messages_height);
@@ -4688,15 +4735,23 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                         } else {
                                             let status_label = match status {
-                                                "processing" => "Processing",
-                                                "suspended_approval" => "Suspended — awaiting approval",
-                                                "suspended_user_input" => "Suspended — awaiting user input",
-                                                s => s,
+                                                "processing" => Some("Processing"),
+                                                "suspended_approval" => Some("Suspended — awaiting approval"),
+                                                "suspended_user_input" => {
+                                                    if app.session_overview.pending_user_interactions > 0 {
+                                                        Some("Suspended — awaiting user input")
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
+                                                s => Some(s),
                                             };
-                                            app.add_message(
-                                                MessageRole::System,
-                                                format!("⏳ Session status: {}", status_label),
-                                            );
+                                            if let Some(label) = status_label {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!("⏳ Session status: {}", label),
+                                                );
+                                            }
                                         }
                                     }
                                     needs_redraw = true;
@@ -5447,16 +5502,20 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
     }
     match mouse.kind {
         crossterm::event::MouseEventKind::ScrollUp => {
-            app.scroll_messages_up(3);
+            if app.in_messages_area(mouse.row) {
+                app.scroll_messages_up(3);
+            }
             true
         }
         crossterm::event::MouseEventKind::ScrollDown => {
-            app.scroll_messages_down(3);
+            if app.in_messages_area(mouse.row) {
+                app.scroll_messages_down(3);
+            }
             true
         }
         crossterm::event::MouseEventKind::Down(btn) => {
             if btn == crossterm::event::MouseButton::Left {
-                if mouse.row >= 2 {
+                if app.in_messages_area(mouse.row) {
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.selecting = true;
@@ -5479,7 +5538,7 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
         }
         crossterm::event::MouseEventKind::Up(btn) => {
             if btn == crossterm::event::MouseButton::Left && app.selecting {
-                if mouse.row >= 2 {
+                if app.in_messages_area(mouse.row) {
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.sel_end = Some((content_row, content_col));
@@ -5509,13 +5568,12 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
         }
         crossterm::event::MouseEventKind::Drag(btn) => {
             if btn == crossterm::event::MouseButton::Left && app.selecting {
-                // Only update if in messages area
-                if mouse.row >= 2 {
+                if app.in_messages_area(mouse.row) {
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.sel_end = Some((content_row, content_col));
                 }
-                true // Need redraw to show selection highlight
+                true
             } else {
                 false
             }
