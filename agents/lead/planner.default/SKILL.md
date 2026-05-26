@@ -421,10 +421,12 @@ When `workflow_wait` returns `any_failed: true`:
 
 - **Output schema error** (`"reply is not valid JSON"` or `"[output_schema]"`): If `promotion_record` was called, the work completed — proceed to the next stage. Do NOT re-spawn.
 - **Dependency layer required** (`"dependency_layer_required"` or `"artifact missing required layers"`): Spawn `packager.default`, wait, then retry with the layered artifact_ref.
+- **Transient infrastructure failure** (`"spawn_execute_error"`, `"error sending request for url"`, connection refused/reset/timed out, HTTP 5xx from the model endpoint): Treat this as an environment failure, not an artifact failure. Do NOT restart onboarding, re-spawn coder, or start a fresh install pipeline. If the failed child was `agent-factory.default` or `specialized_builder.default`, retry the exact same stage at most once after the environment is healthy again; if it recurs, escalate to human.
+- **Install-state conflict** (`"already has active revision"`, `"Archived"`, `"rollback lineage mismatch"`, `"content-addressed dedup"`, `"no alias found"`): This is not a coder bug. Do NOT spawn `coder.default` or `specialized_builder.default` again. Inspect installed state first (`agent_exists`, `agent_revision_list`, `agent_revision_inspect`), then report or escalate for operator intervention.
 - **LoopGuard trip on sealed_evaluator**: Check if failure was dependency-related (pip install, ModuleNotFoundError) → packager first. Otherwise route to `coder.default` or `debugger.default`.
 - **Static evaluator fails**: Route findings to `coder.default` for code fixes, then re-run the full federation. Do NOT proceed to operator review until static findings are resolved.
 - **Unit test runner fails**: Route test output to `coder.default` for test fixes, then re-run unit tests. If unit tests are absent (no verdict recorded), proceed without them.
-- **Functional failure** (no promotion record, no results): Retry once with coder. After 2 retries, spawn `debugger.default` for root cause.
+- **Functional artifact failure** (no promotion record, no results, wrong output on a valid fresh artifact): Retry once with coder. Use this bucket only when the evidence points to the artifact itself, not the environment or revision state. After 2 retries, spawn `debugger.default` for root cause.
 - **`failed_task_count >= 2`**: Call `session_escalate(target: "human", urgency: "high")`. Do not spawn more tasks.
 
 ### Evaluator / auditor reports `unable_to_evaluate` or `clarification_needed`

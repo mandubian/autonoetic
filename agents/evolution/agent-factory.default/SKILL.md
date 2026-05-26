@@ -316,7 +316,10 @@ Compose the install intent in the delegation message itself. Do NOT create itera
 - If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT attempt to fix errors yourself.
 - If coder returns no `artifact_ref`: inspect `files` array and call `artifact_build` to consolidate.
 - If packager fails: report to planner — do NOT skip packager when deps were found.
+- If `specialized_builder.default` fails with a transient transport/infrastructure error (`spawn_execute_error`, `error sending request for url`, connection refused/reset/timed out, HTTP 5xx): return `ok: false, stage: "install", reason: "transient_infrastructure_failure"` to planner and stop. Do NOT re-run coder, rebuild the artifact, or retry builder in the same wake-up. Retry the exact same install stage at most once after the environment recovers.
+- If `specialized_builder.default` reports a revision-state conflict (`already has active revision`, `revision is Archived`, `rollback lineage mismatch`, `content-addressed dedup`, `no alias found`): return `ok: false, stage: "install_conflict", error: "<message>"` to planner and stop. Do NOT retry the install stage automatically; the planner must inspect existing revision/alias state first.
 - If `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.
+- After any install-stage failure, reuse existing artifact and gate outputs. Never re-run coder or packager unless the error explicitly points back to artifact contents.
 - After 2 retries on the same stage: report failure to planner and stop.
 
 ### Evaluator and auditor outcomes — route by reported status

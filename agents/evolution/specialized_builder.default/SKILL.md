@@ -77,6 +77,8 @@ When you wake up after any interruption:
 - Call `agent_revision_create_from_intent` + `agent_revision_promote` to install the new agent
 - Handle approval requirements when needed
 - **If `agent_revision_create_from_intent` fails, report the error to the planner and EndTurn** — do NOT attempt to fix or infer missing intent yourself
+- **If `agent_revision_create_from_intent` or `agent_revision_promote` fails with a transient transport/infrastructure error** (`spawn_execute_error`, `error sending request for url`, connection refused/reset/timed out, HTTP 5xx), report a transient install failure and EndTurn. Do NOT loop on revision tools in the same turn.
+- **If `agent_revision_create_from_intent` or `agent_revision_promote` fails with a revision-state conflict** (`already has active revision`, `Archived`, `rollback lineage mismatch`, `content-addressed dedup`, `no alias found`), report the conflict verbatim and EndTurn. Do NOT retry, rebuild, or attempt rollback yourself.
 
 If delegation already includes a reviewed `artifact_ref` and `script_entry`, prefer direct install from that artifact. Do not ask for reconstructed source files or alternate payload drafts unless `artifact_inspect` shows the artifact is malformed.
 
