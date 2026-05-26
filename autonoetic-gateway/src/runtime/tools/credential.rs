@@ -578,7 +578,7 @@ impl NativeTool for CredentialRequestTool {
             && !cred
                 .allowed_hosts
                 .iter()
-                .any(|h| h == "*" || h == &url_host)
+                .any(|h| h == "*" || normalize_allowed_host(h) == url_host)
         {
             return Ok(autonoetic_types::tool_error::ToolError::permission(
                 format!(
@@ -732,6 +732,20 @@ impl NativeTool for CredentialRequestTool {
 fn extract_host(url: &str) -> anyhow::Result<String> {
     let parsed = url::Url::parse(url)?;
     Ok(parsed.host_str().unwrap_or("").to_string())
+}
+
+/// Normalize an `allowed_hosts` entry for host-only comparison against
+/// `extract_host(url)`. Strips an optional port and handles IPv6 forms
+/// (e.g. `"localhost:9876"` → `"localhost"`, `"[::1]:8443"` → `"::1"`).
+/// The `"*"` wildcard is returned unchanged.
+fn normalize_allowed_host(entry: &str) -> String {
+    if entry == "*" {
+        return entry.to_string();
+    }
+    url::Url::parse(&format!("http://{}", entry))
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_else(|| entry.to_string())
 }
 
 enum SkillUrlKind {
@@ -2517,7 +2531,34 @@ fn extract_base_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{skills_dir, validate_local_skill_path};
+    use super::{normalize_allowed_host, skills_dir, validate_local_skill_path};
+
+    #[test]
+    fn normalize_allowed_host_strips_port() {
+        assert_eq!(normalize_allowed_host("localhost"), "localhost");
+        assert_eq!(normalize_allowed_host("localhost:9876"), "localhost");
+        assert_eq!(normalize_allowed_host("example.com:8443"), "example.com");
+        assert_eq!(normalize_allowed_host("api.example.com"), "api.example.com");
+    }
+
+    #[test]
+    fn normalize_allowed_host_preserves_wildcard() {
+        assert_eq!(normalize_allowed_host("*"), "*");
+    }
+
+    #[test]
+    fn normalize_allowed_host_handles_ipv6() {
+        // url::Url normalizes IPv6 to brackets-stripped form via host_str()
+        assert_eq!(normalize_allowed_host("[::1]:8443"), "[::1]");
+        assert_eq!(normalize_allowed_host("[::1]"), "[::1]");
+    }
+
+    #[test]
+    fn normalize_allowed_host_falls_back_on_parse_failure() {
+        // Unparseable entries are returned verbatim so the comparison still
+        // fails closed rather than silently matching.
+        assert_eq!(normalize_allowed_host(""), "");
+    }
 
     #[test]
     fn validate_local_skill_path_accepts_skills_prefix() {
