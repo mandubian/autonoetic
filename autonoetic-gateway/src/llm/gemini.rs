@@ -112,6 +112,7 @@ impl GeminiDriver {
                     autonoetic_types::agent::ThinkingEffort::Low
                         | autonoetic_types::agent::ThinkingEffort::Medium
                         | autonoetic_types::agent::ThinkingEffort::High
+                        | autonoetic_types::agent::ThinkingEffort::XHigh
                 )
             {
             } else if model_is_gemma(&self.provider.model) {

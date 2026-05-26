@@ -4,6 +4,23 @@
 //! Drivers should never read environment variables directly; they receive a
 //! `ResolvedProvider` already populated by this module.
 
+/// How an OpenAI-compatible provider expects reasoning/thinking to be requested.
+/// Drivers use this to pick the right request-body shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningStyle {
+    /// Provider exposes no reasoning controls — the `thinking` field is dropped.
+    None,
+    /// OpenAI o-series / GPT-5: top-level string `"reasoning_effort": "low|medium|high"`.
+    /// The driver must additionally gate emission by model name, because OpenAI
+    /// rejects this field on non-reasoning models.
+    OpenAiEffort,
+    /// OpenRouter unified reasoning API: top-level object
+    /// `"reasoning": {"effort": "low|medium|high", "max_tokens": N, ...}`.
+    /// OpenRouter silently ignores the field on models that don't support
+    /// reasoning, so the driver emits it unconditionally whenever `thinking` is set.
+    OpenRouterUnified,
+}
+
 /// Flags describing what a provider's API supports.
 /// Drivers use these to decide which code paths to take.
 #[derive(Debug, Clone)]
@@ -20,10 +37,13 @@ pub struct ProviderCapabilities {
     pub supports_tools: bool,
     /// Provider supports the tool_choice parameter (some OpenAI-compatible APIs don't).
     pub supports_tool_choice: bool,
+    /// Which reasoning-request schema the provider expects (or `None`).
+    pub reasoning: ReasoningStyle,
 }
 
 impl ProviderCapabilities {
     /// OpenAI-compatible endpoints (OpenAI, OpenRouter, Groq, etc.)
+    /// Reasoning defaults to `None`; per-provider entries override as needed.
     pub fn openai_compatible() -> Self {
         Self {
             supports_streaming: true,
@@ -32,6 +52,7 @@ impl ProviderCapabilities {
             supports_usage_in_stream: false,
             supports_tools: true,
             supports_tool_choice: true,
+            reasoning: ReasoningStyle::None,
         }
     }
 
@@ -44,10 +65,12 @@ impl ProviderCapabilities {
             supports_usage_in_stream: false,
             supports_tools: false,
             supports_tool_choice: false,
+            reasoning: ReasoningStyle::None,
         }
     }
 
-    /// Anthropic Messages API
+    /// Anthropic Messages API — handled by the dedicated Anthropic driver,
+    /// so the `reasoning` field on capabilities is unused.
     pub fn anthropic() -> Self {
         Self {
             supports_streaming: true,
@@ -56,10 +79,12 @@ impl ProviderCapabilities {
             supports_usage_in_stream: true,
             supports_tools: true,
             supports_tool_choice: true,
+            reasoning: ReasoningStyle::None,
         }
     }
 
-    /// Google Gemini generateContent API
+    /// Google Gemini generateContent API — handled by the dedicated Gemini
+    /// driver, so the `reasoning` field on capabilities is unused.
     pub fn gemini() -> Self {
         Self {
             supports_streaming: false, // we don't implement Gemini streaming yet
@@ -68,6 +93,7 @@ impl ProviderCapabilities {
             supports_usage_in_stream: false,
             supports_tools: true,
             supports_tool_choice: false,
+            reasoning: ReasoningStyle::None,
         }
     }
 }
@@ -106,6 +132,17 @@ pub struct ResolvedProvider {
     pub extra_headers: Vec<(String, String)>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+}
+
+/// Map a provider name to the reasoning-request schema its API expects.
+/// Unknown providers default to `None` (silent drop), matching the
+/// pre-change behavior for everything except OpenAI o-series.
+fn reasoning_style_for_provider(provider: &str) -> ReasoningStyle {
+    match provider {
+        "openai" | "codex" => ReasoningStyle::OpenAiEffort,
+        "openrouter" => ReasoningStyle::OpenRouterUnified,
+        _ => ReasoningStyle::None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +339,10 @@ pub fn resolve(
     if chat_only {
         capabilities = ProviderCapabilities::chat_only();
     }
+
+    // Per-provider reasoning style (only applies to OpenAI-shape providers;
+    // Anthropic and Gemini drivers use their own native reasoning paths).
+    capabilities.reasoning = reasoning_style_for_provider(provider);
 
     // Resolve auth
     let api_key = if let Some(k) = api_key_override {

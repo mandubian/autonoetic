@@ -148,13 +148,39 @@ impl OpenAiDriver {
         }
 
         if let Some(ref thinking) = req.thinking {
-            if model_is_reasoning_model(&self.provider.model) {
-                let effort = match thinking.effort {
-                    autonoetic_types::agent::ThinkingEffort::Low => "low",
-                    autonoetic_types::agent::ThinkingEffort::Medium => "medium",
-                    autonoetic_types::agent::ThinkingEffort::High => "high",
-                };
-                body["reasoning_effort"] = json!(effort);
+            use autonoetic_types::agent::ThinkingEffort;
+            match self.provider.capabilities.reasoning {
+                crate::llm::provider::ReasoningStyle::None => {}
+                crate::llm::provider::ReasoningStyle::OpenAiEffort => {
+                    // OpenAI's `reasoning_effort` only accepts low|medium|high,
+                    // so `XHigh` collapses to "high". The field is also rejected
+                    // on non-reasoning models, so we gate by model name.
+                    if model_is_reasoning_model(&self.provider.model) {
+                        let effort_str = match thinking.effort {
+                            ThinkingEffort::Low => "low",
+                            ThinkingEffort::Medium => "medium",
+                            ThinkingEffort::High | ThinkingEffort::XHigh => "high",
+                        };
+                        body["reasoning_effort"] = json!(effort_str);
+                    }
+                }
+                crate::llm::provider::ReasoningStyle::OpenRouterUnified => {
+                    // OpenRouter exposes a distinct "xhigh" tier (e.g. DeepSeek
+                    // V4 Flash maps xhigh → max reasoning). Pass it through
+                    // literally. OpenRouter silently ignores `reasoning` on
+                    // models that don't support it, so we emit unconditionally.
+                    let effort_str = match thinking.effort {
+                        ThinkingEffort::Low => "low",
+                        ThinkingEffort::Medium => "medium",
+                        ThinkingEffort::High => "high",
+                        ThinkingEffort::XHigh => "xhigh",
+                    };
+                    let mut r = json!({ "effort": effort_str });
+                    if let Some(b) = thinking.budget_tokens {
+                        r["max_tokens"] = json!(b);
+                    }
+                    body["reasoning"] = r;
+                }
             }
         }
 
@@ -515,5 +541,126 @@ mod tests {
             resp.tool_calls[0].arguments,
             r#"{"content":"hello","name":"test.py"}"#
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Reasoning / thinking dispatch
+    // -----------------------------------------------------------------------
+
+    use crate::llm::provider::{
+        AuthStrategy, DriverKind, ProviderCapabilities, ReasoningStyle, ResolvedProvider,
+    };
+    use crate::llm::{CompletionRequest, Message};
+    use autonoetic_types::agent::{ThinkingConfig, ThinkingEffort};
+
+    fn driver_with(model: &str, reasoning: ReasoningStyle) -> OpenAiDriver {
+        let mut caps = ProviderCapabilities::openai_compatible();
+        caps.reasoning = reasoning;
+        OpenAiDriver::new(
+            Client::new(),
+            ResolvedProvider {
+                kind: DriverKind::OpenAi,
+                base_url: "http://test.invalid".to_string(),
+                model: model.to_string(),
+                auth: AuthStrategy::None,
+                capabilities: caps,
+                extra_headers: vec![],
+                temperature: None,
+                max_tokens: None,
+            },
+        )
+    }
+
+    fn req_with_thinking(model: &str, effort: ThinkingEffort, budget: Option<u32>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            metadata: None,
+            thinking: Some(ThinkingConfig { effort, budget_tokens: budget }),
+        }
+    }
+
+    #[test]
+    fn reasoning_none_omits_field() {
+        let driver = driver_with("o3-mini", ReasoningStyle::None);
+        let body = driver.build_body(&req_with_thinking("o3-mini", ThinkingEffort::High, None), false);
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_openai_effort_emits_top_level_string_for_reasoning_models() {
+        let driver = driver_with("o3-mini", ReasoningStyle::OpenAiEffort);
+        let body = driver.build_body(&req_with_thinking("o3-mini", ThinkingEffort::Medium, None), false);
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_openai_effort_dropped_for_non_reasoning_models() {
+        // OpenAI rejects reasoning_effort on non-reasoning models (e.g. gpt-4o),
+        // so we gate by model name even when the provider supports it.
+        let driver = driver_with("gpt-4o", ReasoningStyle::OpenAiEffort);
+        let body = driver.build_body(&req_with_thinking("gpt-4o", ThinkingEffort::High, None), false);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_openrouter_emits_object_unconditionally() {
+        // OpenRouter ignores `reasoning` on non-reasoning models, so we emit
+        // it whenever thinking is set — no model-name gate.
+        let driver = driver_with(
+            "deepseek/deepseek-v4-flash",
+            ReasoningStyle::OpenRouterUnified,
+        );
+        let body = driver.build_body(
+            &req_with_thinking(
+                "deepseek/deepseek-v4-flash",
+                ThinkingEffort::High,
+                Some(8000),
+            ),
+            false,
+        );
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["max_tokens"], 8000);
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_xhigh_emits_literal_on_openrouter() {
+        // OpenRouter exposes a distinct "xhigh" tier (e.g. DeepSeek V4 Flash
+        // maps xhigh → max reasoning), so we pass it through literally.
+        let or = driver_with("deepseek/deepseek-v4-flash", ReasoningStyle::OpenRouterUnified);
+        let body = or.build_body(
+            &req_with_thinking("deepseek/deepseek-v4-flash", ThinkingEffort::XHigh, None),
+            false,
+        );
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn reasoning_xhigh_collapses_to_high_on_openai() {
+        // OpenAI's reasoning_effort only accepts low|medium|high — XHigh
+        // collapses to "high" to avoid an API rejection.
+        let openai = driver_with("o3-mini", ReasoningStyle::OpenAiEffort);
+        let body = openai.build_body(
+            &req_with_thinking("o3-mini", ThinkingEffort::XHigh, None),
+            false,
+        );
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn thinking_effort_xhigh_serde_rename() {
+        // YAML round-trip uses the literal `xhigh` token (not the default
+        // snake_case `x_high`) so configs match OpenRouter's documented value.
+        let yaml = serde_yaml::to_string(&ThinkingEffort::XHigh).unwrap();
+        assert_eq!(yaml.trim(), "xhigh");
+        let parsed: ThinkingEffort = serde_yaml::from_str("xhigh").unwrap();
+        assert_eq!(parsed, ThinkingEffort::XHigh);
     }
 }

@@ -96,6 +96,12 @@ pub enum ThinkingEffort {
     #[default]
     Medium,
     High,
+    /// Maximum reasoning. Providers that expose a distinct top tier (e.g.
+    /// OpenRouter / DeepSeek with `"xhigh"`) get the literal value; providers
+    /// whose API only accepts `low|medium|high` (e.g. OpenAI o-series)
+    /// collapse this to `"high"`.
+    #[serde(rename = "xhigh")]
+    XHigh,
 }
 
 /// One provider round-trip: token counts and optional context window utilization.
