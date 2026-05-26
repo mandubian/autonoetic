@@ -631,6 +631,8 @@ impl JsonRpcRouter {
                                     }
                                     let status = if spawn_result.suspended_for_approval.is_some() {
                                         AsyncIngestStatus::SuspendedApproval
+                                    } else if spawn_result.suspended_for_user_input {
+                                        AsyncIngestStatus::SuspendedUserInput
                                     } else {
                                         AsyncIngestStatus::Completed
                                     };

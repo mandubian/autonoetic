@@ -1273,11 +1273,20 @@ impl GatewayExecutionService {
             let status = req.status.clone();
             match status {
                 None => {
-                    anyhow::bail!(
-                        "Session '{}' is waiting for approval '{}'; approve or reject it before continuing",
-                        session_id,
-                        rid
+                    tracing::info!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        approval_request_id = %rid,
+                        "Checkpoint blocked by pending approval — re-suspending session"
                     );
+                    return Ok((
+                        TurnOutcome::Suspended {
+                            approval_request_id: rid.clone(),
+                            continuation: None,
+                        },
+                        checkpoint.initial_user_message(),
+                        None,
+                    ));
                 }
                 Some(autonoetic_types::background::ApprovalStatus::Rejected)
                 | Some(autonoetic_types::background::ApprovalStatus::Cancelled) => {
@@ -1336,11 +1345,19 @@ impl GatewayExecutionService {
                 })?;
             match &interaction.status {
                 UserInteractionStatus::Pending => {
-                    anyhow::bail!(
-                        "Session '{}' is waiting for user interaction '{}'; answer it before spawning",
-                        session_id,
-                        iid
+                    tracing::info!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        interaction_id = %iid,
+                        "Checkpoint blocked by pending user interaction — re-suspending session"
                     );
+                    return Ok((
+                        TurnOutcome::SuspendedUserInput {
+                            interaction_id: iid.clone(),
+                        },
+                        checkpoint.initial_user_message(),
+                        None,
+                    ));
                 }
                 UserInteractionStatus::Cancelled | UserInteractionStatus::Expired => {
                     anyhow::bail!(
@@ -1431,13 +1448,22 @@ impl GatewayExecutionService {
                 )
             })?;
             let esc_status = req.status.clone();
-            match esc_status {
+                match esc_status {
                 None => {
-                    anyhow::bail!(
-                        "Session '{}' is waiting for escalation approval '{}'; approve or reject it before continuing",
-                        session_id,
-                        esc_rid
+                        tracing::info!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        escalation_request_id = %esc_rid,
+                        "Checkpoint blocked by pending escalation — re-suspending session"
                     );
+                    return Ok((
+                        TurnOutcome::Suspended {
+                            approval_request_id: esc_rid.clone(),
+                            continuation: None,
+                        },
+                        checkpoint.initial_user_message(),
+                        None,
+                    ));
                 }
                 Some(autonoetic_types::background::ApprovalStatus::Rejected)
                 | Some(autonoetic_types::background::ApprovalStatus::Cancelled) => {

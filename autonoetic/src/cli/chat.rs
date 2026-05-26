@@ -4670,8 +4670,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 .unwrap_or("Unknown failure");
                                             if error_msg.contains("waiting for approval") {
                                                 app.add_message(
-                                                    MessageRole::SignalLow,
-                                                    "⏳ Session paused — awaiting operator approval".to_string(),
+                                                    MessageRole::System,
+                                                    "⏳ Session status: Suspended — awaiting approval".to_string(),
                                                 );
                                             } else {
                                                 app.add_message(
