@@ -5,6 +5,7 @@
 
 use crate::llm::ToolCall;
 use crate::runtime::disclosure::DisclosureState;
+use crate::runtime::failure_classification::{decorate_tool_error, normalize_tool_result_json};
 use crate::runtime::mcp::McpToolRuntime;
 use crate::runtime::session_tracer::SessionTracer;
 use crate::runtime::store::SecretStoreRuntime;
@@ -171,6 +172,7 @@ impl<'a> ToolCallProcessor<'a> {
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
                 Ok(res) => {
+                    let res = normalize_tool_result_json(&res);
                     let event_id = tracer.log_tool_completed_with_approval(
                         &tc.name,
                         &res,
@@ -188,7 +190,7 @@ impl<'a> ToolCallProcessor<'a> {
                     res
                 }
                 Err(e) => {
-                    let tool_error: ToolError = e.into();
+                    let tool_error = decorate_tool_error(e.into());
                     let error_json = tool_error.to_json_string();
                     let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
                     if !tool_error.is_recoverable() {
@@ -1068,6 +1070,10 @@ mod tests {
         assert_eq!(counting_calls.load(Ordering::SeqCst), 0);
         let parsed: serde_json::Value = serde_json::from_str(&results[0].2).unwrap();
         assert_eq!(parsed["approval_required"], true);
+        assert_eq!(parsed["failure_class"], "approval_pending");
+        assert_eq!(parsed["retry_advice"], "wait");
+        assert_eq!(parsed["requires_external_event"], true);
+        assert_eq!(parsed["requires_human"], true);
     }
 
     #[tokio::test(flavor = "multi_thread")]

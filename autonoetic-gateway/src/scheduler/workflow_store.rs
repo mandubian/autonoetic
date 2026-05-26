@@ -8,6 +8,7 @@
 
 use crate::execution::gateway_root_dir;
 use crate::runtime::live_digest::base_session_id;
+use crate::runtime::failure_classification::classify_task_status;
 use crate::scheduler::gateway_store::GatewayStore;
 use crate::scheduler::store::{read_json_file, write_json_file};
 use autonoetic_types::causal_chain::EntryStatus;
@@ -596,9 +597,15 @@ pub fn update_task_run_status(
     let was_succeeded = task.status == TaskRunStatus::Succeeded;
     let is_now_succeeded = status == TaskRunStatus::Succeeded;
 
+    let task_failure = classify_task_status(status, result_summary.as_deref());
+
     task.status = status;
     task.updated_at = now_rfc3339();
     task.result_summary = result_summary.clone();
+    if let Some(ref failure) = task_failure {
+        task.last_failure_class = failure.failure_class;
+        task.side_effect_state = failure.side_effect_state;
+    }
     save_task_run(config, store, &task)?;
 
     // Create implicit artifact when task succeeds (transition to Succeeded)
@@ -623,7 +630,7 @@ pub fn update_task_run_status(
 
     // Build event payload, including approval metadata for AwaitingApproval status
     let payload = if matches!(status, TaskRunStatus::AwaitingApproval) {
-        if let Some(meta) = approval_metadata {
+        let mut payload = if let Some(meta) = approval_metadata {
             serde_json::json!({
                 "status": status,
                 "approval_request_id": meta.request_id,
@@ -632,7 +639,13 @@ pub fn update_task_run_status(
             })
         } else {
             serde_json::json!({ "status": status })
+        };
+        if let Some(ref failure) = task_failure {
+            if let Some(obj) = payload.as_object_mut() {
+                failure.apply_to_json_map(obj);
+            }
         }
+        payload
     } else if matches!(status, TaskRunStatus::Succeeded) {
         let agent_outcome = result_summary
             .as_deref()
@@ -656,6 +669,11 @@ pub fn update_task_run_status(
         if let Some(ref summary) = result_summary {
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("result_summary".to_string(), serde_json::Value::String(summary.clone()));
+            }
+        }
+        if let Some(ref failure) = task_failure {
+            if let Some(obj) = payload.as_object_mut() {
+                failure.apply_to_json_map(obj);
             }
         }
         payload
@@ -728,7 +746,10 @@ pub fn update_task_run_status(
         // Bug fix: removed !wf.join_task_ids.is_empty() check - check_join_condition correctly
         // returns true for empty join_task_ids, and workflows with empty join_task_ids need to
         // transition to Resumable when tasks complete
-        if is_terminal && wf_not_emergency_stopped {
+        if is_terminal
+            && wf_not_emergency_stopped
+            && wf.status != WorkflowRunStatus::Resumable
+        {
             if let Ok(true) = check_join_condition(config, store, workflow_id) {
                 let mut wf_mut = wf;
                 wf_mut.status = WorkflowRunStatus::Resumable;
@@ -2073,6 +2094,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 1,
+            last_failure_class: Some(autonoetic_types::tool_error::FailureClass::TransientInfra),
+            retry_policy: Some(serde_json::json!({"max_retries": 3})),
+            side_effect_state: Some(autonoetic_types::tool_error::SideEffectState::Unknown),
+            dedupe_key: Some("durable:coder.default:r1".to_string()),
         };
         save_task_run(&cfg, None, &task).unwrap();
         update_task_run_status(
@@ -2091,6 +2117,58 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.status, TaskRunStatus::Succeeded);
         assert_eq!(loaded.result_summary.as_deref(), Some("ok"));
+        assert_eq!(loaded.retry_count, 1);
+        assert_eq!(
+            loaded.last_failure_class,
+            Some(autonoetic_types::tool_error::FailureClass::TransientInfra)
+        );
+        assert_eq!(
+            loaded.retry_policy,
+            Some(serde_json::json!({"max_retries": 3}))
+        );
+        assert_eq!(
+            loaded.side_effect_state,
+            Some(autonoetic_types::tool_error::SideEffectState::Unknown)
+        );
+        assert_eq!(loaded.dedupe_key.as_deref(), Some("durable:coder.default:r1"));
+    }
+
+    #[test]
+    fn load_task_run_backfills_missing_mechanical_fields() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "legacy-root", None).unwrap();
+        let task_id = "task-legacy";
+
+        let legacy_json = serde_json::json!({
+            "task_id": task_id,
+            "workflow_id": wf.workflow_id,
+            "agent_id": "coder.default",
+            "session_id": "legacy-root/coder-x",
+            "parent_session_id": "legacy-root",
+            "status": "running",
+            "created_at": now_rfc3339(),
+            "updated_at": now_rfc3339(),
+            "source_agent_id": null,
+            "result_summary": null,
+            "join_group": null,
+            "message": null,
+            "metadata": null
+        });
+        let path = task_run_path(&cfg, &wf.workflow_id, task_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy_json).unwrap()).unwrap();
+
+        let loaded = load_task_run(&cfg, None, &wf.workflow_id, task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.retry_count, 0);
+        assert!(loaded.last_failure_class.is_none());
+        assert!(loaded.retry_policy.is_none());
+        assert!(loaded.side_effect_state.is_none());
+        assert!(loaded.dedupe_key.is_none());
     }
 
     #[test]
@@ -2139,6 +2217,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
 
         create_implicit_artifact(&cfg, None, &task, Some("done")).unwrap();
@@ -2242,6 +2325,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
 
         create_implicit_artifact(&cfg, Some(&gateway_store), &task, Some("done")).unwrap();
@@ -2316,6 +2404,11 @@ mod tests {
             join_group: Some("g1".to_string()),
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &task).unwrap();
 
@@ -2362,6 +2455,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &task).unwrap();
         assert!(
@@ -2396,6 +2494,11 @@ mod tests {
                 join_group: None,
                 message: None,
                 metadata: None,
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
             };
             save_task_run(&cfg, None, &task).unwrap();
         }
@@ -2525,6 +2628,11 @@ mod tests {
                 join_group: Some("main".to_string()),
                 message: None,
                 metadata: None,
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
             };
             save_task_run(&cfg, None, &task).unwrap();
         }
@@ -2599,6 +2707,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &task).unwrap();
 
@@ -2632,6 +2745,79 @@ mod tests {
     }
 
     #[test]
+    fn join_satisfied_event_is_not_re_emitted_once_workflow_is_resumable() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "join-once-root", None).unwrap();
+
+        for (task_id, session_id) in [
+            ("task-join", "join-once-root/a-x"),
+            ("task-extra", "join-once-root/b-x"),
+        ] {
+            let task = TaskRun {
+                task_id: task_id.to_string(),
+                workflow_id: wf.workflow_id.clone(),
+                agent_id: "a".to_string(),
+                session_id: session_id.to_string(),
+                parent_session_id: "join-once-root".to_string(),
+                status: TaskRunStatus::Running,
+                created_at: now_rfc3339(),
+                updated_at: now_rfc3339(),
+                source_agent_id: None,
+                result_summary: None,
+                join_group: None,
+                message: None,
+                metadata: None,
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
+            };
+            save_task_run(&cfg, None, &task).unwrap();
+        }
+
+        let mut run = load_workflow_run(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        run.join_task_ids = vec!["task-join".to_string()];
+        save_workflow_run(&cfg, None, &run).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-join",
+            TaskRunStatus::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        update_task_run_status(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-extra",
+            TaskRunStatus::Failed,
+            Some("late failure".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let join_events = load_workflow_events(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.event_type == "workflow.join.satisfied")
+            .count();
+        assert_eq!(join_events, 1, "workflow.join.satisfied should only be emitted once");
+    }
+
+    #[test]
     fn failed_task_still_satisfies_join() {
         let dir = tempdir().unwrap();
         let agents = dir.path().join("agents");
@@ -2654,6 +2840,11 @@ mod tests {
                 join_group: None,
                 message: None,
                 metadata: None,
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
             };
             save_task_run(&cfg, None, &task).unwrap();
         }
@@ -2733,6 +2924,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &running).unwrap();
 
@@ -2750,6 +2946,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &done).unwrap();
 
@@ -2799,6 +3000,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &task).unwrap();
 
@@ -2855,6 +3061,11 @@ mod tests {
             join_group: None,
             message: Some(original_message.clone()),
             metadata: Some(original_metadata.clone()),
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &task).unwrap();
 
@@ -2925,6 +3136,11 @@ mod tests {
                 join_group: Some(grp.to_string()),
                 message: None,
                 metadata: None,
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
             };
             save_task_run(&cfg, None, &task).unwrap();
         }
@@ -2983,6 +3199,11 @@ mod tests {
                 join_group: Some("group1".to_string()),
                 message: None,
                 metadata: None,
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
             };
             save_task_run(&cfg, None, &task).unwrap();
         }
@@ -3044,6 +3265,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, None, &task).unwrap();
 
@@ -3064,9 +3290,82 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.status, TaskRunStatus::Failed);
+        assert_eq!(
+            loaded.last_failure_class,
+            Some(autonoetic_types::tool_error::FailureClass::PolicyDenied)
+        );
 
         let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
         assert!(events.iter().any(|e| e.event_type == "task.failed"));
+        let failed = events
+            .iter()
+            .find(|e| e.event_type == "task.failed")
+            .unwrap();
+        assert_eq!(failed.payload["failure_class"], "policy_denied");
+        assert_eq!(failed.payload["retry_advice"], "do_not_retry");
+    }
+
+    #[test]
+    fn awaiting_approval_event_carries_mechanical_classification() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "awaiting-root", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-await".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "awaiting-root/coder-x".to_string(),
+            parent_session_id: "awaiting-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-await",
+            TaskRunStatus::AwaitingApproval,
+            None,
+            Some(ApprovalMetadata {
+                request_id: "apr-await123".to_string(),
+                kind: "sandbox".to_string(),
+                reason: Some("operator approval required".to_string()),
+            }),
+            None,
+        )
+        .unwrap();
+
+        let loaded = load_task_run(&cfg, None, &wf.workflow_id, "task-await")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.last_failure_class,
+            Some(autonoetic_types::tool_error::FailureClass::ApprovalPending)
+        );
+        let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        let awaiting = events
+            .iter()
+            .find(|e| e.event_type == "task.awaiting_approval")
+            .unwrap();
+        assert_eq!(awaiting.payload["failure_class"], "approval_pending");
+        assert_eq!(awaiting.payload["retry_advice"], "wait");
+        assert_eq!(awaiting.payload["requires_external_event"], true);
     }
 
     #[test]
@@ -3459,6 +3758,11 @@ mod tests {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, Some(&store), &task).unwrap();
 

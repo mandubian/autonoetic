@@ -25,6 +25,12 @@ pub enum YieldReason {
     ApprovalRequired { approval_request_id: String },
     /// Explicit question / choice for the human.
     UserInputRequired { interaction_id: String },
+    /// Session is suspended waiting for child workflow/task state to change.
+    WaitingForChild {
+        workflow_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
     /// Operator circuit breaker; do not auto-resume.
     EmergencyStop { stop_id: String },
     /// Loop guard limit reached.
@@ -696,6 +702,10 @@ mod tests {
             },
             YieldReason::UserInputRequired {
                 interaction_id: "ui-456".to_string(),
+            },
+            YieldReason::WaitingForChild {
+                workflow_id: "wf-789".to_string(),
+                task_id: Some("task-123".to_string()),
             },
             YieldReason::EmergencyStop {
                 stop_id: "estop-789".to_string(),

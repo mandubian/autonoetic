@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::tool_error::{FailureClass, SideEffectState};
+
 fn default_true() -> bool {
     true
 }
@@ -141,6 +143,21 @@ pub struct TaskRun {
     /// Original metadata passed through to the child. Preserved across approval boundaries.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Stage-local retry count used by the workflow layer.
+    #[serde(default)]
+    pub retry_count: u32,
+    /// Last gateway-owned failure classification observed for this task.
+    #[serde(default)]
+    pub last_failure_class: Option<FailureClass>,
+    /// Retry policy attached to the logical stage execution.
+    #[serde(default)]
+    pub retry_policy: Option<serde_json::Value>,
+    /// Side-effect state carried forward across retries/resume.
+    #[serde(default)]
+    pub side_effect_state: Option<SideEffectState>,
+    /// Stable dedupe key for durable operations.
+    #[serde(default)]
+    pub dedupe_key: Option<String>,
 }
 
 /// Join policy for a group of tasks.

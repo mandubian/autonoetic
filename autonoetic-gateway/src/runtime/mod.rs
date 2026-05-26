@@ -21,6 +21,7 @@ pub mod crypto;
 pub mod curator_journal;
 pub mod disclosure;
 pub mod eval_stats;
+pub mod failure_classification;
 pub mod guard;
 pub mod history_persist;
 pub mod human_gate;

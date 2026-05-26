@@ -2,6 +2,48 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Gateway-owned mechanical classification for workflow-relevant failures.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureClass {
+    TransientInfra,
+    ApprovalPending,
+    AwaitingUserInput,
+    Timeout,
+    ChildCancelled,
+    ArtifactInvalid,
+    DependencyMissing,
+    GateUnsatisfied,
+    GateUnableToEvaluate,
+    InstallConflict,
+    PolicyDenied,
+    SchemaValidationFailed,
+    TaskContractInvalid,
+    Unknown,
+}
+
+/// Gateway-owned retry guidance for workflow orchestration.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryAdvice {
+    Wait,
+    RetrySameStage,
+    RetryAfterExternalRecovery,
+    DoNotRetry,
+    EscalateHuman,
+    FixArtifactThenRetry,
+}
+
+/// Best-effort record of whether a failed stage may have committed side effects.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SideEffectState {
+    #[serde(rename = "none")]
+    NoSideEffect,
+    Committed,
+    Unknown,
+}
+
 /// Type of tool error, indicating whether it's recoverable or fatal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -70,85 +112,152 @@ pub struct ToolError {
     /// Specific constitutional or policy rule IDs enforced for this error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enforced_rules: Vec<String>,
+    /// Mechanical failure classification used by workflow orchestration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<FailureClass>,
+    /// Gateway retry guidance for the current workflow stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_advice: Option<RetryAdvice>,
+    /// Normalized recoverability hint for legacy consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// True when progress depends on an external approval/input/event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_external_event: Option<bool>,
+    /// True when the failure should escalate to a human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_human: Option<bool>,
+    /// Whether the failing stage may already have committed side effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_effect_state: Option<SideEffectState>,
+    /// Stable dedupe key for durable operations when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
 }
 
 impl ToolError {
-    /// Creates a new validation error.
-    pub fn validation(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
+    fn new(
+        error_type: ToolErrorType,
+        message: impl Into<String>,
+        repair_hint: Option<String>,
+        details: Option<String>,
+    ) -> Self {
         Self {
             success: false,
-            error_type: ToolErrorType::Validation,
+            error_type,
             message: message.into(),
-            repair_hint: repair_hint.map(|h| h.into()),
-            details: None,
+            repair_hint,
+            details,
             enforced_rules: Vec::new(),
+            failure_class: None,
+            retry_advice: None,
+            retryable: None,
+            requires_external_event: None,
+            requires_human: None,
+            side_effect_state: None,
+            dedupe_key: None,
         }
+    }
+
+    /// Creates a new validation error.
+    pub fn validation(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
+        Self::new(
+            ToolErrorType::Validation,
+            message,
+            repair_hint.map(|h| h.into()),
+            None,
+        )
     }
 
     /// Creates a new permission error.
     pub fn permission(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::Permission,
-            message: message.into(),
-            repair_hint: Some(
+        Self::new(
+            ToolErrorType::Permission,
+            message,
+            Some(
                 "Request additional authorization or adjust the scope of your request.".to_string(),
             ),
-            details: None,
-            enforced_rules: Vec::new(),
-        }
+            None,
+        )
     }
 
     /// Creates a new resource error.
     pub fn resource(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::Resource,
-            message: message.into(),
-            repair_hint: repair_hint.map(|h| h.into()),
-            details: None,
-            enforced_rules: Vec::new(),
-        }
+        Self::new(
+            ToolErrorType::Resource,
+            message,
+            repair_hint.map(|h| h.into()),
+            None,
+        )
     }
 
     /// Creates a new execution error.
     pub fn execution(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::Execution,
-            message: message.into(),
-            repair_hint: repair_hint.map(|h| h.into()),
-            details: None,
-            enforced_rules: Vec::new(),
-        }
+        Self::new(
+            ToolErrorType::Execution,
+            message,
+            repair_hint.map(|h| h.into()),
+            None,
+        )
     }
 
     /// Creates a new fatal error.
     pub fn fatal(message: impl Into<String>, details: Option<impl Into<String>>) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::Fatal,
-            message: message.into(),
-            repair_hint: None,
-            details: details.map(|d| d.into()),
-            enforced_rules: Vec::new(),
-        }
+        Self::new(
+            ToolErrorType::Fatal,
+            message,
+            None,
+            details.map(|d| d.into()),
+        )
     }
 
     /// Creates a new conflict error.
     pub fn conflict(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::Conflict,
-            message: message.into(),
-            repair_hint: repair_hint.map(|h| h.into()),
-            details: None,
-            enforced_rules: Vec::new(),
-        }
+        Self::new(
+            ToolErrorType::Conflict,
+            message,
+            repair_hint.map(|h| h.into()),
+            None,
+        )
     }
 
     pub fn with_enforced_rules(mut self, enforced_rules: Vec<String>) -> Self {
         self.enforced_rules = enforced_rules;
+        self
+    }
+
+    pub fn with_failure_class(mut self, failure_class: FailureClass) -> Self {
+        self.failure_class = Some(failure_class);
+        self
+    }
+
+    pub fn with_retry_advice(mut self, retry_advice: RetryAdvice) -> Self {
+        self.retry_advice = Some(retry_advice);
+        self
+    }
+
+    pub fn with_retryable(mut self, retryable: bool) -> Self {
+        self.retryable = Some(retryable);
+        self
+    }
+
+    pub fn with_requires_external_event(mut self, requires_external_event: bool) -> Self {
+        self.requires_external_event = Some(requires_external_event);
+        self
+    }
+
+    pub fn with_requires_human(mut self, requires_human: bool) -> Self {
+        self.requires_human = Some(requires_human);
+        self
+    }
+
+    pub fn with_side_effect_state(mut self, side_effect_state: SideEffectState) -> Self {
+        self.side_effect_state = Some(side_effect_state);
+        self
+    }
+
+    pub fn with_dedupe_key(mut self, dedupe_key: impl Into<String>) -> Self {
+        self.dedupe_key = Some(dedupe_key.into());
         self
     }
 
@@ -157,38 +266,32 @@ impl ToolError {
         message: impl Into<String>,
         repair_hint: Option<impl Into<String>>,
     ) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::QuotaExceeded,
-            message: message.into(),
-            repair_hint: repair_hint.map(|h| h.into()),
-            details: None,
-            enforced_rules: Vec::new(),
-        }
+        Self::new(
+            ToolErrorType::QuotaExceeded,
+            message,
+            repair_hint.map(|h| h.into()),
+            None,
+        )
     }
 
     /// Creates a new not found error.
     pub fn not_found(resource: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::NotFound,
-            message: format!("{} not found", resource.into()),
-            repair_hint: repair_hint.map(|h| h.into()),
-            details: None,
-            enforced_rules: Vec::new(),
-        }
+        Self::new(
+            ToolErrorType::NotFound,
+            format!("{} not found", resource.into()),
+            repair_hint.map(|h| h.into()),
+            None,
+        )
     }
 
     /// Creates a new timeout error.
     pub fn timeout(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
-        Self {
-            success: false,
-            error_type: ToolErrorType::Timeout,
-            message: message.into(),
-            repair_hint: repair_hint.map(|h| h.into()),
-            details: None,
-            enforced_rules: Vec::new(),
-        }
+        Self::new(
+            ToolErrorType::Timeout,
+            message,
+            repair_hint.map(|h| h.into()),
+            None,
+        )
     }
 
     /// Returns true if this error is recoverable (agent can retry).

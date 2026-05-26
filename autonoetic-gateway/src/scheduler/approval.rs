@@ -1642,6 +1642,11 @@ mod tests {
             join_group: None,
             message: Some("Continue after approval".to_string()),
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&cfg, Some(&store), &task).unwrap();
 

@@ -959,6 +959,11 @@ pub async fn process_queued_workflow_tasks(
                 join_group: queued_task.join_group.clone(),
                 message: Some(queued_task.message.clone()),
                 metadata: queued_task.metadata.clone(),
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
             };
             if let Err(e) = workflow_store::save_task_run(&config, store, &task_run) {
                 tracing::warn!(

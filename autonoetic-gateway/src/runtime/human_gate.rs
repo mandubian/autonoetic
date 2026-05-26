@@ -22,6 +22,7 @@ use autonoetic_types::background::{
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::content_store;
 use crate::runtime::tools::{build_approval_details, extract_host};
+use crate::runtime::failure_classification::normalize_tool_result_json;
 use crate::scheduler::gateway_store::GatewayStore;
 
 // ---------------------------------------------------------------------------
@@ -684,14 +685,16 @@ impl GateService {
             subject,
         );
 
-        Ok(serde_json::json!({
-            "ok": false,
-            "approval_required": true,
-            "suspended": true,
-            "request_id": gate_id,
-            "approval": approval_details
-        })
-        .to_string())
+        Ok(normalize_tool_result_json(
+            &serde_json::json!({
+                "ok": false,
+                "approval_required": true,
+                "suspended": true,
+                "request_id": gate_id,
+                "approval": approval_details
+            })
+            .to_string(),
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -1007,6 +1010,10 @@ mod tests {
                 assert_eq!(json["approval_required"], true);
                 assert_eq!(json["suspended"], true);
                 assert_eq!(json["request_id"], gate_id);
+                assert_eq!(json["failure_class"], "approval_pending");
+                assert_eq!(json["retry_advice"], "wait");
+                assert_eq!(json["requires_external_event"], true);
+                assert_eq!(json["requires_human"], true);
             }
             other => panic!("expected Suspended, got {:?}", other),
         }

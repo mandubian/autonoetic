@@ -11,8 +11,7 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
-use autonoetic_types::tool_error::ToolError;
-use autonoetic_types::tool_error::ToolErrorType;
+use autonoetic_types::tool_error::{FailureClass, RetryAdvice, SideEffectState, ToolError, ToolErrorType};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -100,6 +99,27 @@ fn test_tool_error_validation_has_optional_hint() {
     assert_eq!(parsed["ok"], false);
     assert_eq!(parsed["error_type"], "validation");
     assert!(parsed.get("repair_hint").is_none());
+}
+
+#[test]
+fn test_tool_error_workflow_fields_serialize_when_present() {
+    let err = ToolError::timeout("request timed out", Some("Retry with backoff.".to_string()))
+        .with_failure_class(FailureClass::Timeout)
+        .with_retry_advice(RetryAdvice::Wait)
+        .with_retryable(true)
+        .with_requires_external_event(true)
+        .with_requires_human(false)
+        .with_side_effect_state(SideEffectState::NoSideEffect)
+        .with_dedupe_key("durable:timeout:test");
+    let parsed: serde_json::Value = serde_json::from_str(&err.to_error_response()).unwrap();
+
+    assert_eq!(parsed["failure_class"], "timeout");
+    assert_eq!(parsed["retry_advice"], "wait");
+    assert_eq!(parsed["retryable"], true);
+    assert_eq!(parsed["requires_external_event"], true);
+    assert_eq!(parsed["requires_human"], false);
+    assert_eq!(parsed["side_effect_state"], "none");
+    assert_eq!(parsed["dedupe_key"], "durable:timeout:test");
 }
 
 #[test]

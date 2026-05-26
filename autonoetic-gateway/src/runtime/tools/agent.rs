@@ -420,6 +420,11 @@ impl NativeTool for AgentSpawnTool {
             join_group: None,
             message: Some(kickoff_message.clone()),
             metadata: args.metadata.clone(),
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         crate::scheduler::save_task_run(gw_config, gateway_store.as_deref(), &task)?;
         crate::scheduler::append_workflow_event(
