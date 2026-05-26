@@ -1138,13 +1138,24 @@ impl JsonRpcRouter {
                     level.as_ref(),
                     Some(hooks.as_ref()),
                 ) {
-                    Ok(decision) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::json!({
-                            "request_id": decision.request_id,
-                            "status": format!("{:?}", decision.status),
-                        }),
-                    ),
+                    Ok(decision) => {
+                        {
+                            let mut map = self.async_results.lock().await;
+                            map.remove(&decision.session_id);
+                            if let Some(root) = &decision.root_session_id {
+                                if root != &decision.session_id {
+                                    map.remove(root);
+                                }
+                            }
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "request_id": decision.request_id,
+                                "status": format!("{:?}", decision.status),
+                            }),
+                        )
+                    }
                     Err(e) => JsonRpcResponse::error(
                         req.id,
                         -32000,
@@ -1192,13 +1203,24 @@ impl JsonRpcRouter {
                     params.reason,
                     Some(hooks.as_ref()),
                 ) {
-                    Ok(decision) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::json!({
-                            "request_id": decision.request_id,
-                            "status": format!("{:?}", decision.status),
-                        }),
-                    ),
+                    Ok(decision) => {
+                        {
+                            let mut map = self.async_results.lock().await;
+                            map.remove(&decision.session_id);
+                            if let Some(root) = &decision.root_session_id {
+                                if root != &decision.session_id {
+                                    map.remove(root);
+                                }
+                            }
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "request_id": decision.request_id,
+                                "status": format!("{:?}", decision.status),
+                            }),
+                        )
+                    }
                     Err(e) => JsonRpcResponse::error(
                         req.id,
                         -32000,
