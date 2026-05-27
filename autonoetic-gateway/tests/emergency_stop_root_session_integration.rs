@@ -97,6 +97,11 @@ async fn emergency_stop_aborts_tasks_cancels_interaction_and_checkpoint() -> any
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(&config, Some(store.as_ref()), &task)?;
     }
@@ -296,6 +301,11 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
         join_group: None,
         message: None,
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     save_task_run(&config, Some(store.as_ref()), &task)?;
 
@@ -679,6 +689,11 @@ async fn emergency_stop_authorization_matrix() -> anyhow::Result<()> {
             join_group: None,
             message: None,
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         save_task_run(config, Some(store), &task)?;
         Ok(())

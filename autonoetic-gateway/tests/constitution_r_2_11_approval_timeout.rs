@@ -79,6 +79,11 @@ async fn r_2_11_timed_out_approval_marks_task_failed_and_preserves_continuation(
         join_group: None,
         message: Some("run command".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &task)?;
 
@@ -173,6 +178,11 @@ async fn r_7_11_approval_timeout_records_resolution_in_session_report() -> anyho
         join_group: None,
         message: Some("run command".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &task)?;
 

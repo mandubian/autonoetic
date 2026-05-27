@@ -103,6 +103,11 @@ async fn test_chat_ingest_from_child_session_routes_to_planner_root_while_tasks_
         join_group: Some("main".to_string()),
         message: None,
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     save_task_run(&config, None, &task)?;
 

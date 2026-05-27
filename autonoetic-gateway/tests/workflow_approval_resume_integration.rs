@@ -57,6 +57,11 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
         join_group: None,
         message: Some("ORIGINAL TASK MESSAGE".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &task_run)?;
 
