@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--version",
-        default="2026.05.05",
+        default="2026.05.27",
         help="Constitution version directory under docs/constitution/versions/.",
     )
     parser.add_argument(

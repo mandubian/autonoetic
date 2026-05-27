@@ -4,7 +4,7 @@
 > enforcement against the architectural constitution.
 >
 > This document is **historical** — it records findings at a point in
-> time. The living rule list is `docs/constitution/versions/2026.05.05/constitution.md`; the
+> time. The living rule list is `docs/constitution/versions/2026.05.27/constitution.md`; the
 > active backlog is `docs/gateway-constitution-roadmap.md`.
 
 ## Purpose
@@ -49,7 +49,7 @@ Roughly **65% of the constitution is fully enforced**, **20% partial**,
 ## Category-by-category findings
 
 Each category lists only the rules with a non-obvious status or a gap.
-The full rule table lives in `docs/constitution/versions/2026.05.05/constitution.md`.
+The full rule table lives in `docs/constitution/versions/2026.05.27/constitution.md`.
 
 ### 1. Capability & Rights
 
@@ -284,7 +284,7 @@ Secondary:
 - **R+15** Constant-time comparison for JSON-RPC shared-secret auth.
 - **R+16** Promotion-gate execution denied network access.
 - **R+17** Retention pruning emits `retention.pruned` causal event.
-- **R+18** Canonical `docs/constitution/versions/2026.05.05/constitution.md` maintained alongside
+- **R+18** Canonical `docs/constitution/versions/2026.05.27/constitution.md` maintained alongside
   code.
 
 ## Methodology

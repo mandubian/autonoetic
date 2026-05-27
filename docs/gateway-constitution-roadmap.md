@@ -5,7 +5,7 @@
 > Source documents:
 >
 > - `docs/gateway-constitution-audit-2026-04-24.md` — the findings.
-> - `docs/constitution/versions/2026.05.05/constitution.md` — the canonical rule list.
+> - `docs/constitution/versions/2026.05.27/constitution.md` — the canonical rule list.
 >
 > Every entry below has a rule ID from the constitution, a threat model,
 > an implementation sketch, a test strategy, and a size estimate
@@ -778,7 +778,7 @@ interaction silently lands in the weaker regime.
 - Canonical digest/profile extraction is centralized in
   `autonoetic-gateway/src/constitution_digest.rs` and surfaced via
   `gateway.info` + `constitution_read`; pinned by
-  `docs/constitution/versions/2026.05.05/gateway-constitution.lock.json`
+  `docs/constitution/versions/2026.05.27/gateway-constitution.lock.json`
   with startup integrity checks.
 - OFP wire now carries `constitution_digest` and optional
   `constitution_profile` (rule/right enforcement tables) in
@@ -1190,7 +1190,7 @@ Files:
 `autonoetic-gateway/tests/constitution_gateway_determinism.rs`,
 `autonoetic-gateway/tests/constitution_policy_determinism.rs`,
 `autonoetic-gateway/src/runtime/tool_call_processor.rs`,
-`docs/constitution/versions/2026.05.05/constitution.md`.
+`docs/constitution/versions/2026.05.27/constitution.md`.
 
 **Size.** M. Completed via property-test capstone + constitutional row flip.
 
