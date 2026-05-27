@@ -992,6 +992,11 @@ pub fn update_task_run_status(
         }
 
         if let Some(child_event_type) = child_state_event_type(status) {
+            let target_session_id = if task.parent_session_id.is_empty() {
+                root_session_id.as_str()
+            } else {
+                task.parent_session_id.as_str()
+            };
             tracing::info!(
                 target: "workflow",
                 workflow_id = %workflow_id,
@@ -1001,7 +1006,7 @@ pub fn update_task_run_status(
             );
             if let Err(e) = crate::scheduler::signal::send_child_state_notification(
                 store,
-                &task.parent_session_id,
+                target_session_id,
                 child_state_notification,
             ) {
                 tracing::warn!(
@@ -4630,6 +4635,79 @@ mod tests {
         match signal {
             crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
                 assert_eq!(notification.task_id, "task-nested-child");
+                assert_eq!(notification.child_status, "awaiting_approval");
+            }
+            other => panic!("expected child-state notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_state_notification_falls_back_to_root_when_parent_session_missing() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "missing-parent-root", None)
+            .unwrap();
+
+        let task = TaskRun {
+            task_id: "task-missing-parent".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "missing-parent-root/coder-x".to_string(),
+            parent_session_id: String::new(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-missing-parent",
+            TaskRunStatus::AwaitingApproval,
+            Some("awaiting approval apr-root-fallback".to_string()),
+            Some(ApprovalMetadata {
+                request_id: "apr-root-fallback".to_string(),
+                kind: "sandbox".to_string(),
+                reason: Some("operator approval required".to_string()),
+            }),
+            None,
+        )
+        .unwrap();
+
+        let root_notifications = store
+            .list_notifications_for_session(
+                &wf.root_session_id,
+                autonoetic_types::notification::NotificationStatus::Pending,
+            )
+            .unwrap();
+        let child_signal = root_notifications
+            .iter()
+            .find(|notification| {
+                notification.notification_type
+                    == autonoetic_types::notification::NotificationType::ChildStateNotification
+            })
+            .expect("root session should receive the child-state notification fallback");
+        let signal: crate::scheduler::signal::Signal =
+            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+        match signal {
+            crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
+                assert_eq!(notification.task_id, "task-missing-parent");
                 assert_eq!(notification.child_status, "awaiting_approval");
             }
             other => panic!("expected child-state notification, got {other:?}"),
