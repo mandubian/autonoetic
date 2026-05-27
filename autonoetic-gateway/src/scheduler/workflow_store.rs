@@ -14,8 +14,8 @@ use crate::scheduler::store::{read_json_file, write_json_file};
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::workflow::{
-    QueuedTaskRun, TaskCheckpoint, TaskRun, TaskRunStatus, WorkflowCheckpoint, WorkflowEventRecord,
-    WorkflowRun, WorkflowRunStatus,
+    ChildStateNotification, QueuedTaskRun, TaskCheckpoint, TaskRun, TaskRunStatus,
+    WorkflowCheckpoint, WorkflowEventRecord, WorkflowRun, WorkflowRunStatus,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -598,6 +598,12 @@ pub fn update_task_run_status(
     let is_now_succeeded = status == TaskRunStatus::Succeeded;
 
     let task_failure = classify_task_status(status, result_summary.as_deref());
+    let child_state_notification = build_child_state_notification(
+        &task,
+        status,
+        result_summary.as_deref(),
+        task_failure.as_ref(),
+    );
 
     task.status = status;
     task.updated_at = now_rfc3339();
@@ -693,7 +699,24 @@ pub fn update_task_run_status(
         },
     )?;
 
+    if let Some(child_event_type) = child_state_event_type(status) {
+        append_workflow_event(
+            config,
+            store,
+            &WorkflowEventRecord {
+                event_id: new_event_id(),
+                workflow_id: workflow_id.to_string(),
+                task_id: Some(task_id.to_string()),
+                event_type: child_event_type.to_string(),
+                agent_id: Some(task.agent_id.clone()),
+                payload: serde_json::to_value(&child_state_notification)?,
+                occurred_at: now_rfc3339(),
+            },
+        )?;
+    }
+
     if let Some(wf) = load_workflow_run(config, store, workflow_id)? {
+        let root_session_id = wf.root_session_id.clone();
         let (causal_action, causal_status) = match status {
             TaskRunStatus::Succeeded => ("workflow.task.completed", EntryStatus::Success),
             TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Aborted => {
@@ -706,7 +729,7 @@ pub fn update_task_run_status(
         };
         crate::scheduler::workflow_causal::mirror_orchestration_event(
             config,
-            &wf.root_session_id,
+            &root_session_id,
             causal_action,
             causal_status,
             serde_json::json!({
@@ -806,8 +829,74 @@ pub fn update_task_run_status(
                 }
             }
         }
+
+        if let Some(child_event_type) = child_state_event_type(status) {
+            tracing::info!(
+                target: "workflow",
+                workflow_id = %workflow_id,
+                task_id = %task_id,
+                event_type = %child_event_type,
+                "Emitting child-state notification to parent session"
+            );
+            if let Err(e) = crate::scheduler::signal::send_child_state_notification(
+                store,
+                &root_session_id,
+                child_state_notification,
+            ) {
+                tracing::warn!(
+                    target: "signal",
+                    workflow_id = %workflow_id,
+                    task_id = %task_id,
+                    error = %e,
+                    "Failed to send child-state notification"
+                );
+            }
+        }
     }
     Ok(())
+}
+
+fn child_state_event_type(status: TaskRunStatus) -> Option<&'static str> {
+    match status {
+        TaskRunStatus::AwaitingApproval | TaskRunStatus::Paused => Some("workflow.child.waiting"),
+        TaskRunStatus::Runnable
+        | TaskRunStatus::Succeeded
+        | TaskRunStatus::Failed
+        | TaskRunStatus::Cancelled
+        | TaskRunStatus::Aborted => Some("workflow.child.resolved"),
+        _ => None,
+    }
+}
+
+fn build_child_state_notification(
+    task: &TaskRun,
+    status: TaskRunStatus,
+    result_summary: Option<&str>,
+    task_failure: Option<&crate::runtime::failure_classification::WorkflowFailureMetadata>,
+) -> ChildStateNotification {
+    let failure_class = task_failure.and_then(|failure| failure.failure_class);
+    let install_conflict_detail = if failure_class
+        == Some(autonoetic_types::tool_error::FailureClass::InstallConflict)
+    {
+        result_summary
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map(ToString::to_string)
+    } else {
+        None
+    };
+
+    ChildStateNotification {
+        workflow_id: task.workflow_id.clone(),
+        task_id: task.task_id.clone(),
+        child_session_id: task.session_id.clone(),
+        child_status: status.as_str().to_string(),
+        failure_class,
+        install_conflict_detail,
+        retry_advice: task_failure.and_then(|failure| failure.retry_advice),
+        side_effect_state: task_failure.and_then(|failure| failure.side_effect_state),
+        summary: result_summary.map(ToString::to_string),
+    }
 }
 
 /// Attempt to transition a workflow from `Resumable` to `Completed`.
@@ -3809,5 +3898,173 @@ mod tests {
                 .any(|e| e.event_type == "task.updated"),
             "task.updated event should be in SQLite"
         );
+    }
+
+    #[test]
+    fn awaiting_approval_emits_child_waiting_event_and_notification() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "child-wait-root", None)
+            .unwrap();
+
+        let task = TaskRun {
+            task_id: "task-child-wait".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "child-wait-root/coder-x".to_string(),
+            parent_session_id: "child-wait-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-child-wait",
+            TaskRunStatus::AwaitingApproval,
+            Some("awaiting approval apr-1".to_string()),
+            Some(ApprovalMetadata {
+                request_id: "apr-1".to_string(),
+                kind: "sandbox".to_string(),
+                reason: Some("operator approval required".to_string()),
+            }),
+            None,
+        )
+        .unwrap();
+
+        let events = load_workflow_events(&cfg, Some(&store), &wf.workflow_id).unwrap();
+        let waiting = events
+            .iter()
+            .find(|event| event.event_type == "workflow.child.waiting")
+            .expect("workflow.child.waiting event should exist");
+        assert_eq!(waiting.payload["task_id"], "task-child-wait");
+        assert_eq!(waiting.payload["child_status"], "awaiting_approval");
+        assert_eq!(waiting.payload["failure_class"], "approval_pending");
+
+        let notifications = store
+            .list_notifications_for_session(
+                &wf.root_session_id,
+                autonoetic_types::notification::NotificationStatus::Pending,
+            )
+            .unwrap();
+        let child_signal = notifications
+            .iter()
+            .find(|notification| {
+                notification.notification_type
+                    == autonoetic_types::notification::NotificationType::ChildStateNotification
+            })
+            .expect("child-state notification should be queued");
+        let signal: crate::scheduler::signal::Signal =
+            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+        match signal {
+            crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
+                assert_eq!(notification.task_id, "task-child-wait");
+                assert_eq!(notification.child_status, "awaiting_approval");
+                assert_eq!(
+                    notification.failure_class,
+                    Some(autonoetic_types::tool_error::FailureClass::ApprovalPending)
+                );
+            }
+            other => panic!("expected child-state notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_task_emits_child_resolved_event_and_notification() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "child-resolve-root", None)
+            .unwrap();
+
+        let task = TaskRun {
+            task_id: "task-child-resolve".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "child-resolve-root/coder-x".to_string(),
+            parent_session_id: "child-resolve-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-child-resolve",
+            TaskRunStatus::Failed,
+            Some("approval_rejected".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let events = load_workflow_events(&cfg, Some(&store), &wf.workflow_id).unwrap();
+        let resolved = events
+            .iter()
+            .find(|event| event.event_type == "workflow.child.resolved")
+            .expect("workflow.child.resolved event should exist");
+        assert_eq!(resolved.payload["task_id"], "task-child-resolve");
+        assert_eq!(resolved.payload["child_status"], "failed");
+        assert_eq!(resolved.payload["failure_class"], "policy_denied");
+
+        let notifications = store
+            .list_notifications_for_session(
+                &wf.root_session_id,
+                autonoetic_types::notification::NotificationStatus::Pending,
+            )
+            .unwrap();
+        let child_signal = notifications
+            .iter()
+            .find(|notification| {
+                notification.notification_type
+                    == autonoetic_types::notification::NotificationType::ChildStateNotification
+            })
+            .expect("child-state notification should be queued");
+        let signal: crate::scheduler::signal::Signal =
+            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+        match signal {
+            crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
+                assert_eq!(notification.task_id, "task-child-resolve");
+                assert_eq!(notification.child_status, "failed");
+                assert_eq!(
+                    notification.failure_class,
+                    Some(autonoetic_types::tool_error::FailureClass::PolicyDenied)
+                );
+            }
+            other => panic!("expected child-state notification, got {other:?}"),
+        }
     }
 }

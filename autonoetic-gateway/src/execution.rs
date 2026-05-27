@@ -1237,6 +1237,7 @@ impl GatewayExecutionService {
         runtime: &mut crate::runtime::lifecycle::AgentExecutor,
         session_id: &str,
         message: &str,
+        metadata: Option<&serde_json::Value>,
         checkpoint: crate::runtime::checkpoint::SessionCheckpoint,
     ) -> anyhow::Result<(
         crate::runtime::lifecycle::TurnOutcome,
@@ -1528,7 +1529,10 @@ impl GatewayExecutionService {
             checkpoint.restore_into(runtime);
 
             let mut history = checkpoint.history.clone();
-            history.push(crate::llm::Message::user(message.to_string()));
+            let (turn_start_messages, resume_message) =
+                gateway_signal_turn_start_context(message, metadata);
+            history.extend(turn_start_messages);
+            history.push(crate::llm::Message::user(resume_message));
             let initial_msg = checkpoint.initial_user_message();
 
             let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
@@ -1546,6 +1550,7 @@ impl GatewayExecutionService {
                 &runtime.initial_user_message,
                 session_id,
                 &runtime.manifest,
+                &[],
             );
             let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
             Ok((outcome, runtime.initial_user_message.clone(), None))
@@ -2272,16 +2277,20 @@ impl GatewayExecutionService {
                             &mut runtime,
                             session_id,
                             message,
+                            metadata,
                             checkpoint,
                         )
                         .await?
                     } else {
+                        let (turn_start_messages, initial_message) =
+                            gateway_signal_turn_start_context(&runtime.initial_user_message, metadata);
                         let mut history = build_initial_history(
                             &runtime.agent_dir,
                             &runtime.instructions,
-                            &runtime.initial_user_message,
+                            &initial_message,
                             session_id,
                             &runtime.manifest,
+                            &turn_start_messages,
                         );
                         let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                         (outcome, runtime.initial_user_message.clone(), None)
@@ -2295,16 +2304,20 @@ impl GatewayExecutionService {
                         &mut runtime,
                         session_id,
                         message,
+                        metadata,
                         checkpoint,
                     )
                     .await?
                 } else {
+                    let (turn_start_messages, initial_message) =
+                        gateway_signal_turn_start_context(&runtime.initial_user_message, metadata);
                     let mut history = build_initial_history(
                         &runtime.agent_dir,
                         &runtime.instructions,
-                        &runtime.initial_user_message,
+                        &initial_message,
                         session_id,
                         &runtime.manifest,
+                        &turn_start_messages,
                     );
                     let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                     (outcome, runtime.initial_user_message.clone(), None)
@@ -3444,6 +3457,7 @@ fn build_initial_history(
     user_message: &str,
     session_id: &str,
     manifest: &autonoetic_types::agent::AgentManifest,
+    turn_start_messages: &[Message],
 ) -> Vec<Message> {
     let mut history = vec![Message::system(
         crate::runtime::lifecycle::compose_system_instructions_with_metadata(
@@ -3469,8 +3483,50 @@ fn build_initial_history(
             "Failed to load session context; continuing without injected continuity"
         ),
     }
+    history.extend(turn_start_messages.iter().cloned());
     history.push(Message::user(user_message.to_string()));
     history
+}
+
+fn gateway_signal_turn_start_context(
+    user_message: &str,
+    metadata: Option<&serde_json::Value>,
+) -> (Vec<Message>, String) {
+    let is_signal_delivery = metadata
+        .and_then(|value| value.get("signal_delivered"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !is_signal_delivery {
+        return (Vec::new(), user_message.to_string());
+    }
+
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(user_message) else {
+        return (Vec::new(), user_message.to_string());
+    };
+    if parsed.get("type").and_then(|value| value.as_str()) != Some("child_state_notification") {
+        return (Vec::new(), user_message.to_string());
+    }
+
+    let Some(notification_value) = parsed.get("notification") else {
+        return (Vec::new(), user_message.to_string());
+    };
+    let Ok(notification) =
+        serde_json::from_value::<autonoetic_types::workflow::ChildStateNotification>(
+            notification_value.clone(),
+        )
+    else {
+        return (Vec::new(), user_message.to_string());
+    };
+
+    let pretty = serde_json::to_string_pretty(&notification)
+        .unwrap_or_else(|_| notification_value.to_string());
+    (
+        vec![Message::system(format!(
+            "[gateway child state notification]\n{}",
+            pretty
+        ))],
+        "Gateway child-state notification delivered. Continue from the current workflow state and use the structured gateway child state above.".to_string(),
+    )
 }
 
 fn persist_session_context_turn(
@@ -3644,6 +3700,7 @@ mod tests {
             "What did I ask you to remember?",
             "session-1",
             &manifest,
+            &[],
         );
 
         assert_eq!(history.len(), 3);
@@ -3657,6 +3714,42 @@ mod tests {
         assert!(history[1]
             .content
             .contains("Last assistant reply: Stored that."));
+    }
+
+    #[test]
+    fn child_state_signal_turn_start_context_is_injected_as_system_message() {
+        let message = serde_json::json!({
+            "type": "child_state_notification",
+            "notification": {
+                "workflow_id": "wf-1",
+                "task_id": "task-1",
+                "child_session_id": "root/task-1",
+                "child_status": "failed",
+                "failure_class": "policy_denied",
+                "retry_advice": "do_not_retry",
+                "side_effect_state": "none",
+                "summary": "approval_rejected"
+            }
+        })
+        .to_string();
+        let metadata = serde_json::json!({
+            "signal_delivered": true,
+            "signal_request_id": "wf-child-test"
+        });
+
+        let (turn_start_messages, user_message) =
+            gateway_signal_turn_start_context(&message, Some(&metadata));
+
+        assert_eq!(turn_start_messages.len(), 1);
+        assert!(matches!(turn_start_messages[0].role, crate::llm::Role::System));
+        assert!(turn_start_messages[0]
+            .content
+            .contains("[gateway child state notification]"));
+        assert!(turn_start_messages[0].content.contains("\"task_id\": \"task-1\""));
+        assert_eq!(
+            user_message,
+            "Gateway child-state notification delivered. Continue from the current workflow state and use the structured gateway child state above."
+        );
     }
 
     #[test]

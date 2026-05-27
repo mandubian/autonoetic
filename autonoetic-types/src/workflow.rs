@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::tool_error::{FailureClass, SideEffectState};
+use crate::tool_error::{FailureClass, RetryAdvice, SideEffectState};
 
 fn default_true() -> bool {
     true
@@ -158,6 +158,25 @@ pub struct TaskRun {
     /// Stable dedupe key for durable operations.
     #[serde(default)]
     pub dedupe_key: Option<String>,
+}
+
+/// Structured child-state wake-up payload for parent workflow resumption.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChildStateNotification {
+    pub workflow_id: String,
+    pub task_id: String,
+    pub child_session_id: String,
+    pub child_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<FailureClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_conflict_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_advice: Option<RetryAdvice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_effect_state: Option<SideEffectState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Join policy for a group of tasks.

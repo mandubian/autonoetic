@@ -4,16 +4,15 @@
 //! and delivered asynchronously by the scheduler's notification pump via TCP
 //! JSON-RPC (`event.ingest`). There are no filesystem signal files.
 //!
-//! Primary use case: Notify waiting sessions that an approval has been resolved,
-//! enabling automatic session resume without user intervention.
+//! Primary use cases: approval auto-resume, workflow join wake-ups, and typed
+//! child-state delivery to parent sessions.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::gateway_store::GatewayStore;
 use autonoetic_types::notification::{NotificationRecord, NotificationType};
-
-// ... (Signal enum stays the same)
+use autonoetic_types::workflow::ChildStateNotification;
 
 /// Signal types that can be sent between components.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +32,12 @@ pub enum Signal {
     WorkflowJoinSatisfied {
         workflow_id: String,
         join_task_ids: Vec<String>,
+        message: String,
+        timestamp: String,
+    },
+    /// Typed child-state update for parent wake-up / resume.
+    ChildStateNotification {
+        notification: ChildStateNotification,
         message: String,
         timestamp: String,
     },
@@ -129,7 +134,7 @@ fn build_delivery_request(
     let request_id = &pending.request_id;
     let signal = &pending.signal;
 
-    let (message, target_agent_id, approval_status) = match signal {
+    let (message, target_agent_id, signal_status, approval_request_id) = match signal {
         Signal::ApprovalResolved {
             request_id,
             agent_id,
@@ -149,6 +154,7 @@ fn build_delivery_request(
             .to_string(),
             Some(agent_id.clone()),
             status.clone(),
+            Some(request_id.clone()),
         ),
         Signal::WorkflowJoinSatisfied {
             workflow_id,
@@ -165,6 +171,22 @@ fn build_delivery_request(
             .to_string(),
             None,
             "completed".to_string(),
+            None,
+        ),
+        Signal::ChildStateNotification {
+            notification,
+            message,
+            ..
+        } => (
+            serde_json::json!({
+                "type": "child_state_notification",
+                "notification": notification,
+                "message": message,
+            })
+            .to_string(),
+            None,
+            notification.child_status.clone(),
+            None,
         ),
         Signal::AgentMessage {
             message_id,
@@ -183,12 +205,15 @@ fn build_delivery_request(
             .to_string(),
             None,
             "agent_message".to_string(),
+            None,
         ),
     };
 
     let is_async = matches!(
         signal,
-        Signal::WorkflowJoinSatisfied { .. } | Signal::AgentMessage { .. }
+        Signal::WorkflowJoinSatisfied { .. }
+            | Signal::ChildStateNotification { .. }
+            | Signal::AgentMessage { .. }
     );
 
     crate::router::JsonRpcRequest {
@@ -205,8 +230,9 @@ fn build_delivery_request(
                 "sender_id": "gateway-signal-poller",
                 "channel_id": format!("signal-poller-{}", session_id),
                 "signal_delivered": true,
-                "approval_request_id": request_id,
-                "approval_status": approval_status,
+                "signal_request_id": request_id,
+                "approval_request_id": approval_request_id,
+                "approval_status": signal_status,
             }
         }),
         auth_token: std::env::var("AUTONOETIC_SHARED_SECRET").ok(),
@@ -226,6 +252,7 @@ pub fn write_signal(
     let n_type = match signal {
         Signal::ApprovalResolved { .. } => NotificationType::ApprovalResolved,
         Signal::WorkflowJoinSatisfied { .. } => NotificationType::WorkflowJoinSatisfied,
+        Signal::ChildStateNotification { .. } => NotificationType::ChildStateNotification,
         Signal::AgentMessage { .. } => NotificationType::AgentMessage,
     };
 
@@ -262,9 +289,29 @@ pub fn send_workflow_join_satisfied(
     Ok(())
 }
 
+pub fn send_child_state_notification(
+    store: Option<&GatewayStore>,
+    root_session_id: &str,
+    notification: ChildStateNotification,
+) -> anyhow::Result<()> {
+    let signal_id = format!("wf-child-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let signal = Signal::ChildStateNotification {
+        message: format!(
+            "Workflow child '{}' changed state to '{}'.",
+            notification.task_id, notification.child_status
+        ),
+        notification,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    write_signal(store, root_session_id, &signal_id, &signal)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build_delivery_request, deliver_signal, PendingSignal, Signal};
+    use autonoetic_types::tool_error::{FailureClass, RetryAdvice, SideEffectState};
+    use autonoetic_types::workflow::ChildStateNotification;
 
     #[test]
     fn workflow_join_signal_omits_explicit_target_agent() {
@@ -311,6 +358,54 @@ mod tests {
             None | Some(serde_json::Value::Bool(false)) => {}
             other => panic!("expected async_mode=false or absent, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn child_state_notification_signal_is_async_and_typed() {
+        let pending = PendingSignal {
+            request_id: "wf-child-test".to_string(),
+            signal: Signal::ChildStateNotification {
+                notification: ChildStateNotification {
+                    workflow_id: "wf-123".to_string(),
+                    task_id: "task-a".to_string(),
+                    child_session_id: "root/task-a".to_string(),
+                    child_status: "awaiting_approval".to_string(),
+                    failure_class: Some(FailureClass::ApprovalPending),
+                    install_conflict_detail: None,
+                    retry_advice: Some(RetryAdvice::Wait),
+                    side_effect_state: Some(SideEffectState::NoSideEffect),
+                    summary: Some("awaiting approval apr-123".to_string()),
+                },
+                message: "child waiting".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            },
+            filename: "wf-child-test.json".to_string(),
+        };
+
+        let request = build_delivery_request(&pending, "demo-session");
+        assert_eq!(
+            request.params.get("async_mode"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let metadata = request
+            .params
+            .get("metadata")
+            .and_then(|v| v.as_object())
+            .expect("metadata should be present");
+        assert_eq!(
+            metadata.get("signal_request_id"),
+            Some(&serde_json::Value::String("wf-child-test".to_string()))
+        );
+
+        let message = request
+            .params
+            .get("message")
+            .and_then(|v| v.as_str())
+            .expect("message should be a JSON string");
+        let parsed: serde_json::Value = serde_json::from_str(message).expect("message should parse");
+        assert_eq!(parsed["type"], "child_state_notification");
+        assert_eq!(parsed["notification"]["task_id"], "task-a");
+        assert_eq!(parsed["notification"]["failure_class"], "approval_pending");
     }
 
     #[tokio::test]

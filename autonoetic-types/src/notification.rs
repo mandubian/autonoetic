@@ -36,6 +36,7 @@ pub enum NotificationStatus {
 pub enum NotificationType {
     ApprovalResolved,
     WorkflowJoinSatisfied,
+    ChildStateNotification,
     AgentMessage,
     AdminProposal,
     ConstitutionalProposal,

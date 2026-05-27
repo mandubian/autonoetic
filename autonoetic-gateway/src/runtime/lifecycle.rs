@@ -2557,6 +2557,7 @@ impl AgentExecutor {
                     tracer.log_hibernate(&format!("{:?}", response.stop_reason));
 
                     // Inject compact workflow summary if any tasks are tracked
+                    let mut turn_yield_reason = YieldReason::Hibernation;
                     if let Some(cfg) = self.config.as_ref() {
                         if let Ok(Some(summary)) =
                             crate::scheduler::compact_workflow_summary(cfg, None, &session_id)
@@ -2591,6 +2592,14 @@ impl AgentExecutor {
                                 let note = disclosure_state.filter_reply(&note);
                                 history.push(Message::assistant(note.clone()));
                             }
+                        }
+
+                        if let Some(waiting_reason) = waiting_for_child_yield_reason(
+                            cfg,
+                            self.gateway_store.as_deref(),
+                            &session_id,
+                        ) {
+                            turn_yield_reason = waiting_reason;
                         }
 
                         // Durable planner checkpoint at turn end
@@ -2647,8 +2656,7 @@ impl AgentExecutor {
                     }
 
                     // Save checkpoint at hibernation yield point
-                    let _ =
-                        self.save_yield_checkpoint(history, &turn_id, YieldReason::Hibernation, None);
+                    let _ = self.save_yield_checkpoint(history, &turn_id, turn_yield_reason, None);
                     if let Some(config) = self.config.as_ref() {
                         // Prune old checkpoints, keep last 3
                         let _ = prune_checkpoints(config, &session_id, 3);
@@ -2749,6 +2757,37 @@ impl AgentExecutor {
         }
         true
     }
+}
+
+fn waiting_for_child_yield_reason(
+    config: &GatewayConfig,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
+) -> Option<YieldReason> {
+    let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+    let workflow_id = crate::scheduler::resolve_workflow_id_for_root_session(
+        config,
+        &root_session_id,
+    )
+    .ok()??;
+    let workflow = crate::scheduler::workflow_store::load_workflow_run(config, store, &workflow_id)
+        .ok()??;
+
+    let is_waiting = matches!(
+        workflow.status,
+        autonoetic_types::workflow::WorkflowRunStatus::WaitingChildren
+            | autonoetic_types::workflow::WorkflowRunStatus::BlockedApproval
+    ) || !workflow.active_task_ids.is_empty()
+        || !workflow.queued_task_ids.is_empty();
+
+    if !is_waiting {
+        return None;
+    }
+
+    Some(YieldReason::WaitingForChild {
+        workflow_id,
+        task_id: None,
+    })
 }
 
 #[cfg(test)]

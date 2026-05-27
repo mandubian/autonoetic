@@ -11,6 +11,7 @@ pub(crate) fn should_auto_resume_checkpoint_yield_reason(
         yield_reason,
         YieldReason::Hibernation
             | YieldReason::BudgetExhausted
+            | YieldReason::WaitingForChild { .. }
             | YieldReason::ManualStop
             | YieldReason::Error(_)
     )
@@ -229,5 +230,14 @@ mod session_resume_tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["selected_value"], "alpha");
         assert_eq!(v["answer_option_id"], "opt-a");
+    }
+
+    #[test]
+    fn waiting_for_child_checkpoint_is_auto_resumable() {
+        let resumable = crate::runtime::checkpoint::YieldReason::WaitingForChild {
+            workflow_id: "wf-123".into(),
+            task_id: None,
+        };
+        assert!(should_auto_resume_checkpoint_yield_reason(&resumable));
     }
 }

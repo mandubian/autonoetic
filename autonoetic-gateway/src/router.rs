@@ -198,12 +198,27 @@ impl JsonRpcRouter {
                 message,
                 metadata,
             } => {
-                let kickoff = match metadata {
-                    Some(metadata) => format!(
-                        "Gateway event type: {}\nMessage: {}\nMetadata: {}",
-                        event_type, message, metadata
-                    ),
-                    None => format!("Gateway event type: {}\nMessage: {}", event_type, message),
+                let child_state_signal = metadata.as_ref().is_some_and(|value| {
+                    value.get("signal_delivered") == Some(&serde_json::Value::Bool(true))
+                        && serde_json::from_str::<serde_json::Value>(message)
+                            .ok()
+                            .is_some_and(|parsed| {
+                                parsed.get("type").and_then(|value| value.as_str())
+                                    == Some("child_state_notification")
+                            })
+                });
+                let kickoff = if child_state_signal {
+                    message.clone()
+                } else {
+                    match metadata {
+                        Some(metadata) => format!(
+                            "Gateway event type: {}\nMessage: {}\nMetadata: {}",
+                            event_type, message, metadata
+                        ),
+                        None => {
+                            format!("Gateway event type: {}\nMessage: {}", event_type, message)
+                        }
+                    }
                 };
                 (
                     "event.ingest",
@@ -520,11 +535,13 @@ impl JsonRpcRouter {
                 // by the signal's request_id to prevent spurious agent turns.
                 if let Some(meta) = params.metadata.as_ref() {
                     if meta.get("signal_delivered") == Some(&serde_json::Value::Bool(true)) {
-                        if let Some(serde_json::Value::String(signal_req_id)) =
-                            meta.get("approval_request_id")
+                        if let Some(signal_req_id) = meta
+                            .get("signal_request_id")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| meta.get("approval_request_id").and_then(|v| v.as_str()))
                         {
                             let mut seen = self.processed_signal_ids.lock().unwrap();
-                            if !seen.insert(signal_req_id.clone()) {
+                            if !seen.insert(signal_req_id.to_string()) {
                                 tracing::info!(
                                     target: "gateway.router",
                                     signal_request_id = %signal_req_id,

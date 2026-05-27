@@ -1733,6 +1733,9 @@ async fn process_pending_notifications(
             autonoetic_types::notification::NotificationType::WorkflowJoinSatisfied => {
                 serde_json::from_value::<crate::scheduler::signal::Signal>(n.payload.clone()).ok()
             }
+            autonoetic_types::notification::NotificationType::ChildStateNotification => {
+                serde_json::from_value::<crate::scheduler::signal::Signal>(n.payload.clone()).ok()
+            }
             autonoetic_types::notification::NotificationType::AgentMessage => {
                 serde_json::from_value::<crate::scheduler::signal::Signal>(n.payload.clone()).ok()
             }
