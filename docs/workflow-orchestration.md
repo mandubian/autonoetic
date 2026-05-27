@@ -14,7 +14,7 @@ One durable workflow per user-facing task. Created automatically when the first 
 workflow_id       Unique identifier (e.g. wf-a1b2c3d4)
 root_session_id   The lead planner's session
 lead_agent_id     The planner agent (e.g. planner.default)
-status            Active | WaitingChildren | BlockedApproval | Resumable | Completed | Failed | Cancelled
+status            Active | WaitingChildren | BlockedApproval | Resumable | EmergencyStopping | EmergencyStopped | Completed | Failed | Cancelled
 created_at        RFC3339 timestamp
 updated_at        RFC3339 timestamp
 join_task_ids     Task IDs the planner is waiting on
@@ -141,7 +141,8 @@ When a task enters `AwaitingApproval`, its `message` and `metadata` are preserve
 Planners interact with the orchestration layer through:
 
 - **`agent_spawn(..., async: true)`** — Enqueue a child task and return immediately
-- **`workflow_wait({ task_ids, workflow_id?, timeout_secs? })`** — Inspect task statuses and join condition
+- **Gateway child-state wake-up** — Resume a suspended parent with structured `ChildStateNotification` context when a child task becomes waiting or terminal
+- **`workflow_wait({ task_ids, workflow_id?, timeout_secs? })`** — Inspect task statuses and join condition; retained as an inspection/compatibility primitive rather than the primary orchestration path
 - **`workflow_cancel_task({ workflow_id, task_id, reason? })`** — Cancel `AwaitingApproval`/`Pending`/`Runnable` tasks and trigger join re-evaluation
 - **`approval_status({ request_id })`** — Inspect approval state when needed
 
@@ -155,9 +156,10 @@ The planner is not "done" when it delegates:
 4. Child tasks execute independently
 5. On approval: child turn is suspended to `TurnContinuation`, task becomes `AwaitingApproval`, and resources are released
 6. On approval resolution: task becomes `Runnable`; on next execution the gateway loads continuation, executes approved action, and resumes turn history
-7. When join condition is satisfied: workflow becomes `Resumable`
-8. Planner observes task state via `workflow_wait` and continues
-9. When planner session closes normally: workflow becomes `Completed` (if all join tasks terminal and no active/queued work remains)
+7. On child waiting/terminal transitions: the gateway records workflow events and targets the parent session with structured child-state delivery
+8. When join condition is satisfied: workflow becomes `Resumable`
+9. The parent resumes from `WaitingForChild` with structured child-state context; `workflow_wait` remains available for explicit inspection/debugging when desired
+10. When planner session closes normally: workflow becomes `Completed` (if all join tasks terminal and no active/queued work remains)
 
 ### Workflow Completion
 
@@ -179,7 +181,7 @@ the workflow stays `Resumable` so it can be woken again later.
 - **`AllOf`**: All tasks must complete (default)
 - **`AnyOf`**: Any task completion satisfies
 - **`FirstSuccess`**: First success satisfies; failures ignored
-- **`Manual`**: Explicit `workflow_wait` call required
+- **`Manual`**: Explicit `workflow_wait`/`workflow_state` inspection controls when the planner proceeds; child-state wake-ups still carry typed transition facts
 
 ## CLI Integration
 

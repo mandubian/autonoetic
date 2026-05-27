@@ -17,7 +17,8 @@ This index links to all documentation under `docs/` and marks what is stable ref
 ## Workflow and Interaction Semantics
 
 - [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) - **Unified GateService architecture** for approvals, `user_ask`, and escalations (`runtime/human_gate.rs`).
-- [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) - Constitutional amendments for the unified gate abstraction (R-2.18–R-2.21, R-8.19).
+- [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) - Active constitutional rationale for unified gates; ratified rules are mixed with still-pending agent-decider amendments.
+- [`design/gateway-mechanical-orchestration-implementation-rfc.md`](./design/gateway-mechanical-orchestration-implementation-rfc.md) - Implemented mechanical orchestration RFC: typed failures, parent wake-up, single-flight dedupe, and stage-local retry.
 - [`workflow-orchestration.md`](./workflow-orchestration.md) - Durable workflow/task lifecycle and join semantics.
 - [`approval-notification-delivery.md`](./approval-notification-delivery.md) - Delivery path for workflow vs non-workflow approvals.
 - [`agent-clarification-protocol.md`](./agent-clarification-protocol.md) - Clarification signal format and parent/child handling.
@@ -65,7 +66,8 @@ This index links to all documentation under `docs/` and marks what is stable ref
 
 - [`design/progressive-ux-auto-learning-plan.md`](./design/progressive-ux-auto-learning-plan.md) - Progressive UX and default self-improvement: one-command start, auto-learning, contextual "why", complexity profiles, session continuity, user persona.
 - [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) - Unified GateService architecture, migration status, and future agent-as-decider design.
-- [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) - Constitutional amendments rationale for unified gates.
+- [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) - Active constitutional amendments rationale for unified gates.
+- [`design/gateway-mechanical-orchestration-implementation-rfc.md`](./design/gateway-mechanical-orchestration-implementation-rfc.md) - Implemented RFC for gateway-owned workflow mechanics.
 - [`design/architecture_modules.md`](./design/architecture_modules.md) - Architecture decomposition by module.
 - [`design/concepts.md`](./design/concepts.md) - Core conceptual model and terminology.
 - [`design/data_models.md`](./design/data_models.md) - Data model design details.
@@ -95,3 +97,4 @@ These are preserved for history and should not be treated as current source-of-t
 - [`archived/tool-skill-repository-design.md`](./archived/tool-skill-repository-design.md) - Aspirational tool/skill repository design (not yet implemented).
 - [`archived/approval-system.md`](./archived/approval-system.md) - Pre-unification approval architecture (superseded by `GateService`).
 - [`archived/architecture-interaction-mechanisms.md`](./archived/architecture-interaction-mechanisms.md) - Legacy three-pipeline interaction model (superseded by unified gate).
+- [`archived/gateway-mechanical-orchestration-plan.md`](./archived/gateway-mechanical-orchestration-plan.md) - Superseded pre-implementation design plan for the mechanical orchestration RFC.

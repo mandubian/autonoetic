@@ -23,7 +23,8 @@ If an approval request has both `workflow_id` and `task_id`:
 - Workflow task is unblocked (`Runnable` on approve, `Failed` on reject).
 - Scheduler picks runnable tasks and re-executes them.
 - Execution loads `TurnContinuation`, executes approved action in the gateway, injects real tool result, and continues the turn.
-- No `approval_resolved` signal is required for this path.
+- No `approval_resolved` signal is required for the child-task continuation path.
+- Parent workflow visibility comes from workflow events plus `ChildStateNotification` delivery on child state transitions, not from a separate approval notification row.
 
 ### 2) Non-Workflow Sessions (notification model)
 

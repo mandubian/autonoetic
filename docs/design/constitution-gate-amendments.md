@@ -1,7 +1,8 @@
 # Constitutional Amendments for Unified Gate Abstraction
 
 > Related: [#167](https://github.com/mandubian/autonoetic/issues/167) — HumanGate unification
-> Constitution version: `2026.05.05`
+> Status: Active rationale doc. `R-2.18`, `R-2.19`, and `R-8.19` are ratified and enforced in the current constitution; `R-2.20` and `R-2.21` remain ratified-but-pending implementation.
+> Constitution version: `2026.05.27`
 
 ## Motivation
 

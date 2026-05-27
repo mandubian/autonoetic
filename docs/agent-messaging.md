@@ -10,7 +10,7 @@ It is important to understand when to use `agent_message` compared to traditiona
 **1. Delegation (`agent_spawn`)**
 - **Hierarchical:** Always establishes a parent-child relationship.
 - **Task-oriented:** Used to completely hand off a defined unit of work because the current agent lacks the explicit capabilities to perform it (e.g., Planner delegating to Coder to execute code).
-- **Synchronous context:** The caller explicitly waits via `workflow_wait` or `workflow_state` to retrieve the final result and artifacts produced by the child agent.
+- **Structured workflow context:** The caller is resumed by gateway-owned child-state wake-up when the child changes state, and may still use `workflow_wait` or `workflow_state` for explicit inspection and artifact lookup.
 
 **2. Messaging (`agent_message`)**
 - **Peer-to-Peer:** Non-hierarchical. Messages can be sent across unrelated active sessions.
