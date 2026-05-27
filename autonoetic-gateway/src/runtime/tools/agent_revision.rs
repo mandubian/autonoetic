@@ -1179,6 +1179,91 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         };
         let gateway_dir = gateway_dir.ok_or_else(|| anyhow::anyhow!("gateway_dir required"))?;
 
+        let resolved_artifact = resolve_revision_artifact_input(
+            args.artifact_id.as_deref(),
+            args.artifact_ref.as_deref(),
+            session_id,
+            &gateway_store,
+        )?;
+
+        let single_flight_scope = if let (Some(config), Some(session_id)) = (_config, session_id) {
+            let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+            let workflow = crate::scheduler::ensure_workflow_for_root_session(
+                config,
+                Some(gateway_store.as_ref()),
+                &root_session_id,
+                Some(manifest.agent.id.as_str()),
+            )?;
+            let spec = crate::scheduler::single_flight::build_spec(
+                &workflow.workflow_id,
+                "install",
+                &args.agent_id,
+                resolved_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.source_ref.clone()),
+                resolved_artifact
+                    .as_ref()
+                    .map(|_| None)
+                    .unwrap_or_else(|| Some(direct_install_intent_digest(&args))),
+            );
+            match crate::scheduler::single_flight::try_acquire_reservation(
+                config,
+                Some(gateway_store.as_ref()),
+                &spec,
+                None,
+                None,
+            )? {
+                crate::scheduler::single_flight::AcquireOutcome::Acquired(_) => {
+                    Some((workflow.workflow_id, spec))
+                }
+                crate::scheduler::single_flight::AcquireOutcome::Coalesced(existing) => {
+                    crate::scheduler::append_workflow_event(
+                        config,
+                        Some(gateway_store.as_ref()),
+                        &autonoetic_types::workflow::WorkflowEventRecord {
+                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            workflow_id: workflow.workflow_id.clone(),
+                            task_id: existing.existing_task_id.clone(),
+                            event_type: "workflow.single_flight.coalesced".to_string(),
+                            agent_id: Some(args.agent_id.clone()),
+                            payload: serde_json::json!({
+                                "status": "coalesced",
+                                "stage_kind": existing.stage_kind,
+                                "dedupe_key": existing.dedupe_key,
+                                "existing_task_id": existing.existing_task_id,
+                                "approval_request_id": existing.approval_request_id,
+                                "retry_advice": "wait",
+                            }),
+                            occurred_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    )?;
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "status": "coalesced",
+                        "existing_task_id": existing.existing_task_id,
+                        "approval_ref": existing.approval_request_id,
+                        "dedupe_key": existing.dedupe_key,
+                        "retry_advice": "wait",
+                        "message": "Equivalent durable install operation is already active. Wait for the existing operation instead."
+                    })
+                    .to_string());
+                }
+            }
+        } else {
+            None
+        };
+        let _single_flight_guard = single_flight_scope
+            .as_ref()
+            .and_then(|(workflow_id, spec)| {
+                _config.map(|config| {
+                    SingleFlightReleaseGuard::new(
+                        config,
+                        workflow_id.clone(),
+                        spec.dedupe_key.clone(),
+                    )
+                })
+            });
+
         let existing = gateway_store.list_agent_revisions(&args.agent_id)?;
         let active_revisions: Vec<String> = existing
             .iter()
@@ -1217,13 +1302,6 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 ).to_error_response());
             }
         }
-
-        let resolved_artifact = resolve_revision_artifact_input(
-            args.artifact_id.as_deref(),
-            args.artifact_ref.as_deref(),
-            session_id,
-            &gateway_store,
-        )?;
 
         // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
         let (
@@ -1806,6 +1884,32 @@ impl Drop for SingleFlightReleaseGuard<'_> {
             );
         }
     }
+}
+
+fn normalized_install_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn direct_install_intent_digest(args: &RevisionCreateFromIntentArgs) -> String {
+    let normalized = serde_json::json!({
+        "agent_id": args.agent_id,
+        "instructions": normalized_install_text(&args.instructions),
+        "description": normalized_install_text(&args.description),
+        "capabilities": args.capabilities,
+        "execution_mode": args.execution_mode,
+        "script_entry": args.script_entry.as_deref().map(normalized_install_text),
+        "script_input_mode": args.script_input_mode,
+        "llm_config": args.llm_config,
+        "io": args.io,
+        "middleware": args.middleware,
+        "base_revision_id": args.base_revision_id,
+        "replace": args.replace,
+        "credential_services": args.credential_services,
+    });
+    format!(
+        "intent:{}",
+        sha256_hex(serde_json::to_string(&normalized).unwrap_or_default().as_bytes())
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -3573,5 +3677,116 @@ mod capability_lenient_deser_tests {
             Some(bundle.artifact_id.as_str())
         );
         assert_eq!(revision.source_ref.as_deref(), Some("ar.testinstall01"));
+    }
+
+    #[test]
+    fn duplicate_create_from_intent_request_coalesces_when_install_reservation_exists() {
+        use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let gateway_dir = agents_dir.join(".gateway");
+        let session_id = "sess-install";
+
+        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
+        let handle = content_store
+            .write(b"#!/usr/bin/env python3\nprint('hello')\n")
+            .unwrap();
+        content_store
+            .register_name(session_id, "main.py", &handle)
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+        let inputs = vec!["main.py".to_string()];
+        let entrypoints = vec!["main.py".to_string()];
+        let bundle = artifact_store
+            .build(&inputs, Some(&entrypoints), None, session_id)
+            .unwrap();
+
+        let gateway_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let artifact_ref = "ar.testinstall01".to_string();
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: artifact_ref.clone(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: session_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "specialized-builder.test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let config = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..GatewayConfig::default()
+        };
+        let workflow = crate::scheduler::ensure_workflow_for_root_session(
+            &config,
+            Some(gateway_store.as_ref()),
+            session_id,
+            Some("specialized-builder.test"),
+        )
+        .unwrap();
+        let spec = crate::scheduler::single_flight::build_spec(
+            &workflow.workflow_id,
+            "install",
+            "weather-fetcher",
+            Some(artifact_ref.clone()),
+            None,
+        );
+        match crate::scheduler::single_flight::try_acquire_reservation(
+            &config,
+            Some(gateway_store.as_ref()),
+            &spec,
+            None,
+            None,
+        )
+        .unwrap()
+        {
+            crate::scheduler::single_flight::AcquireOutcome::Acquired(_) => {}
+            crate::scheduler::single_flight::AcquireOutcome::Coalesced(_) => {
+                panic!("seed reservation must acquire")
+            }
+        }
+
+        let manifest = test_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = AgentRevisionCreateFromIntentTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "weather-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Fetch weather data",
+                    "instructions": "# Weather Agent",
+                    "capabilities": [
+                        {"type": "ReadAccess", "scopes": ["*"]}
+                    ]
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                Some(&config),
+                Some(gateway_store),
+                None,
+            )
+            .unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response_json["ok"].as_bool(), Some(true));
+        assert_eq!(response_json["status"].as_str(), Some("coalesced"));
+        assert_eq!(response_json["dedupe_key"].as_str(), Some(spec.dedupe_key.as_str()));
+        assert_eq!(response_json["retry_advice"].as_str(), Some("wait"));
     }
 }

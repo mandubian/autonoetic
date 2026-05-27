@@ -7,7 +7,9 @@
 //! - Workflow events are stored in SQLite table `workflow_events` (`gateway.db`).
 
 use crate::execution::gateway_root_dir;
-use crate::runtime::failure_classification::{classify_task_status, WorkflowFailureMetadata};
+use crate::runtime::failure_classification::{
+    classify_task_status, metadata_for_failure_class, WorkflowFailureMetadata,
+};
 use crate::runtime::live_digest::base_session_id;
 use crate::scheduler::gateway_store::GatewayStore;
 use crate::scheduler::store::{read_json_file, write_json_file};
@@ -80,7 +82,16 @@ pub(crate) fn evaluate_stage_retry(
     status: TaskRunStatus,
     result_summary: Option<&str>,
 ) -> StageRetryDecision {
-    let mut failure = classify_task_status(status, result_summary);
+    let mut failure = task.last_failure_class.map(|failure_class| {
+        let mut metadata = metadata_for_failure_class(failure_class);
+        if task.side_effect_state.is_some() {
+            metadata.side_effect_state = task.side_effect_state;
+        }
+        metadata
+    });
+    if failure.is_none() {
+        failure = classify_task_status(status, result_summary);
+    }
     let mut decision = StageRetryDecision {
         failure: failure.clone(),
         retry_scheduled: false,
@@ -3960,6 +3971,52 @@ mod tests {
         assert_eq!(
             failure.retry_advice,
             Some(autonoetic_types::tool_error::RetryAdvice::EscalateHuman)
+        );
+    }
+
+    #[test]
+    fn persisted_failure_class_outranks_prose_summary_for_retry_decisions() {
+        let task = TaskRun {
+            task_id: "task-structured-failure".to_string(),
+            workflow_id: "wf-structured-failure".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-x".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: Some(autonoetic_types::tool_error::FailureClass::TransientInfra),
+            retry_policy: Some(serde_json::json!({
+                "transient_infra": { "max_retries": 1 }
+            })),
+            side_effect_state: Some(autonoetic_types::tool_error::SideEffectState::NoSideEffect),
+            dedupe_key: None,
+        };
+
+        let decision = evaluate_stage_retry(
+            &task,
+            TaskRunStatus::Failed,
+            Some("child agent failed; see task metadata"),
+        );
+        assert!(decision.retry_scheduled);
+        let failure = decision.failure.expect("failure metadata");
+        assert_eq!(
+            failure.failure_class,
+            Some(autonoetic_types::tool_error::FailureClass::TransientInfra)
+        );
+        assert_eq!(
+            failure.retry_advice,
+            Some(autonoetic_types::tool_error::RetryAdvice::RetrySameStage)
+        );
+        assert_eq!(
+            failure.side_effect_state,
+            Some(autonoetic_types::tool_error::SideEffectState::NoSideEffect)
         );
     }
 

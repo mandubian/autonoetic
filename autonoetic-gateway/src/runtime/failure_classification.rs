@@ -327,6 +327,25 @@ pub(crate) fn classify_task_status(
     }
 }
 
+pub(crate) fn metadata_for_failure_class(failure_class: FailureClass) -> WorkflowFailureMetadata {
+    match failure_class {
+        FailureClass::ApprovalPending => WorkflowFailureMetadata::approval_pending(),
+        FailureClass::PolicyDenied => WorkflowFailureMetadata::policy_denied(),
+        FailureClass::ChildCancelled => WorkflowFailureMetadata::child_cancelled(),
+        FailureClass::InstallConflict => WorkflowFailureMetadata::install_conflict(),
+        FailureClass::Timeout => WorkflowFailureMetadata::timeout(),
+        FailureClass::TransientInfra => WorkflowFailureMetadata::transient_infra(),
+        FailureClass::SchemaValidationFailed => WorkflowFailureMetadata::schema_validation_failed(),
+        FailureClass::AwaitingUserInput
+        | FailureClass::ArtifactInvalid
+        | FailureClass::DependencyMissing
+        | FailureClass::GateUnsatisfied
+        | FailureClass::GateUnableToEvaluate
+        | FailureClass::TaskContractInvalid
+        | FailureClass::Unknown => WorkflowFailureMetadata::unknown_failure(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
