@@ -186,6 +186,10 @@ fn ri_0_12_all_yield_reasons_roundtrip() {
         YieldReason::UserInputRequired {
             interaction_id: "ui-test".to_string(),
         },
+        YieldReason::WaitingForChild {
+            workflow_id: "wf-test".to_string(),
+            task_id: Some("task-test".to_string()),
+        },
         YieldReason::EmergencyStop {
             stop_id: "es-test".to_string(),
         },
@@ -214,8 +218,8 @@ fn ri_0_12_all_yield_reasons_roundtrip() {
     }
     assert_eq!(
         reasons.len(),
-        10,
-        "YieldReason must have exactly 10 variants — update this test if adding one"
+        11,
+        "YieldReason must have exactly 11 variants — update this test if adding one"
     );
 }
 

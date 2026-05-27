@@ -560,6 +560,11 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         join_group: None,
         message: Some("Run the approval-gated command.".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &approval_task)?;
 
@@ -577,6 +582,11 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         join_group: None,
         message: Some("Run fast task.".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &fast_task)?;
 
@@ -821,6 +831,11 @@ async fn test_approval_timeout_fails_task_and_satisfies_join() -> anyhow::Result
         join_group: None,
         message: Some("Run the data fetch command.".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &task)?;
 
@@ -978,6 +993,11 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
         join_group: None,
         message: Some("Run the data fetch command.".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &task)?;
 
@@ -1170,6 +1190,11 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
             join_group: None,
             message: Some("Run approval command.".to_string()),
             metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
         };
         workflow_store::save_task_run(&config, Some(store.as_ref()), &task)?;
     }
@@ -1447,6 +1472,11 @@ async fn test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join() -
         join_group: None,
         message: Some("Run the data fetch command.".to_string()),
         metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
     };
     workflow_store::save_task_run(&config, Some(store.as_ref()), &task)?;
 
