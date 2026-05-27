@@ -761,11 +761,11 @@ impl Default for ConstitutionConfig {
 }
 
 fn default_constitution_source_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.19/constitution.md")
+    PathBuf::from("docs/constitution/versions/2026.05.27/constitution.md")
 }
 
 fn default_constitution_lock_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.19/gateway-constitution.lock.json")
+    PathBuf::from("docs/constitution/versions/2026.05.27/gateway-constitution.lock.json")
 }
 
 fn default_require_constitution_signature() -> bool {

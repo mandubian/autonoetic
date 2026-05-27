@@ -610,7 +610,7 @@ mod tests {
         );
         assert_eq!(
             lock.constitution_source,
-            "docs/constitution/versions/2026.05.19/constitution.md"
+            "docs/constitution/versions/2026.05.27/constitution.md"
         );
     }
 }

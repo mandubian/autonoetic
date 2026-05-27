@@ -256,6 +256,10 @@ fn ri_0_12_terminal_vs_resumable_categorized() {
         YieldReason::UserInputRequired {
             interaction_id: "u".to_string(),
         },
+        YieldReason::WaitingForChild {
+            workflow_id: "wf".to_string(),
+            task_id: Some("task".to_string()),
+        },
         YieldReason::HumanEscalation {
             escalation_request_id: "h".to_string(),
         },
@@ -263,8 +267,8 @@ fn ri_0_12_terminal_vs_resumable_categorized() {
 
     assert_eq!(
         terminal.len() + resumable.len(),
-        10,
-        "terminal + resumable must cover all 10 YieldReason variants"
+        11,
+        "terminal + resumable must cover all 11 YieldReason variants"
     );
 
     for r in &terminal {
