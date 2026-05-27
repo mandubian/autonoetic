@@ -348,6 +348,69 @@ impl JsonRpcRouter {
         Ok((result, None))
     }
 
+    /// Transition async_results entries from `SuspendedApproval` to `Processing`
+    /// for the given session (and optionally its root session).
+    ///
+    /// This is the **single** place that clears a stale `SuspendedApproval`
+    /// status after an approval has been granted.  Every approval path
+    /// (JSON-RPC, inline TUI, interaction.answer) must call this instead of
+    /// manipulating the map directly.
+    async fn transition_async_to_processing(
+        &self,
+        session_id: &str,
+        root_session_id: Option<&str>,
+    ) {
+        let mut map = self.async_results.lock().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        for sid in std::iter::once(session_id)
+            .chain(root_session_id.filter(|r| *r != session_id))
+        {
+            if let Some(entry) = map.get_mut(sid) {
+                if entry.status == AsyncIngestStatus::SuspendedApproval {
+                    entry.status = AsyncIngestStatus::Processing;
+                    entry.completed_at = None;
+                    entry.started_at = now.clone();
+                    tracing::debug!(
+                        target: "router",
+                        session_id = %sid,
+                        "Transitioned async_results from SuspendedApproval to Processing"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Update an existing async_results entry with the final spawn result.
+    ///
+    /// Called by both the async and sync `event.ingest` paths after the
+    /// planner finishes so that `session.status` reflects reality.
+    fn apply_spawn_result_to_async_entry(
+        entry: &mut AsyncIngestResult,
+        spawn_result: &SpawnResult,
+    ) {
+        let status = if spawn_result.suspended_for_approval.is_some() {
+            AsyncIngestStatus::SuspendedApproval
+        } else if spawn_result.suspended_for_user_input {
+            AsyncIngestStatus::SuspendedUserInput
+        } else {
+            AsyncIngestStatus::Completed
+        };
+        entry.status = status;
+        entry.assistant_reply = spawn_result.assistant_reply.clone();
+        entry.workflow_note = spawn_result.workflow_note.clone();
+        entry.artifacts = spawn_result
+            .artifacts
+            .iter()
+            .map(|a| serde_json::to_value(a).unwrap_or_default())
+            .collect();
+        entry.shared_knowledge = spawn_result
+            .shared_knowledge
+            .iter()
+            .map(|k| serde_json::to_value(k).unwrap_or_default())
+            .collect();
+        entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
+    }
+
     pub async fn dispatch(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         tracing::debug!("Dispatching JSON-RPC method: {}", req.method);
 
@@ -651,7 +714,6 @@ impl JsonRpcRouter {
                             .execute_agent_request(ingress, session_id_clone.clone())
                             .await;
                         let mut map = async_results.lock().await;
-                        let now = chrono::Utc::now().to_rfc3339();
                         if let Some(entry) = map.get_mut(&session_id_clone) {
                             match result {
                                 Ok((spawn_result, _)) => {
@@ -672,27 +734,7 @@ impl JsonRpcRouter {
                                             })),
                                         );
                                     }
-                                    let status = if spawn_result.suspended_for_approval.is_some() {
-                                        AsyncIngestStatus::SuspendedApproval
-                                    } else if spawn_result.suspended_for_user_input {
-                                        AsyncIngestStatus::SuspendedUserInput
-                                    } else {
-                                        AsyncIngestStatus::Completed
-                                    };
-                                    entry.status = status;
-                                    entry.assistant_reply = spawn_result.assistant_reply;
-                                    entry.workflow_note = spawn_result.workflow_note;
-                                    entry.artifacts = spawn_result
-                                        .artifacts
-                                        .into_iter()
-                                        .map(|a| serde_json::to_value(&a).unwrap_or_default())
-                                        .collect();
-                                    entry.shared_knowledge = spawn_result
-                                        .shared_knowledge
-                                        .into_iter()
-                                        .map(|k| serde_json::to_value(&k).unwrap_or_default())
-                                        .collect();
-                                    entry.completed_at = Some(now);
+                                    JsonRpcRouter::apply_spawn_result_to_async_entry(entry, &spawn_result);
                                 }
                                 Err((e, _)) => {
                                     if let Some(source) = source_agent_id {
@@ -710,7 +752,7 @@ impl JsonRpcRouter {
                                     }
                                     entry.status = AsyncIngestStatus::Failed;
                                     entry.error = Some(e);
-                                    entry.completed_at = Some(now);
+                                    entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
                                 }
                             }
                         }
@@ -748,6 +790,15 @@ impl JsonRpcRouter {
                                         "event_type": event_type.clone(),
                                     })),
                                 );
+                            }
+                            // Update async_results if this session has a polling
+                            // entry (e.g. standalone approval resume via sync
+                            // ApprovalResolved signal).
+                            {
+                                let mut map = self.async_results.lock().await;
+                                if let Some(entry) = map.get_mut(&session_id) {
+                                    Self::apply_spawn_result_to_async_entry(entry, &result);
+                                }
                             }
                             JsonRpcResponse::success(
                                 req.id,
@@ -829,6 +880,30 @@ impl JsonRpcRouter {
                         format!("No async result found for session '{}'. The session may have been initiated with async_mode=false, or the session ID is incorrect.", params.session_id),
                     )
                 }
+            }
+
+            "session.approval_resolved" => {
+                #[derive(Deserialize)]
+                struct ApprovalResolvedParams {
+                    session_id: String,
+                    #[serde(default)]
+                    root_session_id: Option<String>,
+                }
+                let params: ApprovalResolvedParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.approval_resolved: {}", e),
+                        );
+                    }
+                };
+                self.transition_async_to_processing(
+                    &params.session_id,
+                    params.root_session_id.as_deref(),
+                ).await;
+                JsonRpcResponse::success(req.id, serde_json::json!({ "ok": true }))
             }
 
             "root_session.emergency_stop" => {
@@ -1182,15 +1257,10 @@ impl JsonRpcRouter {
                     Some(hooks.as_ref()),
                 ) {
                     Ok(decision) => {
-                        {
-                            let mut map = self.async_results.lock().await;
-                            map.remove(&decision.session_id);
-                            if let Some(root) = &decision.root_session_id {
-                                if root != &decision.session_id {
-                                    map.remove(root);
-                                }
-                            }
-                        }
+                        self.transition_async_to_processing(
+                            &decision.session_id,
+                            decision.root_session_id.as_deref(),
+                        ).await;
                         JsonRpcResponse::success(
                             req.id,
                             serde_json::json!({

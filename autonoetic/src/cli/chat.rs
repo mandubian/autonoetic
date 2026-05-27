@@ -270,6 +270,9 @@ enum ChatOutbound {
     PolicyAuthor(String),
     /// Query session.status for the async planner reply after workflow completion.
     SessionStatusQuery { session_id: String },
+    /// Notify the gateway that an approval was resolved so it can transition
+    /// `async_results` from `SuspendedApproval` to `Processing`.
+    ApprovalResolved { session_id: String, root_session_id: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -4734,23 +4737,42 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 );
                                             }
                                         } else {
-                                            let status_label = match status {
-                                                "processing" => Some("Processing"),
-                                                "suspended_approval" => Some("Suspended — awaiting approval"),
-                                                "suspended_user_input" => {
-                                                    if app.session_overview.pending_user_interactions > 0 {
-                                                        Some("Suspended — awaiting user input")
-                                                    } else {
-                                                        None
-                                                    }
+                                            // For workflow sessions, a suspended_approval
+                                            // response is a race condition (the planner's
+                                            // async_results entry hasn't been updated yet
+                                            // after WorkflowJoinSatisfied).  Don't display
+                                            // the stale status; remove from the dedup set
+                                            // so check_signals re-queries on the next cycle.
+                                            let response_sid = result
+                                                .get("session_id")
+                                                .and_then(|s| s.as_str());
+                                            let is_stale_workflow_suspension = status == "suspended_approval"
+                                                && response_sid.map_or(false, |sid| {
+                                                    app.queried_session_status_for_workflows.contains(sid)
+                                                });
+                                            if is_stale_workflow_suspension {
+                                                if let Some(sid) = response_sid {
+                                                    app.queried_session_status_for_workflows.remove(sid);
                                                 }
-                                                s => Some(s),
-                                            };
-                                            if let Some(label) = status_label {
-                                                app.add_message(
-                                                    MessageRole::System,
-                                                    format!("⏳ Session status: {}", label),
-                                                );
+                                            } else {
+                                                let status_label = match status {
+                                                    "processing" => Some("Processing"),
+                                                    "suspended_approval" => Some("Suspended — awaiting approval"),
+                                                    "suspended_user_input" => {
+                                                        if app.session_overview.pending_user_interactions > 0 {
+                                                            Some("Suspended — awaiting user input")
+                                                        } else {
+                                                            None
+                                                        }
+                                                    }
+                                                    s => Some(s),
+                                                };
+                                                if let Some(label) = status_label {
+                                                    app.add_message(
+                                                        MessageRole::System,
+                                                        format!("⏳ Session status: {}", label),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -4929,9 +4951,32 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         continue;
                     }
 
+                    // Notify the gateway that an approval was resolved so it
+                    // transitions async_results from SuspendedApproval to Processing.
+                    if let ChatOutbound::ApprovalResolved { session_id: sid, root_session_id: root_sid } = &outbound {
+                        let req_id = format!("approval-resolved-{}", id);
+                        let request = GatewayJsonRpcRequest {
+                            jsonrpc: "2.0".to_string(),
+                            id: req_id.clone(),
+                            method: "session.approval_resolved".to_string(),
+                            params: serde_json::json!({
+                                "session_id": sid,
+                                "root_session_id": root_sid,
+                            }),
+                            auth_token: Some(jsonrpc_auth_token.to_string()),
+                        };
+                        let encoded = serde_json::to_string(&request)?;
+                        write_half.write_all(encoded.as_bytes()).await?;
+                        write_half.write_all(b"\n").await?;
+                        write_half.flush().await?;
+                        // Fire-and-forget: no response expected
+                        needs_redraw = true;
+                        continue;
+                    }
+
                     let message_text = match &outbound {
                         ChatOutbound::Chat(s) | ChatOutbound::PolicyAuthor(s) => s.clone(),
-                        ChatOutbound::SessionStatusQuery { .. } => unreachable!(),
+                        ChatOutbound::SessionStatusQuery { .. } | ChatOutbound::ApprovalResolved { .. } => unreachable!(),
                     };
                     // Pending user.ask: gateway-owned answer + resume (workflow Runnable or session checkpoint).
                     let mut skip_chat_ingest = false;
@@ -5071,7 +5116,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                             "governance-author.default".to_string(),
                             message_text.clone(),
                         ),
-                        ChatOutbound::SessionStatusQuery { .. } => unreachable!(),
+                        ChatOutbound::SessionStatusQuery { .. } | ChatOutbound::ApprovalResolved { .. } => unreachable!(),
                     };
 
                     let params = serde_json::json!({
@@ -5291,18 +5336,30 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 app.add_pending(pid);
                                                 app.post_approval_pending_ids.push(pid);
 
-                                                // For approvals that lack workflow task events
-                                                // (e.g. session_continue, emergency_stop), send a
-                                                // session.status query to surface the final reply.
+                                                // Notify the gateway so async_results transitions
+                                                // from SuspendedApproval to Processing.
                                                 if let Ok(Some(approval)) = store.get_approval(&apr_id) {
-                                                    let status_id = app.next_id();
-                                                    app.pending_session_status_ids.insert(status_id);
+                                                    let notify_id = app.next_id();
                                                     let _ = tx.send((
-                                                        status_id,
-                                                        ChatOutbound::SessionStatusQuery {
-                                                            session_id: approval.session_id,
+                                                        notify_id,
+                                                        ChatOutbound::ApprovalResolved {
+                                                            session_id: approval.session_id.clone(),
+                                                            root_session_id: approval.root_session_id.clone(),
                                                         },
                                                     ));
+                                                    // For approvals that lack workflow task events
+                                                    // (e.g. session_continue, emergency_stop), also
+                                                    // send a session.status query to surface the reply.
+                                                    if approval.workflow_id.is_none() || approval.task_id.is_none() {
+                                                        let status_id = app.next_id();
+                                                        app.pending_session_status_ids.insert(status_id);
+                                                        let _ = tx.send((
+                                                            status_id,
+                                                            ChatOutbound::SessionStatusQuery {
+                                                                session_id: approval.session_id,
+                                                            },
+                                                        ));
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
@@ -5403,14 +5460,24 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                     app.add_pending(pid);
                                                     app.post_approval_pending_ids.push(pid);
                                                     if let Ok(Some(approval)) = store.get_approval(&apr_id) {
-                                                        let status_id = app.next_id();
-                                                        app.pending_session_status_ids.insert(status_id);
+                                                        let notify_id = app.next_id();
                                                         let _ = tx.send((
-                                                            status_id,
-                                                            ChatOutbound::SessionStatusQuery {
-                                                                session_id: approval.session_id,
+                                                            notify_id,
+                                                            ChatOutbound::ApprovalResolved {
+                                                                session_id: approval.session_id.clone(),
+                                                                root_session_id: approval.root_session_id.clone(),
                                                             },
                                                         ));
+                                                        if approval.workflow_id.is_none() || approval.task_id.is_none() {
+                                                            let status_id = app.next_id();
+                                                            app.pending_session_status_ids.insert(status_id);
+                                                            let _ = tx.send((
+                                                                status_id,
+                                                                ChatOutbound::SessionStatusQuery {
+                                                                    session_id: approval.session_id,
+                                                                },
+                                                            ));
+                                                        }
                                                     }
                                                     if let Some(ref mut overlay) = app.pending_overlay {
                                                         overlay.items.remove(idx);
@@ -6638,9 +6705,13 @@ async fn check_signals(
 
                                     // Clear post-approval spinners on task lifecycle events
                                     // that indicate the scheduler resumed (or finished) work.
-                                    // Only send a session.status query for non-completion events;
-                                    // the dedicated workflow.completed handler below handles that case
-                                    // to avoid duplicate assistant reply display.
+                                    // Only send a session.status query for non-completion events
+                                    // that actually have updated async_results (task.started,
+                                    // task.completed, task.failed).  task.approved is excluded
+                                    // because the ApprovalResolved notification already
+                                    // transitioned async_results to Processing, and querying at
+                                    // this point would hit stale data before the scheduler picks
+                                    // up the task.
                                     let is_completion_event = event.event_type == "workflow.completed";
                                     if matches!(
                                         event.event_type.as_str(),
@@ -6656,7 +6727,7 @@ async fn check_signals(
                                         for pid in ids {
                                             app.remove_pending(pid);
                                         }
-                                        if !is_completion_event {
+                                        if !is_completion_event && event.event_type != "task.approved" {
                                             let wf_root_sid = event
                                                 .payload
                                                 .get("root_session_id")
