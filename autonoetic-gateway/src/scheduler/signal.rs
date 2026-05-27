@@ -291,7 +291,7 @@ pub fn send_workflow_join_satisfied(
 
 pub fn send_child_state_notification(
     store: Option<&GatewayStore>,
-    root_session_id: &str,
+    target_session_id: &str,
     notification: ChildStateNotification,
 ) -> anyhow::Result<()> {
     let signal_id = format!("wf-child-{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -303,7 +303,7 @@ pub fn send_child_state_notification(
         notification,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    write_signal(store, root_session_id, &signal_id, &signal)?;
+    write_signal(store, target_session_id, &signal_id, &signal)?;
     Ok(())
 }
 

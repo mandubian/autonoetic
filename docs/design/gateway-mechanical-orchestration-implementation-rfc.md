@@ -172,7 +172,9 @@ pub struct TaskRun {
 
 `retry_policy` is stored on the task row because retry is scoped to a single logical stage execution.
 
-Because these fields are persisted in the gateway store, implementation requires a SQLite schema migration in [autonoetic-gateway/src/scheduler/gateway_store/migrate.rs](../autonoetic-gateway/src/scheduler/gateway_store/migrate.rs):
+Current repository note: `TaskRun` records are file-backed JSON under the workflow store, so these fields land via serde-compatible defaults on the persisted task documents rather than a SQLite `task_runs` migration. If task rows move into SQLite later, the equivalent schema/backfill work belongs in [autonoetic-gateway/src/scheduler/gateway_store/migrate.rs](../autonoetic-gateway/src/scheduler/gateway_store/migrate.rs).
+
+If task persistence moves into SQLite, the required migration work is:
 
 - increment `SCHEMA_VERSION_LATEST`
 - add a new `apply_*_vN()` migration function
@@ -316,7 +318,7 @@ Responsibilities:
 - normalize `retry_advice` from `failure_class + retry_count + retry_policy`
 - persist retry metadata on task rows
 - emit budget-exhaustion workflow events
-- own store migration/backfill for the new persisted task fields
+- own persistence compatibility/backfill for the new task fields (currently JSON task documents; SQLite migration only if task rows move into the database)
 
 ### 7.4 Single-flight layer
 

@@ -7,8 +7,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::ErrorKind;
-use std::io::Write;
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 const PENDING_RESERVATION_FRESHNESS_MINUTES: i64 = 5;
@@ -49,6 +48,15 @@ pub struct CoalescedOperation {
 pub enum AcquireOutcome {
     Acquired(SingleFlightReservation),
     Coalesced(CoalescedOperation),
+}
+
+fn coalesced_operation(existing: SingleFlightReservation) -> AcquireOutcome {
+    AcquireOutcome::Coalesced(CoalescedOperation {
+        dedupe_key: existing.dedupe_key,
+        stage_kind: existing.stage_kind,
+        existing_task_id: existing.task_id,
+        approval_request_id: existing.approval_request_id,
+    })
 }
 
 pub fn durable_operation_for_spawn(
@@ -154,17 +162,44 @@ pub fn try_acquire_reservation(
                     }
                 };
                 if reservation_is_active(config, store, &existing, ignore_approval_request_id)? {
-                    return Ok(AcquireOutcome::Coalesced(CoalescedOperation {
-                        dedupe_key: existing.dedupe_key,
-                        stage_kind: existing.stage_kind,
-                        existing_task_id: existing.task_id,
-                        approval_request_id: existing.approval_request_id,
-                    }));
+                    return Ok(coalesced_operation(existing));
                 }
                 let _ = fs::remove_file(&path);
             }
             Err(error) => return Err(error.into()),
         }
+    }
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            let bytes = serde_json::to_vec_pretty(&reservation)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            return Ok(AcquireOutcome::Acquired(reservation));
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            if let Ok(existing) = read_json_file::<SingleFlightReservation>(&path) {
+                if reservation_is_active(config, store, &existing, ignore_approval_request_id)? {
+                    return Ok(coalesced_operation(existing));
+                }
+                let _ = fs::remove_file(&path);
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    let bytes = serde_json::to_vec_pretty(&reservation)?;
+                    file.write_all(&bytes)?;
+                    file.sync_all()?;
+                    return Ok(AcquireOutcome::Acquired(reservation));
+                }
+            }
+        }
+        Err(error) => return Err(error.into()),
     }
 
     anyhow::bail!(
@@ -180,10 +215,18 @@ pub fn attach_approval_request(
     approval_request_id: &str,
 ) -> anyhow::Result<()> {
     let path = reservation_path(config, workflow_id, dedupe_key);
-    let mut reservation: SingleFlightReservation = read_json_file(&path)?;
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+    let mut body = String::new();
+    file.read_to_string(&mut body)?;
+    let mut reservation: SingleFlightReservation = serde_json::from_str(&body)?;
     reservation.approval_request_id = Some(approval_request_id.to_string());
     reservation.updated_at = Utc::now().to_rfc3339();
-    write_json_file(&path, &reservation)
+    let encoded = serde_json::to_vec_pretty(&reservation)?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&encoded)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 pub fn release_reservation(
@@ -513,6 +556,44 @@ mod tests {
                 assert!(existing.existing_task_id.is_none());
             }
             AcquireOutcome::Acquired(_) => panic!("duplicate approval request should coalesce"),
+        }
+    }
+
+    #[test]
+    fn stale_reservation_is_replaced_without_hard_error() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let workflow = ensure_workflow_for_root_session(&cfg, None, "root-stale", None).unwrap();
+
+        let spec = build_spec(
+            &workflow.workflow_id,
+            "install",
+            "builder.default",
+            Some("ar.stale".to_string()),
+            None,
+        );
+        let path = reservation_path(&cfg, &workflow.workflow_id, &spec.dedupe_key);
+        let stale = SingleFlightReservation {
+            workflow_id: workflow.workflow_id.clone(),
+            dedupe_key: spec.dedupe_key.clone(),
+            stage_kind: "install".to_string(),
+            agent_id: "builder.default".to_string(),
+            artifact_ref: Some("ar.stale".to_string()),
+            intent_digest: None,
+            task_id: None,
+            approval_request_id: None,
+            created_at: (Utc::now() - Duration::minutes(10)).to_rfc3339(),
+            updated_at: (Utc::now() - Duration::minutes(10)).to_rfc3339(),
+        };
+        write_json_file(&path, &stale).unwrap();
+
+        match try_acquire_reservation(&cfg, None, &spec, Some("task-fresh"), None).unwrap() {
+            AcquireOutcome::Acquired(reservation) => {
+                assert_eq!(reservation.task_id.as_deref(), Some("task-fresh"));
+            }
+            AcquireOutcome::Coalesced(_) => panic!("stale reservation should be replaced"),
         }
     }
 }
