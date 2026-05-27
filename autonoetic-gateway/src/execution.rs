@@ -3796,6 +3796,7 @@ mod tests {
                 }],
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_details: None,
             },
         ];
 
@@ -3830,6 +3831,7 @@ mod tests {
                 }],
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_details: None,
             },
         ];
 

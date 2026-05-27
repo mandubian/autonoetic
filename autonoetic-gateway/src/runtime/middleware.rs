@@ -343,6 +343,7 @@ mod tests {
                 text: "assistant reply".to_string(),
                 tool_calls: vec![],
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             })
@@ -462,6 +463,7 @@ Hope this helps!"#;
                 arguments: "{}".to_string(),
             }],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::ToolUse,
             usage: TokenUsage::default(),
         };
@@ -499,6 +501,7 @@ Hope this helps!"#;
             text: "plain text response".to_string(),
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         };
@@ -511,6 +514,7 @@ Hope this helps!"#;
             text: r#"{"result": "success"}"#.to_string(),
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         };

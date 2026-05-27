@@ -1687,6 +1687,9 @@ impl AgentExecutor {
                 temperature,
                 metadata: None,
                 thinking: routed_llm_cfg.thinking.clone(),
+                // Stable per-session key so providers that support prompt
+                // caching reuse the cached prompt prefix across turns.
+                prompt_cache_key: Some(session_id.clone()),
             };
 
             // --- Pre-process hook: transform input before LLM call ---
@@ -1734,6 +1737,7 @@ impl AgentExecutor {
                     text: assistant_reply,
                     tool_calls: vec![],
                     reasoning_content: None,
+                    reasoning_details: None,
                     usage: crate::llm::TokenUsage::default(),
                     stop_reason: crate::llm::StopReason::EndTurn,
                 }
@@ -1976,6 +1980,8 @@ impl AgentExecutor {
                     context_window_tokens,
                     input_context_pct,
                     estimated_cost_usd,
+                    reasoning_tokens: response.usage.reasoning_tokens,
+                    cached_tokens: response.usage.cached_tokens,
                 });
                 tracing::info!(
                     target: "autonoetic.llm",
@@ -1984,6 +1990,8 @@ impl AgentExecutor {
                     model = %actual_model,
                     input_tokens = response.usage.input_tokens,
                     output_tokens = response.usage.output_tokens,
+                    reasoning_tokens = response.usage.reasoning_tokens,
+                    cached_tokens = response.usage.cached_tokens,
                     input_context_pct = ?input_context_pct,
                     context_window_tokens = ?context_window_tokens,
                     "llm exchange"
@@ -2029,6 +2037,8 @@ impl AgentExecutor {
                     // if no suspension occurs (continuation reconstruction re-injects it).
                     let mut assistant_msg = Message::assistant(response.text.clone());
                     assistant_msg.reasoning_content = response.reasoning_content.clone();
+                    assistant_msg.reasoning_details = response.reasoning_details.clone();
+
                     assistant_msg.tool_calls = response.tool_calls.clone();
 
                     if let Some(budget) = self.session_budget.as_ref() {
@@ -2552,6 +2562,8 @@ impl AgentExecutor {
                     if !response.text.trim().is_empty() {
                         let mut assistant_msg = Message::assistant(response.text.clone());
                         assistant_msg.reasoning_content = response.reasoning_content.clone();
+                        assistant_msg.reasoning_details = response.reasoning_details.clone();
+
                         history.push(assistant_msg);
                     }
                     tracer.log_hibernate(&format!("{:?}", response.stop_reason));
@@ -2661,6 +2673,8 @@ impl AgentExecutor {
                     if !response.text.trim().is_empty() {
                         let mut assistant_msg = Message::assistant(response.text.clone());
                         assistant_msg.reasoning_content = response.reasoning_content.clone();
+                        assistant_msg.reasoning_details = response.reasoning_details.clone();
+
                         history.push(assistant_msg);
                     }
                     tracer.log_stopped(&format!("{:?}", response.stop_reason));
@@ -2973,6 +2987,7 @@ mod tests {
                 text: "assistant reply".to_string(),
                 tool_calls: vec![],
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             })
@@ -2996,6 +3011,7 @@ mod tests {
                     text: String::new(),
                     tool_calls: vec![],
                     reasoning_content: None,
+                    reasoning_details: None,
                     stop_reason: StopReason::Other(String::new()),
                     usage: TokenUsage::default(),
                 })
@@ -3004,6 +3020,7 @@ mod tests {
                     text: "recovered reply".to_string(),
                     tool_calls: vec![],
                     reasoning_content: None,
+                    reasoning_details: None,
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
                 })
@@ -3083,6 +3100,7 @@ mod tests {
                 text: "ok".to_string(),
                 tool_calls: vec![],
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             })
@@ -3184,6 +3202,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 }],
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })
@@ -3397,6 +3416,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     }],
                     reasoning_content: None,
+                    reasoning_details: None,
                     stop_reason: StopReason::ToolUse,
                     usage: TokenUsage::default(),
                 })
@@ -3441,6 +3461,7 @@ mod tests {
                     text: "The answer is 42".to_string(),
                     tool_calls: vec![],
                     reasoning_content: None,
+                    reasoning_details: None,
                     stop_reason: StopReason::EndTurn,
                     usage: TokenUsage::default(),
                 })

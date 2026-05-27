@@ -217,6 +217,7 @@ mod tests {
             text: String::new(),
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::Other(String::new()),
             usage: TokenUsage::default(),
         };
@@ -226,6 +227,7 @@ mod tests {
             text: "has text".to_string(),
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::Other(String::new()),
             usage: TokenUsage::default(),
         };

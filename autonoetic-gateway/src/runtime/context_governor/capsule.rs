@@ -360,6 +360,7 @@ pub(crate) async fn extract_delta(
         temperature: Some(0.0),
         metadata: None,
         thinking: None,
+        prompt_cache_key: None,
     };
 
     let resp = driver.complete(&req).await?;
@@ -843,6 +844,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_details: None,
         }];
 
         let result = bootstrap_capsule_from_compressed_markers("sess-1", &history, 10);
@@ -861,6 +863,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_details: None,
         }];
 
         let result = bootstrap_capsule_from_compressed_markers("sess-1", &history, 10);

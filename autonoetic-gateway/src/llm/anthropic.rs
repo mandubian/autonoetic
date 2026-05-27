@@ -312,6 +312,7 @@ impl LlmDriver for AnthropicDriver {
                 text: text_accum,
                 tool_calls,
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: stop_reason.clone(),
                 usage: usage.clone(),
             };
@@ -353,11 +354,16 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     let usage = TokenUsage {
         input_tokens: j["usage"]["input_tokens"].as_u64().unwrap_or(0),
         output_tokens: j["usage"]["output_tokens"].as_u64().unwrap_or(0),
+        // Anthropic reports cache reads separately; thinking tokens are folded
+        // into output_tokens and not itemized, so reasoning_tokens stays 0.
+        cached_tokens: j["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        ..Default::default()
     };
     CompletionResponse {
         text,
         tool_calls,
         reasoning_content: None,
+        reasoning_details: None,
         stop_reason,
         usage,
     }
