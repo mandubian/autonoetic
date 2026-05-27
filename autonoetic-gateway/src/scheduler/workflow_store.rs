@@ -7,12 +7,13 @@
 //! - Workflow events are stored in SQLite table `workflow_events` (`gateway.db`).
 
 use crate::execution::gateway_root_dir;
+use crate::runtime::failure_classification::{classify_task_status, WorkflowFailureMetadata};
 use crate::runtime::live_digest::base_session_id;
-use crate::runtime::failure_classification::classify_task_status;
 use crate::scheduler::gateway_store::GatewayStore;
 use crate::scheduler::store::{read_json_file, write_json_file};
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::tool_error::{FailureClass, RetryAdvice, SideEffectState};
 use autonoetic_types::workflow::{
     ChildStateNotification, QueuedTaskRun, TaskCheckpoint, TaskRun, TaskRunStatus,
     WorkflowCheckpoint, WorkflowEventRecord, WorkflowRun, WorkflowRunStatus,
@@ -39,6 +40,108 @@ pub struct ApprovalMetadata {
     pub kind: String,
     /// Human-readable reason for the approval (if available)
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StageRetryDecision {
+    pub failure: Option<WorkflowFailureMetadata>,
+    pub retry_scheduled: bool,
+    pub budget_exhausted: bool,
+    pub next_retry_count: u32,
+    pub max_retries: Option<u32>,
+}
+
+pub(crate) fn retry_policy_from_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    metadata
+        .and_then(|value| value.as_object())
+        .and_then(|object| object.get("retry_policy"))
+        .cloned()
+}
+
+fn retry_budget_for_failure(
+    retry_policy: &serde_json::Value,
+    failure_class: FailureClass,
+) -> Option<u32> {
+    let key = serde_json::to_value(failure_class)
+        .ok()?
+        .as_str()?
+        .to_string();
+    retry_policy
+        .get(&key)
+        .and_then(|entry| entry.get("max_retries"))
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+pub(crate) fn evaluate_stage_retry(
+    task: &TaskRun,
+    status: TaskRunStatus,
+    result_summary: Option<&str>,
+) -> StageRetryDecision {
+    let mut failure = classify_task_status(status, result_summary);
+    let mut decision = StageRetryDecision {
+        failure: failure.clone(),
+        retry_scheduled: false,
+        budget_exhausted: false,
+        next_retry_count: task.retry_count,
+        max_retries: None,
+    };
+
+    if status != TaskRunStatus::Failed {
+        return decision;
+    }
+
+    let Some(mut failure) = failure else {
+        return decision;
+    };
+    let Some(retry_policy) = task.retry_policy.as_ref() else {
+        decision.failure = Some(failure);
+        return decision;
+    };
+    let Some(failure_class) = failure.failure_class else {
+        decision.failure = Some(failure);
+        return decision;
+    };
+    let Some(max_retries) = retry_budget_for_failure(retry_policy, failure_class) else {
+        decision.failure = Some(failure);
+        return decision;
+    };
+    decision.max_retries = Some(max_retries);
+
+    if failure.retryable != Some(true)
+        || failure.requires_external_event == Some(true)
+        || failure.requires_human == Some(true)
+    {
+        decision.failure = Some(failure);
+        return decision;
+    }
+
+    match failure.side_effect_state {
+        Some(SideEffectState::Unknown) => {
+            failure.retry_advice = Some(RetryAdvice::EscalateHuman);
+            failure.retryable = Some(false);
+        }
+        Some(SideEffectState::Committed) => {
+            failure.retry_advice = Some(RetryAdvice::DoNotRetry);
+            failure.retryable = Some(false);
+        }
+        _ => {
+            if task.retry_count < max_retries {
+                failure.retry_advice = Some(RetryAdvice::RetrySameStage);
+                decision.retry_scheduled = true;
+                decision.next_retry_count = task.retry_count + 1;
+            } else {
+                failure.retry_advice = Some(RetryAdvice::DoNotRetry);
+                failure.retryable = Some(false);
+                decision.budget_exhausted = true;
+            }
+        }
+    }
+
+    decision.failure = Some(failure);
+    decision
 }
 
 pub fn workflows_root(config: &GatewayConfig) -> PathBuf {
@@ -597,7 +700,8 @@ pub fn update_task_run_status(
     let was_succeeded = task.status == TaskRunStatus::Succeeded;
     let is_now_succeeded = status == TaskRunStatus::Succeeded;
 
-    let task_failure = classify_task_status(status, result_summary.as_deref());
+    let retry_decision = evaluate_stage_retry(&task, status, result_summary.as_deref());
+    let task_failure = retry_decision.failure.clone();
     let child_state_notification = build_child_state_notification(
         &task,
         status,
@@ -698,6 +802,28 @@ pub fn update_task_run_status(
             occurred_at: now_rfc3339(),
         },
     )?;
+
+    if retry_decision.budget_exhausted {
+        append_workflow_event(
+            config,
+            store,
+            &WorkflowEventRecord {
+                event_id: new_event_id(),
+                workflow_id: workflow_id.to_string(),
+                task_id: Some(task_id.to_string()),
+                event_type: "workflow.stage_budget_exhausted".to_string(),
+                agent_id: Some(task.agent_id.clone()),
+                payload: serde_json::json!({
+                    "task_id": task_id,
+                    "failure_class": task_failure.as_ref().and_then(|failure| failure.failure_class).and_then(|value| serde_json::to_value(value).ok()),
+                    "retry_advice": task_failure.as_ref().and_then(|failure| failure.retry_advice).and_then(|value| serde_json::to_value(value).ok()),
+                    "retry_count": task.retry_count,
+                    "max_retries": retry_decision.max_retries,
+                }),
+                occurred_at: now_rfc3339(),
+            },
+        )?;
+    }
 
     if let Some(child_event_type) = child_state_event_type(status) {
         append_workflow_event(
@@ -853,6 +979,52 @@ pub fn update_task_run_status(
             }
         }
     }
+    Ok(())
+}
+
+pub(crate) fn schedule_task_stage_retry(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    task_id: &str,
+    result_summary: Option<String>,
+    decision: &StageRetryDecision,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(decision.retry_scheduled, "stage retry is not scheduled for this task");
+
+    let mut task = load_task_run(config, store, workflow_id, task_id)?
+        .ok_or_else(|| anyhow::anyhow!("task '{}' not in workflow '{}'", task_id, workflow_id))?;
+    task.status = TaskRunStatus::Runnable;
+    task.updated_at = now_rfc3339();
+    task.result_summary = result_summary.clone();
+    task.retry_count = decision.next_retry_count;
+    if let Some(ref failure) = decision.failure {
+        task.last_failure_class = failure.failure_class;
+        task.side_effect_state = failure.side_effect_state;
+    }
+    save_task_run(config, store, &task)?;
+
+    append_workflow_event(
+        config,
+        store,
+        &WorkflowEventRecord {
+            event_id: new_event_id(),
+            workflow_id: workflow_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            event_type: "task.updated".to_string(),
+            agent_id: Some(task.agent_id.clone()),
+            payload: serde_json::json!({
+                "status": TaskRunStatus::Runnable,
+                "result_summary": result_summary,
+                "retry_count": task.retry_count,
+                "failure_class": decision.failure.as_ref().and_then(|failure| failure.failure_class).and_then(|value| serde_json::to_value(value).ok()),
+                "retry_advice": decision.failure.as_ref().and_then(|failure| failure.retry_advice).and_then(|value| serde_json::to_value(value).ok()),
+                "side_effect_state": decision.failure.as_ref().and_then(|failure| failure.side_effect_state).and_then(|value| serde_json::to_value(value).ok()),
+            }),
+            occurred_at: now_rfc3339(),
+        },
+    )?;
+
     Ok(())
 }
 
@@ -3455,6 +3627,316 @@ mod tests {
         assert_eq!(awaiting.payload["failure_class"], "approval_pending");
         assert_eq!(awaiting.payload["retry_advice"], "wait");
         assert_eq!(awaiting.payload["requires_external_event"], true);
+    }
+
+    #[test]
+    fn retry_policy_normalizes_transient_infra_failure_to_retry_same_stage() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "retry-root", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-retry".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "retry-root/coder-x".to_string(),
+            parent_session_id: "retry-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: Some(serde_json::json!({
+                "retry_policy": {
+                    "transient_infra": { "max_retries": 1 }
+                }
+            })),
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: Some(serde_json::json!({
+                "transient_infra": { "max_retries": 1 }
+            })),
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-retry",
+            TaskRunStatus::Failed,
+            Some("connection refused while contacting registry".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        let failed = events
+            .iter()
+            .find(|e| e.event_type == "task.failed")
+            .unwrap();
+        assert_eq!(failed.payload["failure_class"], "transient_infra");
+        assert_eq!(failed.payload["retry_advice"], "retry_same_stage");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.event_type == "workflow.stage_budget_exhausted")
+        );
+    }
+
+    #[test]
+    fn exhausted_retry_budget_emits_stage_budget_exhausted() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "retry-exhausted-root", None)
+            .unwrap();
+
+        let task = TaskRun {
+            task_id: "task-retry-exhausted".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "retry-exhausted-root/coder-x".to_string(),
+            parent_session_id: "retry-exhausted-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 1,
+            last_failure_class: None,
+            retry_policy: Some(serde_json::json!({
+                "transient_infra": { "max_retries": 1 }
+            })),
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-retry-exhausted",
+            TaskRunStatus::Failed,
+            Some("connection refused while contacting registry".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        let failed = events
+            .iter()
+            .find(|e| e.event_type == "task.failed")
+            .unwrap();
+        assert_eq!(failed.payload["retry_advice"], "do_not_retry");
+        let exhausted = events
+            .iter()
+            .find(|e| e.event_type == "workflow.stage_budget_exhausted")
+            .unwrap();
+        assert_eq!(exhausted.payload["failure_class"], "transient_infra");
+        assert_eq!(exhausted.payload["retry_count"], 1);
+        assert_eq!(exhausted.payload["max_retries"], 1);
+    }
+
+    #[test]
+    fn schedule_task_stage_retry_marks_task_runnable_without_terminal_event() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "retry-schedule-root", None)
+            .unwrap();
+
+        let task = TaskRun {
+            task_id: "task-retry-schedule".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "retry-schedule-root/coder-x".to_string(),
+            parent_session_id: "retry-schedule-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: Some("Do the work".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: Some(serde_json::json!({
+                "transient_infra": { "max_retries": 1 }
+            })),
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        let decision = evaluate_stage_retry(
+            &task,
+            TaskRunStatus::Failed,
+            Some("connection refused while contacting registry"),
+        );
+        assert!(decision.retry_scheduled);
+
+        schedule_task_stage_retry(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-retry-schedule",
+            Some("connection refused while contacting registry".to_string()),
+            &decision,
+        )
+        .unwrap();
+
+        let loaded = load_task_run(&cfg, None, &wf.workflow_id, "task-retry-schedule")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, TaskRunStatus::Runnable);
+        assert_eq!(loaded.retry_count, 1);
+        assert_eq!(
+            loaded.last_failure_class,
+            Some(autonoetic_types::tool_error::FailureClass::TransientInfra)
+        );
+
+        let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        let updated = events
+            .iter()
+            .find(|e| e.event_type == "task.updated")
+            .expect("task.updated event should exist");
+        assert_eq!(updated.payload["status"], "runnable");
+        assert_eq!(updated.payload["retry_advice"], "retry_same_stage");
+        assert!(
+            !events.iter().any(|e| e.event_type == "task.failed"),
+            "retry scheduling should not emit a terminal failure event"
+        );
+    }
+
+    #[test]
+    fn absent_retry_policy_does_not_schedule_retry() {
+        let task = TaskRun {
+            task_id: "task-no-policy".to_string(),
+            workflow_id: "wf-no-policy".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-x".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+
+        let decision = evaluate_stage_retry(
+            &task,
+            TaskRunStatus::Failed,
+            Some("connection refused while contacting registry"),
+        );
+        assert!(!decision.retry_scheduled);
+        assert!(!decision.budget_exhausted);
+        assert_eq!(
+            decision.failure.and_then(|failure| failure.retry_advice),
+            None,
+            "absent explicit policy must not auto-schedule a retry"
+        );
+    }
+
+    #[test]
+    fn install_conflict_stays_non_retryable_by_default() {
+        let task = TaskRun {
+            task_id: "task-install-conflict".to_string(),
+            workflow_id: "wf-install-conflict".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-x".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+
+        let decision = evaluate_stage_retry(
+            &task,
+            TaskRunStatus::Failed,
+            Some("active revision exists for install target"),
+        );
+        assert!(!decision.retry_scheduled);
+        let failure = decision.failure.expect("failure metadata");
+        assert_eq!(
+            failure.failure_class,
+            Some(autonoetic_types::tool_error::FailureClass::InstallConflict)
+        );
+        assert_eq!(
+            failure.retry_advice,
+            Some(autonoetic_types::tool_error::RetryAdvice::DoNotRetry)
+        );
+    }
+
+    #[test]
+    fn timeout_with_policy_escalates_when_side_effect_state_is_unknown() {
+        let task = TaskRun {
+            task_id: "task-timeout".to_string(),
+            workflow_id: "wf-timeout".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-x".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: Some(serde_json::json!({
+                "timeout": { "max_retries": 1 }
+            })),
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+
+        let decision = evaluate_stage_retry(&task, TaskRunStatus::Failed, Some("request timed out"));
+        assert!(!decision.retry_scheduled);
+        let failure = decision.failure.expect("failure metadata");
+        assert_eq!(
+            failure.failure_class,
+            Some(autonoetic_types::tool_error::FailureClass::Timeout)
+        );
+        assert_eq!(
+            failure.retry_advice,
+            Some(autonoetic_types::tool_error::RetryAdvice::EscalateHuman)
+        );
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl WorkflowFailureMetadata {
             retryable: Some(true),
             requires_external_event: Some(false),
             requires_human: Some(false),
-            side_effect_state: Some(SideEffectState::Unknown),
+            side_effect_state: Some(SideEffectState::NoSideEffect),
         }
     }
 
@@ -299,6 +299,26 @@ pub(crate) fn classify_task_status(
                 Some(WorkflowFailureMetadata::policy_denied())
             } else if summary.contains("approval timed out") {
                 Some(WorkflowFailureMetadata::timeout_waiting_on_human())
+            } else if summary.contains("install conflict")
+                || summary.contains("active revision exists")
+                || summary.contains("archived revision exists")
+            {
+                Some(WorkflowFailureMetadata::install_conflict())
+            } else if summary.contains("connection refused")
+                || summary.contains("transport reset")
+                || summary.contains("502")
+                || summary.contains("503")
+                || summary.contains("504")
+                || summary.contains("temporarily unavailable")
+            {
+                Some(WorkflowFailureMetadata::transient_infra())
+            } else if summary.contains("timed out") || summary.contains("timeout") {
+                Some(WorkflowFailureMetadata::timeout())
+            } else if summary.contains("validation failed")
+                || summary.contains("response_validation")
+                || summary.contains("schema")
+            {
+                Some(WorkflowFailureMetadata::schema_validation_failed())
             } else {
                 Some(WorkflowFailureMetadata::unknown_failure())
             }

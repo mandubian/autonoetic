@@ -422,7 +422,9 @@ impl NativeTool for AgentSpawnTool {
             metadata: args.metadata.clone(),
             retry_count: 0,
             last_failure_class: None,
-            retry_policy: None,
+            retry_policy: crate::scheduler::workflow_store::retry_policy_from_metadata(
+                args.metadata.as_ref(),
+            ),
             side_effect_state: None,
             dedupe_key: None,
         };

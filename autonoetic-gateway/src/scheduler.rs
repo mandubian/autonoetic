@@ -910,6 +910,11 @@ pub async fn process_queued_workflow_tasks(
                 existing.updated_at = chrono::Utc::now().to_rfc3339();
                 existing.message = Some(queued_task.message.clone());
                 existing.metadata = queued_task.metadata.clone();
+                if let Some(retry_policy) = workflow_store::retry_policy_from_metadata(
+                    queued_task.metadata.as_ref(),
+                ) {
+                    existing.retry_policy = Some(retry_policy);
+                }
                 if let Err(e) = workflow_store::save_task_run(&config, store, &existing) {
                     tracing::warn!(
                         target: "workflow",
@@ -961,7 +966,9 @@ pub async fn process_queued_workflow_tasks(
                 metadata: queued_task.metadata.clone(),
                 retry_count: 0,
                 last_failure_class: None,
-                retry_policy: None,
+                retry_policy: workflow_store::retry_policy_from_metadata(
+                    queued_task.metadata.as_ref(),
+                ),
                 side_effect_state: None,
                 dedupe_key: None,
             };
@@ -1569,6 +1576,60 @@ async fn spawn_task_execution(
                 return;
             }
 
+            let retry_decision = workflow_store::load_task_run(&cfg, store, &wf_id, &t_id)
+                .ok()
+                .flatten()
+                .map(|task| {
+                    workflow_store::evaluate_stage_retry(
+                        &task,
+                        autonoetic_types::workflow::TaskRunStatus::Failed,
+                        Some(error_str.as_str()),
+                    )
+                });
+            if let Some(ref decision) = retry_decision {
+                if decision.retry_scheduled {
+                    if let Err(inner) = workflow_store::schedule_task_stage_retry(
+                        &cfg,
+                        store,
+                        &wf_id,
+                        &t_id,
+                        Some(error_str.clone()),
+                        decision,
+                    ) {
+                        tracing::warn!(
+                            target: "workflow",
+                            task_id = %t_id,
+                            error = %inner,
+                            "Failed to persist stage-local retry scheduling"
+                        );
+                    } else {
+                        tracing::info!(
+                            target: "workflow",
+                            task_id = %t_id,
+                            retry_count = decision.next_retry_count,
+                            "Stage-local retry scheduled"
+                        );
+                        let _ = workflow_store::checkpoint_task(
+                            &cfg,
+                            store,
+                            &wf_id,
+                            &t_id,
+                            "retry_scheduled".to_string(),
+                            serde_json::json!({
+                                "status": "runnable",
+                                "retry_count": decision.next_retry_count,
+                                "failure_class": decision.failure.as_ref().and_then(|failure| failure.failure_class).and_then(|value| serde_json::to_value(value).ok()),
+                                "retry_advice": decision.failure.as_ref().and_then(|failure| failure.retry_advice).and_then(|value| serde_json::to_value(value).ok()),
+                                "error": error_str,
+                            }),
+                        );
+                        let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+                        finish_active_row("stopped");
+                        return;
+                    }
+                }
+            }
+
             if let Err(inner) = workflow_store::update_task_run_status(
                 &cfg,
                 store,
@@ -1581,6 +1642,7 @@ async fn spawn_task_execution(
             ) {
                 tracing::warn!(target: "workflow", error = %inner, "Failed to persist async task failure");
             }
+
             tracing::warn!(target: "workflow", task_id = %t_id, error = %e, "Async task failed");
             let _ = workflow_store::checkpoint_task(
                 &cfg,
