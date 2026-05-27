@@ -2321,6 +2321,7 @@ mod tests {
                     .to_string(),
                 }],
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })

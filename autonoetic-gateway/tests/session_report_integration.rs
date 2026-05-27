@@ -29,6 +29,7 @@ impl LlmDriver for AnnotateThenStopDriver {
                             .to_string(),
                 }],
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: StopReason::ToolUse,
                 usage: TokenUsage::default(),
             })
@@ -37,6 +38,7 @@ impl LlmDriver for AnnotateThenStopDriver {
                 text: "Structured reporting complete.".to_string(),
                 tool_calls: vec![],
                 reasoning_content: None,
+                reasoning_details: None,
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
             })

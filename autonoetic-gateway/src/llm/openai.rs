@@ -5,7 +5,8 @@
 //! externally by `provider::resolve()` before this driver is instantiated.
 
 use super::{
-    CompletionRequest, CompletionResponse, LlmDriver, StopReason, StreamEvent, TokenUsage, ToolCall,
+    CompletionRequest, CompletionResponse, LlmDriver, Role, StopReason, StreamEvent, TokenUsage,
+    ToolCall,
 };
 use crate::llm::provider::{AuthStrategy, ResolvedProvider};
 use reqwest::Client;
@@ -90,11 +91,15 @@ impl OpenAiDriver {
                 // their chain-of-thought across tool-call rounds. Prefer the
                 // structured `reasoning_details` (OpenRouter, preserves signed/
                 // encrypted blocks); fall back to plain `reasoning_content`
-                // (DeepSeek-direct / OpenAI-compatible).
-                if let Some(ref details) = m.reasoning_details {
-                    msg["reasoning_details"] = details.clone();
-                } else if let Some(ref reasoning_content) = m.reasoning_content {
-                    msg["reasoning_content"] = json!(reasoning_content);
+                // (DeepSeek-direct / OpenAI-compatible). Only assistant turns
+                // carry reasoning — sending these fields on user/tool/system
+                // messages is meaningless and some endpoints reject it.
+                if m.role == Role::Assistant {
+                    if let Some(ref details) = m.reasoning_details {
+                        msg["reasoning_details"] = details.clone();
+                    } else if let Some(ref reasoning_content) = m.reasoning_content {
+                        msg["reasoning_content"] = json!(reasoning_content);
+                    }
                 }
                 msg
             })

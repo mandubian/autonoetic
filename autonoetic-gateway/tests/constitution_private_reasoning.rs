@@ -205,8 +205,10 @@ fn ri_0_13b_completion_response_carries_reasoning() {
         usage: autonoetic_gateway::llm::TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
+            ..Default::default()
         },
         reasoning_content: Some("My private reasoning".to_string()),
+        reasoning_details: None,
     };
     assert_eq!(
         resp.reasoning_content.as_deref(),

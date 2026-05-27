@@ -75,6 +75,7 @@ impl LlmDriver for EchoSummaryDriver {
             text,
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         })
@@ -291,6 +292,7 @@ impl LlmDriver for EchoSummaryConfidenceDriver {
             text,
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         })

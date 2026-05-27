@@ -41,6 +41,7 @@ fn make_test_continuation(request_id: &str) -> TurnContinuation {
             tool_calls: vec![],
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_details: None,
         }],
         assistant_message: Message {
             role: Role::Assistant,
@@ -52,6 +53,7 @@ fn make_test_continuation(request_id: &str) -> TurnContinuation {
             }],
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_details: None,
         },
         completed_tool_results: vec![],
         pending_tool_call: PendingApprovalToolCall {
