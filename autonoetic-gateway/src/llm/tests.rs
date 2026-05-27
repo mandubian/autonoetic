@@ -109,6 +109,7 @@ mod tests {
                 temperature: None,
                 metadata: None,
                 thinking: None,
+                prompt_cache_key: None,
             };
             let body = build_payload(&req);
             assert_eq!(body["tools"][0]["type"], "function");
@@ -298,6 +299,7 @@ mod tests {
                 temperature: None,
                 metadata: None,
                 thinking: None,
+                prompt_cache_key: None,
             };
             let body = build_payload(&req);
             // Anthropic uses "input_schema", NOT "parameters"
@@ -470,6 +472,7 @@ mod tests {
                 temperature: None,
                 metadata: None,
                 thinking: None,
+                prompt_cache_key: None,
             };
             let body = build_payload(&req);
             // Gemini wraps tools in functionDeclarations inside a tools array

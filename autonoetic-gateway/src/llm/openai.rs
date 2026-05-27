@@ -5,7 +5,8 @@
 //! externally by `provider::resolve()` before this driver is instantiated.
 
 use super::{
-    CompletionRequest, CompletionResponse, LlmDriver, StopReason, StreamEvent, TokenUsage, ToolCall,
+    CompletionRequest, CompletionResponse, LlmDriver, Role, StopReason, StreamEvent, TokenUsage,
+    ToolCall,
 };
 use crate::llm::provider::{AuthStrategy, ResolvedProvider};
 use reqwest::Client;
@@ -86,8 +87,19 @@ impl OpenAiDriver {
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = json!(id);
                 }
-                if let Some(ref reasoning_content) = m.reasoning_content {
-                    msg["reasoning_content"] = json!(reasoning_content);
+                // Replay reasoning on assistant turns so reasoning models keep
+                // their chain-of-thought across tool-call rounds. Prefer the
+                // structured `reasoning_details` (OpenRouter, preserves signed/
+                // encrypted blocks); fall back to plain `reasoning_content`
+                // (DeepSeek-direct / OpenAI-compatible). Only assistant turns
+                // carry reasoning — sending these fields on user/tool/system
+                // messages is meaningless and some endpoints reject it.
+                if m.role == Role::Assistant {
+                    if let Some(ref details) = m.reasoning_details {
+                        msg["reasoning_details"] = details.clone();
+                    } else if let Some(ref reasoning_content) = m.reasoning_content {
+                        msg["reasoning_content"] = json!(reasoning_content);
+                    }
                 }
                 msg
             })
@@ -107,6 +119,12 @@ impl OpenAiDriver {
             "messages": messages,
             "stream": stream,
         });
+
+        // Ask for usage stats on the streaming path so reasoning/cache token
+        // accounting works (no-op for providers that ignore the option).
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
 
         if let Some(v) = token_val {
             body[token_key] = json!(v);
@@ -181,6 +199,20 @@ impl OpenAiDriver {
                     }
                     body["reasoning"] = r;
                 }
+            }
+        }
+
+        // Prompt caching: send a stable key so repeated turns in a session
+        // reuse cached prompt-prefix tokens. OpenRouter and OpenAI both accept
+        // top-level `prompt_cache_key`; other OpenAI-compatible providers
+        // ignore unknown fields, so gate on the providers known to honor it.
+        if let Some(ref key) = req.prompt_cache_key {
+            if matches!(
+                self.provider.capabilities.reasoning,
+                crate::llm::provider::ReasoningStyle::OpenRouterUnified
+                    | crate::llm::provider::ReasoningStyle::OpenAiEffort
+            ) {
+                body["prompt_cache_key"] = json!(key);
             }
         }
 
@@ -280,8 +312,10 @@ impl LlmDriver for OpenAiDriver {
 
         let mut text_accum = String::new();
         let mut reasoning_accum = String::new();
+        let mut reasoning_details_accum: Vec<serde_json::Value> = Vec::new();
         let mut tool_calls_accum: Vec<ToolCall> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
+        let mut usage = TokenUsage::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
 
@@ -316,10 +350,21 @@ impl LlmDriver for OpenAiDriver {
                     }
                 }
 
+                // Reasoning text streams under `reasoning_content` (DeepSeek-
+                // direct / OpenAI-compatible) or `reasoning` (OpenRouter).
                 if let Some(reasoning) = delta["reasoning_content"].as_str() {
                     if !reasoning.is_empty() {
                         reasoning_accum.push_str(reasoning);
                     }
+                }
+                if let Some(reasoning) = delta["reasoning"].as_str() {
+                    if !reasoning.is_empty() {
+                        reasoning_accum.push_str(reasoning);
+                    }
+                }
+                // OpenRouter streams structured reasoning blocks incrementally.
+                if let Some(details) = delta["reasoning_details"].as_array() {
+                    reasoning_details_accum.extend(details.iter().cloned());
                 }
 
                 if self.provider.capabilities.supports_tool_stream_deltas {
@@ -349,6 +394,12 @@ impl LlmDriver for OpenAiDriver {
                 if let Some(reason) = j["choices"][0]["finish_reason"].as_str() {
                     stop_reason = parse_stop_reason(reason);
                 }
+
+                // Usage typically arrives on the final chunk (requires
+                // `stream_options.include_usage`; harmless when absent).
+                if j["usage"].is_object() {
+                    usage = parse_usage(&j["usage"]);
+                }
             }
         }
 
@@ -370,8 +421,13 @@ impl LlmDriver for OpenAiDriver {
             } else {
                 Some(reasoning_accum)
             },
+            reasoning_details: if reasoning_details_accum.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Array(reasoning_details_accum))
+            },
             stop_reason: stop_reason.clone(),
-            usage: TokenUsage::default(),
+            usage,
         };
         let _ = tx
             .send(StreamEvent::Complete {
@@ -416,27 +472,76 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
 
     let stop_reason = parse_stop_reason(choice["finish_reason"].as_str().unwrap_or(""));
 
-    let usage = TokenUsage {
-        input_tokens: j["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
-        output_tokens: j["usage"]["completion_tokens"].as_u64().unwrap_or(0),
-    };
+    let reasoning_details = extract_reasoning_details(&choice["message"]);
+
+    let usage = parse_usage(&j["usage"]);
 
     CompletionResponse {
         text,
         tool_calls,
         reasoning_content,
+        reasoning_details,
         stop_reason,
         usage,
     }
 }
 
+/// Parse a `usage` object, including reasoning/cache token details when the
+/// provider reports them (OpenAI/OpenRouter `*_tokens_details`).
+fn parse_usage(usage: &serde_json::Value) -> TokenUsage {
+    TokenUsage {
+        input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
+        output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+        reasoning_tokens: usage["completion_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+        cached_tokens: usage["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+    }
+}
+
+/// Capture the model's reasoning text from whichever field the provider uses.
+/// OpenRouter returns `reasoning` (and structured `reasoning_details`);
+/// DeepSeek-direct and OpenAI-compatible reasoning models return
+/// `reasoning_content`. Falls back to flattening `reasoning_details[].text`.
 fn extract_reasoning_content(message: &serde_json::Value) -> Option<String> {
     if let Some(s) = message["reasoning_content"].as_str() {
         if !s.is_empty() {
             return Some(s.to_string());
         }
     }
+    if let Some(s) = message["reasoning"].as_str() {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    // Flatten reasoning_details[].text|.summary into a single string.
+    if let Some(arr) = message["reasoning_details"].as_array() {
+        let mut out = String::new();
+        for block in arr {
+            if let Some(t) = block["text"].as_str().filter(|s| !s.is_empty()) {
+                out.push_str(t);
+            } else if let Some(t) = block["summary"].as_str().filter(|s| !s.is_empty()) {
+                out.push_str(t);
+            }
+        }
+        if !out.is_empty() {
+            return Some(out);
+        }
+    }
     None
+}
+
+/// Capture the raw `reasoning_details` array verbatim so it can be replayed on
+/// the next assistant turn (required for signed/encrypted reasoning blocks).
+fn extract_reasoning_details(message: &serde_json::Value) -> Option<serde_json::Value> {
+    match &message["reasoning_details"] {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            Some(serde_json::Value::Array(arr.clone()))
+        }
+        _ => None,
+    }
 }
 
 fn extract_text_content(content: &serde_json::Value) -> String {
@@ -580,6 +685,7 @@ mod tests {
             temperature: None,
             metadata: None,
             thinking: Some(ThinkingConfig { effort, budget_tokens: budget }),
+            prompt_cache_key: None,
         }
     }
 
@@ -662,5 +768,155 @@ mod tests {
         assert_eq!(yaml.trim(), "xhigh");
         let parsed: ThinkingEffort = serde_yaml::from_str("xhigh").unwrap();
         assert_eq!(parsed, ThinkingEffort::XHigh);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reasoning capture (gap 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn capture_reasoning_content_field() {
+        let msg = json!({ "reasoning_content": "step by step" });
+        assert_eq!(extract_reasoning_content(&msg).as_deref(), Some("step by step"));
+    }
+
+    #[test]
+    fn capture_openrouter_reasoning_field() {
+        // OpenRouter returns the text under `reasoning`, not `reasoning_content`.
+        let msg = json!({ "reasoning": "openrouter thoughts" });
+        assert_eq!(
+            extract_reasoning_content(&msg).as_deref(),
+            Some("openrouter thoughts")
+        );
+    }
+
+    #[test]
+    fn capture_reasoning_details_flattened_to_text() {
+        let msg = json!({
+            "reasoning_details": [
+                { "type": "reasoning.text", "text": "first " },
+                { "type": "reasoning.text", "text": "second" }
+            ]
+        });
+        assert_eq!(
+            extract_reasoning_content(&msg).as_deref(),
+            Some("first second")
+        );
+    }
+
+    #[test]
+    fn capture_reasoning_details_raw_preserved() {
+        let msg = json!({
+            "reasoning_details": [
+                { "type": "reasoning.encrypted", "data": "abc", "format": "openai" }
+            ]
+        });
+        let details = extract_reasoning_details(&msg).expect("details captured");
+        assert_eq!(details[0]["data"], "abc");
+        assert_eq!(details[0]["format"], "openai");
+    }
+
+    #[test]
+    fn capture_reasoning_details_empty_is_none() {
+        assert!(extract_reasoning_details(&json!({ "reasoning_details": [] })).is_none());
+        assert!(extract_reasoning_details(&json!({})).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Usage details (gap 4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_usage_captures_reasoning_and_cache_tokens() {
+        let usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "completion_tokens_details": { "reasoning_tokens": 150 },
+            "prompt_tokens_details": { "cached_tokens": 800 }
+        });
+        let u = parse_usage(&usage);
+        assert_eq!(u.input_tokens, 1000);
+        assert_eq!(u.output_tokens, 200);
+        assert_eq!(u.reasoning_tokens, 150);
+        assert_eq!(u.cached_tokens, 800);
+    }
+
+    #[test]
+    fn parse_usage_defaults_to_zero_when_absent() {
+        let u = parse_usage(&json!({ "prompt_tokens": 5, "completion_tokens": 7 }));
+        assert_eq!(u.reasoning_tokens, 0);
+        assert_eq!(u.cached_tokens, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Round-trip (gap 2) + cache key (gap 3) in the request body
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn round_trip_prefers_reasoning_details_over_content() {
+        let driver = driver_with("deepseek/deepseek-v4-flash", ReasoningStyle::OpenRouterUnified);
+        let mut assistant = Message::assistant("answer");
+        assistant.reasoning_content = Some("plain".to_string());
+        assistant.reasoning_details = Some(json!([{ "type": "reasoning.text", "text": "structured" }]));
+        let req = CompletionRequest {
+            model: "deepseek/deepseek-v4-flash".to_string(),
+            messages: vec![assistant],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            metadata: None,
+            thinking: None,
+            prompt_cache_key: None,
+        };
+        let body = driver.build_body(&req, false);
+        // reasoning_details replayed; plain reasoning_content suppressed.
+        assert!(body["messages"][0]["reasoning_details"].is_array());
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn round_trip_falls_back_to_reasoning_content() {
+        let driver = driver_with("deepseek-reasoner", ReasoningStyle::None);
+        let mut assistant = Message::assistant("answer");
+        assistant.reasoning_content = Some("plain".to_string());
+        let req = CompletionRequest {
+            model: "deepseek-reasoner".to_string(),
+            messages: vec![assistant],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            metadata: None,
+            thinking: None,
+            prompt_cache_key: None,
+        };
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["messages"][0]["reasoning_content"], "plain");
+    }
+
+    #[test]
+    fn prompt_cache_key_emitted_for_openrouter() {
+        let driver = driver_with("deepseek/deepseek-v4-flash", ReasoningStyle::OpenRouterUnified);
+        let mut req = req_with_thinking("deepseek/deepseek-v4-flash", ThinkingEffort::Low, None);
+        req.prompt_cache_key = Some("session-abc".to_string());
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["prompt_cache_key"], "session-abc");
+    }
+
+    #[test]
+    fn prompt_cache_key_omitted_for_plain_provider() {
+        // A provider with ReasoningStyle::None (e.g. groq) doesn't get the key.
+        let driver = driver_with("llama-3.1-70b", ReasoningStyle::None);
+        let mut req = req_with_thinking("llama-3.1-70b", ThinkingEffort::Low, None);
+        req.prompt_cache_key = Some("session-abc".to_string());
+        let body = driver.build_body(&req, false);
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn stream_request_includes_usage_option() {
+        let driver = driver_with("gpt-4o", ReasoningStyle::None);
+        let req = CompletionRequest::simple("gpt-4o", vec![Message::user("hi")]);
+        let body = driver.build_body(&req, true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 }

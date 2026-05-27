@@ -109,6 +109,7 @@ Always write working, syntactically correct Python code."#
         temperature: Some(0.3),
         metadata: None,
                 thinking: None,
+                prompt_cache_key: None,
     };
 
     let resp = driver.complete(&req).await?;

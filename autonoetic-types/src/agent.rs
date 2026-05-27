@@ -119,6 +119,18 @@ pub struct LlmExchangeUsage {
     /// Estimated USD for this completion (OpenRouter catalog pricing × token counts) when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_usd: Option<f64>,
+    /// Reasoning tokens (subset of `output_tokens`) when the provider reports
+    /// them. 0/omitted when unknown or not a reasoning model.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub reasoning_tokens: u64,
+    /// Prompt tokens served from cache (subset of `input_tokens`) when the
+    /// provider reports them. 0/omitted when unknown or caching is disabled.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cached_tokens: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Resource limits enforced by the Gateway.

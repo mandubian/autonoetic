@@ -134,9 +134,16 @@ pub struct Message {
     /// For Role::Tool turns, the matching call ID.
     pub tool_call_id: Option<String>,
     /// Provider-specific assistant reasoning content that must be replayed on
-    /// subsequent turns for some thinking/reasoning models.
+    /// subsequent turns for some thinking/reasoning models (DeepSeek-direct
+    /// `reasoning_content`, or flattened text from OpenRouter `reasoning`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Raw structured reasoning blocks (OpenRouter `reasoning_details` array).
+    /// Preserved verbatim so signed/encrypted reasoning round-trips correctly
+    /// across tool-call turns; replayed in preference to `reasoning_content`
+    /// when the provider expects the structured form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -148,6 +155,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_details: None,
         }
     }
 
@@ -159,6 +167,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_details: None,
         }
     }
 
@@ -170,6 +179,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: None,
             reasoning_content: None,
+            reasoning_details: None,
         }
     }
 
@@ -186,6 +196,7 @@ impl Message {
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.into()),
             reasoning_content: None,
+            reasoning_details: None,
         }
     }
 }
@@ -214,6 +225,12 @@ pub struct CompletionRequest {
     /// thinking budget for Anthropic, <|think|> token for Gemma).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<autonoetic_types::agent::ThinkingConfig>,
+    /// Stable cache key for provider prompt caching (OpenRouter/OpenAI
+    /// `prompt_cache_key`). Typically the session id, so repeated turns in a
+    /// session reuse cached prompt-prefix tokens. Drivers emit it only for
+    /// providers that support it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
 }
 
 impl CompletionRequest {
@@ -226,6 +243,7 @@ impl CompletionRequest {
             temperature: None,
             metadata: None,
             thinking: None,
+            prompt_cache_key: None,
         }
     }
 }
@@ -245,6 +263,16 @@ pub enum StopReason {
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Reasoning tokens, a subset of `output_tokens`, billed as output but
+    /// spent on hidden chain-of-thought. From `completion_tokens_details
+    /// .reasoning_tokens` (OpenAI/OpenRouter). 0 when unknown.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    /// Prompt tokens served from the provider's cache, a subset of
+    /// `input_tokens`. From `prompt_tokens_details.cached_tokens`. 0 when
+    /// unknown. Useful for cost attribution when prompt caching is enabled.
+    #[serde(default)]
+    pub cached_tokens: u64,
 }
 
 /// Full response from a completion call.
@@ -258,6 +286,10 @@ pub struct CompletionResponse {
     /// with the assistant turn when required by the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Raw structured reasoning blocks (OpenRouter `reasoning_details`),
+    /// preserved verbatim for round-trip on the next assistant turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<serde_json::Value>,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
 }
@@ -268,6 +300,7 @@ impl CompletionResponse {
             text,
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         }

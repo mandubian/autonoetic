@@ -352,6 +352,7 @@ pub async fn compress_context(
             }),
         )])),
         thinking: None,
+        prompt_cache_key: None,
     };
 
     let summary_text = match driver.complete(&req).await {

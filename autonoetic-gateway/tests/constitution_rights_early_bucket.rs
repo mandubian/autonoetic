@@ -198,6 +198,7 @@ impl LlmDriver for EndTurnDriver {
             text: "Done.".to_string(),
             tool_calls: vec![],
             reasoning_content: None,
+            reasoning_details: None,
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
         })

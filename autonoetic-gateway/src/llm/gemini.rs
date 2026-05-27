@@ -245,12 +245,19 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
         output_tokens: j["usageMetadata"]["candidatesTokenCount"]
             .as_u64()
             .unwrap_or(0),
+        // Gemini reports thoughtsTokenCount for thinking models; cached content
+        // tokens under cachedContentTokenCount.
+        reasoning_tokens: j["usageMetadata"]["thoughtsTokenCount"].as_u64().unwrap_or(0),
+        cached_tokens: j["usageMetadata"]["cachedContentTokenCount"]
+            .as_u64()
+            .unwrap_or(0),
     };
 
     CompletionResponse {
         text,
         tool_calls,
         reasoning_content: None,
+        reasoning_details: None,
         stop_reason,
         usage,
     }

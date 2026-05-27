@@ -400,6 +400,7 @@ impl ModelRouter for LlmClassifierRouter {
                 tool_calls: vec![],
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_details: None,
             },
             Message {
                 role: Role::User,
@@ -407,6 +408,7 @@ impl ModelRouter for LlmClassifierRouter {
                 tool_calls: vec![],
                 tool_call_id: None,
                 reasoning_content: None,
+                reasoning_details: None,
             },
         ];
 
@@ -418,6 +420,7 @@ impl ModelRouter for LlmClassifierRouter {
             temperature: Some(0.0),
             metadata: None,
             thinking: None,
+            prompt_cache_key: None,
         };
 
         let result = tokio::time::timeout(
