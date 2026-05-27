@@ -164,13 +164,13 @@ impl NativeTool for ContentReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Also supports `ar.<ref>:<filename>` to read a specific file from an artifact by its scoped ref. Full `sha256:...` digest still works.".to_string(),
+            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Also supports `ar.<ref>:<filename>` to read a specific file from an artifact by its scoped ref. Full `sha256:...` digest still works. Gateway-local skill files such as `skills/<service>/SKILL.md` are for `credential_setup(skill_url=...)`, not `content_read`.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name_or_handle": {
                         "type": "string",
-                        "description": "Content name (e.g. 'main.py'), 8-hex alias, cnt_<alias> ref, ar.<ref>:<filename>, or sha256 digest — not a sandbox path"
+                        "description": "Content-store name (e.g. 'main.py' or a session-stored 'skill.md'), 8-hex alias, cnt_<alias> ref, ar.<ref>:<filename>, or sha256 digest — not a sandbox path or gateway skills/ path"
                     }
                 },
                 "required": ["name_or_handle"],
@@ -245,6 +245,13 @@ impl NativeTool for ContentReadTool {
             match store.read_by_name_or_handle(sid, input) {
                 Ok(c) => c,
                 Err(e) => {
+                    if let Some(repair_hint) = skill_path_repair_hint(gw_dir, input) {
+                        return Ok(ToolError::not_found(
+                            format!("Content '{}' not found in session '{}': {}", input, sid, e),
+                            Some(repair_hint),
+                        ).to_error_response());
+                    }
+
                     let looks_like_guessed_name = !input.starts_with("sha256:");
 
                     if looks_like_guessed_name {
@@ -304,6 +311,37 @@ fn find_available_artifacts(
     }));
 
     hints
+}
+
+fn skill_path_repair_hint(gateway_dir: &Path, input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let normalized = trimmed.trim_start_matches("./");
+    let looks_like_skill_path = normalized.starts_with("skills/") || trimmed.ends_with("/SKILL.md");
+
+    if looks_like_skill_path {
+        let suggested = normalized.strip_prefix("skills/").map_or_else(
+            || normalized.to_string(),
+            |_| normalized.to_string(),
+        );
+        let candidate = gateway_dir.join(&suggested);
+        let suffix = if candidate.is_file() {
+            format!(" Use `credential_setup` with `skill_url: \"{}\"`.", suggested)
+        } else {
+            " If you mean a gateway skill file, use `credential_setup` with `skill_url: \"skills/<service>/SKILL.md\"`.".to_string()
+        };
+        return Some(format!(
+            "content_read only reads session content names/handles, not gateway-local skill files.{} If the skill was fetched into the session, read the stored content name or handle instead.",
+            suffix
+        ));
+    }
+
+    if trimmed == "SKILL.md" {
+        return Some(
+            "content_read only reads session content names/handles, not gateway-local skill files. If you mean a gateway skill file, use `credential_setup` with `skill_url: \"skills/<service>/SKILL.md\"`. If the skill was fetched into the session, read the stored content name or handle instead.".to_string(),
+        );
+    }
+
+    None
 }
 
 fn try_read_artifact_ref_file(

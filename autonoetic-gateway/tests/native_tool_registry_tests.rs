@@ -1,4 +1,5 @@
 use autonoetic_gateway::policy::PolicyEngine;
+use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::runtime::memory::Tier2Memory;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::approval::approve_request;
@@ -1435,6 +1436,7 @@ fn test_skill_normalize_moltbook_fixture_generates_expected_steps() {
     }]);
     let policy = PolicyEngine::new(manifest.clone());
     let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path();
     let agent_dir = temp.path().join("agents").join("planner.default");
     std::fs::create_dir_all(&agent_dir).expect("agent workspace should create");
 
@@ -1458,9 +1460,9 @@ fn test_skill_normalize_moltbook_fixture_generates_expected_steps() {
             &manifest,
             &policy,
             &agent_dir,
-            None,
+            Some(gateway_dir),
             &args.to_string(),
-            None,
+            Some("session-1"),
             None,
             None,
             None,
@@ -1476,6 +1478,21 @@ fn test_skill_normalize_moltbook_fixture_generates_expected_steps() {
         Some("skills/moltbook/SKILL.md")
     );
     assert_eq!(parsed.get("steps_count").and_then(|v| v.as_u64()), Some(6_u64));
+    assert_eq!(
+        parsed
+            .get("session_content")
+            .and_then(|v| v.get("normalized_name"))
+            .and_then(|v| v.as_str()),
+        Some("skill.moltbook.md")
+    );
+    assert!(
+        parsed
+            .get("session_content")
+            .and_then(|v| v.get("normalized_ref"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .starts_with("cnt_")
+    );
 
     let written = std::fs::read_to_string(agent_dir.join("skills/moltbook/SKILL.md"))
         .expect("normalized fixture file should exist");
@@ -1488,6 +1505,14 @@ fn test_skill_normalize_moltbook_fixture_generates_expected_steps() {
     assert!(written.contains("/api/setup-heartbeat"));
     assert!(written.contains("/api/post-to-feed"));
     assert!(written.contains("/status"));
+
+    let store = ContentStore::new(gateway_dir).expect("content store should open");
+    let registered = store
+        .read_by_name_or_handle("session-1", "skill.moltbook.md")
+        .expect("normalized content should be registered in session content");
+    let registered =
+        String::from_utf8(registered).expect("registered content should be utf-8");
+    assert_eq!(registered, written);
 }
 
 #[test]
@@ -1614,7 +1639,7 @@ fn test_skill_normalize_denied_without_skills_write_capability() {
         "service": "noop"
     });
 
-    let err = registry
+    let result = registry
         .execute(
             "skill_normalize",
             &manifest,
@@ -1628,8 +1653,15 @@ fn test_skill_normalize_denied_without_skills_write_capability() {
             None,
             None,
         )
-        .expect_err("skill_normalize must be unavailable without capability");
-    assert!(err.to_string().contains("skill_normalize"));
+        .expect("skill_normalize should return a structured permission error");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("permission response should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(parsed.get("error_type"), Some(&serde_json::json!("permission")));
+    assert!(parsed["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("skill_normalize"));
 }
 
 #[test]

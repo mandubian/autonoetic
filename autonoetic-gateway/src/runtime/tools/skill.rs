@@ -325,6 +325,13 @@ struct NormalizeOnboardingOut {
     steps: Vec<serde_yaml::Value>,
 }
 
+#[derive(Serialize)]
+struct SkillNormalizeSessionContentOut {
+    normalized_name: String,
+    normalized_alias: String,
+    normalized_ref: String,
+}
+
 fn service_slug(service: &str) -> String {
     service
         .chars()
@@ -568,6 +575,37 @@ fn write_skill_to_gateway_dir(gateway_dir: Option<&Path>, rel: &str, content: &s
     }
 }
 
+fn register_skill_session_content(
+    gateway_dir: Option<&Path>,
+    session_id: Option<&str>,
+    manifest: &AgentManifest,
+    service_slug: &str,
+    content: &str,
+) -> anyhow::Result<Option<SkillNormalizeSessionContentOut>> {
+    let Some(gw_dir) = gateway_dir else {
+        return Ok(None);
+    };
+
+    let sid = session_id.unwrap_or(&manifest.agent.id);
+    let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
+    let handle = store.write(content.as_bytes())?;
+    let normalized_name = format!("skill.{}.md", service_slug);
+    store.register_name_with_visibility(
+        sid,
+        &normalized_name,
+        &handle,
+        crate::runtime::content_store::ContentVisibility::Session,
+    )?;
+    let normalized_alias =
+        crate::runtime::content_store::ContentStore::get_short_alias(&handle);
+
+    Ok(Some(SkillNormalizeSessionContentOut {
+        normalized_name,
+        normalized_alias: normalized_alias.clone(),
+        normalized_ref: format!("cnt_{}", normalized_alias),
+    }))
+}
+
 fn write_skill_discovery_record(
     gateway_dir: Option<&Path>,
     gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -756,6 +794,13 @@ impl NativeTool for SkillNormalizeTool {
             std::fs::create_dir_all(out_path.parent().unwrap())?;
             std::fs::write(&out_path, &markdown)?;
             write_skill_to_gateway_dir(gateway_dir, &rel, &markdown);
+            let session_content = register_skill_session_content(
+                gateway_dir,
+                session_id,
+                manifest,
+                &slug,
+                &markdown,
+            )?;
             let discovery_record_registered =
                 match write_skill_discovery_record(
                     gateway_dir,
@@ -785,8 +830,9 @@ impl NativeTool for SkillNormalizeTool {
                 "ok": true,
                 "skill_path": rel,
                 "already_normalized": true,
+                "session_content": session_content,
                 "discovery_record_registered": discovery_record_registered,
-                "message": "Content already contains autonoetic.onboarding steps; file written as-is.",
+                "message": "Content already contains autonoetic.onboarding steps; file written as-is. Use content_read with session_content.normalized_name, or credential_setup with skill_url=skill_path.",
             })
             .to_string());
         }
@@ -834,6 +880,13 @@ impl NativeTool for SkillNormalizeTool {
         )?;
         std::fs::write(&out_path, &document)?;
         write_skill_to_gateway_dir(gateway_dir, &rel, &document);
+        let session_content = register_skill_session_content(
+            gateway_dir,
+            session_id,
+            manifest,
+            &slug,
+            &document,
+        )?;
 
         let discovery_record_registered = match write_skill_discovery_record(
             gateway_dir,
@@ -869,12 +922,13 @@ impl NativeTool for SkillNormalizeTool {
             "steps_count": steps_count,
             "base_url": base_url,
             "fragments": fragments,
+            "session_content": session_content,
             "discovery_record_registered": discovery_record_registered,
             "agent_creation_candidate": agent_candidate,
             "message": if agent_candidate {
-                "Wrote Autonoetic SKILL.md with multiple API operations. Use credential_setup with skill_url for onboarding. Consider spawning coder.default to build a reusable script agent for this service."
+                "Wrote Autonoetic SKILL.md with multiple API operations. Use content_read with session_content.normalized_name, or credential_setup with skill_url for onboarding. Consider spawning coder.default to build a reusable script agent for this service."
             } else {
-                "Wrote Autonoetic SKILL.md; use credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment."
+                "Wrote Autonoetic SKILL.md; use content_read with session_content.normalized_name, or credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment."
             },
         })
         .to_string())

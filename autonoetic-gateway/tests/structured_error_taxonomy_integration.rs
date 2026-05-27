@@ -91,6 +91,44 @@ fn test_tool_error_not_found_includes_repair_hint() {
 }
 
 #[test]
+fn test_content_read_skill_path_not_found_has_targeted_repair_hint() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(gateway_dir.join("skills/moltbook"))?;
+    std::fs::write(
+        gateway_dir.join("skills/moltbook/SKILL.md"),
+        "# Moltbook Skill\n",
+    )?;
+
+    let registry = default_registry();
+    let manifest = test_manifest(vec![Capability::ReadAccess { scopes: vec![] }]);
+    let policy = PolicyEngine::new(manifest.clone());
+
+    let result = registry.execute(
+        "content_read",
+        &manifest,
+        &policy,
+        temp.path(),
+        Some(&gateway_dir),
+        &json!({"name_or_handle": "skills/moltbook/SKILL.md"}).to_string(),
+        Some("session-1"),
+        None,
+        None,
+        None,
+        None,
+    )?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&result)?;
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error_type"], "not_found");
+    let repair_hint = parsed["repair_hint"].as_str().unwrap_or_default();
+    assert!(repair_hint.contains("credential_setup"));
+    assert!(repair_hint.contains("skills/moltbook/SKILL.md"));
+
+    Ok(())
+}
+
+#[test]
 fn test_tool_error_validation_has_optional_hint() {
     let err = ToolError::validation("bad input", None::<String>);
     let json_str = err.to_error_response();
