@@ -369,6 +369,61 @@ impl NativeTool for AgentSpawnTool {
         )?;
         let workflow_id = workflow.workflow_id.clone();
         let task_id = crate::scheduler::new_task_id();
+        let target_agent_id = args.agent_id.clone();
+
+        let durable_operation = crate::scheduler::single_flight::durable_operation_for_spawn(
+            &workflow_id,
+            &target_agent_id,
+            args.metadata.as_ref(),
+            args.artifact_id.as_deref(),
+            &args.message,
+        );
+        if let Some(spec) = durable_operation.as_ref() {
+            match crate::scheduler::single_flight::try_acquire_reservation(
+                gw_config,
+                gateway_store.as_deref(),
+                spec,
+                Some(&task_id),
+                None,
+            )? {
+                crate::scheduler::single_flight::AcquireOutcome::Acquired(_) => {}
+                crate::scheduler::single_flight::AcquireOutcome::Coalesced(existing) => {
+                    crate::scheduler::append_workflow_event(
+                        gw_config,
+                        gateway_store.as_deref(),
+                        &WorkflowEventRecord {
+                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            workflow_id: workflow_id.clone(),
+                            task_id: existing.existing_task_id.clone(),
+                            event_type: "workflow.single_flight.coalesced".to_string(),
+                            agent_id: Some(target_agent_id.clone()),
+                            payload: serde_json::json!({
+                                "status": "coalesced",
+                                "stage_kind": existing.stage_kind,
+                                "dedupe_key": existing.dedupe_key,
+                                "existing_task_id": existing.existing_task_id,
+                                "approval_request_id": existing.approval_request_id,
+                                "retry_advice": "wait",
+                            }),
+                            occurred_at: Utc::now().to_rfc3339(),
+                        },
+                    )?;
+
+                    return serde_json::to_string(&serde_json::json!({
+                        "ok": true,
+                        "accepted": true,
+                        "status": "coalesced",
+                        "workflow_id": workflow_id,
+                        "existing_task_id": existing.existing_task_id,
+                        "approval_request_id": existing.approval_request_id,
+                        "dedupe_key": existing.dedupe_key,
+                        "retry_advice": "wait",
+                        "message": "Equivalent durable operation is already active. Wait for the existing task instead."
+                    }))
+                    .map_err(Into::into);
+                }
+            }
+        }
 
         let execution_config = GatewayConfig {
             agents_dir: agents_dir.to_path_buf(),
@@ -377,7 +432,6 @@ impl NativeTool for AgentSpawnTool {
         let execution =
             crate::execution::GatewayExecutionService::new(execution_config, gateway_store.clone());
 
-        let target_agent_id = args.agent_id.clone();
         let kickoff_message = match (&args.context, &args.metadata) {
             (Some(ctx), Some(meta)) => {
                 format!(
@@ -406,130 +460,143 @@ impl NativeTool for AgentSpawnTool {
 
         let ts = Utc::now().to_rfc3339();
         let spawn_reason_preview: String = kickoff_message.chars().take(200).collect();
-        let task = TaskRun {
-            task_id: task_id.clone(),
-            workflow_id: workflow_id.clone(),
-            agent_id: target_agent_id.clone(),
-            session_id: child_delegation_path.clone(),
-            parent_session_id: resolved_session_id.clone(),
-            status: TaskRunStatus::Running,
-            created_at: ts.clone(),
-            updated_at: ts,
-            source_agent_id: Some(source_agent_id.clone()),
-            result_summary: None,
-            join_group: None,
-            message: Some(kickoff_message.clone()),
-            metadata: args.metadata.clone(),
-            retry_count: 0,
-            last_failure_class: None,
-            retry_policy: crate::scheduler::workflow_store::retry_policy_from_metadata(
-                args.metadata.as_ref(),
-            ),
-            side_effect_state: None,
-            dedupe_key: None,
-        };
-        crate::scheduler::save_task_run(gw_config, gateway_store.as_deref(), &task)?;
-        crate::scheduler::append_workflow_event(
-            gw_config,
-            gateway_store.as_deref(),
-            &WorkflowEventRecord {
-                event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        let persist_result: anyhow::Result<String> = (|| {
+            let task = TaskRun {
+                task_id: task_id.clone(),
                 workflow_id: workflow_id.clone(),
-                task_id: Some(task_id.clone()),
-                event_type: "task.spawned".to_string(),
-                agent_id: Some(target_agent_id.clone()),
-                payload: serde_json::json!({
+                agent_id: target_agent_id.clone(),
+                session_id: child_delegation_path.clone(),
+                parent_session_id: resolved_session_id.clone(),
+                status: TaskRunStatus::Running,
+                created_at: ts.clone(),
+                updated_at: ts,
+                source_agent_id: Some(source_agent_id.clone()),
+                result_summary: None,
+                join_group: None,
+                message: Some(kickoff_message.clone()),
+                metadata: args.metadata.clone(),
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: crate::scheduler::workflow_store::retry_policy_from_metadata(
+                    args.metadata.as_ref(),
+                ),
+                side_effect_state: None,
+                dedupe_key: durable_operation.as_ref().map(|spec| spec.dedupe_key.clone()),
+            };
+            crate::scheduler::save_task_run(gw_config, gateway_store.as_deref(), &task)?;
+            crate::scheduler::append_workflow_event(
+                gw_config,
+                gateway_store.as_deref(),
+                &WorkflowEventRecord {
+                    event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    workflow_id: workflow_id.clone(),
+                    task_id: Some(task_id.clone()),
+                    event_type: "task.spawned".to_string(),
+                    agent_id: Some(target_agent_id.clone()),
+                    payload: serde_json::json!({
+                        "target_agent_id": target_agent_id,
+                        "child_session_id": child_delegation_path,
+                        "parent_session_id": resolved_session_id,
+                        "spawn_reason": spawn_reason_preview,
+                        "spawn_reason_full": kickoff_message,
+                    }),
+                    occurred_at: Utc::now().to_rfc3339(),
+                },
+            )?;
+
+            crate::scheduler::workflow_causal::mirror_orchestration_event(
+                gw_config,
+                root,
+                "workflow.task.spawned",
+                autonoetic_types::causal_chain::EntryStatus::Success,
+                serde_json::json!({
+                    "workflow_id": workflow_id,
+                    "task_id": task_id,
                     "target_agent_id": target_agent_id,
                     "child_session_id": child_delegation_path,
                     "parent_session_id": resolved_session_id,
-                    "spawn_reason": spawn_reason_preview,
-                    "spawn_reason_full": kickoff_message,
+                    "source_agent_id": source_agent_id,
                 }),
-                occurred_at: Utc::now().to_rfc3339(),
-            },
-        )?;
+            );
 
-        crate::scheduler::workflow_causal::mirror_orchestration_event(
-            gw_config,
-            root,
-            "workflow.task.spawned",
-            autonoetic_types::causal_chain::EntryStatus::Success,
-            serde_json::json!({
-                "workflow_id": workflow_id,
-                "task_id": task_id,
-                "target_agent_id": target_agent_id,
-                "child_session_id": child_delegation_path,
-                "parent_session_id": resolved_session_id,
-                "source_agent_id": source_agent_id,
-            }),
-        );
-
-        // Set root session relationship so child's session-visible content is visible to parent
-        // Must use the same gateway_dir as the execution engine, NOT agent_dir.parent()
-        if let Some(gw_dir) = gateway_dir {
-            if let Ok(store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
-                if let Err(e) = store.set_root_session(&child_delegation_path, root) {
-                    tracing::warn!(
-                        target: "content_store",
-                        error = %e,
-                        parent_session = %resolved_session_id,
-                        child_delegation = %child_delegation_path,
-                        "Failed to set root session for child agent"
-                    );
-                } else {
-                    tracing::info!(
-                        target: "content_store",
-                        parent_session = %resolved_session_id,
-                        child_delegation = %child_delegation_path,
-                        "Set up hierarchical content namespace for child agent"
-                    );
+            // Set root session relationship so child's session-visible content is visible to parent
+            // Must use the same gateway_dir as the execution engine, NOT agent_dir.parent()
+            if let Some(gw_dir) = gateway_dir {
+                if let Ok(store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
+                    if let Err(e) = store.set_root_session(&child_delegation_path, root) {
+                        tracing::warn!(
+                            target: "content_store",
+                            error = %e,
+                            parent_session = %resolved_session_id,
+                            child_delegation = %child_delegation_path,
+                            "Failed to set root session for child agent"
+                        );
+                    } else {
+                        tracing::info!(
+                            target: "content_store",
+                            parent_session = %resolved_session_id,
+                            child_delegation = %child_delegation_path,
+                            "Set up hierarchical content namespace for child agent"
+                        );
+                    }
                 }
             }
+
+            // --- Always queue the task (async execution by the scheduler) ---
+            // The sync `block_in_place` path was removed because it deadlocks the
+            // tokio runtime when called from within an already-running agent context.
+            // The scheduler's `process_queued_workflow_tasks` picks up queued tasks
+            // and runs them on dedicated tokio tasks.
+            let queued = autonoetic_types::workflow::QueuedTaskRun {
+                task_id: task_id.clone(),
+                workflow_id: workflow_id.clone(),
+                agent_id: target_agent_id.clone(),
+                message: kickoff_message,
+                child_session_id: child_delegation_path.clone(),
+                parent_session_id: resolved_session_id.clone(),
+                source_agent_id: source_agent_id.clone(),
+                metadata: args.metadata.clone(),
+                join_group: args.join_group,
+                blocks_planner: true,
+                enqueued_at: Utc::now().to_rfc3339(),
+                credential_bindings: args.credential_bindings,
+            };
+            crate::scheduler::enqueue_task(gw_config, gateway_store.as_deref(), &queued)?;
+
+            let _ = crate::scheduler::update_task_run_status(
+                gw_config,
+                gateway_store.as_deref(),
+                &workflow_id,
+                &task_id,
+                TaskRunStatus::Pending,
+                Some("queued".to_string()),
+                None,
+                None,
+            );
+
+            serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "accepted": true,
+                "status": "queued",
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "agent_id": target_agent_id,
+                "session_id": child_delegation_path,
+                "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
+            }))
+            .map_err(Into::into)
+        })();
+
+        if persist_result.is_err() {
+            if let Some(spec) = durable_operation.as_ref() {
+                let _ = crate::scheduler::single_flight::release_reservation(
+                    gw_config,
+                    &workflow_id,
+                    &spec.dedupe_key,
+                );
+            }
         }
-
-        // --- Always queue the task (async execution by the scheduler) ---
-        // The sync `block_in_place` path was removed because it deadlocks the
-        // tokio runtime when called from within an already-running agent context.
-        // The scheduler's `process_queued_workflow_tasks` picks up queued tasks
-        // and runs them on dedicated tokio tasks.
-        let queued = autonoetic_types::workflow::QueuedTaskRun {
-            task_id: task_id.clone(),
-            workflow_id: workflow_id.clone(),
-            agent_id: target_agent_id.clone(),
-            message: kickoff_message,
-            child_session_id: child_delegation_path.clone(),
-            parent_session_id: resolved_session_id.clone(),
-            source_agent_id: source_agent_id.clone(),
-            metadata: args.metadata.clone(),
-            join_group: args.join_group,
-            blocks_planner: true,
-            enqueued_at: Utc::now().to_rfc3339(),
-            credential_bindings: args.credential_bindings,
-        };
-        crate::scheduler::enqueue_task(gw_config, gateway_store.as_deref(), &queued)?;
-
-        let _ = crate::scheduler::update_task_run_status(
-            gw_config,
-            gateway_store.as_deref(),
-            &workflow_id,
-            &task_id,
-            TaskRunStatus::Pending,
-            Some("queued".to_string()),
-            None,
-            None,
-        );
-
-        return serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "accepted": true,
-            "status": "queued",
-            "workflow_id": workflow_id,
-            "task_id": task_id,
-            "agent_id": target_agent_id,
-            "session_id": child_delegation_path,
-            "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
-        }))
-        .map_err(Into::into);
+        return persist_result;
     }
 }
 

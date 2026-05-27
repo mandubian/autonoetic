@@ -825,6 +825,30 @@ pub fn update_task_run_status(
         )?;
     }
 
+    if matches!(
+        status,
+        TaskRunStatus::Succeeded
+            | TaskRunStatus::Failed
+            | TaskRunStatus::Cancelled
+            | TaskRunStatus::Aborted
+    ) {
+        if let Some(dedupe_key) = task.dedupe_key.as_deref() {
+            if let Err(error) = crate::scheduler::single_flight::release_reservation(
+                config,
+                workflow_id,
+                dedupe_key,
+            ) {
+                tracing::warn!(
+                    target: "workflow",
+                    workflow_id = %workflow_id,
+                    task_id = %task_id,
+                    error = %error,
+                    "Failed to release single-flight reservation"
+                );
+            }
+        }
+    }
+
     if let Some(child_event_type) = child_state_event_type(status) {
         append_workflow_event(
             config,

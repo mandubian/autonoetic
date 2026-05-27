@@ -1209,6 +1209,96 @@ fn test_agent_spawn_tool_accepts_metadata_argument() {
 }
 
 #[test]
+fn test_agent_spawn_coalesces_duplicate_durable_operation() {
+    let manifest = test_manifest_with_id(
+        "planner.default",
+        vec![Capability::AgentSpawn {
+            max_children: 2,
+            max_spawn_depth: 0,
+        }],
+    );
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agents_dir = temp.path().join("agents");
+    let parent_dir = agents_dir.join("planner.default");
+    let child_dir = agents_dir.join("builder.default");
+    std::fs::create_dir_all(&parent_dir).expect("parent dir should create");
+    std::fs::create_dir_all(&child_dir).expect("child dir should create");
+
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store = Arc::new(
+        GatewayStore::open(&gateway_dir).expect("gateway store should open"),
+    );
+
+    let args = serde_json::json!({
+        "agent_id": "builder.default",
+        "message": "Build the durable artifact and keep the workflow state authoritative.",
+        "metadata": {
+            "stage_kind": "durable_build",
+            "artifact_ref": "ar.test-build-01"
+        }
+    });
+
+    let registry = default_registry();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
+    let _guard = runtime.enter();
+    let first = registry
+        .execute(
+            "agent_spawn",
+            &manifest,
+            &policy,
+            &parent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-single-flight"),
+            None,
+            Some(&config),
+            Some(gateway_store.clone()),
+            None,
+        )
+        .expect("first durable spawn should queue");
+    let first_json: serde_json::Value =
+        serde_json::from_str(&first).expect("first response should decode");
+    assert_eq!(first_json.get("status"), Some(&serde_json::json!("queued")));
+    let first_task_id = first_json
+        .get("task_id")
+        .and_then(|value| value.as_str())
+        .expect("queued response should include task_id")
+        .to_string();
+
+    let second = registry
+        .execute(
+            "agent_spawn",
+            &manifest,
+            &policy,
+            &parent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-single-flight"),
+            None,
+            Some(&config),
+            Some(gateway_store),
+            None,
+        )
+        .expect("duplicate durable spawn should coalesce");
+    let second_json: serde_json::Value =
+        serde_json::from_str(&second).expect("coalesced response should decode");
+    assert_eq!(second_json.get("status"), Some(&serde_json::json!("coalesced")));
+    assert_eq!(
+        second_json.get("existing_task_id"),
+        Some(&serde_json::json!(first_task_id))
+    );
+    assert_eq!(
+        second_json.get("retry_advice"),
+        Some(&serde_json::json!("wait"))
+    );
+}
+
+#[test]
 fn test_skill_normalize_writes_autonoetic_skill_under_skills_scope() {
     let manifest = test_manifest(vec![Capability::WriteAccess {
         scopes: vec!["skills/*".to_string()],

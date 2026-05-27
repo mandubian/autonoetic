@@ -32,6 +32,7 @@ pub mod store;
 pub mod system_agents;
 pub mod auto_learning_jobs;
 pub mod overflow_classifier;
+pub mod single_flight;
 pub mod workflow_causal;
 pub mod workflow_store;
 
@@ -40,6 +41,7 @@ pub use decision::*;
 pub use gateway_store::*;
 pub use runner::*;
 pub use signal::*;
+pub use single_flight::*;
 pub use store::*;
 pub use workflow_causal::*;
 pub use workflow_store::*;
@@ -147,6 +149,14 @@ async fn run_scheduler_tick_at(
     }
     if let Err(e) = process_queued_workflow_tasks(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to process queued workflow tasks");
+    }
+    if let Some(store) = execution.gateway_store() {
+        if let Err(e) = crate::scheduler::single_flight::cleanup_stale_reservations(
+            &config,
+            Some(store.as_ref()),
+        ) {
+            tracing::warn!(error = %e, "Failed to clean up stale single-flight reservations");
+        }
     }
 
     let repo = crate::agent::AgentRepository::from_config(&config);

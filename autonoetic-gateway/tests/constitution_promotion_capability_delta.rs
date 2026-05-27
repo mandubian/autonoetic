@@ -185,6 +185,38 @@ fn invoke_promote(h: &PromoteHarness, args_json: &str) -> serde_json::Value {
     serde_json::from_str(&raw).expect("response is JSON")
 }
 
+fn invoke_promote_with_config(h: &PromoteHarness, args_json: &str) -> serde_json::Value {
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let config = GatewayConfig {
+        agents_dir: h
+            .agent_dir
+            .parent()
+            .expect("agent dir should have parent")
+            .to_path_buf(),
+        ..GatewayConfig::default()
+    };
+    let raw = registry
+        .execute(
+            "agent_revision_promote",
+            &manifest,
+            &policy,
+            &h.agent_dir,
+            Some(&h.gateway_dir),
+            args_json,
+            Some("test-session"),
+            Some("turn-000001"),
+            Some(&config),
+            Some(h.store.clone()),
+            None,
+        )
+        .expect("execute should not error for normal cases");
+    serde_json::from_str(&raw).expect("response is JSON")
+}
+
 // ---------------------------------------------------------------------------
 // Direct approval-gate tests (no SKILL.md scaffolding)
 // ---------------------------------------------------------------------------
@@ -469,6 +501,29 @@ fn adds_network_access_creates_named_approval() {
     } else {
         panic!("expected RevisionPromote action, got {:?}", row.action);
     }
+}
+
+#[test]
+fn duplicate_promote_request_coalesces_before_creating_second_approval() {
+    let outgoing_caps = "capabilities: []";
+    let incoming_caps = "capabilities:\n  - type: NetworkAccess\n    hosts: [\"api.github.com\"]";
+    let h = setup_promote_harness(outgoing_caps, incoming_caps);
+
+    let args = format!(
+        r#"{{"agent_id":"{}","revision_id":"{}"}}"#,
+        AGENT_ID, INCOMING_REVISION
+    );
+    let first = invoke_promote_with_config(&h, &args);
+    assert_eq!(first["error"], "capability_delta_requires_approval");
+    let approval_ref = first["approval_ref"]
+        .as_str()
+        .expect("first approval_ref present")
+        .to_string();
+
+    let second = invoke_promote_with_config(&h, &args);
+    assert_eq!(second["status"], "coalesced");
+    assert_eq!(second["approval_ref"], approval_ref);
+    assert_eq!(second["retry_advice"], "wait");
 }
 
 #[test]

@@ -1774,6 +1774,40 @@ impl NativeTool for AgentRevisionInspectTool {
     }
 }
 
+struct SingleFlightReleaseGuard<'a> {
+    config: &'a GatewayConfig,
+    workflow_id: String,
+    dedupe_key: String,
+    armed: bool,
+}
+
+impl<'a> SingleFlightReleaseGuard<'a> {
+    fn new(config: &'a GatewayConfig, workflow_id: String, dedupe_key: String) -> Self {
+        Self {
+            config,
+            workflow_id,
+            dedupe_key,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SingleFlightReleaseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = crate::scheduler::single_flight::release_reservation(
+                self.config,
+                &self.workflow_id,
+                &self.dedupe_key,
+            );
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RevisionPromoteArgs {
     agent_id: String,
@@ -1891,6 +1925,79 @@ impl NativeTool for AgentRevisionPromoteTool {
             rev.status
         );
 
+        let single_flight_scope = if let (Some(config), Some(session_id)) = (config, session_id) {
+            let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+            let workflow = crate::scheduler::ensure_workflow_for_root_session(
+                config,
+                Some(gateway_store.as_ref()),
+                &root_session_id,
+                Some(manifest.agent.id.as_str()),
+            )?;
+            let spec = crate::scheduler::single_flight::build_spec(
+                &workflow.workflow_id,
+                "promote",
+                &args.agent_id,
+                rev.source_ref.clone().or_else(|| Some(args.revision_id.clone())),
+                None,
+            );
+            match crate::scheduler::single_flight::try_acquire_reservation(
+                config,
+                Some(gateway_store.as_ref()),
+                &spec,
+                None,
+                args.approval_ref.as_deref(),
+            )? {
+                crate::scheduler::single_flight::AcquireOutcome::Acquired(_) => {
+                    Some((workflow.workflow_id, spec))
+                }
+                crate::scheduler::single_flight::AcquireOutcome::Coalesced(existing) => {
+                    crate::scheduler::append_workflow_event(
+                        config,
+                        Some(gateway_store.as_ref()),
+                        &autonoetic_types::workflow::WorkflowEventRecord {
+                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            workflow_id: workflow.workflow_id.clone(),
+                            task_id: existing.existing_task_id.clone(),
+                            event_type: "workflow.single_flight.coalesced".to_string(),
+                            agent_id: Some(args.agent_id.clone()),
+                            payload: serde_json::json!({
+                                "status": "coalesced",
+                                "stage_kind": existing.stage_kind,
+                                "dedupe_key": existing.dedupe_key,
+                                "existing_task_id": existing.existing_task_id,
+                                "approval_request_id": existing.approval_request_id,
+                                "retry_advice": "wait",
+                            }),
+                            occurred_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    )?;
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "status": "coalesced",
+                        "existing_task_id": existing.existing_task_id,
+                        "approval_ref": existing.approval_request_id,
+                        "dedupe_key": existing.dedupe_key,
+                        "retry_advice": "wait",
+                        "message": "Equivalent durable promote operation is already active. Wait for the existing operation instead."
+                    })
+                    .to_string());
+                }
+            }
+        } else {
+            None
+        };
+        let mut single_flight_guard = single_flight_scope
+            .as_ref()
+            .and_then(|(workflow_id, spec)| {
+                config.map(|config| {
+                    SingleFlightReleaseGuard::new(
+                        config,
+                        workflow_id.clone(),
+                        spec.dedupe_key.clone(),
+                    )
+                })
+            });
+
         let revision_dir = gateway_dir
             .join("revisions/agents")
             .join(&args.agent_id)
@@ -2004,6 +2111,17 @@ impl NativeTool for AgentRevisionPromoteTool {
             risk_summary: None,
                 };
                 gateway_store.create_approval(&mut req)?;
+                if let (Some(config), Some((workflow_id, spec))) = (config, single_flight_scope.as_ref()) {
+                    crate::scheduler::single_flight::attach_approval_request(
+                        config,
+                        workflow_id,
+                        &spec.dedupe_key,
+                        &request_id,
+                    )?;
+                }
+                if let Some(guard) = single_flight_guard.as_mut() {
+                    guard.disarm();
+                }
 
                 return Ok(serde_json::json!({
                     "ok": false,
@@ -2563,9 +2681,9 @@ impl NativeTool for AgentRevisionRollbackTool {
         _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&GatewayConfig>,
+        config: Option<&GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
@@ -2638,6 +2756,79 @@ impl NativeTool for AgentRevisionRollbackTool {
         let rev = gateway_store
             .get_agent_revision(&target_revision_id)?
             .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found", target_revision_id))?;
+
+        let single_flight_scope = if let (Some(config), Some(session_id)) = (config, session_id) {
+            let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+            let workflow = crate::scheduler::ensure_workflow_for_root_session(
+                config,
+                Some(gateway_store.as_ref()),
+                &root_session_id,
+                Some(manifest.agent.id.as_str()),
+            )?;
+            let spec = crate::scheduler::single_flight::build_spec(
+                &workflow.workflow_id,
+                "rollback",
+                &args.agent_id,
+                rev.source_ref.clone().or_else(|| Some(target_revision_id.clone())),
+                None,
+            );
+            match crate::scheduler::single_flight::try_acquire_reservation(
+                config,
+                Some(gateway_store.as_ref()),
+                &spec,
+                None,
+                None,
+            )? {
+                crate::scheduler::single_flight::AcquireOutcome::Acquired(_) => {
+                    Some((workflow.workflow_id, spec))
+                }
+                crate::scheduler::single_flight::AcquireOutcome::Coalesced(existing) => {
+                    crate::scheduler::append_workflow_event(
+                        config,
+                        Some(gateway_store.as_ref()),
+                        &autonoetic_types::workflow::WorkflowEventRecord {
+                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            workflow_id: workflow.workflow_id.clone(),
+                            task_id: existing.existing_task_id.clone(),
+                            event_type: "workflow.single_flight.coalesced".to_string(),
+                            agent_id: Some(args.agent_id.clone()),
+                            payload: serde_json::json!({
+                                "status": "coalesced",
+                                "stage_kind": existing.stage_kind,
+                                "dedupe_key": existing.dedupe_key,
+                                "existing_task_id": existing.existing_task_id,
+                                "approval_request_id": existing.approval_request_id,
+                                "retry_advice": "wait",
+                            }),
+                            occurred_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    )?;
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "status": "coalesced",
+                        "existing_task_id": existing.existing_task_id,
+                        "approval_ref": existing.approval_request_id,
+                        "dedupe_key": existing.dedupe_key,
+                        "retry_advice": "wait",
+                        "message": "Equivalent durable rollback operation is already active. Wait for the existing operation instead."
+                    })
+                    .to_string());
+                }
+            }
+        } else {
+            None
+        };
+        let _single_flight_guard = single_flight_scope
+            .as_ref()
+            .and_then(|(workflow_id, spec)| {
+                config.map(|config| {
+                    SingleFlightReleaseGuard::new(
+                        config,
+                        workflow_id.clone(),
+                        spec.dedupe_key.clone(),
+                    )
+                })
+            });
 
         let promotion_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "prom-",
