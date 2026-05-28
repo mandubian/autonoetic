@@ -34,13 +34,18 @@ pub enum CapsuleMode {
     /// Hermetic + session checkpoint + context capsule state.
     /// Resume an agent session exactly where it left off.
     Replay,
-    /// Thin or Hermetic + scheduled job definitions.
-    /// Re-create cold-path (cron) agents that run without human interaction.
+    /// Thin (references only) + scheduled job definitions. Re-creates
+    /// cold-path (cron) agents that run without human interaction. To
+    /// embed dependency content alongside scheduled jobs, export
+    /// `Hermetic` first and recreate jobs by hand on the receiver.
     Headless,
 }
 
 impl CapsuleMode {
-    /// Returns true when the mode embeds dependency content (not just references).
+    /// Returns true when the mode embeds dependency content (not just
+    /// references). `Headless` is treated as a thin variant — bundling
+    /// dependency content alongside scheduled jobs is intentionally
+    /// out of scope for this mode.
     pub fn is_hermetic(self) -> bool {
         matches!(self, CapsuleMode::Hermetic | CapsuleMode::Replay)
     }
@@ -84,8 +89,10 @@ pub struct CapsuleSignature {
 /// Memory snapshot embedded in a capsule (opt-in).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CapsuleMemorySnapshot {
-    /// Number of memory entries included.
-    pub entry_count: usize,
+    /// Number of memory entries included. Fixed-width `u64` so the
+    /// capsule manifest stays portable across 32-bit and 64-bit
+    /// gateways.
+    pub entry_count: u64,
     /// Knowledge-store scopes that were exported (e.g. `["memory","user_profile"]`).
     pub scopes: Vec<String>,
     /// Path inside the capsule archive that holds the memory dump file.
