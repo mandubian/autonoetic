@@ -13,10 +13,10 @@
 //!   digest + Ed25519 signature checks
 //! - [`archive::pack`] / [`archive::unpack`] — low-level archive helpers
 //!
-//! Phase 2 ships the thin-mode happy path end-to-end (export → import → new
-//! revision record). Hermetic-layer embedding, memory-merge conflict
-//! policy, and Replay-mode session resume layer on top of these surfaces
-//! in Phase 4.
+//! Phase 2 shipped the thin-mode happy path. Phase 4 adds Replay-mode
+//! checkpoint bundle/restore, Headless-mode scheduled-job bundle/recreate,
+//! real memory-snapshot enumeration with a conflict policy, and a
+//! platform compatibility refusal that fires in non-`local` trust domains.
 
 pub mod archive;
 pub mod export;
@@ -24,7 +24,7 @@ pub mod import;
 pub mod verify;
 
 pub use export::{export, ExportContext, ExportOutcome, ExportRequest};
-pub use import::{import, ImportContext, ImportOutcome, ImportRequest};
+pub use import::{import, ImportContext, ImportOutcome, ImportRequest, MemoryConflictPolicy};
 
 /// Canonical relative paths inside the capsule archive.
 pub mod paths {

@@ -647,6 +647,8 @@ async fn main() -> anyhow::Result<()> {
                 include_memory,
                 sign,
                 output,
+                session_id,
+                root_session_id,
                 json,
             } => {
                 cli::capsule::handle_export(
@@ -657,6 +659,8 @@ async fn main() -> anyhow::Result<()> {
                     *include_memory,
                     *sign,
                     output.as_deref(),
+                    session_id.as_deref(),
+                    root_session_id.as_deref(),
                     *json,
                 )?;
             }
@@ -666,6 +670,7 @@ async fn main() -> anyhow::Result<()> {
                 activate,
                 dry_run,
                 trust_domain,
+                memory_conflict,
                 json,
             } => {
                 cli::capsule::handle_import(
@@ -675,6 +680,7 @@ async fn main() -> anyhow::Result<()> {
                     *activate,
                     *dry_run,
                     trust_domain.as_deref(),
+                    memory_conflict,
                     *json,
                 )?;
             }

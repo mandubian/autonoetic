@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use autonoetic_gateway::capsule::{self, ExportRequest, ImportRequest};
+use autonoetic_gateway::capsule::{self, ExportRequest, ImportRequest, MemoryConflictPolicy};
 use autonoetic_gateway::config::load_config;
 use autonoetic_gateway::execution::gateway_root_dir;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -38,6 +38,8 @@ pub fn handle_export(
     include_memory: Option<bool>,
     sign: Option<bool>,
     output: Option<&Path>,
+    session_id: Option<&str>,
+    root_session_id: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
     let config = load_config(config_path)?;
@@ -55,6 +57,8 @@ pub fn handle_export(
         include_memory,
         sign,
         output_path: output.map(|p| p.to_path_buf()),
+        session_id: session_id.map(|s| s.to_string()),
+        root_session_id: root_session_id.map(|s| s.to_string()),
     };
     let outcome = capsule::export(
         req,
@@ -94,11 +98,21 @@ pub fn handle_import(
     activate: bool,
     dry_run: bool,
     trust_domain: Option<&str>,
+    memory_conflict: &str,
     json: bool,
 ) -> anyhow::Result<()> {
     let config = load_config(config_path)?;
     let gateway_dir = gateway_root_dir(&config);
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let memory_conflict_policy = match memory_conflict.to_ascii_lowercase().as_str() {
+        "keep-local" | "keep_local" => MemoryConflictPolicy::KeepLocal,
+        "overwrite-local" | "overwrite_local" => MemoryConflictPolicy::OverwriteLocal,
+        other => anyhow::bail!(
+            "unknown --memory-conflict value '{}' (expected: keep-local | overwrite-local)",
+            other
+        ),
+    };
 
     let req = ImportRequest {
         archive_path: archive.to_path_buf(),
@@ -106,6 +120,7 @@ pub fn handle_import(
         activate,
         dry_run,
         trust_domain_override: trust_domain.map(|s| s.to_string()),
+        memory_conflict_policy,
     };
     let outcome = capsule::import(
         req,

@@ -1,6 +1,7 @@
 # Cognitive Capsule Standardization — Design Plan
 
 **Concept origin**: `docs/design/concepts.md` (line 41)
+**Phased implementation plan**: [`cognitive-capsule-implementation-plan.md`](cognitive-capsule-implementation-plan.md)
 **Archived plan reference**: `docs/archived/plan_extended.md` Phase 13 (concepts only — code paths no longer match)
 
 ## Background

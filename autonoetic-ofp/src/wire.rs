@@ -110,6 +110,43 @@ pub enum WireRequest {
     /// Ping to check if the peer is alive.
     #[serde(rename = "ping")]
     Ping,
+
+    /// Offer a Cognitive Capsule for transfer to the peer.
+    /// The peer responds with `CapsuleAccept` (or `Error`), and the
+    /// originator then streams chunks via `CapsuleData` followed by
+    /// `CapsuleComplete`. Requires the `capsule_transfer` extension to
+    /// be advertised by both peers at handshake time.
+    #[serde(rename = "capsule_offer")]
+    CapsuleOffer {
+        /// ID of the capsule being offered.
+        capsule_id: String,
+        /// SHA-256 of the canonical manifest JSON (with the `signature`
+        /// field cleared). Lets the receiver verify the eventual
+        /// `capsule.json` matches what was advertised.
+        manifest_digest: String,
+        /// Total archive size in bytes.
+        size_bytes: u64,
+    },
+
+    /// Stream a chunk of capsule archive bytes. `chunk_index` is zero-based
+    /// and monotonically increasing within a single offer.
+    #[serde(rename = "capsule_data")]
+    CapsuleData {
+        capsule_id: String,
+        chunk_index: u32,
+        /// Raw archive bytes (base64-encoded inside JSON).
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
+
+    /// Signal end of stream. The receiver computes a SHA-256 over the
+    /// reassembled bytes and verifies it matches `digest`.
+    #[serde(rename = "capsule_complete")]
+    CapsuleComplete {
+        capsule_id: String,
+        /// SHA-256 hex of the reassembled archive bytes.
+        digest: String,
+    },
 }
 
 /// Response messages.
@@ -184,7 +221,53 @@ pub enum WireResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_event_ref: Option<PeerEventRef>,
     },
+
+    /// Accept a previously-received `CapsuleOffer` — the originator may
+    /// now begin streaming `CapsuleData` chunks.
+    #[serde(rename = "capsule_accept")]
+    CapsuleAccept { capsule_id: String },
+
+    /// Acknowledge a completed capsule transfer with the import outcome.
+    #[serde(rename = "capsule_ack")]
+    CapsuleAck {
+        capsule_id: String,
+        /// Whether the import was successful on the receiver.
+        imported: bool,
+        /// Optional error reason when `imported = false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Revision ID created on the receiver (when imported).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision_id: Option<String>,
+    },
 }
+
+/// Base64 helper for the `Vec<u8>` payload of [`WireRequest::CapsuleData`].
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        STANDARD.decode(s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Name of the OFP extension that gates the `capsule_transfer` family.
+/// Both peers must advertise this string in their handshake to enable
+/// `CapsuleOffer` / `CapsuleAccept` / `CapsuleData` / `CapsuleComplete`
+/// / `CapsuleAck`.
+pub const CAPSULE_TRANSFER_EXTENSION: &str = "capsule_transfer";
 
 /// Notification messages (one-way, no response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,6 +379,95 @@ mod tests {
         assert_eq!(len as usize, bytes.len() - 4);
         let decoded = decode_message(&bytes[4..]).unwrap();
         assert_eq!(decoded.id, "msg-1");
+    }
+
+    #[test]
+    fn capsule_offer_request_roundtrip() {
+        let msg = WireMessage {
+            id: "cap-offer-1".to_string(),
+            signature: None,
+            seq_num: None,
+            kind: WireMessageKind::Request(WireRequest::CapsuleOffer {
+                capsule_id: "cap_sha256:abc".to_string(),
+                manifest_digest: "deadbeef".to_string(),
+                size_bytes: 1024,
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("capsule_offer"));
+        let decoded: WireMessage = serde_json::from_str(&json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Request(WireRequest::CapsuleOffer {
+                capsule_id,
+                manifest_digest,
+                size_bytes,
+            }) => {
+                assert_eq!(capsule_id, "cap_sha256:abc");
+                assert_eq!(manifest_digest, "deadbeef");
+                assert_eq!(size_bytes, 1024);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn capsule_data_base64_roundtrip() {
+        let payload = vec![1u8, 2, 3, 4, 5];
+        let msg = WireMessage {
+            id: "cap-data-1".to_string(),
+            signature: None,
+            seq_num: None,
+            kind: WireMessageKind::Request(WireRequest::CapsuleData {
+                capsule_id: "cap_sha256:abc".to_string(),
+                chunk_index: 0,
+                data: payload.clone(),
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: WireMessage = serde_json::from_str(&json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Request(WireRequest::CapsuleData {
+                data, chunk_index, ..
+            }) => {
+                assert_eq!(data, payload);
+                assert_eq!(chunk_index, 0);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn capsule_ack_response_roundtrip() {
+        let msg = WireMessage {
+            id: "cap-ack-1".to_string(),
+            signature: None,
+            seq_num: None,
+            kind: WireMessageKind::Response(WireResponse::CapsuleAck {
+                capsule_id: "cap_x".to_string(),
+                imported: true,
+                reason: None,
+                revision_id: Some("rev_sha256:xyz".to_string()),
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("capsule_ack"));
+        let decoded: WireMessage = serde_json::from_str(&json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Response(WireResponse::CapsuleAck {
+                imported,
+                revision_id,
+                ..
+            }) => {
+                assert!(imported);
+                assert_eq!(revision_id.as_deref(), Some("rev_sha256:xyz"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn capsule_transfer_extension_name_is_stable() {
+        assert_eq!(CAPSULE_TRANSFER_EXTENSION, "capsule_transfer");
     }
 
     #[test]

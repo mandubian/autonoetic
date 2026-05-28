@@ -264,6 +264,7 @@ name = "autonoetic-ofp"
 version = "0.1.0"
 dependencies = [
  "autonoetic-types",
+ "base64",
  "serde",
  "serde_json",
 ]

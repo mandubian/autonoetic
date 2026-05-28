@@ -210,6 +210,12 @@ pub enum CapsuleCommands {
         /// Output archive path (default: <agent_id>.capsule.tar.zst).
         #[arg(long)]
         output: Option<std::path::PathBuf>,
+        /// Session whose latest checkpoint to bundle (required for `--mode replay`).
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Root session whose scheduled jobs to bundle (required for `--mode headless`).
+        #[arg(long)]
+        root_session_id: Option<String>,
         /// Emit machine-readable JSON output.
         #[arg(long)]
         json: bool,
@@ -230,6 +236,10 @@ pub enum CapsuleCommands {
         /// Override trust domain stamped on the imported revision.
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["local", "partner", "foreign"]))]
         trust_domain: Option<String>,
+        /// Memory conflict policy when an entry already exists locally:
+        /// `keep-local` (default, skip) or `overwrite-local`.
+        #[arg(long, default_value = "keep-local")]
+        memory_conflict: String,
         /// Emit machine-readable JSON output.
         #[arg(long)]
         json: bool,
