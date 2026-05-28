@@ -470,12 +470,10 @@ impl NativeTool for WorkflowWaitTool {
         let task_ids_clone = task_ids.clone();
         let wf_id = workflow_id.clone();
         let gw_config_arc = std::sync::Arc::new(gw_config.clone());
-        let notify = gateway_store
-            .as_ref()
-            .map(|s| {
-                let sid = session_id.unwrap_or(&manifest.agent.id);
-                s.task_notify.get_or_create(sid)
-            });
+        let notify = match (gateway_store.as_ref(), session_id) {
+            (Some(s), Some(sid)) => Some(s.task_notify.get_or_create(sid)),
+            _ => None,
+        };
 
         let (
             tasks_status,

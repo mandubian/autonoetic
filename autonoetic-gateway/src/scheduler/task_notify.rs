@@ -23,6 +23,7 @@ impl TaskNotifyRegistry {
         let map = self.notifiers.lock().expect("task_notify mutex poisoned");
         if let Some(notify) = map.get(session_id) {
             notify.notify_waiters();
+            notify.notify_one();
         }
     }
 }
