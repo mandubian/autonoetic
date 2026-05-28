@@ -390,56 +390,44 @@ Do NOT run sealed evaluation unless the operator explicitly requests it. The sea
 
 ## Approval & Clarification Handling
 
-**`agent_spawn` returns `status: "queued"` (approval pending):**
-Call `workflow_wait(task_ids=[...], timeout_secs=300)`. Do not re-spawn. The gateway resumes the child automatically after approval.
-
-**`workflow_wait` returns `checkpoint_state.status == "awaiting_approval"`:**
-Do NOT call `user_ask`. Tell the user in plain text that approval is pending and show the `approval_request_id` and the command: `autonoetic gateway approvals approve apr-xxx`. Then call `workflow_wait(timeout_secs=300)`.
+When a child is awaiting approval, inform the user of the pending `approval_request_id` and the resolution command. The gateway resumes the child automatically on approval — do not re-spawn or cancel `AwaitingApproval` tasks.
 
 **`workflow_wait` times out with `checkpoint_state.status == "paused"` and `reason == "awaiting_user_input_or_operator_guidance"`:**
-The child agent is suspended waiting for a `user_ask` answer. Do NOT close your session. Tell the user that the child is waiting for their input (in the approval channel / terminal), then call `workflow_wait(timeout_secs=300)` again. Keep looping until the child resumes. Never give up because of a timeout alone when the child is user-input-paused.
+Tell the user that the child is waiting for their input, then call `workflow_wait(timeout_secs=300)` again. The gateway will resume the child once the user answers.
 
-**Approval resolved (`ApprovalResolved` signal):**
-Call `workflow_state` or `workflow_wait` to check updated task status. Do not restart — the child resumes from its checkpoint.
-
-**Never cancel `AwaitingApproval` tasks.** Operator approval is an external event; use `workflow_wait(timeout_secs=300)` and keep looping. Do not call `workflow_cancel_task` on tasks whose status is `AwaitingApproval`.
+**Approval timeout (`checkpoint_step == "approval_timeout"`):**
+Inform user. If they want to continue, respawn (creates a new approval).
 
 **Child clarification request (`status: "clarification_needed"`):**
 1. Answer from your knowledge of the goal if possible. Respawn with clarified instructions.
 2. If you need user input: relay the child's question. Wait for answer. Respawn with the answer included.
 
-**Approval timeout (`checkpoint_step == "approval_timeout"`):**
-Inform user. If they want to continue, respawn (creates a new approval). One retry max — after two timeouts on the same logical task, escalate to human.
-
 ---
 
 ## Failure Handling
 
-**`agent_message` result validation:** Always check `ok`, `status`, and `recipients_count`. Report success only when `ok == true`, `status == "delivered"`, and `recipients_count > 0`. Otherwise report delivery failure (e.g., `no_live_recipients`, `target_agent_not_found`, `target_agent_unavailable`) and include `status` plus `message_id` if present.
+**`agent_message` result validation:** Always check `ok`, `status`, and `recipients_count`. Report success only when `ok == true`, `status == "delivered"`, and `recipients_count > 0`. Otherwise report delivery failure.
 
 When `workflow_wait` returns `any_failed: true`:
 
 - **Output schema error** (`"reply is not valid JSON"` or `"[output_schema]"`): If `promotion_record` was called, the work completed — proceed to the next stage. Do NOT re-spawn.
 - **Dependency layer required** (`"dependency_layer_required"` or `"artifact missing required layers"`): Spawn `packager.default`, wait, then retry with the layered artifact_ref.
-- **Transient infrastructure failure** (`"spawn_execute_error"`, `"error sending request for url"`, connection refused/reset/timed out, HTTP 5xx from the model endpoint): Treat this as an environment failure, not an artifact failure. Do NOT restart onboarding, re-spawn coder, or start a fresh install pipeline. If the failed child was `agent-factory.default` or `specialized_builder.default`, retry the exact same stage at most once after the environment is healthy again; if it recurs, escalate to human.
 - **Install-state conflict** (`"already has active revision"`, `"Archived"`, `"rollback lineage mismatch"`, `"content-addressed dedup"`, `"no alias found"`): This is not a coder bug. Do NOT spawn `coder.default` or `specialized_builder.default` again. Inspect installed state first (`agent_exists`, `agent_revision_list`, `agent_revision_inspect`), then report or escalate for operator intervention.
-- **LoopGuard trip on sealed_evaluator**: Check if failure was dependency-related (pip install, ModuleNotFoundError) → packager first. Otherwise route to `coder.default` or `debugger.default`.
+- **Transient infrastructure failure** (connection errors, HTTP 5xx from model endpoint): Treat as an environment failure, not an artifact failure. Do NOT restart onboarding or re-spawn coder. Escalate to human if the failure persists.
 - **Static evaluator fails**: Route findings to `coder.default` for code fixes, then re-run the full federation. Do NOT proceed to operator review until static findings are resolved.
 - **Unit test runner fails**: Route test output to `coder.default` for test fixes, then re-run unit tests. If unit tests are absent (no verdict recorded), proceed without them.
-- **Functional artifact failure** (no promotion record, no results, wrong output on a valid fresh artifact): Retry once with coder. Use this bucket only when the evidence points to the artifact itself, not the environment or revision state. After 2 retries, spawn `debugger.default` for root cause.
-- **`failed_task_count >= 2`**: Call `session_escalate(target: "human", urgency: "high")`. Do not spawn more tasks.
+- **LoopGuard trip on sealed_evaluator**: Check if failure was dependency-related (pip install, ModuleNotFoundError) → packager first. Otherwise route to `coder.default` or `debugger.default`.
+- **Functional artifact failure** (no promotion record, no results, wrong output on a valid fresh artifact): Route to `coder.default` for fixes. If coder cannot resolve, spawn `debugger.default` for root cause.
 
 ### Evaluator / auditor reports `unable_to_evaluate` or `clarification_needed`
 
 These two outcomes are **not artifact failures**. Do not route them to `coder.default` or `debugger.default`.
 
-- **`unable_to_evaluate`**: the gate could not produce a deterministic verdict because of its environment — live network unavailable, fixtures missing, sandbox degraded, dependency layers absent. The artifact may or may not be broken; you do not know. Inspect the gate's `findings` array for the actual blocker:
+- **`unable_to_evaluate`**: the gate could not produce a deterministic verdict because of its environment. Inspect the gate's `findings` array for the actual blocker:
   - **Dependency layer missing** (`"requires dependency layering"`): Spawn `packager.default`, then re-run gates.
-  - **Live network required but unavailable** (`recommendation: "blocked_on_environment"` with a network finding): Do not coerce to fail. If the artifact's contract genuinely requires live external state to verify, this is a *coverage gap*, not an artifact bug. Either accept the artifact without dynamic evidence (only if operator policy allows), or call `session_escalate(target: "human", urgency: "normal")` describing the gap. Do not loop on retries.
-  - **Sandbox degraded** (R-7.18 in findings): The gate's session was degraded mid-evaluation. Spawn a fresh gate task on a clean session; if it recurs, escalate.
+  - **Live network required but unavailable** (`recommendation: "blocked_on_environment"` with a network finding): Do not coerce to fail. Either accept the artifact without dynamic evidence (only if operator policy allows), or call `session_escalate(target: "human", urgency: "normal")` describing the gap.
+  - **Sandbox degraded** (R-7.18 in findings): Spawn a fresh gate task on a clean session; if it recurs, escalate.
 - **`clarification_needed`**: the gate is asking *you* for missing inputs (test criteria, scenarios, thresholds). Read the `clarification_request` payload and either supply the missing context in a fresh `agent_spawn` of the same gate, or call `user_ask` to relay the question to the operator if you cannot answer it yourself. Never invent test criteria the gate did not have.
-
-Both outcomes count toward `failed_task_count` only when retried without addressing the underlying cause. Routing the right next agent (packager, escalate, user_ask) is *not* a failed task.
 
 ---
 

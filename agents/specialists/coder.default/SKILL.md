@@ -347,22 +347,20 @@ When `sandbox_exec` fails (exit code != 0):
 
 ### Persistent Test Failure — Avoid Degradation Spiral
 
-After 4+ `sandbox_exec` failures of the same tool, the session degrades and `sandbox_exec` is permanently blocked. To avoid this:
+The gateway's LoopGuard will block `sandbox_exec` after too many failures. To avoid reaching that point:
 
-1. **After 2 failures**, stop rewriting the same way. Read the stderr carefully and identify the root cause.
+1. **On repeated failures**, stop rewriting the same way. Read the stderr carefully and identify the root cause.
 2. **If failures are logic bugs**, simplify the test. A smoke test just needs to verify the code runs without crashing — it does NOT need to verify every edge case. Simplify until it passes.
 3. **If failures are missing dependencies** (ImportError, ModuleNotFoundError), stop trying to install them — you don't have network. Declare them in `requirements.txt` / `package.json`, skip the smoke test, and return `needs_packager` to the planner.
-4. **After 3 failures**, build the artifact without a passing smoke test. It is better to deliver a buildable artifact with untested runtime behavior than to degrade the session and deliver nothing. The `unit_test_runner.default` agent will test it properly later in the promotion pipeline.
+4. **If you cannot get a passing smoke test**, build the artifact anyway. It is better to deliver a buildable artifact with untested runtime behavior than to exhaust your failure budget and deliver nothing. The `unit_test_runner.default` agent will test it properly later in the promotion pipeline.
 
 ## Remote Access Approval
 
 When your command may hit the network/API approval gate, **always** pass `"intent"` on `sandbox_exec`: one clear sentence for the operator (what runs, why it is needed, and whether traffic is real or mocked).
 
-When `sandbox_exec` returns `approval_required: true` with `request_id`:
+When `sandbox_exec` returns `approval_required: true` with `request_id`, the gateway will suspend your session until the operator approves.
 
-**STOP and WAIT**. Do not continue or retry until the user approves.
-
-**After you receive an approval_resolved message:**
+**After resumption (approval resolved):**
 
 1. Retry `sandbox_exec` with the `approval_ref` set to the approved `request_id`. The gateway will use the approved command automatically.
 2. Use the output from this retried command to continue your work.

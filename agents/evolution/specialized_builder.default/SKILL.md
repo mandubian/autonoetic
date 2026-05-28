@@ -410,9 +410,8 @@ Before calling `agent_revision_create_from_intent`, ensure:
 3. Proceed directly to install — the gateway's code analysis provides baseline safety.
 
 ### Approval Flow
-1. First call may return "approval_required: true"
-2. If "approval_required: true", STOP and tell user to approve
-3. DO NOT retry until user approves - wait for approval message
+
+When a tool returns `approval_required: true`, the gateway will suspend your session. After resumption, retry the **same call** with `approval_ref` set to the approved `request_id`. Do not retry with a guessed id.
 
 ### Promotion Gate Failure
 
