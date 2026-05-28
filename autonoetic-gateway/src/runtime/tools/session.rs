@@ -544,6 +544,21 @@ impl NativeTool for SessionSummarizeTool {
         )?;
 
         if transcript_record.transcript_handle.is_none() {
+            let is_own_session = session_id.map_or(false, |sid| sid == transcript_record.session_id);
+            if is_own_session {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "status": "active",
+                    "summary": "",
+                    "turn_count": 0,
+                    "user_turns": 0,
+                    "assistant_turns": 0,
+                    "tool_turns": 0,
+                    "transcript_handle": args.transcript_handle,
+                    "message": "This session is active — conversation history and tool calls are not persisted until the current turn completes. Re-check next turn.",
+                })
+                .to_string());
+            }
             return Ok(serde_json::json!({
                 "ok": true,
                 "status": transcript_record.status,
