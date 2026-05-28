@@ -81,7 +81,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
   **Before re-running credential onboarding for a service**, call `agent_list` to check whether an agent for that service already exists (e.g., `agent_id` contains the service name). If found, spawn it directly instead of re-fetching, re-normalizing, and re-registering. This applies to **any flow** that produces durable state — check first, compute second.
 
-5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` + `workflow_wait`.
+5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` — see **Coordinating With Children** for how to wait (yield for a single/sequential child; one `workflow_wait` join for a parallel fan-out).
 
 6. **Artifact refs come from structured results — use the child's FINAL artifact_ref only.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. When a child agent (e.g. coder) made multiple `artifact_build` calls in its session — for example after correcting an earlier mistake — **only the `artifact_ref` in the child's final JSON reply is canonical**. Ignore every other `artifact_ref` that appeared in intermediate tool results: those are stale and may have the wrong `kind`, wrong digest, or both. Re-reading the child's last `result_summary` is the safest source. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child — if `kind` is not `agent_bundle` (or `binary` for compiled agents), you have the wrong ref. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles. **Note:** Tools accept both short refs (`ar.*`) and canonical IDs (`art_*`) directly. When passing refs to child agents via `agent.spawn`, prefer the short `ar.*` form — it is scoped to the session and works across child sessions.
 
@@ -148,8 +148,8 @@ On every wake-up after interruption (approval, timeout, join, hibernation):
 | `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to evaluation or install |
 | `has_evaluator_result: true` + `has_auditor_result: true` | Re-run evaluator or auditor | Proceed to install (both pass) or coder iteration (either fails) |
 | `has_static_evaluator_result: true` + `has_unit_test_runner_result: true` + `has_auditor_result: true` | Re-run federation roles | Collect all verdicts and escalate to operator |
-| `pending_approvals: true` | Spawn new tasks | `workflow_wait(timeout_secs=300)` |
-| `active_tasks_running: true` | Spawn duplicate tasks | Wait with `workflow_wait` |
+| `pending_approvals: true` | Spawn new tasks | End your turn — the gateway wakes you when the approval resolves (Ri-0.14) |
+| `active_tasks_running: true` | Spawn duplicate tasks | End your turn — the gateway wakes you when a task transitions (Ri-0.14) |
 
 **Reading child outputs:** After a child completes, inspect `workflow_state` output for that task, then read named handles from `named_outputs`:
 ```json
@@ -162,7 +162,7 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 1. Call `workflow_state` and inspect active tasks plus completed `named_outputs`.
 2. Check session-visible knowledge for an existing record keyed by the same source, goal, or intent.
 3. If reusable content already exists, read the existing handle and continue locally.
-4. If matching work is still running, wait instead of spawning a second child.
+4. If matching work is still running, do not spawn a second child — end your turn and the gateway wakes you when it transitions (Ri-0.14).
 
 ---
 
@@ -300,13 +300,28 @@ Do not use discovery for intents clearly covered by foundational agents — the 
 
 ---
 
-## Parallel Delegation
+## Coordinating With Children — Three Cases
 
+Pick the mechanism by the shape of the dependency. The rule that never changes: **never re-issue `workflow_wait` in a loop, and never spin `workflow_state` to discover progress.** Discovering child state is the gateway's job (Ri-0.14), not yours to poll.
+
+**1. Sequential / single child — spawn, then end your turn.**
 ```
-agent_spawn("researcher.default", message="...", async=true)   # returns task_id immediately
-agent_spawn("coder.default", message="...", async=true)        # runs in parallel
-workflow_wait(task_ids=[...], timeout_secs=300)                 # blocks until all complete
+agent_spawn("coder.default", message="...", async=true)   # one child, its output feeds the next step
+# Then END YOUR TURN.
 ```
+The gateway suspends you as `WaitingForChild` and **wakes you automatically** when the child reaches a terminal state or hits a gate (Ri-0.14). On wake, the child's typed state is already in your turn-start context. Do not call `workflow_wait` — yielding is cheaper than blocking, and the wake-up costs exactly one resumption.
+
+**2. Parallel fan-out you must fully join — spawn all, then one `workflow_wait` join.**
+```
+agent_spawn("researcher.default", message="...", async=true)
+agent_spawn("auditor.default",     message="...", async=true)
+workflow_wait(task_ids=[<all of them>], timeout_secs=300)   # ONE blocking join, returns when ALL terminal
+```
+When you need **every** child done before you can proceed and they run concurrently, a single `workflow_wait` on all their `task_ids` is the right tool — it blocks once and returns when the whole group is terminal. This is a join, **not** polling, and it is strictly cheaper than ending your turn and being woken once per child (a 3-way fan-out would otherwise cost ~3 resumptions). Call it **once**; never loop it.
+
+**3. Inspection / recovery — `workflow_wait` as a probe.**
+- One-shot status snapshot mid-turn → `workflow_wait(timeout_secs=0)` (returns immediately, does not block).
+- Actively recovering a task you already suspect is stuck → see **Stuck Tasks**.
 
 Use `async=true` only for **independent** tasks (no data dependency between them). Sequential dependencies (Principle 5) must be chained calls, not parallel.
 
@@ -324,7 +339,7 @@ When an artifact-backed agent needs promotion (after `coder.default` produces an
 | Artifact-backed, no external HTTP | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` |
 | Artifact-backed, has HTTP calls | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` (sealed_evaluator deferred to operator decision) |
 
-Use `async=true` to spawn independent roles in parallel. Wait for all with `workflow_wait`.
+Spawn the independent roles in parallel with `async=true`, then join them with a single `workflow_wait(task_ids=[<all roles>], timeout_secs=300)` (Case 2 — parallel fan-out). It returns once every role is terminal; then collect verdicts. Do not loop the wait or end your turn per-role.
 
 **Step 2: Collect verdicts**
 
@@ -380,7 +395,7 @@ Once `approval_status` reports `status: "approved"`/`"rejected"`/`"sealed_eval_r
 
 If the operator requests sealed evaluation:
 1. Spawn `sealed_evaluator.default` with metadata `{fixture_set_ref: "..."}` if the operator provided one
-2. Wait for completion with `workflow_wait`
+2. End your turn — the gateway wakes you when it completes (Ri-0.14)
 3. Collect the sealed evaluation verdict from `promotion_query`
 4. Re-escalate to operator with the complete report set
 
@@ -392,8 +407,8 @@ Do NOT run sealed evaluation unless the operator explicitly requests it. The sea
 
 When a child is awaiting approval, inform the user of the pending `approval_request_id` and the resolution command. The gateway resumes the child automatically on approval — do not re-spawn or cancel `AwaitingApproval` tasks.
 
-**`workflow_wait` times out with `checkpoint_state.status == "paused"` and `reason == "awaiting_user_input_or_operator_guidance"`:**
-Tell the user that the child is waiting for their input, then call `workflow_wait(timeout_secs=300)` again. The gateway will resume the child once the user answers.
+**Child is `paused` with `reason == "awaiting_user_input_or_operator_guidance"`:**
+Tell the user that the child is waiting for their input, then end your turn. The gateway resumes the child once the user answers and wakes you when it transitions (Ri-0.14) — do not loop on `workflow_wait`.
 
 **Approval timeout (`checkpoint_step == "approval_timeout"`):**
 Inform user. If they want to continue, respawn (creates a new approval).
@@ -408,7 +423,7 @@ Inform user. If they want to continue, respawn (creates a new approval).
 
 **`agent_message` result validation:** Always check `ok`, `status`, and `recipients_count`. Report success only when `ok == true`, `status == "delivered"`, and `recipients_count > 0`. Otherwise report delivery failure.
 
-When `workflow_wait` returns `any_failed: true`:
+When a child task fails (the wake-up notification reports a failed child, or `workflow_state` shows `any_failed: true`):
 
 - **Output schema error** (`"reply is not valid JSON"` or `"[output_schema]"`): If `promotion_record` was called, the work completed — proceed to the next stage. Do NOT re-spawn.
 - **Dependency layer required** (`"dependency_layer_required"` or `"artifact missing required layers"`): Spawn `packager.default`, wait, then retry with the layered artifact_ref.
@@ -433,11 +448,12 @@ These two outcomes are **not artifact failures**. Do not route them to `coder.de
 
 ## Stuck Tasks
 
-When `workflow_wait` returns `join_satisfied: false` after 3 timeouts for the same task:
+If you suspect a task is stuck (you have been woken with no progress on it, or it has been `Running` far longer than expected), actively probe it — this is the legitimate use of `workflow_wait`:
 
-1. Call `workflow_state`. Check if the child session has a digest or `promotion_record` (evidence of completion).
-2. If evidence exists, use `workflow_force_complete` to resolve the stuck task — then proceed.
-3. Use `workflow_force_complete` only after 3+ timeouts AND confirmed evidence. Never use it for tasks running under 60 seconds.
+1. Call `workflow_wait(task_ids=[<task_id>], timeout_secs=300)` to actively wait on the specific task. If it returns `join_satisfied: false`, the task is genuinely stalled.
+2. Call `workflow_state` and check whether the child session has a digest or `promotion_record` (evidence of completion despite the stalled status).
+3. If evidence exists, use `workflow_force_complete` to resolve the stuck task — then proceed.
+4. Use `workflow_force_complete` only after a confirmed stall AND confirmed evidence. Never use it for tasks running under 60 seconds.
 
 ---
 

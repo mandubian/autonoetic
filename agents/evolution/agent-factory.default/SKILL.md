@@ -108,9 +108,11 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 ## Tools for delegation
 
 **IMPORTANT**: To delegate to a sub-agent, always use `agent_spawn` (NOT `workflow.spawn` — that tool does not exist).
-- `agent_spawn` with `async=true` — enqueues a sub-agent and returns a `task_id`
-- `workflow_wait` with `task_ids=[<task_id>]` — blocks until the sub-agent completes
-- `workflow_state` — check current workflow status on resumption
+- `agent_spawn` with `async=true` — enqueues a sub-agent and returns a `task_id`.
+- **Sequential step (one child, then the next) → end your turn.** Most of this pipeline is sequential: architect → coder → packager → install. After spawning the stage owner, reply with a short status line and stop. The gateway suspends you as `WaitingForChild` and **wakes you automatically** when that sub-agent reaches a terminal state or hits a gate (constitutional right Ri-0.14); its typed state is already in your turn-start context. Yielding is cheaper than blocking and costs exactly one resumption. So each sequential step is: spawn the stage owner → end turn → resume on wake → spawn the next stage.
+- **Parallel fan-out you must fully join (the promotion gates) → one `workflow_wait` join.** When you spawn several independent children at once and need all of them before proceeding (Step 4), call `workflow_wait(task_ids=[<all of them>], timeout_secs=300)` **once**. It blocks until the whole group is terminal and is cheaper than being woken once per child. This is a join, not polling.
+- `workflow_state` — on resume, the one call that gives mechanical `reuse_guards` truth (which stages already completed). Call it once per resume, never in a loop.
+- **Never** loop `workflow_wait` or spin `workflow_state` to discover progress — the wake-up (sequential) or the single join (parallel) already does that.
 
 Do not use write tools to produce the primary output of design, implementation, evaluation, audit, packaging, or installation stages. Spawn the stage owner instead. If that owner is unavailable or fails, report the failed stage rather than completing it yourself.
 
@@ -132,7 +134,7 @@ Do NOT rewrite code, regenerate multiple draft payload files, or rebuild equival
 
 ### Step 1: Architect (if design_needed or complex structure)
 
-Call `agent_spawn` with `agent_id="architect.default"`, `async=true`, passing the purpose and intended capabilities. Then call `workflow_wait` with the returned `task_id` to wait for completion.
+Call `agent_spawn` with `agent_id="architect.default"`, `async=true`, passing the purpose and intended capabilities. Then end your turn — you resume automatically when it completes (Ri-0.14).
 
 Skip this step for reasoning-only and simple single-file code agents.
 
@@ -189,7 +191,7 @@ Install a new reasoning agent called '<agent_id>':
 - io: { returns: { type: "object", required: ["status"], properties: { status: { type: "string" } } } }
 - Gating: none (reasoning-only, no CodeExecution/AgentSpawn)
 ```
-Then call `workflow_wait` with the returned `task_id`.
+Then end your turn — you resume automatically when it completes (Ri-0.14).
 
 **io schema guidance for reasoning agents:**
 Include `io.returns` in the install intent to give the gateway an output
@@ -228,17 +230,17 @@ between steps 1 and 4.
 
 Use this step only when no reusable `source_artifact_ref` was provided, or when the provided artifact is malformed and must be repaired.
 
-Call `agent_spawn` with `agent_id="coder.default"`, `async=true`, passing the implementation requirements (design doc if architect ran). Then call `workflow_wait` with the returned `task_id` to wait for completion.
+Call `agent_spawn` with `agent_id="coder.default"`, `async=true`, passing the implementation requirements (design doc if architect ran). Then end your turn — you resume automatically when it completes (Ri-0.14).
 
-After coder completes:
-1. Read `workflow_wait`/`workflow_state` output for that task.
+On resume after coder completes (the child state arrives in your turn-start context; call `workflow_state` once if you need the full reuse_guards):
+1. Read the completed task's `output` (from the wake-up context or `workflow_state`).
 2. From `output.named_outputs`, inspect dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
-3. Use `content_read` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload when needed.
+3. Use `content_read` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload only when the named outputs don't already tell you what you need.
 4. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
 
 ### Step 3: Packager (if dependency files found)
 
-Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the artifact_ref from coder. Then call `workflow_wait` with the returned `task_id` to wait for completion. Packager returns a new `artifact_ref` with deps baked into layers.
+Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the artifact_ref from coder. Then end your turn — you resume automatically when it completes (Ri-0.14). Packager returns a new `artifact_ref` with deps baked into layers.
 
 ### Step 4: Promotion gates (if required)
 
@@ -270,21 +272,27 @@ the agent gains executable code (CodeExecution, AgentSpawn,
 NetworkAccess), both roles become mandatory to provide code-level
 evidence alongside the auditor's SKILL review.
 
-If gates required:
+If gates required — the gates are independent and you need **all** of
+them before installing, so this is a parallel fan-out join: spawn every
+required gate with `async=true`, then make **one** `workflow_wait` call on
+all their `task_ids`. That blocks once and returns when every gate is
+terminal — cheaper than ending your turn and being woken once per gate.
+Do not loop the wait, and do not spin `workflow_state`.
 1. Call `agent_spawn` with `agent_id="auditor.default"`, `async=true`,
    passing the **artifact_ref of the intent-only bundle** built in
    Step 2a (for pure-skill agents) or the **coder-built artifact_ref**
-   (for code-bearing agents). Then call `workflow_wait` with the
-   returned `task_id`.
+   (for code-bearing agents).
 2. If the static evaluator is required for this row, call `agent_spawn`
    with `agent_id="static_evaluator.default"`, `async=true`, against the
-   same `artifact_ref`. Then call `workflow_wait`.
+   same `artifact_ref`.
 3. If the unit test runner is required for this row, call `agent_spawn`
    with `agent_id="unit_test_runner.default"`, `async=true`, against the
-   same `artifact_ref`. Then call `workflow_wait`.
-4. Each required gate must call `promotion_record(artifact_ref=<that
-   artifact>, role=..., pass=true)`. specialized_builder verifies these
-   records exist against the artifact_ref that is being installed.
+   same `artifact_ref`.
+4. Call `workflow_wait(task_ids=[<all spawned gates>], timeout_secs=300)`
+   once to join. Each required gate must call
+   `promotion_record(artifact_ref=<that artifact>, role=..., pass=true)`;
+   specialized_builder verifies these records exist against the
+   artifact_ref that is being installed.
 
 If only the auditor is required (`audit_only` gating mode, pure-skill
 rows): tell specialized_builder `"Gating: audit_only"` and pass the
@@ -301,7 +309,7 @@ operator's explicit intent.
 
 This separation exists by design (see `docs/protected-agents.md`, recursive trust problem): the orchestrator that *decides* what to install must not be the same agent that *executes* the install — otherwise a regressed orchestrator could silently promote broken revisions, including a broken version of itself.
 
-Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent. Then call `workflow_wait` with the returned `task_id`. Include:
+Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
 - `artifact_ref` (for code agents) or omit (for reasoning agents)
 - `instructions`, `description`, `capabilities`, `execution_mode`
 - `llm_config` (for reasoning mode)
@@ -345,4 +353,4 @@ On wake-up after interruption: call `workflow_state` first. Check `reuse_guards`
 |---|---|---|
 | `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to packager/gates/install |
 | `has_evaluator_result: true` + `has_auditor_result: true` | Re-run evaluator or auditor | Proceed to install |
-| `pending_approvals: true` | Spawn new tasks | `workflow_wait(timeout_secs=300)` |
+| `pending_approvals: true` | Spawn new tasks | End your turn — the gateway wakes you when the approval resolves (Ri-0.14) |

@@ -42,6 +42,16 @@ If B uses A's output, they cannot be parallelized. Only tasks with no data depen
 
 Never type artifact refs from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Run `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child. Wrong artifact refs create avoidable retry loops.
 
+### 7. Coordinate by yielding, not polling
+
+The invariant: **never re-issue `workflow_wait` in a loop, and never spin `workflow_state` to discover progress.** Discovering child-state transitions is a mechanical lifecycle concern the gateway already owns (Ri-0.14: *"Parents are not required to poll to discover child state transitions"*); pushing it into prompt logic is fragile and token-expensive — an 880-turn agent-creation session traced largely to such polling loops motivated this principle. How you *wait* depends on the dependency shape:
+
+- **Sequential / single child → end your turn.** Spawn, then stop. The gateway suspends the parent as `WaitingForChild` and wakes it automatically when the child reaches a terminal state or hits a gate, with the child's typed state already in the turn-start context. Yielding costs exactly one resumption — cheaper than blocking.
+- **Parallel fan-out you must fully join → one `workflow_wait(task_ids=[all])`.** When several independent children run concurrently and you need all of them before proceeding, a single blocking join returns when the whole group is terminal. This is *not* polling, and it is strictly cheaper than ending your turn and being woken once per child (the gateway emits a per-child notification, so a 3-way fan-out would otherwise cost ~3 resumptions). Call it once; never loop it.
+- **Inspection / recovery → `workflow_wait` as a probe.** A `timeout_secs=0` snapshot, or an active wait when recovering a task already suspected stuck.
+
+(This composes with Principle 4: `workflow_state` is still the one call you make *on resume* to read `reuse_guards` — once per wake, never in a loop.)
+
 ---
 
 ## What Was Removed (and Where It Went)
