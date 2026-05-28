@@ -158,6 +158,8 @@ mod tests {
             },
             requires_agents: vec![],
             requires_skills: vec![],
+            scheduled_jobs: vec![],
+            platform: None,
         }
     }
 

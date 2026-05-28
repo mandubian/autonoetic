@@ -25,7 +25,7 @@ use crate::scheduler::gateway_store::GatewayStore;
 
 const CAPSULE_FORMAT_MAJOR_SUPPORTED: u64 = 1;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ImportRequest {
     pub archive_path: PathBuf,
     /// Require a present + verified signature.
@@ -37,6 +37,37 @@ pub struct ImportRequest {
     /// Override the trust domain stamped on the imported revision.
     /// Defaults to `"local"`.
     pub trust_domain_override: Option<String>,
+    /// Conflict policy for memory entries that already exist locally.
+    pub memory_conflict_policy: MemoryConflictPolicy,
+}
+
+impl Default for ImportRequest {
+    fn default() -> Self {
+        Self {
+            archive_path: PathBuf::new(),
+            verify_signature: false,
+            dry_run: false,
+            activate: false,
+            trust_domain_override: None,
+            memory_conflict_policy: MemoryConflictPolicy::default(),
+        }
+    }
+}
+
+/// What to do when the incoming capsule carries a memory entry whose
+/// `memory_id` already exists on the receiving gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryConflictPolicy {
+    /// Keep the local copy; skip the imported one (default — safest).
+    KeepLocal,
+    /// Overwrite the local copy with the imported one.
+    OverwriteLocal,
+}
+
+impl Default for MemoryConflictPolicy {
+    fn default() -> Self {
+        MemoryConflictPolicy::KeepLocal
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -49,6 +80,16 @@ pub struct ImportOutcome {
     pub dry_run: bool,
     pub dedup_savings_bytes: u64,
     pub created_revision: bool,
+    /// Number of memory entries actually persisted (post-conflict-policy).
+    pub memory_entries_imported: usize,
+    /// Number of memory entries skipped because a local copy existed and
+    /// the policy was `KeepLocal`.
+    pub memory_entries_skipped: usize,
+    /// Number of scheduled jobs recreated on this gateway (Headless mode).
+    pub scheduled_jobs_recreated: usize,
+    /// True when a session checkpoint from the capsule was restored
+    /// into the gateway's checkpoint store (Replay mode).
+    pub checkpoint_restored: bool,
 }
 
 pub struct ImportContext<'a> {
@@ -112,6 +153,28 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
         .clone()
         .unwrap_or_else(|| "local".to_string());
 
+    // Platform compatibility: refuse cross-platform layer imports when
+    // the trust domain is anything other than `"local"`. Within the same
+    // trust boundary we trust the operator's judgment (mostly so dev
+    // workflows on macOS hosts can pull capsules built in Linux CI).
+    if trust_domain != "local" {
+        if let Some(p) = &manifest.platform {
+            let local_os = std::env::consts::OS;
+            let local_arch = std::env::consts::ARCH;
+            if p.os != local_os || p.arch != local_arch {
+                anyhow::bail!(
+                    "capsule was built for {}/{} but this gateway is {}/{}; \
+                     refusing import in trust_domain={} (override --trust-domain local to bypass)",
+                    p.os,
+                    p.arch,
+                    local_os,
+                    local_arch,
+                    trust_domain
+                );
+            }
+        }
+    }
+
     let agent_dir = extract.path().join("agent");
     let file_map = read_agent_files(&agent_dir)?;
     let (dedup_savings, _content_handles) =
@@ -127,6 +190,10 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
             dry_run: true,
             dedup_savings_bytes: dedup_savings,
             created_revision: false,
+            memory_entries_imported: 0,
+            memory_entries_skipped: 0,
+            scheduled_jobs_recreated: 0,
+            checkpoint_restored: false,
         });
     }
 
@@ -184,6 +251,25 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
         bind_alias(ctx.gateway_store, &agent_id, &revision_id)?;
     }
 
+    let (memory_imported, memory_skipped) = import_memory_snapshot(
+        ctx.gateway_store,
+        extract.path(),
+        manifest.memory_snapshot.as_ref(),
+        req.memory_conflict_policy,
+    )?;
+
+    let scheduled_jobs_recreated = if matches!(manifest.mode, autonoetic_types::capsule::CapsuleMode::Headless) {
+        recreate_scheduled_jobs(ctx.gateway_store, &manifest.scheduled_jobs)?
+    } else {
+        0
+    };
+
+    let checkpoint_restored = if matches!(manifest.mode, autonoetic_types::capsule::CapsuleMode::Replay) {
+        restore_checkpoint(ctx.gateway_config, extract.path(), &manifest)?
+    } else {
+        false
+    };
+
     emit_import_event(
         ctx.gateway_store,
         &manifest.capsule_id,
@@ -202,7 +288,115 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
         dry_run: false,
         dedup_savings_bytes: dedup_savings,
         created_revision: !revision_existed,
+        memory_entries_imported: memory_imported,
+        memory_entries_skipped: memory_skipped,
+        scheduled_jobs_recreated,
+        checkpoint_restored,
     })
+}
+
+fn import_memory_snapshot(
+    store: &Arc<GatewayStore>,
+    extract_root: &Path,
+    snapshot: Option<&autonoetic_types::capsule::CapsuleMemorySnapshot>,
+    policy: MemoryConflictPolicy,
+) -> Result<(usize, usize)> {
+    let Some(snapshot) = snapshot else {
+        return Ok((0, 0));
+    };
+    let path = extract_root.join(&snapshot.content_handle);
+    if !path.is_file() {
+        return Ok((0, 0));
+    }
+    let bytes = std::fs::read(&path)?;
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let entries = match parsed.get("entries").and_then(|v| v.as_array()) {
+        Some(arr) => arr.clone(),
+        None => return Ok((0, 0)),
+    };
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    for entry in entries {
+        let obj: autonoetic_types::memory::MemoryObject = match serde_json::from_value(entry) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    target: "capsule",
+                    error = %e,
+                    "skipping malformed memory entry"
+                );
+                continue;
+            }
+        };
+        let existing = store.memory_get_unrestricted(&obj.memory_id)?;
+        match (existing, policy) {
+            (Some(_), MemoryConflictPolicy::KeepLocal) => skipped += 1,
+            (_, _) => {
+                store.memory_upsert(&obj)?;
+                imported += 1;
+            }
+        }
+    }
+    Ok((imported, skipped))
+}
+
+fn recreate_scheduled_jobs(
+    store: &Arc<GatewayStore>,
+    jobs: &[autonoetic_types::capsule::CapsuleScheduledJob],
+) -> Result<usize> {
+    let mut created = 0;
+    for j in jobs {
+        let now = Utc::now().to_rfc3339();
+        let new_id = format!("job_capsule_{}_{}", j.job_id, uuid::Uuid::new_v4());
+        let job = autonoetic_types::scheduled_job::ScheduledJob {
+            job_id: new_id,
+            owner_agent_id: j.owner_agent_id.clone(),
+            root_session_id: j.root_session_id.clone(),
+            target_agent_id: j.target_agent_id.clone(),
+            target_revision_id: j.target_revision_id.clone(),
+            message: j.message.clone(),
+            metadata_json: j.metadata_json.clone(),
+            cron_expr: j.cron_expr.clone(),
+            timezone: j.timezone.clone(),
+            next_run_at: now.clone(),
+            last_run_at: None,
+            status: autonoetic_types::scheduled_job::ScheduledJobStatus::Active,
+            created_at: now.clone(),
+            updated_at: now,
+            last_error: None,
+            generation: 0,
+        };
+        match store.create_scheduled_job(&job) {
+            Ok(()) => created += 1,
+            Err(e) => {
+                tracing::warn!(
+                    target: "capsule",
+                    error = %e,
+                    job_id = %j.job_id,
+                    "failed to re-create scheduled job; continuing"
+                );
+            }
+        }
+    }
+    Ok(created)
+}
+
+fn restore_checkpoint(
+    config: &GatewayConfig,
+    extract_root: &Path,
+    manifest: &CapsuleManifest,
+) -> Result<bool> {
+    let Some(rel) = &manifest.checkpoint_handle else {
+        return Ok(false);
+    };
+    let path = extract_root.join(rel);
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(&path)?;
+    let ckpt: crate::runtime::checkpoint::SessionCheckpoint = serde_json::from_slice(&bytes)?;
+    crate::runtime::checkpoint::save_checkpoint(config, &ckpt)?;
+    Ok(true)
 }
 
 fn read_agent_files(agent_dir: &Path) -> Result<BTreeMap<String, Vec<u8>>> {

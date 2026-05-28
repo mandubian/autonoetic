@@ -40,6 +40,12 @@ pub struct ExportRequest {
     pub sign: Option<bool>,
     /// Output archive path. Defaults to `<agent_id>.capsule.tar.zst` in `cwd`.
     pub output_path: Option<PathBuf>,
+    /// Required for `Replay` mode: the session whose latest checkpoint
+    /// should be bundled. Ignored for other modes.
+    pub session_id: Option<String>,
+    /// Required for `Headless` mode: the root session whose scheduled
+    /// jobs should be bundled. Ignored for other modes.
+    pub root_session_id: Option<String>,
 }
 
 impl ExportRequest {
@@ -51,6 +57,8 @@ impl ExportRequest {
             include_memory: None,
             sign: None,
             output_path: None,
+            session_id: None,
+            root_session_id: None,
         }
     }
 }
@@ -91,17 +99,59 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
     let included_skills = collect_skill_names(&revision_dir);
 
     let memory_snapshot = if req.include_memory.unwrap_or(cfg.include_memory_by_default) {
-        Some(stage_memory_snapshot(staging_path, &revision.agent_id)?)
+        Some(stage_memory_snapshot(
+            staging_path,
+            &revision.agent_id,
+            ctx.gateway_store.as_ref(),
+        )?)
     } else {
         None
     };
 
     let checkpoint_handle = if req.mode == CapsuleMode::Replay {
-        // Phase 2 records the path the importer should look for. Phase 4
-        // wires the actual checkpoint capture / restore.
-        Some(crate::capsule::paths::CHECKPOINT_PATH.to_string())
+        let session_id = req.session_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Replay-mode export requires session_id in ExportRequest")
+        })?;
+        match crate::runtime::checkpoint::load_latest_checkpoint(
+            ctx.gateway_config,
+            session_id,
+        )? {
+            Some(ckpt) => {
+                let bytes = serde_json::to_vec_pretty(&ckpt)?;
+                archive::write_entry(staging_path, crate::capsule::paths::CHECKPOINT_PATH, &bytes)?;
+                Some(crate::capsule::paths::CHECKPOINT_PATH.to_string())
+            }
+            None => anyhow::bail!(
+                "Replay-mode export: no checkpoint found for session {}",
+                session_id
+            ),
+        }
     } else {
         None
+    };
+
+    let scheduled_jobs = if req.mode == CapsuleMode::Headless {
+        let root = req.root_session_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Headless-mode export requires root_session_id in ExportRequest")
+        })?;
+        ctx.gateway_store
+            .list_scheduled_jobs_for_root(root)?
+            .into_iter()
+            .map(|j| autonoetic_types::capsule::CapsuleScheduledJob {
+                job_id: j.job_id,
+                owner_agent_id: j.owner_agent_id,
+                root_session_id: j.root_session_id,
+                target_agent_id: j.target_agent_id,
+                target_revision_id: j.target_revision_id,
+                message: j.message,
+                metadata_json: j.metadata_json,
+                cron_expr: j.cron_expr,
+                timezone: j.timezone,
+                created_at: j.created_at,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
     };
 
     let capsule_id = compute_capsule_id(&revision.revision_id, req.mode);
@@ -134,12 +184,17 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
         },
         requires_agents: vec![],
         requires_skills: vec![],
+        scheduled_jobs,
+        platform: Some(autonoetic_types::capsule::CapsulePlatform {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+        }),
     };
 
-    // Hermetic layer embedding (LayerStore archive copy + platform
-    // descriptor) lands in Phase 4 once the revision-to-layer-closure
-    // helper is in place. For now thin and hermetic exports differ only
-    // in the mode field and the importer's compatibility checks.
+    // Hermetic layer embedding via LayerStore is a follow-up — Phase 4
+    // ships the export-side platform descriptor and the scheduled-jobs
+    // bundle; the layer-closure traversal helper will land alongside the
+    // OFP receive-side handler in a separate PR.
 
     if signed {
         let key = GatewayIdentityKey::load_or_generate(ctx.gateway_dir)
@@ -316,23 +371,32 @@ fn collect_skill_names(revision_dir: &Path) -> Vec<String> {
 }
 
 fn stage_memory_snapshot(
-    _staging: &Path,
-    _agent_id: &str,
+    staging: &Path,
+    agent_id: &str,
+    store: &GatewayStore,
 ) -> Result<autonoetic_types::capsule::CapsuleMemorySnapshot> {
-    // Phase 2 records the snapshot placeholder file so importers can
-    // dedup; full agent-scoped memory enumeration lands with Phase 4
-    // (memory dedup + conflict policy). The redaction round-trip is
-    // demonstrated by the unit test below.
+    // Enumerate memories owned by this agent (any scope), then run each
+    // one through the redaction pipeline. The receiving gateway may
+    // re-key these (see [`crate::capsule::import`]).
+    let ids = store.memory_list_ids_owned_by(agent_id)?;
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(ids.len());
+    let mut scopes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for id in &ids {
+        if let Some(obj) = store.memory_get_unrestricted(id)? {
+            scopes.insert(obj.scope.clone());
+            let serialised = serde_json::to_value(&obj)?;
+            entries.push(redact_json_value(&serialised));
+        }
+    }
     let snapshot_json = serde_json::json!({
-        "entries": [],
-        "scopes": ["memory", "user_profile"],
+        "entries": entries,
+        "scopes": scopes.iter().cloned().collect::<Vec<_>>(),
     });
-    let redacted = redact_json_value(&snapshot_json);
-    let serialised = serde_json::to_vec_pretty(&redacted)?;
-    archive::write_entry(_staging, crate::capsule::paths::MEMORY_SNAPSHOT_PATH, &serialised)?;
+    let serialised = serde_json::to_vec_pretty(&snapshot_json)?;
+    archive::write_entry(staging, crate::capsule::paths::MEMORY_SNAPSHOT_PATH, &serialised)?;
     Ok(autonoetic_types::capsule::CapsuleMemorySnapshot {
-        entry_count: 0,
-        scopes: vec!["memory".to_string(), "user_profile".to_string()],
+        entry_count: entries.len(),
+        scopes: scopes.into_iter().collect(),
         content_handle: crate::capsule::paths::MEMORY_SNAPSHOT_PATH.to_string(),
         redacted: true,
     })

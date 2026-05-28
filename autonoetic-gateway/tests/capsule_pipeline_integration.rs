@@ -110,6 +110,8 @@ fn export_then_import_creates_revision_with_capsule_import_source_kind() {
             include_memory: None,
             sign: Some(true),
             output_path: Some(archive.clone()),
+            session_id: None,
+            root_session_id: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -153,6 +155,7 @@ fn export_then_import_creates_revision_with_capsule_import_source_kind() {
             dry_run: false,
             activate: true,
             trust_domain_override: None,
+            memory_conflict_policy: Default::default(),
         },
         autonoetic_gateway::capsule::ImportContext {
             gateway_dir: &f2.gateway_dir,
@@ -207,6 +210,8 @@ fn import_dry_run_does_not_persist_revision() {
             include_memory: None,
             sign: Some(false),
             output_path: Some(archive.clone()),
+            session_id: None,
+            root_session_id: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -242,6 +247,7 @@ fn import_dry_run_does_not_persist_revision() {
             dry_run: true,
             activate: false,
             trust_domain_override: None,
+            memory_conflict_policy: Default::default(),
         },
         autonoetic_gateway::capsule::ImportContext {
             gateway_dir: &f2.gateway_dir,
@@ -269,6 +275,8 @@ fn tampered_archive_fails_verify_signature() {
             include_memory: None,
             sign: Some(true),
             output_path: Some(archive.clone()),
+            session_id: None,
+            root_session_id: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -317,6 +325,7 @@ fn tampered_archive_fails_verify_signature() {
             dry_run: false,
             activate: false,
             trust_domain_override: None,
+            memory_conflict_policy: Default::default(),
         },
         autonoetic_gateway::capsule::ImportContext {
             gateway_dir: &f2.gateway_dir,
@@ -345,6 +354,8 @@ fn import_refuses_archive_exceeding_size_cap() {
             include_memory: None,
             sign: Some(false),
             output_path: Some(archive.clone()),
+            session_id: None,
+            root_session_id: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -363,6 +374,7 @@ fn import_refuses_archive_exceeding_size_cap() {
             dry_run: true,
             activate: false,
             trust_domain_override: None,
+            memory_conflict_policy: Default::default(),
         },
         autonoetic_gateway::capsule::ImportContext {
             gateway_dir: &f.gateway_dir,
@@ -391,6 +403,8 @@ fn second_import_is_dedup_noop_for_existing_revision() {
             include_memory: None,
             sign: Some(false),
             output_path: Some(archive.clone()),
+            session_id: None,
+            root_session_id: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -425,6 +439,7 @@ fn second_import_is_dedup_noop_for_existing_revision() {
             dry_run: false,
             activate: false,
             trust_domain_override: None,
+            memory_conflict_policy: Default::default(),
         },
         autonoetic_gateway::capsule::ImportContext {
             gateway_dir: &f2.gateway_dir,
@@ -442,6 +457,7 @@ fn second_import_is_dedup_noop_for_existing_revision() {
             dry_run: false,
             activate: false,
             trust_domain_override: None,
+            memory_conflict_policy: Default::default(),
         },
         autonoetic_gateway::capsule::ImportContext {
             gateway_dir: &f2.gateway_dir,

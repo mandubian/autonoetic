@@ -47,6 +47,12 @@ struct CapsuleExportArgs {
     sign: Option<bool>,
     #[serde(default)]
     output: Option<PathBuf>,
+    /// Required when `mode == "replay"`.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// Required when `mode == "headless"`.
+    #[serde(default)]
+    root_session_id: Option<String>,
 }
 
 fn default_mode_string() -> String {
@@ -139,6 +145,8 @@ impl NativeTool for CapsuleExportTool {
                 include_memory: args.include_memory,
                 sign: args.sign,
                 output_path: args.output,
+                session_id: args.session_id,
+                root_session_id: args.root_session_id,
             },
             ExportContext {
                 gateway_dir,
@@ -239,6 +247,7 @@ impl NativeTool for CapsuleImportTool {
                 activate: args.activate,
                 dry_run: args.dry_run,
                 trust_domain_override: args.trust_domain,
+                ..Default::default()
             },
             ImportContext {
                 gateway_dir,

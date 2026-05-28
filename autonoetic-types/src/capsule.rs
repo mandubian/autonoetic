@@ -210,6 +210,38 @@ pub struct CapsuleManifest {
     /// Skill names this capsule depends on but does not bundle.
     #[serde(default)]
     pub requires_skills: Vec<String>,
+
+    // --- Mode-specific extras ---
+    /// Scheduled job definitions bundled into Headless-mode capsules. On
+    /// import the receiving gateway recreates these jobs via the
+    /// scheduler (subject to local config caps).
+    #[serde(default)]
+    pub scheduled_jobs: Vec<CapsuleScheduledJob>,
+    /// Build platform of the originating gateway. Importers compare
+    /// against the local platform when `trust_domain` is not `"local"`
+    /// to refuse incompatible layer bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<CapsulePlatform>,
+}
+
+/// A scheduled job definition bundled in a Headless-mode capsule.
+///
+/// Mirrors the gateway's `autonoetic_types::scheduled_job::ScheduledJob`
+/// shape so the importer can `INSERT` directly. Job IDs are remapped on
+/// import to avoid collisions with the receiver's existing jobs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapsuleScheduledJob {
+    pub job_id: String,
+    pub owner_agent_id: String,
+    pub root_session_id: String,
+    pub target_agent_id: String,
+    pub target_revision_id: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_json: Option<String>,
+    pub cron_expr: String,
+    pub timezone: String,
+    pub created_at: String,
 }
 
 fn default_format_version() -> String {
@@ -309,6 +341,11 @@ mod tests {
             },
             requires_agents: vec!["lead".to_string()],
             requires_skills: vec!["researcher".to_string()],
+            scheduled_jobs: vec![],
+            platform: Some(CapsulePlatform {
+                os: "linux".to_string(),
+                arch: "x86_64".to_string(),
+            }),
         }
     }
 

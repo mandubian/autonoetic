@@ -516,8 +516,12 @@ autonoetic capsule export <agent_id> \
   [--sign[=true|false]]                    # sign with the gateway key;
                                            # omit to defer to config.capsule.auto_sign
   [--output <path>]                        # default: <agent_id>.capsule.tar.zst
+  [--session-id <id>]                      # required for --mode replay
+  [--root-session-id <id>]                 # required for --mode headless
   [--json]
 ```
+
+Replay mode bundles the latest `SessionCheckpoint` for `--session-id`; Headless mode bundles all scheduled jobs under `--root-session-id`. Importers recreate jobs with prefixed IDs and lay the checkpoint into the receiving gateway's `.gateway/checkpoints/` so the scheduler resume path can pick it up.
 
 ### `autonoetic capsule import`
 
@@ -528,7 +532,8 @@ autonoetic capsule import <path> \
   [--verify-signature]                     # require + verify a trusted signature
   [--activate]                             # bind the alias to the imported revision
   [--dry-run]                              # validate only
-  [--trust-domain local|partner|foreign]   # constrained set; clap rejects other values
+  [--trust-domain local|partner|foreign]   # constrained set; clap rejects other values; platform compatibility only enforced when != local
+  [--memory-conflict keep-local|overwrite-local]   # default: keep-local
   [--json]
 ```
 
