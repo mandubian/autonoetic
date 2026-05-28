@@ -543,6 +543,20 @@ impl NativeTool for SessionSummarizeTool {
             session_id,
         )?;
 
+        if transcript_record.transcript_handle.is_none() {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "status": transcript_record.status,
+                "summary": "",
+                "turn_count": 0,
+                "user_turns": 0,
+                "assistant_turns": 0,
+                "tool_turns": 0,
+                "transcript_handle": args.transcript_handle,
+            })
+            .to_string());
+        }
+
         let content_store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
         let handle = transcript_record
             .transcript_handle

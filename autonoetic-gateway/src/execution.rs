@@ -1695,6 +1695,34 @@ impl GatewayExecutionService {
             let loaded =
                 repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?;
 
+            if let Some(ref gs) = self.gateway_store {
+                let root_sid =
+                    crate::runtime::content_store::root_session_id(session_id).to_string();
+                let placeholder = autonoetic_types::causal_chain::SessionTranscriptRecord {
+                    transcript_id: format!("stx-{}", session_id),
+                    session_id: session_id.to_string(),
+                    root_session_id: root_sid,
+                    agent_id: agent_ref.agent_id.clone(),
+                    revision_id: Some(agent_ref.revision_id.clone()),
+                    user_id: None,
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    ended_at: None,
+                    status: "initializing".to_string(),
+                    turn_count: 0,
+                    transcript_handle: None,
+                    excerpt: None,
+                    origin_node_id: None,
+                };
+                if let Err(e) = gs.upsert_session_transcript(&placeholder) {
+                    tracing::debug!(
+                        target: "execution",
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to seed placeholder transcript (non-fatal)"
+                    );
+                }
+            }
+
             // Validate spawn input against target agent's accepts schema (observational).
             // Hard enforcement + structured rejection happens earlier in the agent.spawn
             // tool entry (runtime/tools/agent.rs). This second pass just records a causal
