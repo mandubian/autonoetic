@@ -806,6 +806,19 @@ impl PolicyEngine {
         PolicyDecision::deny("R-1.1")
     }
 
+    /// Gate `capsule.export` / `capsule.import` on the `CapsuleExport`
+    /// capability. The capability has no scope payload — granting it is
+    /// itself the trust boundary, mirroring `EmergencyStop` /
+    /// `SecurityRedTeam`.
+    pub fn can_use_capsule(&self) -> PolicyDecision {
+        for cap in &self.manifest.capabilities {
+            if matches!(cap, Capability::CapsuleExport) {
+                return PolicyDecision::allow("R-1.1");
+            }
+        }
+        PolicyDecision::deny("R-1.1")
+    }
+
     pub fn can_audit_reasoning(&self, target_agent_id: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::ReasoningAudit { targets } = cap {

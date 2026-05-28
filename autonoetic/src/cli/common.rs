@@ -175,6 +175,81 @@ pub enum Commands {
     Session(SessionArgs),
     /// Run the self-improvement loop (P3): diagnose, propose, validate, deploy
     Improve(crate::cli::improve::ImproveArgs),
+    /// Export, import, verify, or inspect Cognitive Capsules
+    Capsule(CapsuleArgs),
+}
+
+#[derive(Args)]
+pub struct CapsuleArgs {
+    #[command(subcommand)]
+    pub command: CapsuleCommands,
+}
+
+#[derive(Subcommand)]
+pub enum CapsuleCommands {
+    /// Export an agent revision as a Cognitive Capsule archive.
+    Export {
+        /// Agent ID to export.
+        agent_id: String,
+        /// Capsule mode: thin | hermetic | replay | headless.
+        #[arg(long, default_value = "thin")]
+        mode: String,
+        /// Pin a specific revision (defaults to the current alias target).
+        #[arg(long)]
+        revision: Option<String>,
+        /// Include a redacted memory snapshot. When omitted, the
+        /// gateway falls back to `config.capsule.include_memory_by_default`.
+        /// Use `--include-memory=false` to force it off regardless of config.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        include_memory: Option<bool>,
+        /// Sign with the gateway key. When omitted, the gateway falls
+        /// back to `config.capsule.auto_sign`. Use `--sign=false` to
+        /// force unsigned regardless of config.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        sign: Option<bool>,
+        /// Output archive path (default: <agent_id>.capsule.tar.zst).
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import a Cognitive Capsule archive on this gateway.
+    Import {
+        /// Path to the .capsule.tar.zst archive.
+        archive: std::path::PathBuf,
+        /// Require + verify a signature against capsule.trusted_signers.
+        #[arg(long)]
+        verify_signature: bool,
+        /// Bind the imported revision to its agent alias.
+        #[arg(long)]
+        activate: bool,
+        /// Validate only; do not persist any revision or memory.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override trust domain stamped on the imported revision.
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["local", "partner", "foreign"]))]
+        trust_domain: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate the manifest + signature of a capsule archive without importing.
+    Verify {
+        /// Path to the .capsule.tar.zst archive.
+        archive: std::path::PathBuf,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a summary of the capsule manifest.
+    Inspect {
+        /// Path to the .capsule.tar.zst archive.
+        archive: std::path::PathBuf,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Arguments for the `session` subcommand group.

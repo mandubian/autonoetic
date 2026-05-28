@@ -639,6 +639,52 @@ async fn main() -> anyhow::Result<()> {
         Commands::Improve(args) => {
             cli::improve::handle_improve(&config_path, &args.command).await?;
         }
+        Commands::Capsule(args) => match &args.command {
+            cli::common::CapsuleCommands::Export {
+                agent_id,
+                mode,
+                revision,
+                include_memory,
+                sign,
+                output,
+                json,
+            } => {
+                cli::capsule::handle_export(
+                    &config_path,
+                    agent_id,
+                    mode,
+                    revision.as_deref(),
+                    *include_memory,
+                    *sign,
+                    output.as_deref(),
+                    *json,
+                )?;
+            }
+            cli::common::CapsuleCommands::Import {
+                archive,
+                verify_signature,
+                activate,
+                dry_run,
+                trust_domain,
+                json,
+            } => {
+                cli::capsule::handle_import(
+                    &config_path,
+                    archive,
+                    *verify_signature,
+                    *activate,
+                    *dry_run,
+                    trust_domain.as_deref(),
+                    *json,
+                )?;
+            }
+            cli::common::CapsuleCommands::Verify { archive, json } => {
+                cli::capsule::handle_verify(&config_path, archive, *json)?;
+            }
+            cli::common::CapsuleCommands::Inspect { archive, json } => {
+                cli::capsule::handle_inspect(&config_path, archive, *json)?;
+            }
+        },
     }
 
     Ok(())
