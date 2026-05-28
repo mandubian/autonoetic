@@ -1707,7 +1707,7 @@ impl GatewayExecutionService {
                     user_id: None,
                     started_at: chrono::Utc::now().to_rfc3339(),
                     ended_at: None,
-                    status: "initializing".to_string(),
+                    status: "active".to_string(),
                     turn_count: 0,
                     transcript_handle: None,
                     excerpt: None,
