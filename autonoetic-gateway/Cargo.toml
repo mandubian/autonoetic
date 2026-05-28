@@ -40,6 +40,7 @@ regex = "1.11.2"
 libc = "0.2"
 tar = "0.4"
 zstd = "0.13"
+tempfile = "3.26.0"
 aes-gcm = "0.10.3"
 rand = "0.8"
 
@@ -48,6 +49,5 @@ name = "mock-moltbook"
 path = "src/bin/mock_moltbook.rs"
 
 [dev-dependencies]
-tempfile = "3.26.0"
 serial_test = "3.0"
 proptest = "1.11.0"
