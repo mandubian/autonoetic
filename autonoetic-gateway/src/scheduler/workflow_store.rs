@@ -966,18 +966,27 @@ pub fn update_task_run_status(
                     "Join condition satisfied — workflow marked Resumable"
                 );
 
-                // Send a signal to the planner session to resume
-                if let Err(e) = crate::scheduler::signal::send_workflow_join_satisfied(
-                    store,
-                    &wf_mut.root_session_id,
-                    workflow_id,
-                    wf_mut.join_task_ids.clone(),
-                ) {
-                    tracing::warn!(
-                        target: "signal",
-                        error = %e,
-                        "Failed to send workflow join satisfied signal"
-                    );
+                let hook_delivers_join_signal = hook_executor.is_some_and(|executor| {
+                    executor.has_deliver_signal_hook(
+                        autonoetic_types::hooks::HookEvent::WorkflowJoinSatisfied,
+                    )
+                });
+
+                // Send a signal to the planner session to resume unless a workflow.join.satisfied
+                // deliver_signal hook is already configured to do so.
+                if !hook_delivers_join_signal {
+                    if let Err(e) = crate::scheduler::signal::send_workflow_join_satisfied(
+                        store,
+                        &wf_mut.root_session_id,
+                        workflow_id,
+                        wf_mut.join_task_ids.clone(),
+                    ) {
+                        tracing::warn!(
+                            target: "signal",
+                            error = %e,
+                            "Failed to send workflow join satisfied signal"
+                        );
+                    }
                 }
 
                 if let Some(executor) = hook_executor {

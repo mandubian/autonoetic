@@ -1368,28 +1368,12 @@ impl GatewayExecutionService {
                     );
                 }
                 UserInteractionStatus::Answered => {
-                    let is_standalone = interaction
-                        .workflow_id
-                        .as_ref()
-                        .map_or(true, |w| w.trim().is_empty());
-                    if is_standalone {
-                        if let Some(store) = self.gateway_store.as_ref() {
-                            if !store.try_claim_answered_standalone_interaction_resume(iid)? {
-                                tracing::info!(
-                                    target: "checkpoint",
-                                    session_id = %session_id,
-                                    interaction_id = %iid,
-                                    "Skipping UserInputRequired resume: interaction already claimed by another resume path"
-                                );
-                                let initial_msg = checkpoint.initial_user_message();
-                                return Ok((
-                                    crate::runtime::lifecycle::TurnOutcome::Completed(None),
-                                    initial_msg,
-                                    None,
-                                ));
-                            }
-                        }
-                    }
+                    // Claim is already acquired upstream in resume_from_user_interaction
+                    // (execution.rs:2758) before spawn_agent_once calls this function.
+                    // The standalone/interaction-resume-claim prevents concurrent
+                    // scheduler polls from spawning duplicate executions.  Do NOT
+                    // re-acquire it here — that would short-circuit the actual resume
+                    // with a silent Completed(None) because the claim is single-use.
 
                     tracing::info!(
                         target: "user_interaction",
@@ -2020,6 +2004,7 @@ impl GatewayExecutionService {
                 runtime = runtime.with_overflow_recovery(true);
             }
 
+            use crate::runtime::checkpoint::YieldReason;
             use crate::runtime::lifecycle::TurnOutcome;
 
             // --- Turn continuation / checkpoint resume ---
@@ -2342,14 +2327,48 @@ impl GatewayExecutionService {
                 let checkpoint =
                     crate::runtime::checkpoint::load_latest_checkpoint(&self.config, session_id)?;
                 if let Some(checkpoint) = checkpoint {
-                    self.resume_from_checkpoint(
-                        &mut runtime,
-                        session_id,
-                        message,
-                        metadata,
-                        checkpoint,
-                    )
-                    .await?
+                    if matches!(
+                        checkpoint.yield_reason,
+                        YieldReason::EmergencyStop { .. }
+                    ) {
+                        tracing::warn!(
+                            target: "execution",
+                            session_id = %session_id,
+                            turn_counter = checkpoint.turn_counter,
+                            "Session was emergency-stopped — continuing with preserved context and fresh LoopGuard"
+                        );
+                        // Restore session state from checkpoint (turn counter, session
+                        // state, etc.) but replace the guard with a fresh one so that
+                        // accumulated failure budgets don't immediately re-trip.
+                        checkpoint.restore_into(&mut runtime);
+                        runtime.guard = crate::runtime::tool_dispatch::loop_guard_from_config_and_manifest(
+                            runtime.config.as_deref(),
+                            &runtime.agent_dir,
+                        );
+                        // If the incoming message is already the last user message in
+                        // the checkpoint history, don't duplicate it.
+                        let mut history = checkpoint.history.clone();
+                        let last_user = history.iter().rev().find(|m| m.role == crate::llm::Role::User);
+                        let should_append = match last_user {
+                            Some(last) => last.content != message,
+                            None => true,
+                        };
+                        if should_append {
+                            history.push(crate::llm::Message::user(message));
+                        }
+                        let initial_msg = checkpoint.initial_user_message();
+                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
+                        (outcome, initial_msg, Some(checkpoint.turn_id))
+                    } else {
+                        self.resume_from_checkpoint(
+                            &mut runtime,
+                            session_id,
+                            message,
+                            metadata,
+                            checkpoint,
+                        )
+                        .await?
+                    }
                 } else {
                     let (turn_start_messages, initial_message) =
                         gateway_signal_turn_start_context(&runtime.initial_user_message, metadata);
@@ -2716,6 +2735,17 @@ impl GatewayExecutionService {
             );
         }
 
+        // Acquire the resume claim before any spawn attempt. This is the single
+        // gate for all resume paths (UserInputRequired, EmergencyStop, etc.) and
+        // prevents the scheduler from spawning multiple concurrent executions for
+        // the same interaction when polling every ~5s.
+        if !store.try_claim_answered_standalone_interaction_resume(interaction_id)? {
+            anyhow::bail!(
+                "Interaction '{}' is already claimed by another resume attempt",
+                interaction_id,
+            );
+        }
+
         // Pre-check: if the latest checkpoint shifted away from UserInputRequired,
         // return early so the scheduler can defer or report appropriately.
         use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
@@ -2771,6 +2801,7 @@ impl GatewayExecutionService {
             )
             .await;
 
+        // On error, release the claim so the scheduler can retry later.
         if spawn_result.is_err() {
             if let Some(s) = self.gateway_store.as_ref() {
                 if let Err(release_err) =
@@ -2785,6 +2816,8 @@ impl GatewayExecutionService {
                 }
             }
         }
+        // On success the claim is consumed (single-use) and NOT released, so
+        // subsequent scheduler polls will fail the try_claim above and skip.
 
         spawn_result
     }

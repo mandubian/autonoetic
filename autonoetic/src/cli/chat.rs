@@ -762,7 +762,11 @@ impl App {
     }
 
     fn in_messages_area(&self, row: u16) -> bool {
-        row >= 2 && row < self.messages_area_row_end
+        // Allow 1-row tolerance at the bottom boundary to handle imprecise
+        // mouse clicks on [click to expand] text near the input area.
+        // The input area has Borders::TOP at messages_area_row_end, so the
+        // last message line sits right above it with zero gap.
+        row >= 2 && row < self.messages_area_row_end + 1
     }
 
     fn toggle_lifecycle_at_content_row(&mut self, content_row: usize) -> bool {

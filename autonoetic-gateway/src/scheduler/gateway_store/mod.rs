@@ -794,6 +794,57 @@ mod tests {
     }
 
     #[test]
+    fn active_upsert_does_not_reopen_terminal_transcript() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        let started = chrono::Utc::now().to_rfc3339();
+        let ended = chrono::Utc::now().to_rfc3339();
+        store.upsert_session_transcript(&SessionTranscriptRecord {
+            transcript_id: "stx-sess1".to_string(),
+            session_id: "sess1".to_string(),
+            root_session_id: "root1".to_string(),
+            agent_id: "agent1".to_string(),
+            revision_id: None,
+            user_id: None,
+            started_at: started.clone(),
+            ended_at: None,
+            status: "active".to_string(),
+            turn_count: 1,
+            transcript_handle: Some("h1".to_string()),
+            excerpt: Some("initial".to_string()),
+            origin_node_id: None,
+        })?;
+
+        store.finalize_session_transcript("sess1", &ended, "completed")?;
+
+        store.upsert_session_transcript(&SessionTranscriptRecord {
+            transcript_id: "stx-sess1".to_string(),
+            session_id: "sess1".to_string(),
+            root_session_id: "root1".to_string(),
+            agent_id: "agent1".to_string(),
+            revision_id: None,
+            user_id: None,
+            started_at: started,
+            ended_at: None,
+            status: "active".to_string(),
+            turn_count: 2,
+            transcript_handle: Some("h2".to_string()),
+            excerpt: Some("updated".to_string()),
+            origin_node_id: None,
+        })?;
+
+        let results = store.search_session_transcripts(None, None, None, Some("completed"), None, 10)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, "completed");
+        assert_eq!(results[0].ended_at.as_deref(), Some(ended.as_str()));
+        assert_eq!(results[0].turn_count, 2);
+        assert_eq!(results[0].transcript_handle.as_deref(), Some("h2"));
+
+        Ok(())
+    }
+
+    #[test]
     fn escalation_create_get_list_resolve() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let store = GatewayStore::open(temp_dir.path())?;

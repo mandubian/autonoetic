@@ -63,6 +63,12 @@ impl HookExecutor {
             .any(|h| h.event == HookEvent::PolicyDecision)
     }
 
+    pub fn has_deliver_signal_hook(&self, event: HookEvent) -> bool {
+        self.hooks
+            .iter()
+            .any(|h| h.event == event && h.action == HookAction::DeliverSignal)
+    }
+
     /// Called by `GatewayStore::create_causal_event` after the row is committed.
     /// Observer-only: never affects allow/deny.
     pub fn maybe_dispatch_policy_decision_hook(

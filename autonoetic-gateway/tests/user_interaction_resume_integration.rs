@@ -541,38 +541,59 @@ async fn test_duplicate_resume_claim_guard_skips_second_caller() -> anyhow::Resu
         answered_by: "integration_test".to_string(),
     })?;
 
-    assert!(
-        store.try_claim_answered_standalone_interaction_resume(&interaction_id)?,
-        "first claim should succeed"
-    );
+    // Do NOT acquire the claim here — resume_from_user_interaction (execution.rs:2758)
+    // handles it internally.  If we claimed it now, the first resume attempt would
+    // fail with "already claimed".
 
-    let second = execution
-        .spawn_agent_once(
-            agent_id,
-            "[operator] resume after answer",
-            session_id,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-        &[],
+    // The claim guard has moved to resume_from_user_interaction (execution.rs:2758),
+    // which acquires the claim before spawn_agent_once → resume_from_checkpoint.
+    // spawn_agent_once no longer checks the claim internally.  Instead, the gate is
+    // at the resume_from_user_interaction entry: the first caller acquires the claim
+    // and resumes, the second caller sees "already claimed" and bails.
+
+    // First resume via resume_from_user_interaction — acquires claim, resumes session.
+    let first_resume = execution
+        .resume_from_user_interaction(
+            &interaction_id,
+            Some("[integration-test] resume via resume_from_user_interaction"),
         )
         .await?;
-
     assert!(
-        second.assistant_reply.is_none(),
-        "second spawn should skip resume (already claimed), got: {:?}",
-        second.assistant_reply
+        first_resume.assistant_reply.is_some(),
+        "first resume_from_user_interaction should succeed and produce an assistant reply"
     );
 
-    let llm_calls = *call_count.lock().unwrap();
+    let llm_calls_first = *call_count.lock().unwrap();
     assert_eq!(
-        llm_calls, 1,
-        "LLM should only be called once (during first spawn), but was called {} times",
-        llm_calls
+        llm_calls_first, 2,
+        "LLM should have been called twice (first spawn + resume), got {}",
+        llm_calls_first
+    );
+
+    // Second resume — claim already consumed, should get "already claimed" error.
+    let second_resume = execution
+        .resume_from_user_interaction(
+            &interaction_id,
+            Some("[integration-test] second resume attempt"),
+        )
+        .await;
+    assert!(
+        second_resume.is_err(),
+        "second resume_from_user_interaction should fail (claim already consumed)"
+    );
+    let err = second_resume.unwrap_err().to_string();
+    assert!(
+        err.contains("already claimed"),
+        "error should mention 'already claimed', got: {}",
+        err
+    );
+
+    // LLM call count should NOT have increased — the second resume never spawned.
+    let llm_calls_after = *call_count.lock().unwrap();
+    assert_eq!(
+        llm_calls_after, 2,
+        "LLM should still have been called 2 times (second resume was rejected), got {}",
+        llm_calls_after
     );
 
     Ok(())

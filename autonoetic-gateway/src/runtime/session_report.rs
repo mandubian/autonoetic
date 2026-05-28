@@ -230,50 +230,57 @@ impl SessionReportWriter {
     pub fn start_session(&mut self, task_preview: &str) -> anyhow::Result<()> {
         self.update_state(|state| {
             let now = chrono::Utc::now().to_rfc3339();
-            state.status = "running".to_string();
-            state.ended_at = None;
             if state.started_at.is_none() {
                 state.started_at = Some(now.clone());
             }
             let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
-            if agent.started_at.is_none() {
+            let first_start = agent.started_at.is_none();
+            if first_start {
                 agent.started_at = Some(now.clone());
+                agent.status = "running".to_string();
+                agent.ended_at = None;
+                agent.close_reason = None;
             }
-            agent.ended_at = None;
-            agent.status = "running".to_string();
-            agent.close_reason = None;
             if !task_preview.trim().is_empty() {
                 agent.input_preview = Some(truncate_chars(
                     &redact_text_for_logs(task_preview.trim()),
                     600,
                 ));
             }
-            push_event(
-                state,
-                ReportEvent {
-                    event_id: None,
-                    created_at: now,
-                    session_id: self.session_id.clone(),
-                    agent_id: self.agent_id.clone(),
-                    turn_id: None,
-                    kind: "SESSION".to_string(),
-                    summary: "session started".to_string(),
-                    important: true,
-                    details: None,
-                    payload_ref: None,
-                    links: None,
-                },
-            );
+            if first_start {
+                state.status = "running".to_string();
+                state.ended_at = None;
+                push_event(
+                    state,
+                    ReportEvent {
+                        event_id: None,
+                        created_at: now,
+                        session_id: self.session_id.clone(),
+                        agent_id: self.agent_id.clone(),
+                        turn_id: None,
+                        kind: "SESSION".to_string(),
+                        summary: "session started".to_string(),
+                        important: true,
+                        details: None,
+                        payload_ref: None,
+                        links: None,
+                    },
+                );
+            }
         })
     }
 
     pub fn start_turn(&mut self, turn_id: Option<&str>) -> anyhow::Result<()> {
         self.update_state(|state| {
             let now = chrono::Utc::now().to_rfc3339();
+            state.status = "running".to_string();
+            state.ended_at = None;
             let turn_count = {
                 let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
                 agent.turn_count = agent.turn_count.saturating_add(1);
                 agent.status = "running".to_string();
+                agent.ended_at = None;
+                agent.close_reason = None;
                 touch_agent(agent, "TURN", "turn started", &now);
                 agent.turn_count
             };
@@ -3463,10 +3470,35 @@ mod tests {
         assert!(live.contains("Active Agents"));
         assert!(live.contains("suspended"));
         assert!(live.contains("apr-1"));
-        assert!(live.contains("Open Approvals"));
+        assert!(live.contains("## Approvals"));
         assert!(final_md.contains("Agent Summary"));
         assert!(final_md.contains("## Errors"));
         assert!(final_md.contains("## Approvals"));
         assert!(final_json.contains("\"request_id\": \"apr-1\""));
+    }
+
+    #[test]
+    fn start_session_does_not_reopen_finished_live_report_without_turns() {
+        let tmp = tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let mut writer = SessionReportWriter::open(&gateway_dir, "root/planner.default", "planner.default")
+            .unwrap();
+        writer.start_session("Initial task").unwrap();
+        writer.start_turn(Some("turn-1")).unwrap();
+        writer
+            .finish_session("jsonrpc_spawn_complete", Some("done"))
+            .unwrap();
+
+        writer.start_session("stray reopen").unwrap();
+
+        let session_dir = gateway_dir.join("sessions").join("root");
+        let live = std::fs::read_to_string(session_dir.join("session_overview.md")).unwrap();
+        let state_json = std::fs::read_to_string(session_dir.join("session_report.live.json")).unwrap();
+
+        assert!(live.contains("| Status | `completed` |"));
+        assert_eq!(state_json.matches("session started").count(), 1);
+        assert!(state_json.contains("\"status\": \"completed\""));
     }
 }

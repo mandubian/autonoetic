@@ -476,6 +476,21 @@ fn expected_locked_layers(bundle: &ArtifactBundle) -> Vec<LockedLayerMount> {
     layers
 }
 
+fn comparable_locked_layers(layers: &[LockedLayerMount]) -> Vec<LockedLayerMount> {
+    let mut normalized: Vec<LockedLayerMount> = layers
+        .iter()
+        .cloned()
+        .map(|mut layer| {
+            layer.approval_scope = None;
+            layer
+        })
+        .collect();
+    normalized.sort_by(|a, b| {
+        (&a.mount_path, &a.layer_id, &a.digest).cmp(&(&b.mount_path, &b.layer_id, &b.digest))
+    });
+    normalized
+}
+
 fn parse_agent_owned_lock_sections_strict(
     lock_value: serde_yaml::Value,
 ) -> anyhow::Result<(Vec<LockedDependencySet>, Vec<LockedArtifact>)> {
@@ -552,8 +567,9 @@ fn create_revision_from_files(
 ) -> anyhow::Result<PersistedRevisionResult> {
     let expected_layers = bundle.map(expected_locked_layers).unwrap_or_default();
     let normalized_lock = normalize_runtime_lock(parsed_lock);
+    let comparable_lock_layers = comparable_locked_layers(&normalized_lock.layers);
     anyhow::ensure!(
-        normalized_lock.layers == expected_layers,
+        comparable_lock_layers == expected_layers,
         "runtime.lock layer closure does not match artifact layers: runtime.lock has {} layer(s), artifact has {} layer(s)",
         normalized_lock.layers.len(),
         expected_layers.len()
@@ -3537,6 +3553,31 @@ mod capability_lenient_deser_tests {
     fn wildcard_match_is_utf8_safe() {
         assert!(wildcard_match("pré*", "préfixe"));
         assert!(!wildcard_match("pré*", "postfixe"));
+    }
+
+    #[test]
+    fn comparable_locked_layers_ignore_approval_scope() {
+        let layers = vec![LockedLayerMount {
+            layer_id: "layer_56:0f8a7".to_string(),
+            digest: "sha256:testdigest".to_string(),
+            mount_path: "/tmp/venv".to_string(),
+            approval_scope: Some(autonoetic_types::layer::LayerApprovalScope {
+                approved_hosts: vec![],
+                built_by_agent_id: "packager.default".to_string(),
+                captured_at: "2026-05-28T11:39:52.945382597+00:00".to_string(),
+            }),
+        }];
+
+        let comparable = comparable_locked_layers(&layers);
+        assert_eq!(
+            comparable,
+            vec![LockedLayerMount {
+                layer_id: "layer_56:0f8a7".to_string(),
+                digest: "sha256:testdigest".to_string(),
+                mount_path: "/tmp/venv".to_string(),
+                approval_scope: None,
+            }]
+        );
     }
 
     #[test]

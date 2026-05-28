@@ -576,8 +576,18 @@ impl GatewayStore {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(session_id) DO UPDATE SET
                 transcript_id = excluded.transcript_id,
-                ended_at = excluded.ended_at,
-                status = excluded.status,
+                ended_at = CASE
+                    WHEN excluded.status = 'active'
+                     AND session_transcripts.status IN ('completed', 'failed', 'suspended', 'closed')
+                    THEN session_transcripts.ended_at
+                    ELSE excluded.ended_at
+                END,
+                status = CASE
+                    WHEN excluded.status = 'active'
+                     AND session_transcripts.status IN ('completed', 'failed', 'suspended', 'closed')
+                    THEN session_transcripts.status
+                    ELSE excluded.status
+                END,
                 turn_count = excluded.turn_count,
                 transcript_handle = excluded.transcript_handle,
                 excerpt = excluded.excerpt",

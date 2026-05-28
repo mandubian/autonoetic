@@ -809,6 +809,12 @@ async fn resume_answered_standalone_interactions(
                             interaction_id = %interaction_id,
                             "Standalone interaction deferred: session is now waiting for approval"
                         );
+                    } else if msg.contains("already claimed") {
+                        tracing::debug!(
+                            target: "scheduler",
+                            interaction_id = %interaction_id,
+                            "Standalone interaction resume already in progress"
+                        );
                     } else {
                         tracing::warn!(
                             target: "scheduler",
