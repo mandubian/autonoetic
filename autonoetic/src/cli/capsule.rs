@@ -29,13 +29,14 @@ pub fn parse_mode(s: &str) -> anyhow::Result<CapsuleMode> {
 }
 
 /// `autonoetic capsule export`.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_export(
     config_path: &Path,
     agent_id: &str,
     mode: &str,
     revision: Option<&str>,
-    include_memory: bool,
-    sign: bool,
+    include_memory: Option<bool>,
+    sign: Option<bool>,
     output: Option<&Path>,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -47,8 +48,12 @@ pub fn handle_export(
         agent_id: agent_id.to_string(),
         revision_id: revision.map(|s| s.to_string()),
         mode: parse_mode(mode)?,
-        include_memory: Some(include_memory),
-        sign: Some(sign),
+        // `None` lets the export pipeline defer to
+        // `config.capsule.include_memory_by_default` / `auto_sign`. The
+        // CLI only forces a value when the operator explicitly passes
+        // `--include-memory` / `--sign` (or `=false`).
+        include_memory,
+        sign,
         output_path: output.map(|p| p.to_path_buf()),
     };
     let outcome = capsule::export(
@@ -175,6 +180,17 @@ pub fn handle_verify(config_path: &Path, archive: &Path, json: bool) -> anyhow::
                 println!("    - {}", r);
             }
         }
+    }
+    // Exit non-zero on any failed-trust outcome. A signed but
+    // tampered/unverifiable capsule must not fool scripts that drive
+    // verification from CI.
+    if matches!(
+        status,
+        capsule::verify::SignatureStatus::Mismatch
+            | capsule::verify::SignatureStatus::UntrustedSigner
+            | capsule::verify::SignatureStatus::Malformed
+    ) {
+        anyhow::bail!("capsule verification failed: {:?}", status);
     }
     Ok(())
 }

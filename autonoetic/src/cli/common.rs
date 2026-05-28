@@ -197,12 +197,16 @@ pub enum CapsuleCommands {
         /// Pin a specific revision (defaults to the current alias target).
         #[arg(long)]
         revision: Option<String>,
-        /// Include a redacted memory snapshot.
-        #[arg(long)]
-        include_memory: bool,
-        /// Sign with the gateway key (overrides config.capsule.auto_sign).
-        #[arg(long)]
-        sign: bool,
+        /// Include a redacted memory snapshot. When omitted, the
+        /// gateway falls back to `config.capsule.include_memory_by_default`.
+        /// Use `--include-memory=false` to force it off regardless of config.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        include_memory: Option<bool>,
+        /// Sign with the gateway key. When omitted, the gateway falls
+        /// back to `config.capsule.auto_sign`. Use `--sign=false` to
+        /// force unsigned regardless of config.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        sign: Option<bool>,
         /// Output archive path (default: <agent_id>.capsule.tar.zst).
         #[arg(long)]
         output: Option<std::path::PathBuf>,
@@ -223,9 +227,8 @@ pub enum CapsuleCommands {
         /// Validate only; do not persist any revision or memory.
         #[arg(long)]
         dry_run: bool,
-        /// Override trust domain stamped on the imported revision
-        /// (local | partner | foreign).
-        #[arg(long)]
+        /// Override trust domain stamped on the imported revision.
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["local", "partner", "foreign"]))]
         trust_domain: Option<String>,
         /// Emit machine-readable JSON output.
         #[arg(long)]

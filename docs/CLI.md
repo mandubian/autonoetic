@@ -511,8 +511,10 @@ Package an agent revision into a `.capsule.tar.zst` archive.
 autonoetic capsule export <agent_id> \
   [--mode thin|hermetic|replay|headless]   # default: thin
   [--revision <rev_id>]                    # default: current alias target
-  [--include-memory]                       # include redacted memory snapshot
-  [--sign]                                 # sign with the gateway key
+  [--include-memory[=true|false]]          # include redacted memory snapshot;
+                                           # omit to defer to config.capsule.include_memory_by_default
+  [--sign[=true|false]]                    # sign with the gateway key;
+                                           # omit to defer to config.capsule.auto_sign
   [--output <path>]                        # default: <agent_id>.capsule.tar.zst
   [--json]
 ```
@@ -526,13 +528,13 @@ autonoetic capsule import <path> \
   [--verify-signature]                     # require + verify a trusted signature
   [--activate]                             # bind the alias to the imported revision
   [--dry-run]                              # validate only
-  [--trust-domain local|partner|foreign]
+  [--trust-domain local|partner|foreign]   # constrained set; clap rejects other values
   [--json]
 ```
 
 ### `autonoetic capsule verify`
 
-Validate the manifest schema, the canonical digest, and the signature (when present) against the configured `capsule.trusted_signers`.
+Validate the manifest schema, the canonical digest, and the signature (when present) against the configured `capsule.trusted_signers`. Exits **non-zero** when the signature is `Mismatch`, `UntrustedSigner`, or `Malformed`. Unsigned capsules (`Absent`) pass.
 
 ```bash
 autonoetic capsule verify <path> [--json]

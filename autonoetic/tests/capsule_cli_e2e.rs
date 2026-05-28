@@ -95,7 +95,9 @@ fn cli_export_inspect_verify_dryrun_import_roundtrip() {
 
     let archive = tmp.join("demo.capsule.tar.zst");
 
-    // Export.
+    // Export — unsigned so verify on a fresh gateway (no
+    // `trusted_signers` configured) returns `Absent` and exits 0.
+    // Signed-capsule verification is covered separately below.
     let out = run_cli(
         config_path.to_str().unwrap(),
         &[
@@ -104,7 +106,7 @@ fn cli_export_inspect_verify_dryrun_import_roundtrip() {
             "demo.agent",
             "--mode",
             "thin",
-            "--sign",
+            "--sign=false",
             "--output",
             archive.to_str().unwrap(),
         ],
@@ -128,7 +130,7 @@ fn cli_export_inspect_verify_dryrun_import_roundtrip() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("demo.agent"), "{}", stdout);
 
-    // Verify (no signature requirement; should still succeed with Absent/Verified).
+    // Verify on an unsigned capsule: returns `Absent`, exits 0.
     let out = run_cli(
         config_path.to_str().unwrap(),
         &["capsule", "verify", archive.to_str().unwrap()],
@@ -160,6 +162,61 @@ fn cli_export_inspect_verify_dryrun_import_roundtrip() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("dry-run"), "{}", stdout);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+#[test]
+fn cli_verify_exits_nonzero_for_untrusted_signed_capsule() {
+    // Export a signed capsule on one gateway, then run `verify`
+    // against a different gateway whose `trusted_signers` is empty.
+    // The signer is unknown to the receiver and the CLI must exit
+    // non-zero so CI/scripts treat verification as failed.
+    let tmp = tmp_dir();
+    let agents_dir = tmp.join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let config_path = tmp.join("config.yaml");
+    let yaml = format!("agents_dir: \"{}\"\n", agents_dir.display());
+    std::fs::write(&config_path, yaml).unwrap();
+    seed_revision(&gateway_dir, "demo.agent", "rev_sha256:cap-cli-verify-002");
+    let archive = tmp.join("demo.signed.capsule.tar.zst");
+
+    let out = run_cli(
+        config_path.to_str().unwrap(),
+        &[
+            "capsule",
+            "export",
+            "demo.agent",
+            "--mode",
+            "thin",
+            "--sign",
+            "--output",
+            archive.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "export failed");
+
+    // Fresh receiver — no trusted_signers configured.
+    let other = tmp_dir();
+    let other_agents = other.join("agents");
+    let other_gateway = other_agents.join(".gateway");
+    std::fs::create_dir_all(&other_gateway).unwrap();
+    let other_cfg = other.join("config.yaml");
+    let yaml = format!("agents_dir: \"{}\"\n", other_agents.display());
+    std::fs::write(&other_cfg, yaml).unwrap();
+
+    let out = run_cli(
+        other_cfg.to_str().unwrap(),
+        &["capsule", "verify", archive.to_str().unwrap()],
+    );
+    assert!(
+        !out.status.success(),
+        "verify should exit non-zero on UntrustedSigner: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::remove_dir_all(&other);
