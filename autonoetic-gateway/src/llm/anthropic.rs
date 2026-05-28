@@ -127,7 +127,21 @@ impl LlmDriver for AnthropicDriver {
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
-            let response = builder.send().await?;
+            let response = match builder.send().await {
+                Ok(r) => r,
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
+                    tracing::warn!(
+                        attempt,
+                        wait_ms,
+                        error = %e,
+                        "Anthropic connection error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             let status = response.status().as_u16();
 
             if status == 429 || status == 529 {
@@ -175,7 +189,21 @@ impl LlmDriver for AnthropicDriver {
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
-            let response = builder.send().await?;
+            let response = match builder.send().await {
+                Ok(r) => r,
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
+                    tracing::warn!(
+                        attempt,
+                        wait_ms,
+                        error = %e,
+                        "Anthropic stream connection error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             let status = response.status().as_u16();
 
             if status == 429 || status == 529 {
@@ -319,7 +347,7 @@ impl LlmDriver for AnthropicDriver {
             let _ = tx.send(StreamEvent::Complete { stop_reason, usage }).await;
             return Ok(resp);
         }
-        anyhow::bail!("Max retries exceeded");
+        anyhow::bail!("Max connection retries exceeded");
     }
 }
 

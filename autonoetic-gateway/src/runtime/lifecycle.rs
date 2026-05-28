@@ -297,7 +297,7 @@ impl AgentExecutor {
             session_started_at: None,
             compression_metadata: Default::default(),
             capsule_state: None,
-            http_client: reqwest::Client::new(),
+            http_client: crate::llm::build_llm_client(),
             user_id: None,
             artifact_id: None,
             ri_0_6_previous_snapshot: None,
@@ -1452,7 +1452,10 @@ impl AgentExecutor {
                 let effective_limit = budget_breakdown
                     .context_window
                     .map(|w| w.saturating_sub(margin))
-                    .unwrap_or(budget_breakdown.total_tokens + 1);
+                    .unwrap_or_else(|| {
+                        let default_window: usize = 32_768;
+                        default_window.saturating_sub(margin)
+                    });
                 let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
                 let mut ctx = crate::runtime::context_governor::strategies::GovernorContext::new(
                     history.clone(),

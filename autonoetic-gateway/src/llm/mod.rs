@@ -16,6 +16,54 @@ pub mod gemini;
 pub mod openai;
 pub mod provider;
 
+/// Build a `reqwest::Client` tuned for LLM API calls.
+///
+/// - `connect_timeout`: 15 s — fail fast on unreachable endpoints instead of
+///   waiting for the OS TCP timeout (~2 min on Linux).
+/// - `pool_idle_timeout`: 30 s — evict stale connections before the server does,
+///   avoiding "connection reset" errors on reused pooled connections.
+/// - `pool_max_idle_per_host`: 4 — cap idle connection accumulation when many
+///   concurrent sessions share the same client.
+/// - `tcp_keepalive`: 30 s — detect dead TCP connections proactively.
+/// - **No global request timeout** — LLM streams can run for minutes; a blanket
+///   `timeout()` would kill legitimate long-running responses.
+pub fn build_llm_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Whether a reqwest error is transient and worth retrying.
+///
+/// Catches: connection refused, connection reset, connection aborted,
+/// timed out (connect or request), name resolution failures, and the
+/// generic "error sending request for url" wrapper.
+pub fn is_transient_connection_error(err: &reqwest::Error) -> bool {
+    if err.is_connect()
+        || err.is_timeout()
+        || err.is_request()
+    {
+        return true;
+    }
+    let msg = err.to_string().to_lowercase();
+    msg.contains("connection refused")
+        || msg.contains("connection reset")
+        || msg.contains("connection aborted")
+        || msg.contains("broken pipe")
+        || msg.contains("timed out")
+        || msg.contains("error sending request")
+}
+
+pub const MAX_CONNECTION_RETRIES: u32 = 3;
+
+pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {
+    (attempt as u64) * 1000
+}
+
 /// Check whether a non-success status / body indicates a context-overflow error
 /// for any of the supported providers.  Returns `true` when the governor should
 /// trigger reduction strategies rather than propagate a fatal error.

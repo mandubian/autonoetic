@@ -242,7 +242,21 @@ impl LlmDriver for OpenAiDriver {
                     .json(&body),
             );
 
-            let response = builder.send().await?;
+            let response = match builder.send().await {
+                Ok(r) => r,
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
+                    tracing::warn!(
+                        attempt,
+                        wait_ms,
+                        error = %e,
+                        "LLM connection error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             let status = response.status();
 
             if status.as_u16() == 429 || status.as_u16() == 529 {
@@ -295,147 +309,166 @@ impl LlmDriver for OpenAiDriver {
         }
 
         let body = self.build_body(req, true);
-        let builder = self.apply_auth(
-            self.client
-                .post(&self.provider.base_url)
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .json(&body),
-        );
 
-        let response = builder.send().await?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenAI stream error {}: {}", status, text);
-        }
+        const MAX_RETRIES: u32 = 3;
+        for attempt in 0..=MAX_RETRIES {
+            let builder = self.apply_auth(
+                self.client
+                    .post(&self.provider.base_url)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .json(&body),
+            );
 
-        let mut text_accum = String::new();
-        let mut reasoning_accum = String::new();
-        let mut reasoning_details_accum: Vec<serde_json::Value> = Vec::new();
-        let mut tool_calls_accum: Vec<ToolCall> = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = TokenUsage::default();
-        let mut buffer = String::new();
-        let mut byte_stream = response.bytes_stream();
-
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_text = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
-
-                let data = event_text
-                    .lines()
-                    .find_map(|l| l.strip_prefix("data: "))
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-
-                if data.is_empty() || data == "[DONE]" {
+            let response = match builder.send().await {
+                Ok(r) => r,
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
+                    tracing::warn!(
+                        attempt,
+                        wait_ms,
+                        error = %e,
+                        "LLM stream connection error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
+                Err(e) => return Err(e.into()),
+            };
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!("OpenAI stream error {}: {}", status, text);
+            }
 
-                let Ok(j) = serde_json::from_str::<serde_json::Value>(&data) else {
-                    continue;
-                };
-                let delta = &j["choices"][0]["delta"];
+            let mut text_accum = String::new();
+            let mut reasoning_accum = String::new();
+            let mut reasoning_details_accum: Vec<serde_json::Value> = Vec::new();
+            let mut tool_calls_accum: Vec<ToolCall> = Vec::new();
+            let mut stop_reason = StopReason::EndTurn;
+            let mut usage = TokenUsage::default();
+            let mut buffer = String::new();
+            let mut byte_stream = response.bytes_stream();
 
-                if let Some(text) = delta["content"].as_str() {
-                    if !text.is_empty() {
-                        text_accum.push_str(text);
-                        let _ = tx.send(StreamEvent::TextDelta(text.to_string())).await;
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = chunk?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(pos) = buffer.find("\n\n") {
+                    let event_text = buffer[..pos].to_string();
+                    buffer = buffer[pos + 2..].to_string();
+
+                    let data = event_text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("data: "))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
                     }
-                }
 
-                // Reasoning text streams under `reasoning_content` (DeepSeek-
-                // direct / OpenAI-compatible) or `reasoning` (OpenRouter).
-                if let Some(reasoning) = delta["reasoning_content"].as_str() {
-                    if !reasoning.is_empty() {
-                        reasoning_accum.push_str(reasoning);
-                    }
-                }
-                if let Some(reasoning) = delta["reasoning"].as_str() {
-                    if !reasoning.is_empty() {
-                        reasoning_accum.push_str(reasoning);
-                    }
-                }
-                // OpenRouter streams structured reasoning blocks incrementally.
-                if let Some(details) = delta["reasoning_details"].as_array() {
-                    reasoning_details_accum.extend(details.iter().cloned());
-                }
+                    let Ok(j) = serde_json::from_str::<serde_json::Value>(&data) else {
+                        continue;
+                    };
+                    let delta = &j["choices"][0]["delta"];
 
-                if self.provider.capabilities.supports_tool_stream_deltas {
-                    if let Some(tcs) = delta["tool_calls"].as_array() {
-                        for tc_delta in tcs {
-                            let idx = tc_delta["index"].as_u64().unwrap_or(0) as usize;
-                            while tool_calls_accum.len() <= idx {
-                                tool_calls_accum.push(ToolCall {
-                                    id: String::new(),
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                });
-                            }
-                            if let Some(id) = tc_delta["id"].as_str() {
-                                tool_calls_accum[idx].id = id.to_string();
-                            }
-                            if let Some(name) = tc_delta["function"]["name"].as_str() {
-                                tool_calls_accum[idx].name = name.to_string();
-                            }
-                            if let Some(args) = tc_delta["function"]["arguments"].as_str() {
-                                tool_calls_accum[idx].arguments.push_str(args);
+                    if let Some(text) = delta["content"].as_str() {
+                        if !text.is_empty() {
+                            text_accum.push_str(text);
+                            let _ = tx.send(StreamEvent::TextDelta(text.to_string())).await;
+                        }
+                    }
+
+                    // Reasoning text streams under `reasoning_content` (DeepSeek-
+                    // direct / OpenAI-compatible) or `reasoning` (OpenRouter).
+                    if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                        if !reasoning.is_empty() {
+                            reasoning_accum.push_str(reasoning);
+                        }
+                    }
+                    if let Some(reasoning) = delta["reasoning"].as_str() {
+                        if !reasoning.is_empty() {
+                            reasoning_accum.push_str(reasoning);
+                        }
+                    }
+                    // OpenRouter streams structured reasoning blocks incrementally.
+                    if let Some(details) = delta["reasoning_details"].as_array() {
+                        reasoning_details_accum.extend(details.iter().cloned());
+                    }
+
+                    if self.provider.capabilities.supports_tool_stream_deltas {
+                        if let Some(tcs) = delta["tool_calls"].as_array() {
+                            for tc_delta in tcs {
+                                let idx = tc_delta["index"].as_u64().unwrap_or(0) as usize;
+                                while tool_calls_accum.len() <= idx {
+                                    tool_calls_accum.push(ToolCall {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        arguments: String::new(),
+                                    });
+                                }
+                                if let Some(id) = tc_delta["id"].as_str() {
+                                    tool_calls_accum[idx].id = id.to_string();
+                                }
+                                if let Some(name) = tc_delta["function"]["name"].as_str() {
+                                    tool_calls_accum[idx].name = name.to_string();
+                                }
+                                if let Some(args) = tc_delta["function"]["arguments"].as_str() {
+                                    tool_calls_accum[idx].arguments.push_str(args);
+                                }
                             }
                         }
                     }
-                }
 
-                if let Some(reason) = j["choices"][0]["finish_reason"].as_str() {
-                    stop_reason = parse_stop_reason(reason);
-                }
+                    if let Some(reason) = j["choices"][0]["finish_reason"].as_str() {
+                        stop_reason = parse_stop_reason(reason);
+                    }
 
-                // Usage typically arrives on the final chunk (requires
-                // `stream_options.include_usage`; harmless when absent).
-                if j["usage"].is_object() {
-                    usage = parse_usage(&j["usage"]);
+                    // Usage typically arrives on the final chunk (requires
+                    // `stream_options.include_usage`; harmless when absent).
+                    if j["usage"].is_object() {
+                        usage = parse_usage(&j["usage"]);
+                    }
                 }
             }
-        }
 
-        for tc in &tool_calls_accum {
+            for tc in &tool_calls_accum {
+                let _ = tx
+                    .send(StreamEvent::ToolUseEnd {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    })
+                    .await;
+            }
+
+            let resp = CompletionResponse {
+                text: text_accum,
+                tool_calls: tool_calls_accum,
+                reasoning_content: if reasoning_accum.is_empty() {
+                    None
+                } else {
+                    Some(reasoning_accum)
+                },
+                reasoning_details: if reasoning_details_accum.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Array(reasoning_details_accum))
+                },
+                stop_reason: stop_reason.clone(),
+                usage,
+            };
             let _ = tx
-                .send(StreamEvent::ToolUseEnd {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
+                .send(StreamEvent::Complete {
+                    stop_reason,
+                    usage: resp.usage.clone(),
                 })
                 .await;
+            return Ok(resp);
         }
-
-        let resp = CompletionResponse {
-            text: text_accum,
-            tool_calls: tool_calls_accum,
-            reasoning_content: if reasoning_accum.is_empty() {
-                None
-            } else {
-                Some(reasoning_accum)
-            },
-            reasoning_details: if reasoning_details_accum.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::Array(reasoning_details_accum))
-            },
-            stop_reason: stop_reason.clone(),
-            usage,
-        };
-        let _ = tx
-            .send(StreamEvent::Complete {
-                stop_reason,
-                usage: resp.usage.clone(),
-            })
-            .await;
-        Ok(resp)
+        anyhow::bail!("Max connection retries exceeded");
     }
 }
 

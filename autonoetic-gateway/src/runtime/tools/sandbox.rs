@@ -2531,12 +2531,6 @@ impl NativeTool for SandboxExecTool {
         if let Some(ref capture_paths) = args.capture_paths {
             if !capture_paths.is_empty() {
                 if let Some(gw_dir) = gateway_dir {
-                    // Build the approval scope to record in each captured layer.
-                    // `approved_hosts` is populated from the static analysis of the build command.
-                    // Because `share_net` was true, the operator explicitly approved network
-                    // access to these hosts for this session — detected patterns == build-time
-                    // approved hosts. Future sessions mounting this layer will need the same
-                    // approval. Layers built without network access get None (no scope gate).
                     let capture_approval_scope: Option<LayerApprovalScope> = if overrides.share_net
                     {
                         let detected = normalize_targets(&remote_analysis.detected_patterns);
@@ -2551,69 +2545,62 @@ impl NativeTool for SandboxExecTool {
 
                     match crate::layer_store::LayerStore::new(gw_dir, Default::default()) {
                         Ok(layer_store) => {
-                            let mut captured_layers = Vec::new();
-                            for cap in capture_paths {
-                                let sandbox_prefix = "/tmp";
-                                let host_path = if cap.path.starts_with(sandbox_prefix) {
-                                    agent_dir.join(
-                                        cap.path
-                                            .trim_start_matches(sandbox_prefix)
-                                            .trim_start_matches('/'),
-                                    )
-                                } else {
-                                    agent_dir.join(cap.path.trim_start_matches('/'))
-                                };
-
-                                if host_path.exists() {
-                                    match layer_store.create_from_dir(
-                                        &host_path,
-                                        &cap.path,
-                                        &cap.mount_as,
-                                        capture_approval_scope.clone(),
-                                    ) {
-                                        Ok(layer) => {
-                                            tracing::info!(
-                                                target: "sandbox",
-                                                path = %cap.path,
-                                                mount_as = %cap.mount_as,
-                                                layer_id = %layer.layer_id,
-                                                has_scope = layer.approval_scope.is_some(),
-                                                "Captured sandbox path as layer"
-                                            );
-                                            captured_layers.push(serde_json::json!({
-                                                "path": cap.path,
-                                                "mount_as": cap.mount_as,
-                                                "layer_id": layer.layer_id,
-                                                "digest": layer.digest,
-                                                "file_count": layer.file_count,
-                                                "size_bytes": layer.size_bytes,
-                                                "approval_scope": layer.approval_scope,
-                                            }));
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                target: "sandbox",
-                                                path = %cap.path,
-                                                error = %e,
-                                                "Failed to capture sandbox path as layer"
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    tracing::warn!(
-                                        target: "sandbox",
-                                        path = %cap.path,
-                                        host_path = %host_path.display(),
-                                        "Capture path does not exist in sandbox workspace"
-                                    );
-                                }
-                            }
-                            if !captured_layers.is_empty() {
-                                body["captured_layers"] = serde_json::Value::Array(captured_layers);
+                            let captured = capture_layers_from_paths(
+                                &layer_store,
+                                capture_paths,
+                                agent_dir,
+                                capture_approval_scope.as_ref(),
+                            );
+                            if !captured.is_empty() {
+                                body["captured_layers"] = serde_json::Value::Array(captured);
                             }
                         }
                         Err(e) => {
                             tracing::warn!(target: "sandbox", error = %e, "Failed to create layer store for capture");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Auto-capture: if the agent ran a package install command without
+        // capture_paths, infer the target directory and capture it anyway.
+        if args.capture_paths.as_ref().map_or(true, |p| p.is_empty()) {
+            if let Some(inferred) = infer_capture_paths_from_command(&args.command) {
+                if let Some(gw_dir) = gateway_dir {
+                    let capture_approval_scope: Option<LayerApprovalScope> = if overrides.share_net
+                    {
+                        let detected = normalize_targets(&remote_analysis.detected_patterns);
+                        Some(LayerApprovalScope {
+                            approved_hosts: detected,
+                            built_by_agent_id: manifest.agent.id.clone(),
+                            captured_at: chrono::Utc::now().to_rfc3339(),
+                        })
+                    } else {
+                        None
+                    };
+
+                    match crate::layer_store::LayerStore::new(gw_dir, Default::default()) {
+                        Ok(layer_store) => {
+                            let captured = capture_layers_from_paths(
+                                &layer_store,
+                                &inferred,
+                                agent_dir,
+                                capture_approval_scope.as_ref(),
+                            );
+                            if !captured.is_empty() {
+                                tracing::info!(
+                                    target: "sandbox",
+                                    command = %args.command,
+                                    inferred_count = inferred.len(),
+                                    "Auto-captured dependency layer(s) from install command"
+                                );
+                                body["captured_layers"] = serde_json::Value::Array(captured);
+                                body["auto_captured"] = serde_json::json!(true);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(target: "sandbox", error = %e, "Failed to create layer store for auto-capture");
                         }
                     }
                 }
@@ -2993,4 +2980,224 @@ mod approval_message_tests {
         assert!(reason.contains("Static analysis cues:"));
         assert!(reason.contains("[line 67] [import] `import requests`"));
     }
+}
+
+/// Execute layer capture for a list of paths. Returns JSON objects for
+/// `captured_layers`.
+fn capture_layers_from_paths(
+    layer_store: &crate::layer_store::LayerStore,
+    capture_paths: &[crate::runtime::tools::CapturePath],
+    agent_dir: &Path,
+    approval_scope: Option<&LayerApprovalScope>,
+) -> Vec<serde_json::Value> {
+    let mut captured = Vec::new();
+    for cap in capture_paths {
+        let sandbox_prefix = "/tmp";
+        let host_path = if cap.path.starts_with(sandbox_prefix) {
+            agent_dir.join(
+                cap.path
+                    .trim_start_matches(sandbox_prefix)
+                    .trim_start_matches('/'),
+            )
+        } else {
+            agent_dir.join(cap.path.trim_start_matches('/'))
+        };
+
+        if !host_path.exists() {
+            tracing::warn!(
+                target: "sandbox",
+                path = %cap.path,
+                host_path = %host_path.display(),
+                "Capture path does not exist in sandbox workspace"
+            );
+            continue;
+        }
+
+        match layer_store.create_from_dir(
+            &host_path,
+            &cap.path,
+            &cap.mount_as,
+            approval_scope.cloned(),
+        ) {
+            Ok(layer) => {
+                tracing::info!(
+                    target: "sandbox",
+                    path = %cap.path,
+                    mount_as = %cap.mount_as,
+                    layer_id = %layer.layer_id,
+                    has_scope = layer.approval_scope.is_some(),
+                    "Captured sandbox path as layer"
+                );
+                captured.push(serde_json::json!({
+                    "path": cap.path,
+                    "mount_as": cap.mount_as,
+                    "layer_id": layer.layer_id,
+                    "digest": layer.digest,
+                    "file_count": layer.file_count,
+                    "size_bytes": layer.size_bytes,
+                    "approval_scope": layer.approval_scope,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "sandbox",
+                    path = %cap.path,
+                    error = %e,
+                    "Failed to capture sandbox path as layer"
+                );
+            }
+        }
+    }
+    captured
+}
+
+/// Detect package install commands that deposit files into a known directory
+/// but were called without explicit `capture_paths`. Returns inferred
+/// `CapturePath` entries for each detected target directory.
+fn infer_capture_paths_from_command(
+    command: &str,
+) -> Option<Vec<crate::runtime::tools::CapturePath>> {
+    let cmd = command.trim();
+    let lower = cmd.to_ascii_lowercase();
+
+    // pip/pip3 install ... --target <dir>
+    if lower.starts_with("pip ") || lower.starts_with("pip3 ") {
+        if lower.contains(" install ") {
+            if let Some(target) = extract_flag_value(cmd, "--target") {
+                return Some(vec![crate::runtime::tools::CapturePath {
+                    path: target.clone(),
+                    mount_as: target,
+                }]);
+            }
+        }
+    }
+
+    // python3 -m pip install ... --target <dir>
+    if lower.starts_with("python3 -m pip ") || lower.starts_with("python -m pip ") {
+        if lower.contains(" install ") {
+            if let Some(target) = extract_flag_value(cmd, "--target") {
+                return Some(vec![crate::runtime::tools::CapturePath {
+                    path: target.clone(),
+                    mount_as: target,
+                }]);
+            }
+        }
+    }
+
+    // npm install [--prefix <dir>]
+    if lower.starts_with("npm install") || lower.starts_with("npm i ") {
+        let prefix_dir = extract_flag_value(cmd, "--prefix");
+        let node_modules_path = prefix_dir
+            .map(|p| format!("{}/node_modules", p.trim_end_matches('/')))
+            .unwrap_or_else(|| "/tmp/node_modules".to_string());
+        return Some(vec![crate::runtime::tools::CapturePath {
+            path: node_modules_path.clone(),
+            mount_as: node_modules_path,
+        }]);
+    }
+
+    // yarn install / yarn add [--cwd <dir>]
+    if lower.starts_with("yarn install") || lower.starts_with("yarn add ") {
+        let cwd_dir = extract_flag_value(cmd, "--cwd");
+        let node_modules_path = cwd_dir
+            .map(|p| format!("{}/node_modules", p.trim_end_matches('/')))
+            .unwrap_or_else(|| "/tmp/node_modules".to_string());
+        return Some(vec![crate::runtime::tools::CapturePath {
+            path: node_modules_path.clone(),
+            mount_as: node_modules_path,
+        }]);
+    }
+
+    // pnpm install [--dir <dir>]
+    if lower.starts_with("pnpm install") {
+        let dir = extract_flag_value(cmd, "--dir");
+        let node_modules_path = dir
+            .map(|p| format!("{}/node_modules", p.trim_end_matches('/')))
+            .unwrap_or_else(|| "/tmp/node_modules".to_string());
+        return Some(vec![crate::runtime::tools::CapturePath {
+            path: node_modules_path.clone(),
+            mount_as: node_modules_path,
+        }]);
+    }
+
+    // go mod download [-modcacherw]
+    if lower.starts_with("go mod download") {
+        let gopath = std::env::var("GOPATH").unwrap_or_else(|_| "/tmp/go".to_string());
+        let go_cache = format!("{}/pkg/mod", gopath);
+        return Some(vec![crate::runtime::tools::CapturePath {
+            path: go_cache.clone(),
+            mount_as: go_cache,
+        }]);
+    }
+
+    // cargo fetch / cargo build (captures registry + target)
+    if lower.starts_with("cargo fetch") || lower.starts_with("cargo build") {
+        let cargo_home = std::env::var("CARGO_HOME")
+            .unwrap_or_else(|_| "/tmp/cargo_registry".to_string());
+        return Some(vec![crate::runtime::tools::CapturePath {
+            path: cargo_home.clone(),
+            mount_as: cargo_home,
+        }]);
+    }
+
+    None
+}
+
+/// Extract the value of a `--flag <value>` or `--flag=<value>` from a command
+/// string. Handles both space-separated and `=`-joined forms. Does minimal
+/// shell-aware splitting (respects double-quoted segments).
+fn extract_flag_value(command: &str, flag: &str) -> Option<String> {
+    let tokens = shlex_split(command)?;
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(value) = token.strip_prefix(&format!("{}=", flag)) {
+            let v = value.trim_matches('"').trim_matches('\'').to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+        if token == flag && i + 1 < tokens.len() {
+            let value = tokens[i + 1].trim_matches('"').trim_matches('\'').to_string();
+            if !value.is_empty() && !value.starts_with('-') {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Minimal shell-like token splitter that handles double-quoted and
+/// single-quoted segments. Returns `None` on pathological input.
+fn shlex_split(s: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if !in_single => {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            ' ' | '\t' if !in_double && !in_single => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
 }

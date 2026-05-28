@@ -541,7 +541,7 @@ impl GatewayExecutionService {
             agent_admission: Arc::new(Mutex::new(HashMap::new())),
             agent_execution_locks: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
-            http_client: reqwest::Client::new(),
+            http_client: crate::llm::build_llm_client(),
             session_budget,
             root_session_budget,
             gateway_store,
@@ -2483,15 +2483,16 @@ impl GatewayExecutionService {
             }
             let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
             if !is_suspended {
-                if let Err(e) = crate::runtime::checkpoint::cleanup_session_checkpoints(
+                if let Err(e) = crate::runtime::checkpoint::prune_checkpoints(
                     self.config.as_ref(),
                     &resolved_session_id,
+                    2,
                 ) {
                     tracing::debug!(
                         target: "checkpoint",
                         session_id = %resolved_session_id,
                         error = %e,
-                        "Failed to clean up session checkpoints after completion"
+                        "Failed to prune session checkpoints after completion"
                     );
                 }
             }
