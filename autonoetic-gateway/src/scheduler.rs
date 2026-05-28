@@ -30,6 +30,7 @@ pub mod runner;
 pub mod signal;
 pub mod store;
 pub mod system_agents;
+pub mod task_notify;
 pub mod auto_learning_jobs;
 pub mod overflow_classifier;
 pub mod single_flight;
