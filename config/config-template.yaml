@@ -329,7 +329,7 @@ retention:
 max_session_turns: 12
 
 # ── Loop Guard ───────────────────────────────────────────────────────
-# Per-session circuit breaker for stuck agents. Four independent trip conditions:
+# Per-session circuit breaker for stuck agents. Independent trip conditions:
 #   max_loops_without_progress: consecutive LLM rounds without meaningful progress.
 #     Progress = a successful tool call whose (tool_name, normalized_arguments)
 #     fingerprint is new since the previous call (or repeats up to
@@ -339,11 +339,20 @@ max_session_turns: 12
 #   max_tool_failures: total failures for a single tool name (regardless of arguments/hosts)
 #   max_consecutive_same_progress: after N identical tool+args calls, stop counting as progress
 #   max_child_failures: total child-agent spawn failures before suspension
+#   rotation_window_size / rotation_distinct_floor: rotating-polling detector
+#     (issue #287). Trips when the last `rotation_window_size` successful tool
+#     calls contain only `rotation_distinct_floor` or fewer distinct
+#     (tool, args) fingerprints — catches agents cycling through a small set of
+#     read-only tools (workflow.wait → workflow.state → content.read → ...) that
+#     defeats `max_loops_without_progress` because each call has a fresh
+#     fingerprint. Set `rotation_window_size: 0` to disable.
 #loop_guard:
 #  max_loops_without_progress: 5
 #  max_tool_failures: 5
 #  max_consecutive_same_progress: 1
 #  max_child_failures: 3
+#  rotation_window_size: 16
+#  rotation_distinct_floor: 6
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
