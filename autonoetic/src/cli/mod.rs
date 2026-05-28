@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod capsule;
 pub mod chat;
 pub mod common;
 pub mod eval;

@@ -497,6 +497,57 @@ autonoetic trace history <session_id> [--json]
 
 ---
 
+## Capsule Commands
+
+Export, import, verify, and inspect Cognitive Capsules — portable, signed, revision-pinned agent snapshots. See [`docs/design/cognitive-capsule-standardization.md`](design/cognitive-capsule-standardization.md).
+
+Agent-initiated callers can use the equivalent `capsule.export` / `capsule.import` tools, gated by the `CapsuleExport` capability.
+
+### `autonoetic capsule export`
+
+Package an agent revision into a `.capsule.tar.zst` archive.
+
+```bash
+autonoetic capsule export <agent_id> \
+  [--mode thin|hermetic|replay|headless]   # default: thin
+  [--revision <rev_id>]                    # default: current alias target
+  [--include-memory]                       # include redacted memory snapshot
+  [--sign]                                 # sign with the gateway key
+  [--output <path>]                        # default: <agent_id>.capsule.tar.zst
+  [--json]
+```
+
+### `autonoetic capsule import`
+
+Import a capsule onto this gateway. Use `--dry-run` to validate without persisting.
+
+```bash
+autonoetic capsule import <path> \
+  [--verify-signature]                     # require + verify a trusted signature
+  [--activate]                             # bind the alias to the imported revision
+  [--dry-run]                              # validate only
+  [--trust-domain local|partner|foreign]
+  [--json]
+```
+
+### `autonoetic capsule verify`
+
+Validate the manifest schema, the canonical digest, and the signature (when present) against the configured `capsule.trusted_signers`.
+
+```bash
+autonoetic capsule verify <path> [--json]
+```
+
+### `autonoetic capsule inspect`
+
+Print a summary of the `capsule.json` manifest — IDs, mode, included content, signature, provenance.
+
+```bash
+autonoetic capsule inspect <path> [--json]
+```
+
+---
+
 ## Skill Commands
 
 ### `autonoetic skill install`
