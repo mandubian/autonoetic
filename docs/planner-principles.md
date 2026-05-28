@@ -42,6 +42,12 @@ If B uses A's output, they cannot be parallelized. Only tasks with no data depen
 
 Never type artifact refs from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. Run `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child. Wrong artifact refs create avoidable retry loops.
 
+### 7. Coordinate by yielding, not polling
+
+After spawning async children, **end your turn**. Do not call `workflow_wait` to block, and never loop on it to discover progress. The gateway suspends the parent as `WaitingForChild` and wakes it automatically when a child reaches a terminal state or hits a gate — this is a constitutional right (Ri-0.14), not a courtesy: *"Parents are not required to poll to discover child state transitions."* On wake, the child's typed state is already in the parent's turn-start context.
+
+`workflow_wait` is an inspection/recovery primitive, not the coordination mechanism: a `timeout_secs=0` probe for a one-shot snapshot, or an active wait when recovering a task already suspected stuck. Polling for child state pushes a mechanical lifecycle concern the gateway already owns into prompt logic, where it is fragile and token-expensive — an 880-turn agent-creation session traced largely to `workflow_wait`/`workflow_state` polling loops motivated this principle. (This composes with Principle 4: `workflow_state` is still the one call you make *on resume* to read `reuse_guards` — once per wake, never in a loop.)
+
 ---
 
 ## What Was Removed (and Where It Went)

@@ -101,6 +101,21 @@ When calling `agent_spawn`, include structured metadata:
 }
 ```
 
+### Coordinating With Children: Yield, Don't Poll
+
+After spawning async children (`agent_spawn` with `async=true`), the parent should **end its turn** rather than block on `workflow_wait`. The gateway suspends the parent as `WaitingForChild` and resumes it automatically with the child's typed state injected as turn-start context the moment a child reaches a terminal state or resolves a gate. This is constitutional right **Ri-0.14** — *"Parents are not required to poll to discover child state transitions"* — and is the canonical orchestration pattern.
+
+`workflow_wait` is an **inspection / recovery** primitive, not the coordination mechanism:
+
+| Use | Call |
+|---|---|
+| Normal coordination (wait for children) | **Don't call it.** Spawn async, end turn, get woken (Ri-0.14). |
+| One-shot status snapshot mid-turn | `workflow_wait(timeout_secs=0)` — returns immediately, does not block |
+| Actively recover a task you suspect is stuck | `workflow_wait(task_ids=[...])` |
+| Read mechanical reuse guards on resume | `workflow_state` — once per wake, never in a loop |
+
+Looping on `workflow_wait` / `workflow_state` to discover progress burns turns and tokens; it traced as the dominant cost in an observed 880-turn agent-creation session.
+
 ---
 
 ## SKILL.md Format
