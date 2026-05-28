@@ -1732,6 +1732,14 @@ impl GatewayExecutionService {
                     );
                 }
             }
+            // Re-open the session transcript for this turn.  Between turns
+            // close_session sets the status to 'completed', which the orphan-
+            // child reaper (R+12) treats as "parent terminated" and will cancel
+            // any active children.  Resetting to 'active' at the start of every
+            // turn prevents immediate orphaning of children spawned during this
+            // turn's execution.
+            let _ = gs.reopen_session_transcript(session_id);
+
             // Background signaling is handled by the notification processor
             let should_signal_background = false;
             // Signal notifications for background scheduler if this is an event.ingest call

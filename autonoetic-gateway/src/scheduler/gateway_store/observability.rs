@@ -624,6 +624,22 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Re-open a previously finalized session for a new turn.
+    ///
+    /// Between turns the session is `completed` (from `close_session`), but the
+    /// orphan-child reaper (R+12) treats any completed/failed parent as "terminated"
+    /// and will cancel its children.  Call this at the start of each turn to restore
+    /// `active` so that child agents spawned during execution are not immediately
+    /// orphaned.
+    pub fn reopen_session_transcript(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session_transcripts SET status = 'active', ended_at = NULL WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn find_transcript_by_handle(
         &self,
         handle: &str,
