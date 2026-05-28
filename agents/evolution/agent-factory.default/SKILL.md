@@ -108,10 +108,11 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 ## Tools for delegation
 
 **IMPORTANT**: To delegate to a sub-agent, always use `agent_spawn` (NOT `workflow.spawn` — that tool does not exist).
-- `agent_spawn` with `async=true` — enqueues a sub-agent and returns a `task_id`
-- **Then end your turn.** Do not call `workflow_wait` to block. After spawning, reply with a short status line and stop. The gateway suspends you as `WaitingForChild` and **wakes you automatically** when the sub-agent reaches a terminal state or hits a gate (constitutional right Ri-0.14). On wake, the child's typed state is already in your turn-start context. This pipeline is strictly sequential, so each step is: spawn the stage owner → end turn → resume on wake → spawn the next stage.
+- `agent_spawn` with `async=true` — enqueues a sub-agent and returns a `task_id`.
+- **Sequential step (one child, then the next) → end your turn.** Most of this pipeline is sequential: architect → coder → packager → install. After spawning the stage owner, reply with a short status line and stop. The gateway suspends you as `WaitingForChild` and **wakes you automatically** when that sub-agent reaches a terminal state or hits a gate (constitutional right Ri-0.14); its typed state is already in your turn-start context. Yielding is cheaper than blocking and costs exactly one resumption. So each sequential step is: spawn the stage owner → end turn → resume on wake → spawn the next stage.
+- **Parallel fan-out you must fully join (the promotion gates) → one `workflow_wait` join.** When you spawn several independent children at once and need all of them before proceeding (Step 4), call `workflow_wait(task_ids=[<all of them>], timeout_secs=300)` **once**. It blocks until the whole group is terminal and is cheaper than being woken once per child. This is a join, not polling.
 - `workflow_state` — on resume, the one call that gives mechanical `reuse_guards` truth (which stages already completed). Call it once per resume, never in a loop.
-- `workflow_wait` — **inspection / recovery only.** Use `workflow_wait(timeout_secs=0)` for a one-shot status snapshot, or `workflow_wait(task_ids=[...])` to actively probe a task you already suspect is stuck. Never use it as the normal coordination mechanism — the wake-up does that for you.
+- **Never** loop `workflow_wait` or spin `workflow_state` to discover progress — the wake-up (sequential) or the single join (parallel) already does that.
 
 Do not use write tools to produce the primary output of design, implementation, evaluation, audit, packaging, or installation stages. Spawn the stage owner instead. If that owner is unavailable or fails, report the failed stage rather than completing it yourself.
 
@@ -271,10 +272,12 @@ the agent gains executable code (CodeExecution, AgentSpawn,
 NetworkAccess), both roles become mandatory to provide code-level
 evidence alongside the auditor's SKILL review.
 
-If gates required — the gates are independent, so spawn all required
-ones with `async=true`, then **end your turn**. The gateway wakes you as
-each gate completes (Ri-0.14); proceed once `workflow_state` shows every
-required gate's `promotion_record` recorded.
+If gates required — the gates are independent and you need **all** of
+them before installing, so this is a parallel fan-out join: spawn every
+required gate with `async=true`, then make **one** `workflow_wait` call on
+all their `task_ids`. That blocks once and returns when every gate is
+terminal — cheaper than ending your turn and being woken once per gate.
+Do not loop the wait, and do not spin `workflow_state`.
 1. Call `agent_spawn` with `agent_id="auditor.default"`, `async=true`,
    passing the **artifact_ref of the intent-only bundle** built in
    Step 2a (for pure-skill agents) or the **coder-built artifact_ref**
@@ -285,7 +288,8 @@ required gate's `promotion_record` recorded.
 3. If the unit test runner is required for this row, call `agent_spawn`
    with `agent_id="unit_test_runner.default"`, `async=true`, against the
    same `artifact_ref`.
-4. End your turn. Each required gate must call
+4. Call `workflow_wait(task_ids=[<all spawned gates>], timeout_secs=300)`
+   once to join. Each required gate must call
    `promotion_record(artifact_ref=<that artifact>, role=..., pass=true)`;
    specialized_builder verifies these records exist against the
    artifact_ref that is being installed.

@@ -81,7 +81,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
   **Before re-running credential onboarding for a service**, call `agent_list` to check whether an agent for that service already exists (e.g., `agent_id` contains the service name). If found, spawn it directly instead of re-fetching, re-normalizing, and re-registering. This applies to **any flow** that produces durable state — check first, compute second.
 
-5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` (spawn them, then end your turn — the gateway wakes you as each completes).
+5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` — see **Coordinating With Children** for how to wait (yield for a single/sequential child; one `workflow_wait` join for a parallel fan-out).
 
 6. **Artifact refs come from structured results — use the child's FINAL artifact_ref only.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. When a child agent (e.g. coder) made multiple `artifact_build` calls in its session — for example after correcting an earlier mistake — **only the `artifact_ref` in the child's final JSON reply is canonical**. Ignore every other `artifact_ref` that appeared in intermediate tool results: those are stale and may have the wrong `kind`, wrong digest, or both. Re-reading the child's last `result_summary` is the safest source. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child — if `kind` is not `agent_bundle` (or `binary` for compiled agents), you have the wrong ref. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles. **Note:** Tools accept both short refs (`ar.*`) and canonical IDs (`art_*`) directly. When passing refs to child agents via `agent.spawn`, prefer the short `ar.*` form — it is scoped to the session and works across child sessions.
 
@@ -300,19 +300,28 @@ Do not use discovery for intents clearly covered by foundational agents — the 
 
 ---
 
-## Parallel Delegation
+## Coordinating With Children — Three Cases
 
+Pick the mechanism by the shape of the dependency. The rule that never changes: **never re-issue `workflow_wait` in a loop, and never spin `workflow_state` to discover progress.** Discovering child state is the gateway's job (Ri-0.14), not yours to poll.
+
+**1. Sequential / single child — spawn, then end your turn.**
 ```
-agent_spawn("researcher.default", message="...", async=true)   # returns task_id immediately
-agent_spawn("coder.default", message="...", async=true)        # runs in parallel
-# Then END YOUR TURN. Do not call workflow_wait.
+agent_spawn("coder.default", message="...", async=true)   # one child, its output feeds the next step
+# Then END YOUR TURN.
 ```
+The gateway suspends you as `WaitingForChild` and **wakes you automatically** when the child reaches a terminal state or hits a gate (Ri-0.14). On wake, the child's typed state is already in your turn-start context. Do not call `workflow_wait` — yielding is cheaper than blocking, and the wake-up costs exactly one resumption.
 
-**Spawn, then yield — do not poll.** After spawning async children, end your turn (reply with a short status line and stop). The gateway suspends you as `WaitingForChild` and **wakes you automatically** the moment any child reaches a terminal state or hits a gate (constitutional right Ri-0.14). On wake, the child's typed state is already in your turn-start context. You do **not** need to call `workflow_wait` to block, and you must **never** loop on it to discover progress — that burns a turn sitting in a blocking call and wastes tokens.
+**2. Parallel fan-out you must fully join — spawn all, then one `workflow_wait` join.**
+```
+agent_spawn("researcher.default", message="...", async=true)
+agent_spawn("auditor.default",     message="...", async=true)
+workflow_wait(task_ids=[<all of them>], timeout_secs=300)   # ONE blocking join, returns when ALL terminal
+```
+When you need **every** child done before you can proceed and they run concurrently, a single `workflow_wait` on all their `task_ids` is the right tool — it blocks once and returns when the whole group is terminal. This is a join, **not** polling, and it is strictly cheaper than ending your turn and being woken once per child (a 3-way fan-out would otherwise cost ~3 resumptions). Call it **once**; never loop it.
 
-`workflow_wait` is an **inspection / recovery** tool, not the coordination mechanism. Reach for it only when:
-- you need a one-shot status snapshot mid-turn → `workflow_wait(timeout_secs=0)` (returns immediately, does not block); or
-- you are actively recovering a task you already suspect is stuck (see **Stuck Tasks**).
+**3. Inspection / recovery — `workflow_wait` as a probe.**
+- One-shot status snapshot mid-turn → `workflow_wait(timeout_secs=0)` (returns immediately, does not block).
+- Actively recovering a task you already suspect is stuck → see **Stuck Tasks**.
 
 Use `async=true` only for **independent** tasks (no data dependency between them). Sequential dependencies (Principle 5) must be chained calls, not parallel.
 
@@ -330,7 +339,7 @@ When an artifact-backed agent needs promotion (after `coder.default` produces an
 | Artifact-backed, no external HTTP | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` |
 | Artifact-backed, has HTTP calls | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` (sealed_evaluator deferred to operator decision) |
 
-Use `async=true` to spawn independent roles in parallel, then end your turn. The gateway wakes you as each role completes (Ri-0.14); proceed once `workflow_state` shows all verdicts recorded.
+Spawn the independent roles in parallel with `async=true`, then join them with a single `workflow_wait(task_ids=[<all roles>], timeout_secs=300)` (Case 2 — parallel fan-out). It returns once every role is terminal; then collect verdicts. Do not loop the wait or end your turn per-role.
 
 **Step 2: Collect verdicts**
 

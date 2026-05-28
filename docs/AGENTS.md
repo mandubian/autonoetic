@@ -103,18 +103,17 @@ When calling `agent_spawn`, include structured metadata:
 
 ### Coordinating With Children: Yield, Don't Poll
 
-After spawning async children (`agent_spawn` with `async=true`), the parent should **end its turn** rather than block on `workflow_wait`. The gateway suspends the parent as `WaitingForChild` and resumes it automatically with the child's typed state injected as turn-start context the moment a child reaches a terminal state or resolves a gate. This is constitutional right **Ri-0.14** — *"Parents are not required to poll to discover child state transitions"* — and is the canonical orchestration pattern.
+How a parent waits for children depends on the dependency shape. The constant rule: **never re-issue `workflow_wait` in a loop and never spin `workflow_state`** to discover progress — discovering child-state transitions is the gateway's job under constitutional right **Ri-0.14** (*"Parents are not required to poll to discover child state transitions"*).
 
-`workflow_wait` is an **inspection / recovery** primitive, not the coordination mechanism:
-
-| Use | Call |
+| Situation | What to do |
 |---|---|
-| Normal coordination (wait for children) | **Don't call it.** Spawn async, end turn, get woken (Ri-0.14). |
+| **Sequential / single child** (its output feeds the next step) | Spawn `async=true`, then **end your turn.** The gateway suspends you as `WaitingForChild` and resumes you with the child's typed state injected as turn-start context when it transitions (Ri-0.14). One resumption — do **not** call `workflow_wait`. |
+| **Parallel fan-out you must fully join** (e.g. promotion gates) | Spawn all children `async=true`, then make **one** `workflow_wait(task_ids=[all], timeout_secs=N)` call. It blocks once and returns when the whole group is terminal — cheaper than being woken once per child (the gateway emits a per-child notification). A join, not polling. |
 | One-shot status snapshot mid-turn | `workflow_wait(timeout_secs=0)` — returns immediately, does not block |
 | Actively recover a task you suspect is stuck | `workflow_wait(task_ids=[...])` |
 | Read mechanical reuse guards on resume | `workflow_state` — once per wake, never in a loop |
 
-Looping on `workflow_wait` / `workflow_state` to discover progress burns turns and tokens; it traced as the dominant cost in an observed 880-turn agent-creation session.
+Looping on `workflow_wait` / `workflow_state` to discover progress burns turns and tokens; it traced as the dominant cost in an observed 880-turn agent-creation session. The fix is shape-aware: yield for the sequential case, a single join for the parallel case — never a poll loop in either.
 
 ---
 
