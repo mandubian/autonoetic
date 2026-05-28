@@ -1874,6 +1874,8 @@ impl GatewayExecutionService {
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }
+                        let ended_at = chrono::Utc::now().to_rfc3339();
+                        let _ = gs.finalize_session_transcript(session_id, &ended_at, "completed");
                     }
                     Err(e) => {
                         if let Some(ref mut r) = report {
@@ -1919,6 +1921,8 @@ impl GatewayExecutionService {
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }
+                        let ended_at = chrono::Utc::now().to_rfc3339();
+                        let _ = gs.finalize_session_transcript(session_id, &ended_at, "failed");
                     }
                 }
 
