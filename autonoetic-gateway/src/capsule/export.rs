@@ -104,7 +104,7 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
         None
     };
 
-    let capsule_id = compute_capsule_id(&revision.revision_id);
+    let capsule_id = compute_capsule_id(&revision.revision_id, req.mode);
     let signed = req.sign.unwrap_or(cfg.auto_sign);
 
     let mut manifest = CapsuleManifest {
@@ -250,8 +250,13 @@ fn copy_dir_redacted(
     Ok(())
 }
 
+/// Cap on file size for the UTF-8 fallback scrubbing path. We don't want
+/// to slurp huge binary-ish files through the regex pipeline.
+const REDACTION_UTF8_FALLBACK_SIZE_LIMIT: usize = 1024 * 1024;
+
 fn redact_file_if_text(filename: &str, bytes: Vec<u8>) -> (Vec<u8>, bool) {
-    let is_text_extension = filename
+    // First branch: a recognised text extension — always try to scrub.
+    let has_text_extension = filename
         .rsplit_once('.')
         .map(|(_, ext)| {
             matches!(
@@ -260,8 +265,38 @@ fn redact_file_if_text(filename: &str, bytes: Vec<u8>) -> (Vec<u8>, bool) {
             )
         })
         .unwrap_or(false);
-    if !is_text_extension {
-        return (bytes, false);
+    // Second branch: recognised extensionless configuration filenames
+    // that often carry secrets (`.env`, `Dockerfile`, `Makefile`, etc.).
+    let basename = filename
+        .rsplit_once('/')
+        .map(|(_, b)| b)
+        .unwrap_or(filename);
+    let is_known_textual_basename = matches!(
+        basename,
+        ".env"
+            | "Dockerfile"
+            | "Makefile"
+            | "LICENSE"
+            | "Containerfile"
+            | "Procfile"
+            | ".bashrc"
+            | ".zshrc"
+    ) || basename.starts_with(".env.");
+    let try_redact = has_text_extension || is_known_textual_basename;
+    if !try_redact {
+        // Fall back to UTF-8 detection for anything else, but only up
+        // to a size cap to keep the regex pipeline bounded.
+        if bytes.len() > REDACTION_UTF8_FALLBACK_SIZE_LIMIT {
+            return (bytes, false);
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return (bytes, false);
+        };
+        let redacted = redact_embedded_secrets(text);
+        if redacted == text {
+            return (bytes, false);
+        }
+        return (redacted.into_bytes(), true);
     }
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return (bytes, false);
@@ -303,11 +338,18 @@ fn stage_memory_snapshot(
     })
 }
 
-fn compute_capsule_id(revision_id: &str) -> String {
+/// Content-derived capsule ID: SHA-256 over (revision_id, mode).
+///
+/// Deterministic so that two exports of the same revision in the same
+/// mode produce the same `capsule_id` — necessary for dedup and stable
+/// provenance chains (see `docs/design/cognitive-capsule-standardization.md`).
+/// Timestamp salting is intentionally avoided.
+fn compute_capsule_id(revision_id: &str, mode: CapsuleMode) -> String {
     use sha2::{Digest, Sha256};
-    let salt = format!("{}-{}", revision_id, Utc::now().to_rfc3339());
     let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
+    hasher.update(revision_id.as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(mode_str(mode).as_bytes());
     let hex = format!("{:x}", hasher.finalize());
     format!("cap_sha256:{}", &hex[..16])
 }
@@ -385,9 +427,20 @@ mod tests {
 
     #[test]
     fn compute_capsule_id_format() {
-        let id = compute_capsule_id("rev_sha256:abc");
+        let id = compute_capsule_id("rev_sha256:abc", CapsuleMode::Thin);
         assert!(id.starts_with("cap_sha256:"));
         assert_eq!(id.len(), "cap_sha256:".len() + 16);
+    }
+
+    #[test]
+    fn compute_capsule_id_is_deterministic_and_mode_sensitive() {
+        let a = compute_capsule_id("rev_sha256:abc", CapsuleMode::Thin);
+        let b = compute_capsule_id("rev_sha256:abc", CapsuleMode::Thin);
+        let c = compute_capsule_id("rev_sha256:abc", CapsuleMode::Hermetic);
+        let d = compute_capsule_id("rev_sha256:xyz", CapsuleMode::Thin);
+        assert_eq!(a, b, "same inputs must yield same capsule_id");
+        assert_ne!(a, c, "mode change must yield a different capsule_id");
+        assert_ne!(a, d, "revision change must yield a different capsule_id");
     }
 
     #[test]

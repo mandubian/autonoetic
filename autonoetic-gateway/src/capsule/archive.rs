@@ -78,9 +78,17 @@ pub fn unpack(archive_path: &Path, target_dir: &Path, max_extract_bytes: u64) ->
                 max_extract_bytes
             );
         }
-        // Defend against path traversal: reject absolute paths or any
-        // `..` segment. Components like `.` and the bare archive root
-        // (`./`) are harmless and pass through.
+        // Defend against tar-archive abuse:
+        //
+        // 1. Path traversal — reject absolute paths and any `..`
+        //    segment. `.` and the bare archive root (`./`) are
+        //    harmless and pass through.
+        // 2. Entry type — only regular files and directories are
+        //    materialised. Symlinks, hardlinks, character/block
+        //    devices, FIFOs, and other "interesting" tar entry types
+        //    can be used to write outside the target dir at extract
+        //    time or to create unsafe nodes on the host. They are
+        //    refused outright.
         let path = entry.path()?.into_owned();
         for component in path.components() {
             use std::path::Component;
@@ -99,6 +107,14 @@ pub fn unpack(archive_path: &Path, target_dir: &Path, max_extract_bytes: u64) ->
                 }
                 Component::CurDir | Component::Normal(_) => {}
             }
+        }
+        let entry_type = entry.header().entry_type();
+        if !(entry_type.is_file() || entry_type.is_dir()) {
+            anyhow::bail!(
+                "capsule entry has unsupported type {:?}: {} (only regular files and directories are allowed; symlinks, hardlinks, and special files are refused)",
+                entry_type,
+                path.display()
+            );
         }
         entry.unpack_in(&target_canonical)?;
     }
@@ -173,5 +189,44 @@ mod tests {
         write_entry(staging.path(), "a/b/c.txt", b"hello").unwrap();
         let bytes = read_entry(staging.path(), "a/b/c.txt").unwrap();
         assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn unpack_refuses_symlink_entries() {
+        use std::io::Write;
+        use tar::{EntryType, Header};
+        // Hand-craft a tar.zst archive containing a single symlink
+        // entry pointing at `/etc/passwd`. `pack` would have followed
+        // symlinks at archive time, so we have to build the header
+        // ourselves to exercise the unpack-side refusal.
+        let mut tar_bytes: Vec<u8> = Vec::new();
+        {
+            let mut tar_builder = TarBuilder::new(&mut tar_bytes);
+            let mut header = Header::new_gnu();
+            header.set_path("evil").unwrap();
+            header.set_entry_type(EntryType::Symlink);
+            header.set_link_name("/etc/passwd").unwrap();
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            tar_builder.append(&header, &[][..]).unwrap();
+            tar_builder.finish().unwrap();
+        }
+        let mut compressed: Vec<u8> = Vec::new();
+        {
+            let mut encoder = ZstdEncoder::new(&mut compressed, 3).unwrap();
+            encoder.write_all(&tar_bytes).unwrap();
+            encoder.finish().unwrap();
+        }
+        let out = tempdir().unwrap();
+        let archive = out.path().join("c.tar.zst");
+        std::fs::write(&archive, &compressed).unwrap();
+        let extract = tempdir().unwrap();
+        let err = unpack(&archive, extract.path(), 64 * 1024)
+            .expect_err("symlink entries must be refused");
+        assert!(
+            err.to_string().contains("unsupported type"),
+            "unexpected error: {err}"
+        );
     }
 }

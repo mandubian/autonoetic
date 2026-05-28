@@ -100,6 +100,13 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
 
     let revision_id = manifest.revision_id.clone();
     let agent_id = manifest.agent_id.clone();
+    // Both fields are interpolated into filesystem paths under
+    // `.gateway/revisions/agents/<agent_id>/<revision_id>/`. They
+    // come from an untrusted capsule manifest, so refuse anything
+    // that could break out of that directory or include directory
+    // separators.
+    validate_path_component(&agent_id, "agent_id")?;
+    validate_path_component(&revision_id, "revision_id")?;
     let trust_domain = req
         .trust_domain_override
         .clone()
@@ -344,6 +351,44 @@ fn emit_import_event(
     Ok(())
 }
 
+/// Refuse manifest-supplied strings that would let an attacker steer
+/// the import pipeline outside the per-agent / per-revision directory
+/// or assemble unexpected paths. Allowed characters are intentionally
+/// narrow (alphanumeric, `_`, `-`, `.`, and `:` for the
+/// `rev_sha256:abcd…` convention); the value also must not be empty
+/// or contain `..` segments.
+fn validate_path_component(value: &str, label: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("capsule manifest has empty {}", label);
+    }
+    if value.contains("..") {
+        anyhow::bail!(
+            "capsule manifest {} {:?} contains parent-dir segment",
+            label,
+            value
+        );
+    }
+    if value.contains('/') || value.contains('\\') {
+        anyhow::bail!(
+            "capsule manifest {} {:?} contains a path separator",
+            label,
+            value
+        );
+    }
+    for ch in value.chars() {
+        let ok = ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':');
+        if !ok {
+            anyhow::bail!(
+                "capsule manifest {} {:?} contains unsupported character {:?}",
+                label,
+                value,
+                ch
+            );
+        }
+    }
+    Ok(())
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -373,5 +418,24 @@ mod tests {
             sha256_hex(b"hello"),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    #[test]
+    fn validate_path_component_accepts_canonical_ids() {
+        assert!(validate_path_component("planner.default", "agent_id").is_ok());
+        assert!(
+            validate_path_component("rev_sha256:abcdef1234567890", "revision_id").is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_path_component_rejects_traversal_and_separators() {
+        for bad in ["", "..", "../etc", "foo/bar", "foo\\bar", "foo bar", "foo;bar"] {
+            assert!(
+                validate_path_component(bad, "agent_id").is_err(),
+                "{:?} should be rejected",
+                bad
+            );
+        }
     }
 }
