@@ -702,6 +702,32 @@ retention:
 
 ---
 
+## Cognitive Capsules
+
+Controls export/import of portable agent snapshots. A Cognitive Capsule pins a specific `AgentRevisionRecord` together with its `runtime.lock`, layer references (or embedded layer content in hermetic mode), and optional memory / checkpoint snapshots. See [`docs/design/cognitive-capsule-standardization.md`](design/cognitive-capsule-standardization.md).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `capsule.default_mode` | string | `"thin"` | Mode used when an export does not specify one. One of `thin` (references), `hermetic` (embedded), `replay` (hermetic + session checkpoint), `headless` (with scheduled jobs). |
+| `capsule.auto_sign` | bool | `true` | When `true`, exported capsules are Ed25519-signed with the gateway signing key (the same key used for `AgentRevisionRecord`). |
+| `capsule.include_memory_by_default` | bool | `false` | When `true`, exports include the agent's redacted memory snapshot unless `--no-memory` is set. |
+| `capsule.max_capsule_size_bytes` | u64 | `2147483648` (2 GiB) | Hard ceiling for accepted capsule archive size on import; larger archives are rejected before extraction. |
+| `capsule.trusted_signers` | map<string,string> | `{}` | Signer trust store consulted when verifying signed capsules. Keys are signer IDs (`gateway:<fingerprint>`, `user:<id>`, …); values are base64-encoded 32-byte Ed25519 public keys. |
+
+Example:
+
+```yaml
+capsule:
+  default_mode: thin
+  auto_sign: true
+  include_memory_by_default: false
+  max_capsule_size_bytes: 2147483648
+  trusted_signers:
+    gateway:example-fingerprint: "AAAA...="
+```
+
+---
+
 ## Security Sentinel
 
 System-tier read-only auditor over causal events, promotion history, approvals, layer mounts, and SKILL.md bodies. Produces append-only `SecurityFinding` records. See [`docs/security-sentinel.md`](security-sentinel.md) for the full design and threat model.

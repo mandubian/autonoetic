@@ -162,6 +162,14 @@ pub enum Capability {
     /// separate from `Evaluation` — the red-team agent must NOT also author eval
     /// suites targeting itself (ownership invariant from #32 applies at tier boundary).
     SecurityRedTeam,
+
+    /// Export or import Cognitive Capsules via `capsule.export` / `capsule.import`.
+    /// Capsules carry agent revisions, runtime closures, optional memory
+    /// snapshots, and (in Replay mode) session checkpoints across machines
+    /// or gateways — a high-impact data-movement boundary that must be
+    /// explicitly granted. Not a default. See
+    /// `docs/design/cognitive-capsule-standardization.md`.
+    CapsuleExport,
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -277,6 +285,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         // BudgetNoPriceAvailableAllow uses its serialized rename:
         "budget.no_price_available.allow",
         "SecurityRedTeam",
+        "CapsuleExport",
     ]
 }
 
@@ -304,6 +313,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::GithubIssueCreate { .. } => "GithubIssueCreate".to_string(),
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
+        Capability::CapsuleExport => "CapsuleExport".to_string(),
     }
 }
 
@@ -676,6 +686,7 @@ mod tests {
             Capability::GithubIssueCreate { patterns: vec![] },
             Capability::BudgetNoPriceAvailableAllow,
             Capability::SecurityRedTeam,
+            Capability::CapsuleExport,
         ];
         for cap in &samples {
             let name = capability_type_name(cap);

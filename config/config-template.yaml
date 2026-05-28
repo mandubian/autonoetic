@@ -293,6 +293,17 @@ retention:
   execution_traces_days: 30
   causal_events_days: 90
 
+# ── Cognitive Capsules ────────────────────────────────────────────────
+# Controls the agent-portability capsule export/import pipeline.
+# See docs/design/cognitive-capsule-standardization.md.
+# capsule:
+#   default_mode: thin                    # thin | hermetic | replay | headless
+#   auto_sign: true                       # sign exports with the gateway key
+#   include_memory_by_default: false      # opt-in memory snapshot export
+#   max_capsule_size_bytes: 2147483648    # 2 GiB safety cap on imports
+#   trusted_signers:                      # signer_id -> base64 32-byte Ed25519 public key
+#     # gateway:example-fingerprint: "AAAA...="
+
 # ── Resource Reclamation ──────────────────────────────────────────────
 # Idempotent garbage collection for content blobs, old revisions,
 # expired memories, orphaned sessions, and stale scheduled jobs.
