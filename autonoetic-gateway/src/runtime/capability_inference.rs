@@ -270,6 +270,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::GithubIssueCreate { .. } => "GithubIssueCreate",
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
         Capability::SecurityRedTeam => "SecurityRedTeam",
+        Capability::CapsuleExport => "CapsuleExport",
     }
 }
 

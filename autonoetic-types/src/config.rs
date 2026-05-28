@@ -1027,6 +1027,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
 
+    /// Cognitive Capsule export/import settings (signing trust, size caps,
+    /// default mode). See `docs/design/cognitive-capsule-standardization.md`.
+    #[serde(default)]
+    pub capsule: CapsuleConfig,
+
     /// Resource reclamation (garbage collection) settings.
     /// Idempotent sweep for content blobs, old revisions, expired memories,
     /// orphaned sessions, and stale scheduled jobs.
@@ -1549,6 +1554,65 @@ fn default_retention_execution_traces_days() -> u32 {
 }
 fn default_retention_causal_events_days() -> u32 {
     90
+}
+
+/// Configuration for Cognitive Capsule export/import.
+///
+/// Capsules are revision-pinned, optionally signed portable snapshots of
+/// agents (see `docs/design/cognitive-capsule-standardization.md`). This
+/// section controls signing-trust, size limits, and default export mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapsuleConfig {
+    /// Trusted signer registry for capsule import verification.
+    /// Keys are signer IDs (e.g. `gateway:<fingerprint>` or `user:<id>`);
+    /// values are base64-encoded 32-byte Ed25519 public keys.
+    #[serde(default)]
+    pub trusted_signers: HashMap<String, String>,
+
+    /// Default export mode when not specified on the CLI / tool call.
+    /// One of `"thin"`, `"hermetic"`, `"replay"`, `"headless"`.
+    #[serde(default = "default_capsule_mode")]
+    pub default_mode: String,
+
+    /// Maximum capsule archive size in bytes; importers refuse larger
+    /// archives. Default: 2 GiB.
+    #[serde(default = "default_capsule_max_size_bytes")]
+    pub max_capsule_size_bytes: u64,
+
+    /// Whether to auto-sign exported capsules with the gateway's
+    /// Ed25519 signing key (the same key used for agent revisions).
+    /// Default: true.
+    #[serde(default = "default_capsule_auto_sign")]
+    pub auto_sign: bool,
+
+    /// Whether `--include-memory` is implied for exports that do not
+    /// explicitly set the flag. Default: false (opt-in).
+    #[serde(default)]
+    pub include_memory_by_default: bool,
+}
+
+impl Default for CapsuleConfig {
+    fn default() -> Self {
+        Self {
+            trusted_signers: HashMap::new(),
+            default_mode: default_capsule_mode(),
+            max_capsule_size_bytes: default_capsule_max_size_bytes(),
+            auto_sign: default_capsule_auto_sign(),
+            include_memory_by_default: false,
+        }
+    }
+}
+
+fn default_capsule_mode() -> String {
+    "thin".to_string()
+}
+
+fn default_capsule_max_size_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+
+fn default_capsule_auto_sign() -> bool {
+    true
 }
 
 /// Configuration for resource reclamation (garbage collection).
@@ -2388,6 +2452,7 @@ impl Default for GatewayConfig {
             outcome_grader: OutcomeGraderConfig::default(),
             improve: ImproveConfig::default(),
             retention: RetentionConfig::default(),
+            capsule: CapsuleConfig::default(),
             reclamation: ReclamationConfig::default(),
             response_validation: ResponseValidationConfig::default(),
             sandbox: SandboxConfig::default(),
