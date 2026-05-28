@@ -256,6 +256,7 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
         extract.path(),
         manifest.memory_snapshot.as_ref(),
         req.memory_conflict_policy,
+        &manifest.agent_id,
     )?;
 
     let scheduled_jobs_recreated = if matches!(manifest.mode, autonoetic_types::capsule::CapsuleMode::Headless) {
@@ -295,15 +296,58 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
     })
 }
 
+/// Reject manifest-supplied relative paths that could read outside the
+/// extracted capsule directory. Same rules as the tar entry guard:
+/// non-empty, no absolute prefix, no `..` segments, no Windows-style
+/// drive letters or backslashes.
+fn validate_archive_relative_path(p: &str, label: &str) -> Result<()> {
+    if p.is_empty() {
+        anyhow::bail!("capsule manifest has empty {}", label);
+    }
+    if p.starts_with('/') || p.contains('\\') {
+        anyhow::bail!(
+            "capsule manifest {} {:?} is absolute or contains backslashes",
+            label,
+            p
+        );
+    }
+    let path = std::path::Path::new(p);
+    for component in path.components() {
+        use std::path::Component;
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                anyhow::bail!(
+                    "capsule manifest {} {:?} contains an absolute prefix",
+                    label,
+                    p
+                );
+            }
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "capsule manifest {} {:?} contains parent-dir segment",
+                    label,
+                    p
+                );
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn import_memory_snapshot(
     store: &Arc<GatewayStore>,
     extract_root: &Path,
     snapshot: Option<&autonoetic_types::capsule::CapsuleMemorySnapshot>,
     policy: MemoryConflictPolicy,
+    expected_agent_id: &str,
 ) -> Result<(usize, usize)> {
     let Some(snapshot) = snapshot else {
         return Ok((0, 0));
     };
+    // The handle comes from the (potentially untrusted) manifest. Refuse
+    // anything that could escape the extracted capsule directory.
+    validate_archive_relative_path(&snapshot.content_handle, "memory content_handle")?;
     let path = extract_root.join(&snapshot.content_handle);
     if !path.is_file() {
         return Ok((0, 0));
@@ -328,6 +372,20 @@ fn import_memory_snapshot(
                 continue;
             }
         };
+        // Refuse memory entries that claim a different owner — a
+        // tampered/unsigned capsule must not be able to inject
+        // arbitrary memories for unrelated agents into the receiver.
+        if obj.owner_agent_id != expected_agent_id {
+            tracing::warn!(
+                target: "capsule",
+                memory_id = %obj.memory_id,
+                claimed_owner = %obj.owner_agent_id,
+                expected_owner = %expected_agent_id,
+                "skipping memory entry whose owner_agent_id does not match the capsule's agent_id"
+            );
+            skipped += 1;
+            continue;
+        }
         let existing = store.memory_get_unrestricted(&obj.memory_id)?;
         match (existing, policy) {
             (Some(_), MemoryConflictPolicy::KeepLocal) => skipped += 1,
@@ -389,12 +447,24 @@ fn restore_checkpoint(
     let Some(rel) = &manifest.checkpoint_handle else {
         return Ok(false);
     };
+    // The checkpoint path is operator-trusted only when signed; even
+    // then, guard against absolute / parent-dir segments before joining.
+    validate_archive_relative_path(rel, "checkpoint_handle")?;
     let path = extract_root.join(rel);
     if !path.is_file() {
         return Ok(false);
     }
     let bytes = std::fs::read(&path)?;
     let ckpt: crate::runtime::checkpoint::SessionCheckpoint = serde_json::from_slice(&bytes)?;
+    // A tampered/unsigned capsule could otherwise inject a checkpoint
+    // for an unrelated agent into the receiver's checkpoint store.
+    if ckpt.agent_id != manifest.agent_id {
+        anyhow::bail!(
+            "Replay-mode checkpoint agent_id {:?} does not match manifest agent_id {:?}",
+            ckpt.agent_id,
+            manifest.agent_id
+        );
+    }
     crate::runtime::checkpoint::save_checkpoint(config, &ckpt)?;
     Ok(true)
 }

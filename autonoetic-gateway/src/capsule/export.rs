@@ -117,6 +117,19 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
             session_id,
         )? {
             Some(ckpt) => {
+                // Refuse to bundle a checkpoint that belongs to a
+                // different agent than the revision we're exporting —
+                // otherwise the resulting capsule would carry agent A's
+                // code with agent B's session state and produce
+                // surprising restores on the receiver.
+                if ckpt.agent_id != revision.agent_id {
+                    anyhow::bail!(
+                        "Replay-mode export: checkpoint for session {:?} belongs to agent {:?}, not {:?}",
+                        session_id,
+                        ckpt.agent_id,
+                        revision.agent_id
+                    );
+                }
                 let bytes = serde_json::to_vec_pretty(&ckpt)?;
                 archive::write_entry(staging_path, crate::capsule::paths::CHECKPOINT_PATH, &bytes)?;
                 Some(crate::capsule::paths::CHECKPOINT_PATH.to_string())
@@ -395,7 +408,7 @@ fn stage_memory_snapshot(
     let serialised = serde_json::to_vec_pretty(&snapshot_json)?;
     archive::write_entry(staging, crate::capsule::paths::MEMORY_SNAPSHOT_PATH, &serialised)?;
     Ok(autonoetic_types::capsule::CapsuleMemorySnapshot {
-        entry_count: entries.len(),
+        entry_count: entries.len() as u64,
         scopes: scopes.into_iter().collect(),
         content_handle: crate::capsule::paths::MEMORY_SNAPSHOT_PATH.to_string(),
         redacted: true,

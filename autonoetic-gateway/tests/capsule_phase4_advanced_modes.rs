@@ -483,3 +483,254 @@ fn platform_mismatch_refused_when_trust_domain_not_local() {
     .expect("local trust domain bypasses platform check");
     assert!(ok.created_revision);
 }
+
+#[test]
+fn import_refuses_memory_entry_with_mismatched_owner() {
+    let f = fixture("own.agent", "rev_sha256:own-001");
+    let now = "2026-05-28T00:00:00Z".to_string();
+    // Seed one legitimate memory owned by the agent, plus one owned by
+    // a different agent (which a tampered capsule could try to inject).
+    for (id, owner) in [("good-1", "own.agent"), ("evil-2", "other.agent")] {
+        let obj = MemoryObject {
+            memory_id: id.to_string(),
+            scope: "memory".to_string(),
+            owner_agent_id: owner.to_string(),
+            writer_agent_id: owner.to_string(),
+            source_type: Default::default(),
+            source_ref: "test".to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            content: "x".to_string(),
+            content_hash: "sha256:0".to_string(),
+            confidence: None,
+            tags: vec![],
+            lineage: vec![],
+            visibility: MemoryVisibility::default(),
+            expires_at: None,
+            revision_id: None,
+            binding_session_id: None,
+            alias_ref: None,
+            quarantine_reason: None,
+        };
+        f.store.memory_upsert(&obj).unwrap();
+    }
+
+    // Override `memory_list_ids_owned_by` semantics by exporting (which
+    // only lists `owner_agent_id == agent_id`)…but to force the bad
+    // entry into the bundle we hand-rewrite memory_snapshot.json after
+    // unpacking the archive. This simulates a tampered capsule.
+    let out_dir = tempdir().unwrap();
+    let archive = out_dir.path().join("own.capsule.tar.zst");
+    export(
+        ExportRequest {
+            agent_id: "own.agent".to_string(),
+            revision_id: None,
+            mode: CapsuleMode::Thin,
+            include_memory: Some(true),
+            sign: Some(false),
+            output_path: Some(archive.clone()),
+            session_id: None,
+            root_session_id: None,
+        },
+        ExportContext {
+            gateway_dir: &f.gateway_dir,
+            gateway_config: &f.config,
+            gateway_store: &f.store,
+        },
+    )
+    .expect("export");
+
+    // Tamper: inject an extra entry owned by `other.agent`.
+    let work = tempdir().unwrap();
+    autonoetic_gateway::capsule::archive::unpack(&archive, work.path(), 16 * 1024 * 1024).unwrap();
+    let snapshot_path = work.path().join("memory/memory_snapshot.json");
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    let injected = serde_json::json!({
+        "memory_id": "evil-2",
+        "scope": "memory",
+        "owner_agent_id": "other.agent",
+        "writer_agent_id": "other.agent",
+        "source_type": "agent_write",
+        "source_ref": "tampered",
+        "created_at": "2026-05-28T00:00:00Z",
+        "updated_at": "2026-05-28T00:00:00Z",
+        "content": "evil",
+        "content_hash": "sha256:0",
+        "tags": [],
+        "lineage": [],
+        "visibility": "private",
+        "expires_at": null,
+        "revision_id": null,
+        "binding_session_id": null,
+        "alias_ref": null,
+        "quarantine_reason": null,
+    });
+    snapshot["entries"]
+        .as_array_mut()
+        .unwrap()
+        .push(injected);
+    std::fs::write(&snapshot_path, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
+    autonoetic_gateway::capsule::archive::pack(work.path(), &archive).unwrap();
+
+    let r = fresh_fixture();
+    let outcome = import(
+        ImportRequest {
+            archive_path: archive,
+            verify_signature: false,
+            dry_run: false,
+            activate: false,
+            trust_domain_override: None,
+            memory_conflict_policy: MemoryConflictPolicy::KeepLocal,
+        },
+        ImportContext {
+            gateway_dir: &r.gateway_dir,
+            gateway_config: &r.config,
+            gateway_store: &r.store,
+        },
+    )
+    .expect("import");
+    // The legitimate entry should be imported; the tampered entry must
+    // be skipped (not silently injected into the receiver's store).
+    assert_eq!(outcome.memory_entries_imported, 1);
+    assert!(outcome.memory_entries_skipped >= 1);
+    assert!(
+        r.store.memory_get_unrestricted("good-1").unwrap().is_some(),
+        "good-1 should be imported"
+    );
+    assert!(
+        r.store.memory_get_unrestricted("evil-2").unwrap().is_none(),
+        "evil-2 must NOT be imported despite being in the archive"
+    );
+}
+
+#[test]
+fn replay_export_refuses_checkpoint_for_other_agent() {
+    let f = fixture("replay.agent", "rev_sha256:replay-001");
+    // Save a checkpoint whose agent_id is somebody else's.
+    let ckpt = SessionCheckpoint {
+        history: vec![Message::system("test")],
+        turn_counter: 1,
+        session_state: Default::default(),
+        loop_guard_state: LoopGuardState {
+            max_loops_without_progress: 10,
+            max_tool_failures: 5,
+            max_consecutive_same_progress: 2,
+            max_child_failures: 3,
+            current_loops: 0,
+            tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
+            child_failure_count: 0,
+            ..Default::default()
+        },
+        agent_id: "different.agent".to_string(),
+        session_id: "x-session".to_string(),
+        turn_id: "t01".to_string(),
+        workflow_id: None,
+        task_id: None,
+        runtime_lock_hash: None,
+        llm_config_snapshot: None,
+        tool_registry_version: None,
+        yield_reason: YieldReason::Hibernation,
+        content_store_refs: vec![],
+        created_at: "2026-05-28T00:00:00Z".to_string(),
+        pending_tool_state: None,
+        llm_rounds_consumed: 1,
+        tool_invocations_consumed: 0,
+        tokens_consumed: 0,
+        estimated_cost_usd: 0.0,
+        compression_metadata: None,
+        capsule_state: None,
+        assistant_message: None,
+        pending_action: None,
+        suspended_at: None,
+    };
+    save_checkpoint(&f.config, &ckpt).unwrap();
+
+    let out_dir = tempdir().unwrap();
+    let archive = out_dir.path().join("rep.capsule.tar.zst");
+    let err = export(
+        ExportRequest {
+            agent_id: "replay.agent".to_string(),
+            revision_id: None,
+            mode: CapsuleMode::Replay,
+            include_memory: Some(false),
+            sign: Some(false),
+            output_path: Some(archive),
+            session_id: Some("x-session".to_string()),
+            root_session_id: None,
+        },
+        ExportContext {
+            gateway_dir: &f.gateway_dir,
+            gateway_config: &f.config,
+            gateway_store: &f.store,
+        },
+    )
+    .expect_err("export must refuse a checkpoint owned by a different agent");
+    assert!(
+        err.to_string().contains("different.agent"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn import_refuses_traversal_in_memory_content_handle() {
+    let f = fixture("trav.agent", "rev_sha256:trav-001");
+    let out_dir = tempdir().unwrap();
+    let archive = out_dir.path().join("trav.capsule.tar.zst");
+    export(
+        ExportRequest {
+            agent_id: "trav.agent".to_string(),
+            revision_id: None,
+            mode: CapsuleMode::Thin,
+            include_memory: Some(true),
+            sign: Some(false),
+            output_path: Some(archive.clone()),
+            session_id: None,
+            root_session_id: None,
+        },
+        ExportContext {
+            gateway_dir: &f.gateway_dir,
+            gateway_config: &f.config,
+            gateway_store: &f.store,
+        },
+    )
+    .expect("export");
+
+    // Tamper: rewrite the manifest's memory_snapshot.content_handle to
+    // an absolute path.
+    let work = tempdir().unwrap();
+    autonoetic_gateway::capsule::archive::unpack(&archive, work.path(), 16 * 1024 * 1024).unwrap();
+    let manifest_path = work.path().join("capsule.json");
+    let mut m: autonoetic_types::capsule::CapsuleManifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    if let Some(ref mut snap) = m.memory_snapshot {
+        snap.content_handle = "/etc/passwd".to_string();
+    }
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    autonoetic_gateway::capsule::archive::pack(work.path(), &archive).unwrap();
+
+    let r = fresh_fixture();
+    let err = import(
+        ImportRequest {
+            archive_path: archive,
+            verify_signature: false,
+            dry_run: false,
+            activate: false,
+            trust_domain_override: None,
+            memory_conflict_policy: MemoryConflictPolicy::KeepLocal,
+        },
+        ImportContext {
+            gateway_dir: &r.gateway_dir,
+            gateway_config: &r.config,
+            gateway_store: &r.store,
+        },
+    )
+    .expect_err("absolute content_handle must be refused");
+    assert!(
+        err.to_string().contains("memory content_handle")
+            || err.to_string().contains("absolute"),
+        "unexpected error: {err}"
+    );
+}
