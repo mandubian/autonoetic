@@ -1,0 +1,36 @@
+//! Cognitive Capsule export/import pipelines.
+//!
+//! A Cognitive Capsule is a portable, signed, revision-pinned snapshot of
+//! an agent — see `docs/design/cognitive-capsule-standardization.md`. The
+//! schema lives in `autonoetic-types/src/capsule.rs`; this module holds
+//! the gateway-side pipelines that produce and consume those archives.
+//!
+//! Surface:
+//!
+//! - [`export::export`] — package a revision into a `tar.zst` archive
+//! - [`import::import`] — extract an archive and create a new revision
+//! - [`verify::manifest_digest`] / [`verify::verify_signature`] — canonical
+//!   digest + Ed25519 signature checks
+//! - [`archive::pack`] / [`archive::unpack`] — low-level archive helpers
+//!
+//! Phase 2 ships the thin-mode happy path end-to-end (export → import → new
+//! revision record). Hermetic-layer embedding, memory-merge conflict
+//! policy, and Replay-mode session resume layer on top of these surfaces
+//! in Phase 4.
+
+pub mod archive;
+pub mod export;
+pub mod import;
+pub mod verify;
+
+pub use export::{export, ExportContext, ExportOutcome, ExportRequest};
+pub use import::{import, ImportContext, ImportOutcome, ImportRequest};
+
+/// Canonical relative paths inside the capsule archive.
+pub mod paths {
+    pub const CAPSULE_JSON: &str = "capsule.json";
+    pub const SKILL_REL: &str = "SKILL.md";
+    pub const RUNTIME_LOCK_REL: &str = "runtime.lock";
+    pub const MEMORY_SNAPSHOT_PATH: &str = "memory/memory_snapshot.json";
+    pub const CHECKPOINT_PATH: &str = "checkpoint/checkpoint.json";
+}

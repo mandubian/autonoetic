@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod artifact_store;
 pub mod bootstrap;
+pub mod capsule;
 pub mod causal_chain;
 pub mod config;
 pub mod constitution_digest;
