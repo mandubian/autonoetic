@@ -5,8 +5,8 @@ use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
-use serde::de::{self, DeserializeOwned};
 use serde::Deserialize;
+use serde::de;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -336,7 +336,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Wait for async tasks to complete. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. With timeout_secs=0 (default), returns current status immediately. With timeout_secs>0, polls until all tasks finish or timeout expires. When task_ids is empty or omitted, waits for all tasks in the current workflow.".to_string(),
+            description: "Suspends until watched task_ids reach terminal state (Succeeded, Failed, Cancelled, Aborted). Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. By default, blocks for up to default_workflow_wait_secs (configurable, default 30s), waking immediately on child-state transitions. Pass timeout_secs=0 to probe current status without waiting. When task_ids is empty or omitted, waits for all tasks in the current workflow.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -353,13 +353,7 @@ impl NativeTool for WorkflowWaitTool {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 300,
-                        "description": "Max seconds to wait. 0 = check once and return (default). >0 = poll until all tasks finish or timeout."
-                    },
-                    "poll_interval_secs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 30,
-                        "description": "Seconds between status polls when blocking. Default: 2."
+                        "description": "Max seconds to block. Omit to use default_workflow_wait_secs (default 30s). 0 = probe once and return immediately (no blocking)."
                     }
                 },
                 "additionalProperties": false
@@ -388,8 +382,6 @@ impl NativeTool for WorkflowWaitTool {
             workflow_id: Option<String>,
             #[serde(default)]
             timeout_secs: Option<u64>,
-            #[serde(default)]
-            poll_interval_secs: Option<u64>,
         }
 
         let args: Args = serde_json::from_str(arguments_json)
@@ -428,8 +420,10 @@ impl NativeTool for WorkflowWaitTool {
 
         anyhow::ensure!(!task_ids.is_empty(), "no tasks found in workflow '{}'", workflow_id);
 
-        let timeout_secs = args.timeout_secs.unwrap_or(0).min(300);
-        let poll_interval_secs = args.poll_interval_secs.unwrap_or(2).clamp(1, 30);
+        let timeout_secs = args
+            .timeout_secs
+            .unwrap_or(gw_config.default_workflow_wait_secs)
+            .min(300);
 
         // Non-blocking mode: check once and return
         if timeout_secs == 0 {
@@ -472,10 +466,14 @@ impl NativeTool for WorkflowWaitTool {
             .map_err(Into::into);
         }
 
-        // Blocking mode: poll until join satisfied or timeout
+        // Blocking mode: wait for signal-driven wake or deadline
         let task_ids_clone = task_ids.clone();
         let wf_id = workflow_id.clone();
         let gw_config_arc = std::sync::Arc::new(gw_config.clone());
+        let notify = match (gateway_store.as_ref(), session_id) {
+            (Some(s), Some(sid)) => Some(s.task_notify.get_or_create(sid)),
+            _ => None,
+        };
 
         let (
             tasks_status,
@@ -488,13 +486,13 @@ impl NativeTool for WorkflowWaitTool {
         ) = if let Ok(handle) = tokio::runtime::Handle::try_current() {
             tokio::task::block_in_place(|| {
                 handle.block_on(async {
-                    poll_until_join(
+                    signal_driven_wait(
                         gw_config_arc.as_ref(),
                         gateway_store.as_deref(),
                         &wf_id,
                         &task_ids_clone,
                         timeout_secs,
-                        poll_interval_secs,
+                        notify.as_ref(),
                         _gateway_dir,
                         session_id,
                     )
@@ -503,13 +501,13 @@ impl NativeTool for WorkflowWaitTool {
             })
         } else {
             tokio::runtime::Runtime::new()?.block_on(async {
-                poll_until_join(
+                signal_driven_wait(
                     gw_config_arc.as_ref(),
                     gateway_store.as_deref(),
                     &wf_id,
                     &task_ids_clone,
                     timeout_secs,
-                    poll_interval_secs,
+                    notify.as_ref(),
                     _gateway_dir,
                     session_id,
                 )
@@ -543,14 +541,15 @@ impl NativeTool for WorkflowWaitTool {
 }
 
 const STALL_GRACE_SECS: i64 = 30;
+const FALLBACK_POLL_SECS: u64 = 5;
 
-async fn poll_until_join(
+async fn signal_driven_wait(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     workflow_id: &str,
     task_ids: &[String],
     timeout_secs: u64,
-    poll_interval_secs: u64,
+    notify: Option<&std::sync::Arc<tokio::sync::Notify>>,
     gateway_dir: Option<&Path>,
     session_id: Option<&str>,
 ) -> (
@@ -562,8 +561,9 @@ async fn poll_until_join(
     usize,
     Vec<serde_json::Value>,
 ) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let mut waited_secs = 0u64;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+    let mut last_waited_report = 0u64;
 
     loop {
         let (tasks_status, all_done, any_failed, any_not_found, failed_task_count, failure_summary) =
@@ -575,6 +575,8 @@ async fn poll_until_join(
                 gateway_dir,
                 session_id,
             );
+        let waited_secs = start.elapsed().as_secs();
+
         if all_done {
             return (
                 tasks_status,
@@ -598,9 +600,8 @@ async fn poll_until_join(
             );
         }
 
-        // Stall detection: if a Running task has no transcript after STALL_GRACE_SECS,
-        // return early so the caller can take action instead of burning the full timeout.
-        if waited_secs >= STALL_GRACE_SECS as u64 {
+        if waited_secs >= STALL_GRACE_SECS as u64 && waited_secs != last_waited_report {
+            last_waited_report = waited_secs;
             if let Some(gw_store) = store {
                 let mut stall_detected = false;
                 let mut enriched_status = tasks_status.clone();
@@ -636,8 +637,7 @@ async fn poll_until_join(
             }
         }
 
-        let now = std::time::Instant::now();
-        if now >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return (
                 tasks_status,
                 false,
@@ -649,9 +649,19 @@ async fn poll_until_join(
             );
         }
 
-        let remaining = (deadline - now).as_secs().min(poll_interval_secs).max(1);
-        waited_secs += remaining;
-        tokio::time::sleep(std::time::Duration::from_secs(remaining)).await;
+        let fallback = tokio::time::sleep(std::time::Duration::from_secs(FALLBACK_POLL_SECS));
+        tokio::pin!(fallback);
+
+        if let Some(n) = notify {
+            let notified = n.notified();
+            tokio::pin!(notified);
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = &mut fallback => {}
+            }
+        } else {
+            fallback.await;
+        }
     }
 }
 

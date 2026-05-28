@@ -123,6 +123,12 @@ approval_timeout_secs: 3600
 # + tool calls). Default: 60.
 # signal_delivery_timeout_secs: 60
 
+# Default blocking timeout (seconds) for workflow.wait when the agent omits
+# timeout_secs. The tool blocks until all watched task_ids reach terminal
+# state or this deadline elapses. Set to 0 to restore legacy immediate-return.
+# Default: 30.
+# default_workflow_wait_secs: 30
+
 # ── Hooks ──────────────────────────────────────────────────────────────
 # Reactive bindings from gateway events to actions.
 # Available events: session.closed, session.suspended, approval.resolved,

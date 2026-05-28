@@ -112,6 +112,7 @@ pub struct GatewayStore {
     /// Weak ref avoids an `Arc` cycle with [`crate::scheduler::hooks::HookExecutor`], which may
     /// hold an `Arc<GatewayStore>` for other hooks.
     policy_hook_executor: Mutex<Option<Weak<crate::scheduler::hooks::HookExecutor>>>,
+    pub task_notify: crate::scheduler::task_notify::TaskNotifyRegistry,
 }
 
 impl GatewayStore {
@@ -135,6 +136,7 @@ impl GatewayStore {
             approval_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             escalation_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             policy_hook_executor: Mutex::new(None),
+            task_notify: crate::scheduler::task_notify::TaskNotifyRegistry::new(),
         };
         {
             let mut conn = store.conn.lock().unwrap();

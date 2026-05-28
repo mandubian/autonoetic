@@ -304,6 +304,9 @@ pub fn send_child_state_notification(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     write_signal(store, target_session_id, &signal_id, &signal)?;
+    if let Some(s) = store {
+        s.task_notify.notify_session(target_session_id);
+    }
     Ok(())
 }
 

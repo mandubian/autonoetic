@@ -1098,6 +1098,13 @@ pub struct GatewayConfig {
     #[serde(default = "default_signal_delivery_timeout_secs")]
     pub signal_delivery_timeout_secs: u64,
 
+    /// Default blocking timeout for `workflow.wait` when the caller omits
+    /// `timeout_secs`. The tool blocks until all watched task_ids reach a
+    /// terminal state or this deadline elapses. Set to 0 to restore the
+    /// legacy immediate-return behaviour. Default: 30.
+    #[serde(default = "default_workflow_wait_secs")]
+    pub default_workflow_wait_secs: u64,
+
     #[serde(default)]
     pub hooks: Vec<crate::hooks::HookConfig>,
 
@@ -2043,6 +2050,10 @@ fn default_signal_delivery_timeout_secs() -> u64 {
     60
 }
 
+fn default_workflow_wait_secs() -> u64 {
+    30
+}
+
 fn default_evidence_mode() -> String {
     "full".to_string()
 }
@@ -2493,6 +2504,7 @@ impl Default for GatewayConfig {
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
+            default_workflow_wait_secs: default_workflow_wait_secs(),
             hooks: Vec::new(),
             scheduled_jobs: ScheduledJobsConfig::default(),
             promotion_governor: PromotionGovernorConfig::default(),
