@@ -1192,8 +1192,46 @@ impl AgentExecutor {
         });
 
         loop {
-            // Loop guard check — save checkpoint before propagating max-turns error
+            // Loop guard check — save checkpoint before propagating max-turns error.
+            // When the guard trips, emit a `loop_guard.tripped` causal event with
+            // the structured trip reason (issue #287) so the divergence sentinel
+            // and operators can see *why* the session terminated, not just that
+            // it did.
             if let Err(e) = self.guard.check_loop() {
+                if let (Some(reason), Some(store)) =
+                    (self.guard.last_trip_reason(), self.gateway_store.as_ref())
+                {
+                    let payload = serde_json::json!({
+                        "reason": reason.code(),
+                        "detail": format!("{:?}", reason),
+                    });
+                    let session_id_for_event =
+                        self.session_id.clone().unwrap_or_default();
+                    let event = autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: format!("loopguard-{}", uuid::Uuid::new_v4()),
+                        agent_id: self.manifest.agent.id.clone(),
+                        session_id: session_id_for_event,
+                        turn_id: Some(turn_id.clone()),
+                        event_seq: 0,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "loop_guard".to_string(),
+                        action: "tripped".to_string(),
+                        status: "active".to_string(),
+                        enforced_rules: vec!["R-7.7".to_string()],
+                        target: None,
+                        payload: Some(payload.to_string()),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: Some(reason.code().to_string()),
+                    };
+                    if let Err(err) = store.create_causal_event(&event) {
+                        tracing::warn!(
+                            target: "loop_guard",
+                            error = %err,
+                            "failed to emit loop_guard.tripped causal event"
+                        );
+                    }
+                }
                 let _ =
                     self.save_yield_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);
                 return Err(e);
@@ -2384,7 +2422,25 @@ impl AgentExecutor {
                             } else if tool_result_counts_as_progress(result) {
                                 if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
                                 {
-                                    self.guard.register_progress(&tc.name, &tc.arguments);
+                                    // Tools may opt into terminal-progress
+                                    // semantics by stamping
+                                    // `side_effect_state: "committed"` in
+                                    // their result (R-5.14 / R-6.26).
+                                    // Terminal events clear the
+                                    // rotating-polling window — a real
+                                    // side effect just landed, so any
+                                    // prior monotony is stale (issue #287).
+                                    let terminal = parsed
+                                        .get("side_effect_state")
+                                        .and_then(|v| v.as_str())
+                                        == Some("committed");
+                                    if terminal {
+                                        self.guard
+                                            .register_progress_terminal(&tc.name, &tc.arguments);
+                                    } else {
+                                        self.guard
+                                            .register_progress(&tc.name, &tc.arguments);
+                                    }
                                 }
                             }
                             if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {

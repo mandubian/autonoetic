@@ -1789,6 +1789,24 @@ pub struct LoopGuardConfig {
     /// fingerprints from resetting progress indefinitely.
     #[serde(default = "default_progress_budget_tools")]
     pub progress_budget_tools: HashMap<String, u32>,
+
+    /// Rotating-polling detector window (issue #287). The detector tracks
+    /// the last N successful-tool-call fingerprints; trips when the window
+    /// is full and has only `rotation_distinct_floor` or fewer distinct
+    /// (tool, args) values. Catches agents that cycle through a small set
+    /// of read-only tools (e.g. `workflow.wait → workflow.state →
+    /// content.read → artifact.inspect → agent.exists`) without making
+    /// semantic progress. Set to 0 to disable.
+    #[serde(default = "default_rotation_window_size")]
+    pub rotation_window_size: usize,
+
+    /// Trip threshold for the rotating-polling detector. When the window
+    /// is full and the distinct fingerprint count is <= this value, the
+    /// guard trips. With the default `rotation_window_size = 16`, a floor
+    /// of 6 means any rotation with 6 or fewer unique calls in the last
+    /// 16 trips; healthy varied work with 7+ unique calls passes.
+    #[serde(default = "default_rotation_distinct_floor")]
+    pub rotation_distinct_floor: usize,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -1808,6 +1826,8 @@ impl Default for LoopGuardConfig {
             max_consecutive_same_progress: default_max_consecutive_same_progress(),
             max_child_failures: default_max_child_failures(),
             progress_budget_tools: default_progress_budget_tools(),
+            rotation_window_size: default_rotation_window_size(),
+            rotation_distinct_floor: default_rotation_distinct_floor(),
         }
     }
 }
@@ -1826,6 +1846,14 @@ fn default_max_consecutive_same_progress() -> u32 {
 
 fn default_max_child_failures() -> u32 {
     3
+}
+
+fn default_rotation_window_size() -> usize {
+    16
+}
+
+fn default_rotation_distinct_floor() -> usize {
+    6
 }
 
 /// Configuration for pluggable code analysis.

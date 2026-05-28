@@ -481,16 +481,10 @@ mod tests {
     fn state_with(loops: u32, max_loops: u32, child_failures: u32, max_children: u32) -> LoopGuardState {
         LoopGuardState {
             max_loops_without_progress: max_loops,
-            max_tool_failures: 5,
-            max_consecutive_same_progress: 1,
             max_child_failures: max_children,
-            progress_budget_tools: HashMap::new(),
-            progress_budget_used: HashMap::new(),
             current_loops: loops,
-            tool_failure_counts: HashMap::new(),
-            last_progress_fingerprint: None,
-            consecutive_progress_count: 0,
             child_failure_count: child_failures,
+            ..Default::default()
         }
     }
 

@@ -20,19 +20,7 @@ fn cfg() -> TrajectoryConfig {
 }
 
 fn quiet_guard_state() -> LoopGuardState {
-    LoopGuardState {
-        max_loops_without_progress: 5,
-        max_tool_failures: 5,
-        max_consecutive_same_progress: 1,
-        max_child_failures: 3,
-        progress_budget_tools: HashMap::new(),
-        progress_budget_used: HashMap::new(),
-        current_loops: 0,
-        tool_failure_counts: HashMap::new(),
-        last_progress_fingerprint: None,
-        consecutive_progress_count: 0,
-        child_failure_count: 0,
-    }
+    LoopGuardState::default()
 }
 
 #[test]
