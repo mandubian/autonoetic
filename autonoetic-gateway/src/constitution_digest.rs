@@ -428,6 +428,64 @@ fn extract_enforcement_table(text: &str, id_prefix: &str) -> BTreeMap<String, St
     out
 }
 
+/// Derive a one-line glossary `clause_id -> short statement` straight from the
+/// constitution text — the single source of truth — so no hand-maintained map
+/// can drift from it. The gloss is the **first sentence** of the clause's
+/// statement column (cells[1]); it covers every `P-*` rule and `Ri-*` right
+/// row in the document.
+pub fn extract_rule_glossary(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        if !line.trim_start().starts_with('|') {
+            continue;
+        }
+        let cells: Vec<String> = line
+            .split('|')
+            .map(str::trim)
+            .filter(|cell| !cell.is_empty())
+            .map(str::to_string)
+            .collect();
+        if cells.len() < 4 {
+            continue;
+        }
+        let id = &cells[0];
+        let is_clause = (id.starts_with("P-") || id.starts_with("Ri-"))
+            && id.chars().nth(if id.starts_with("Ri-") { 3 } else { 2 }).is_some_and(|c| c.is_ascii_digit());
+        if !is_clause || id == "ID" || id.starts_with("---") {
+            continue;
+        }
+        let gloss = first_sentence(&cells[1]);
+        if !gloss.is_empty() {
+            out.insert(id.clone(), gloss);
+        }
+    }
+    out
+}
+
+/// The first sentence of a clause statement: text up to the first sentence
+/// terminator (`. `, `; `, or `: ` followed by a space) that is **not inside a
+/// backtick code span** — so `` `error_type: fatal` `` doesn't split mid-span.
+/// Returns the whole string if no terminator is found. Markdown emphasis
+/// markers are left intact (they render fine in the consuming surfaces).
+fn first_sentence(statement: &str) -> String {
+    let s = statement.trim();
+    let mut in_code = false;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '`' {
+            in_code = !in_code;
+            continue;
+        }
+        if !in_code
+            && matches!(c, '.' | ';' | ':')
+            && chars.peek().is_some_and(|(_, n)| *n == ' ')
+        {
+            return s[..=i].trim_end_matches([';', ':']).to_string();
+        }
+    }
+    s.to_string()
+}
+
 /// Resolve constitution markdown and lock paths from the **same** search root.
 ///
 /// Per-path resolution would pick the first filesystem location where each file exists,
@@ -504,6 +562,52 @@ fn normalize_config_path_label(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_sentence_splits_on_terminators() {
+        // Period, semicolon, colon (each followed by a space) terminate.
+        assert_eq!(first_sentence("One thing. Two thing."), "One thing.");
+        assert_eq!(first_sentence("Lead clause; detail follows."), "Lead clause");
+        assert_eq!(
+            first_sentence("Sessions end only for reasons: (a) exit, (b) budget."),
+            "Sessions end only for reasons"
+        );
+        // No terminator → whole string (trimmed).
+        assert_eq!(first_sentence("  just one clause  "), "just one clause");
+        // A terminator not followed by a space does not split (e.g. decimals).
+        assert_eq!(first_sentence("Cap is 3.5 units total."), "Cap is 3.5 units total.");
+    }
+
+    #[test]
+    fn first_sentence_ignores_terminators_inside_code_spans() {
+        // The ": " inside `error_type: fatal` must NOT split; the real split is
+        // the later "; ".
+        assert_eq!(
+            first_sentence("`error_type: fatal` triggers session abort; recoverable types do not."),
+            "`error_type: fatal` triggers session abort"
+        );
+        // A code span with no outside terminator returns the whole statement.
+        assert_eq!(
+            first_sentence("`a: b` and `c: d` only"),
+            "`a: b` and `c: d` only"
+        );
+    }
+
+    #[test]
+    fn extract_rule_glossary_covers_rules_and_rights_only() {
+        let text = "\
+| ID | Rule | Source | Enforcement | Status |\n\
+| P-1.1 | Every tool call matches a declared capability; no overrides. | x | y | ENFORCED |\n\
+| Ri-0.3 | Every rejection names the rule ID. Always. | x | y | ENFORCED |\n\
+| I-6 | Not a row id we gloss | x | y | ENFORCED |\n\
+| R+9 | retired marker, ignored | x | y | ENFORCED |\n";
+        let g = extract_rule_glossary(text);
+        assert_eq!(g.get("P-1.1").map(String::as_str), Some("Every tool call matches a declared capability"));
+        assert_eq!(g.get("Ri-0.3").map(String::as_str), Some("Every rejection names the rule ID."));
+        // Only P-* / Ri-* clause rows are glossed; invariants and retired markers are not.
+        assert!(!g.contains_key("I-6"));
+        assert!(!g.contains_key("R+9"));
+    }
 
     fn init_default_constitution() {
         initialize_constitution(&GatewayConfig::default())

@@ -6,7 +6,7 @@
 |---------|--------|-------------|
 | Feature 1: One-command start | Done | `autonoetic/src/cli/run.rs`, `common.rs`, `main.rs` |
 | Feature 2: Auto-learning loop | Done | `config.rs` defaults, `quality_signal.rs`, `execution.rs` |
-| Feature 3: Contextual "why" | Done | `constitution_glossary.rs`, `/why` in `chat.rs` |
+| Feature 3: Contextual "why" | Done | `constitution_glossary.rs` (gateway, generated), `/why` in `chat.rs` |
 | Feature 4: Complexity profiles | Done | `Profile` enum + behavior methods in `config.rs` |
 | Feature 5: Session continuity | Done | `build_memory_context_snippet` in `context.rs`, `search_memories_by_tags` in `gateway_store/memory.rs` |
 | Feature 6: User persona | Done | `persona.md` file, `persona_path` in config, injection in `context.rs`, `/persona` command, first-run prompt |
@@ -69,7 +69,7 @@ No new concepts introduced. Power users still use the decomposed commands.
 - **Policy pane**: append rule IDs to each line.
 - **`/why` slash command**: inline constitutional explanation.
 
-**Key files**: new `autonoetic-types/src/constitution_glossary.rs`, `autonoetic/src/cli/chat.rs`.
+**Key files**: `autonoetic-gateway/src/constitution_glossary.rs` (generated from the constitution), `autonoetic/src/cli/chat.rs`.
 
 ---
 

@@ -1706,7 +1706,7 @@ fn format_why_explanation(
                     if !gate_rules.is_empty() {
                         lines.push(String::new());
                         lines.push(
-                            autonoetic_types::constitution_glossary::format_enforced_rules(&gate_rules),
+                            autonoetic_gateway::constitution_glossary::format_enforced_rules(&gate_rules),
                         );
                     }
                 }
@@ -6299,7 +6299,7 @@ fn format_store_approval_card(
     let inferred_rules = infer_rules_for_action(&req.action);
     if !inferred_rules.is_empty() {
         lines.push(String::new());
-        lines.push(autonoetic_types::constitution_glossary::format_enforced_rules(&inferred_rules));
+        lines.push(autonoetic_gateway::constitution_glossary::format_enforced_rules(&inferred_rules));
     }
     if let Some(ref phrase) = req.confirm_phrase {
         lines.push(String::new());
