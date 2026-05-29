@@ -382,6 +382,11 @@ fn test_resolve_artifact_metadata_and_files() -> anyhow::Result<()> {
     let v: serde_json::Value = serde_json::from_str(&out)?;
     assert_eq!(v["ok"], serde_json::json!(true));
     assert_eq!(v["kind"].as_str(), Some("artifact"));
+    // Identity fields mirror artifact_inspect; raw art_* id is not surfaced.
+    assert_eq!(v["artifact_ref"].as_str(), Some(artifact_ref));
+    assert!(v["artifact_canonical_digest"].as_str().is_some());
+    assert!(v["artifact_manifest_digest"].as_str().is_some());
+    assert!(v.get("artifact_id").is_none(), "raw art_* id must not be exposed");
     assert_eq!(v["file_count"].as_u64(), Some(1));
     assert_eq!(v["files"][0]["name"].as_str(), Some("data.py"));
     assert_eq!(

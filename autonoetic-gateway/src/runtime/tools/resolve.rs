@@ -209,8 +209,13 @@ impl ResolveTool {
         let mut out = json!({
             "ok": true,
             "kind": "artifact",
-            "artifact_id": resolved.artifact_id,
-            "ref": resolved.display_ref,
+            // Mirror artifact_inspect's identity fields (ref + digests) so
+            // resolve(include=metadata) is a complete identity check. The raw
+            // canonical `art_*` id is intentionally not surfaced — agents
+            // address artifacts by `artifact_ref` (#312).
+            "artifact_ref": resolved.display_ref,
+            "artifact_canonical_digest": bundle.artifact_canonical_digest,
+            "artifact_manifest_digest": bundle.artifact_manifest_digest,
             "exists": true,
             "artifact_kind": serde_json::to_value(&bundle.kind)
                 .unwrap_or(serde_json::Value::String("binary".to_string())),
