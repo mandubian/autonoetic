@@ -93,8 +93,10 @@ Phased, section by section, each phase preserving every existing check:
 
 1. Introduce the tagging mechanism + Register generator + totality meta-test, proven on **one family** (loop guard) end-to-end. *(This is the first implementation slice — see §8.)*
 2. For each rule cluster, author the parent principle, tag the existing checks, generate Register entries, and confirm the meta-test stays green and the Register reproduces the old citations.
-3. Replace the flat rule table with principles + a link to the generated Register. The old `R-x.y` IDs survive as Register entry keys (stable external references preserved); principles get `P-*` IDs.
+3. Replace the flat rule table with principles + a link to the generated Register. Rules are **renumbered `R-x.y` → `P-x.y`** (e.g. `R-7.19` → `P-7.19`) — they become numbered sub-clauses of their parent principle (`P-7`); rights keep their `Ri-*` IDs. The `R-` prefix is retired everywhere (no legacy alias is preserved — see the note below).
 4. Recompute + re-sign the lock for a new constitution version.
+
+> **Decision (supersedes earlier "keep `R-x.y`" intent).** Autonoetic is pre-release with no external consumers whose links we must not break, so we do **not** keep `R-x.y` as stable alias keys. Carrying a third identifier (`R-x.y`) alongside the principle (`P-7`) and the semantic `check_id` was redundant and, in a constitution/law context, the name "legacy" read ambiguously. Instead the same migration **renames every `R-x.y` reference to `P-x.y`** across the constitution, code, docs, and tests. In the enforcement register the former `legacy_id` field is renamed `rule_id` and holds the `P-x.y` value.
 
 ---
 
@@ -160,8 +162,8 @@ Each step is a deliberate constitution version bump where it touches the signed 
 
 ## 9. Risks & open questions
 
-- **Migration must lose no enforcement.** Mitigation: the Register must reproduce every current `R-x.y` citation as an entry key before the flat table is removed; the totality meta-test guards against orphaned checks.
-- **Stable external references.** Other docs/tests reference `R-x.y` IDs. Keep them as Register entry keys so links don't break; principles take new `P-*` IDs.
+- **Migration must lose no enforcement.** Mitigation: the Register must reproduce every current citation (renumbered `R-x.y` → `P-x.y`) as an entry key before the flat table is removed; the totality meta-test guards against orphaned checks.
+- **No legacy aliases.** Earlier drafts proposed keeping `R-x.y` as stable Register keys so external links wouldn't break. Superseded (see §3.5): pre-release, there are no external consumers to protect, and the redundant third identifier was dropped. The migration instead renames every `R-x.y` → `P-x.y` in one pass (constitution, code, docs, tests); the register's `rule_id` field carries the `P-x.y` value.
 - **Tagging ergonomics.** `#[enforces(...)]` must be cheap to add and impossible to forget (the meta-test enforces the latter). Open question: attribute macro vs. a central registry table vs. a hybrid.
 - **What the signature covers.** Signing principles + Register *digest* (not the full generated Register text) keeps the ceremony light while still detecting code/law divergence. Confirm this satisfies the federation digest/profile checks (R+++2).
 - **Right vs rule conflicts at scale.** Fewer principles makes conflicts more tractable to reason about, but the "rights win; conflict → operator review" valve still leans on humans. Consider a lint that flags a new rule whose scope overlaps an existing right.
