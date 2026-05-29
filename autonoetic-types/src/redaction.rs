@@ -7,7 +7,7 @@
 //!   to non-Admin observers of `ExecutionTraceRecord` / `CausalEventRecord`.
 //! - **`autonoetic-types::background`** — same, for `ScheduledAction`.
 //! - **`autonoetic-gateway::log_redaction`** — when wrapping causal-chain
-//!   payloads via `RedactedPayload` (the gateway-side R+9 invariant).
+//!   payloads via `RedactedPayload` (the gateway-side P-4.14 invariant).
 //!
 //! Centralising them here removes the prior triplication (one copy in each
 //! of those modules) and prevents drift.

@@ -122,8 +122,8 @@ pub fn rights() -> &'static [Right] {
     ]
 }
 
-/// The enforcement register. P-7's four checks (formerly P-7.5/7.7/7.19/7.20)
-/// plus one check per seeded right.
+/// The enforcement register. P-7's four checks (P-7.5/7.7/7.19/7.20) plus one
+/// check per seeded right.
 pub fn enforcement_register() -> &'static [EnforcementEntry] {
     &[
         // ── P-7 (binds agent) ──

@@ -271,7 +271,7 @@ impl Default for OutcomeGraderConfig {
 ///    Changes that broaden sandbox / network / code-execution /
 ///    credential / scheduler / agent-revision capabilities are never
 ///    eligible for the automated path. Operators promote those
-///    through the existing R++2 constitutional gate by hand.
+///    through the existing P-2.16 constitutional gate by hand.
 ///
 /// `restrict_to_prompt_only` is the master switch. When `false`, the
 /// policy short-circuits to "always allow" (no defenses). Keep it
@@ -312,7 +312,7 @@ pub struct ImproveConfig {
     /// "privileges whose widening breaks the sandbox or
     /// reaches the network / shell / credentials / scheduler / agent
     /// promotion". An operator who wants to push such a change still
-    /// can — by promoting the revision manually through the R++2
+    /// can — by promoting the revision manually through the P-2.16
     /// gate — but the automated loop refuses.
     #[serde(default = "default_improve_high_blast_radius_capability_kinds")]
     pub high_blast_radius_capability_kinds: Vec<String>,
@@ -781,7 +781,7 @@ fn default_constitution_trusted_signers() -> HashMap<String, String> {
     out
 }
 
-/// Compatibility policy for federated constitution checks (R+++2).
+/// Compatibility policy for federated constitution checks (P-10.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FederationConstitutionMode {
@@ -795,7 +795,7 @@ pub enum FederationConstitutionMode {
     Superset,
 }
 
-/// Federation constitution compatibility settings (R+++2 scaffolding).
+/// Federation constitution compatibility settings (P-10.9 scaffolding).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FederationConstitutionConfig {
     /// Compatibility mode.
@@ -863,7 +863,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub constitution: ConstitutionConfig,
 
-    /// Constitution compatibility policy for federated peers (R+++2).
+    /// Constitution compatibility policy for federated peers (P-10.9).
     #[serde(default)]
     pub federation_constitution: FederationConstitutionConfig,
 
@@ -876,7 +876,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_pending_spawns_per_agent")]
     pub max_pending_spawns_per_agent: usize,
 
-    /// System-wide ceiling for spawn-chain depth (R+3 / P-7.15).
+    /// System-wide ceiling for spawn-chain depth (P-7.15).
     /// Any agent whose session depth (counting `/` in session_id) equals or exceeds
     /// this value is refused the right to spawn further children.
     /// Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins.
@@ -925,7 +925,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub session_budget: SessionBudgetConfig,
 
-    /// Tree-wide budgets aggregated across all descendants of a root session (R+4 / P-6.21).
+    /// Tree-wide budgets aggregated across all descendants of a root session (P-6.21).
     /// Applies in addition to per-session limits; the tighter bound wins.
     #[serde(default)]
     pub root_session_budget: RootSessionBudgetConfig,
@@ -936,7 +936,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
-    /// Maximum number of concurrent pending approvals per root_session_id (R+5 / P-7.17).
+    /// Maximum number of concurrent pending approvals per root_session_id (P-7.17).
     /// When a new approval request would push the count above this cap, the insert is
     /// rejected with `approval_flood`. Set to 0 to disable (not recommended).
     /// Default: 50.
@@ -1130,7 +1130,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_interaction_answer_orchestration")]
     pub interaction_answer_orchestration: bool,
 
-    /// Allow sessions to start even when runtime.lock drift is detected (R+7 / R+18).
+    /// Allow sessions to start even when runtime.lock drift is detected (P-8.12).
     /// When true, drift is logged as a causal event but does not block session start.
     /// Default: false (drift is fatal).
     #[serde(default)]
@@ -1144,7 +1144,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub trust_unsigned_bundles: bool,
 
-    /// Multiplier applied to approval dwell times (R++4). Set to 0 to
+    /// Multiplier applied to approval dwell times (P-2.24). Set to 0 to
     /// disable dwell-time enforcement (for tests). Default: 1.0.
     #[serde(default = "default_approval_dwell_multiplier")]
     pub approval_dwell_multiplier: f64,

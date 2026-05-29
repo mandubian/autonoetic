@@ -952,7 +952,7 @@ Files: `autonoetic-gateway/src/runtime/tools/observability.rs`
 ## Phase 3 — P2 polish
 
 Current state on `main`: **complete** for planned Phase 3 polish items.
-Enforced: R+8, R+13, R+14, R+17, R++8, R++10, plus the 3.7 rule-pin batch.
+Enforced: R+8, R+13, R+14, R+17, R++8, I-11, plus the 3.7 rule-pin batch.
 
 ### 3.1 `R+8` Vault master-key presence probe at startup — **ENFORCED**
 
@@ -1008,7 +1008,7 @@ exact implementation shape; the enforced invariant is still met.
 
 ---
 
-### 3.6 `R++10` Unified fail-mode table — **ENFORCED**
+### 3.6 `I-11` Unified fail-mode table — **ENFORCED**
 
 **Threat.** Per-invariant failure handling is ad-hoc. Vault key
 missing → ? fsync fails → ? causal-chain hash mismatch mid-session
@@ -1160,7 +1160,7 @@ Size: M. Completed via declarative registry loader + constitutional test pin.
 ### 4.8 Cost-budget silent-disable on catalog failure — **ENFORCED**
 
 Fail-shut is now the default when price-capped sessions cannot obtain
-model price metadata (`P-6.5` + `R++10`, `RefuseSessionStart` mode).
+model price metadata (`P-6.5` + `I-11`, `RefuseSessionStart` mode).
 The runtime preflight checks catalog availability before first LLM call
 for price-capped sessions; unavailable pricing refuses session start.
 

@@ -9,7 +9,7 @@ pub fn rule_explanation(rule_id: &str) -> Option<&'static str> {
         "Ri-0.1" => "Agent right: pending gates must not block unrelated operations",
         "Ri-0.5" => "Agent right: degradation notice before restricted execution",
 
-        // Approval gates (R-2.x)
+        // Approval gates (P-2.x)
         "P-2.1" => "Remote access requires operator approval before execution",
         "P-2.2" => "Approval payload must be persisted before suspension",
         "P-2.3" => "Duplicate gate requests are deduplicated (same session + targets)",
@@ -24,24 +24,25 @@ pub fn rule_explanation(rule_id: &str) -> Option<&'static str> {
         "P-2.20" => "Agent-as-decider: agents may resolve gates for other agents",
         "P-2.21" => "Agent-decider must escalate to human when confidence is low",
         "P-2.22" => "Operator approval required when any federation-role verdict is present (FullJury gate)",
+        "P-2.23" => "Session approval grants expire after a configured TTL",
+        "P-2.24" => "Operator approval hardening (dwell time, typed confirmation, dedup)",
 
-        // Execution safety (R-7.x)
+        // Execution safety (P-7.x)
         "P-7.15" => "Spawn-chain depth limit exceeded",
         "P-7.17" => "Approval flood cap — too many pending approvals per root session",
         "P-7.18" => "Degraded session mode — non-Core tools, network, and spawn revoked; reasoning retained",
 
-        // Audit and attribution (R-8.x, R+++3)
+        // Audit and attribution (P-8.x, I-6)
         "P-8.19" => "Gate decisions carry decider attribution",
-        "R+++3" => "Every enforcement action records the rule ID in the causal chain",
+        "I-6" => "Every enforcement action records the rule ID in the causal chain",
 
-        // State attestation (R-6.x)
+        // State attestation (P-6.x)
         "P-6.23" => "State attestation includes all pending gates (approvals, interactions, escalations)",
 
-        // Promotion and capability (R++2, R++4)
-        "R++2" => "Revision promotion requires operator approval for capability delta",
-        "R++4" => "Approval dwell time enforced before high-risk decisions",
+        // Promotion and capability (P-2.16)
+        "P-2.16" => "Revision promotion requires operator approval for capability delta",
 
-        // Self-approval ban (R-10.x)
+        // Self-approval ban (P-10.x)
         "P-10.7" => "Self-approval ban: agents cannot approve their own spawn-tree ancestors",
 
         _ => return None,
@@ -74,7 +75,7 @@ mod tests {
     fn known_rules_have_explanations() {
         assert!(rule_explanation("P-2.1").is_some());
         assert!(rule_explanation("P-2.18").is_some());
-        assert!(rule_explanation("R+++3").is_some());
+        assert!(rule_explanation("I-6").is_some());
     }
 
     #[test]
