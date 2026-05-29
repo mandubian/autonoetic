@@ -1,7 +1,14 @@
 # Constitution Restructure: Principles, Enforcement Register, Rights, and Self-Awareness
 
-**Status**: Proposal (design)
-**Touches**: the constitution itself, and Autonoetic's root documentation (`docs/ARCHITECTURE.md`, `docs/AGENTS.md`, `docs/separation-of-powers.md`, `docs/planner-principles.md`, `CLAUDE.md`, `docs/config-reference.md`). This is a structural change to how the project frames its own foundations.
+> Status: **Proposal** — feedback wanted before broad implementation.
+> Epic: [#297](https://github.com/mandubian/autonoetic/issues/297).
+> Phase issues: principle/register [#298](https://github.com/mandubian/autonoetic/issues/298),
+> rights [#299](https://github.com/mandubian/autonoetic/issues/299),
+> self-surface [#300](https://github.com/mandubian/autonoetic/issues/300),
+> vocabulary [#301](https://github.com/mandubian/autonoetic/issues/301),
+> detection [#302](https://github.com/mandubian/autonoetic/issues/302),
+> migration [#303](https://github.com/mandubian/autonoetic/issues/303).
+> Touches: the constitution itself, and Autonoetic's root documentation (`docs/ARCHITECTURE.md`, `docs/AGENTS.md`, `docs/separation-of-powers.md`, `docs/planner-principles.md`, `CLAUDE.md`, `docs/config-reference.md`) — a structural change to how the project frames its own foundations.
 
 ---
 
@@ -38,7 +45,7 @@ This reframing has a corollary the current design under-serves: **detection and 
 
 ---
 
-## 3. Concept 1 — Principle / Enforcement-Register split (the core change)
+## 3. Concept 1 — Principle / Enforcement Register split (the core change)
 
 The intractability comes from flattening two different things into one signed table. Split them.
 
