@@ -226,9 +226,9 @@ but begins once the block is authoritatively present.
 
 ---
 
-### 1.7 `R++2` Capability-delta gating at promotion — **ENFORCED** (now R-2.16)
+### 1.7 `R++2` Capability-delta gating at promotion — **ENFORCED** (now P-2.16)
 
-**Threat.** Capability accretion by stealth. R-8.10 detects drift in
+**Threat.** Capability accretion by stealth. P-8.10 detects drift in
 `promotion_history` after the fact; nothing *prevents* the canonical
 failure mode of "one more capability per revision, each PR reasonable
 in isolation, result after six revisions is god-mode." Detection
@@ -261,7 +261,7 @@ rejection.
 
 ---
 
-### 1.8 `R++5` Tool-call intent capture — **ENFORCED** (now R-8.18)
+### 1.8 `R++5` Tool-call intent capture — **ENFORCED** (now P-8.18)
 
 **Threat.** Post-hoc audit of what-happened is much harder than it
 needs to be. Today we see "spawned coder with message X"; we don't
@@ -353,7 +353,7 @@ through motions.
 
 **Sketch.** New native tool `constitution_read`:
 
-- `args`: optional `section` (e.g. `"Ri-0.10"`, `"R-7.5"`, `"§0"`) —
+- `args`: optional `section` (e.g. `"Ri-0.10"`, `"P-7.5"`, `"§0"`) —
   if omitted, returns the whole document.
 - `returns`: `{ text, digest, version, retrieved_at }`.
 
@@ -629,9 +629,9 @@ ECONNREFUSED.
 
 ---
 
-### 2.9 `R++3` Distinct auditor / evaluator identity at promotion — **ENFORCED** (now R-2.17)
+### 2.9 `R++3` Distinct auditor / evaluator identity at promotion — **ENFORCED** (now P-2.17)
 
-**Threat.** Today's gate (R-2.8) requires both evaluator and auditor
+**Threat.** Today's gate (P-2.8) requires both evaluator and auditor
 records but does not require their `agent_id` to differ. A single
 compromised specialist holding both capabilities can self-approve.
 
@@ -697,7 +697,7 @@ with correct phrase, standard no-phrase, persistence in store.
 
 ---
 
-### 2.11 `R-7.18` Degraded session mode — **ENFORCED**
+### 2.11 `P-7.18` Degraded session mode — **ENFORCED**
 
 **Threat.** The response to agent misbehaviour today is binary:
 healthy or emergency-stopped. A session showing loop-guard warnings
@@ -830,7 +830,7 @@ For rights that need one small piece of new code plus a test.
 
 | Right | Work |
 |---|---|
-| Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via R-7.18 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
+| Ri-0.6 no silent capability reduction | Declare the closed set of legitimate narrowing paths (rule-driven via P-7.18 degraded mode, operator-driven via explicit command). Invariant test asserts capability set at turn N+1 is a subset of turn N only via declared paths, with a causal event for each narrowing. |
 | Ri-0.12 continuity — closed list of termination reasons | Audit every `lifecycle.rs` termination path, enumerate, document, refactor so every exit calls a single `terminate(reason, rule_id, evidence)` helper. Test: fuzz inputs, no termination occurs outside the declared set. |
 
 **Implementation.** Ri-0.6: runtime now computes a turn-boundary capability-tier
@@ -838,7 +838,7 @@ snapshot and compares turn N+1 against turn N. Narrowing is allowed only in
 degraded mode with `session.degraded` causal evidence; each narrowing writes
 `session.capability_narrowed` with path attribution (`operator_command` or
 `degraded_mode`). Tests also verify `degrade_session()` emits `session.degraded`
-with `source: "operator"` and `enforced_rules: ["R-7.18"]`, that
+with `source: "operator"` and `enforced_rules: ["P-7.18"]`, that
 `clear_session_degradation()` emits `session.degradation_cleared`, that degraded
 state clamps the tool tier filter to `core_only()` (blocking specialized tools),
 and that declared narrowing paths are enforced (`constitution_right_ri_0_6.rs`).
@@ -873,9 +873,9 @@ For rights whose enforcement mechanism is itself a Phase 1/2 item.
 | Ri-0.1 self-inspection | R++1 attestation (#48) | ENFORCED — `constitution_attestation_freshness.rs` + `constitution_rights_late_bucket.rs` |
 | Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | ENFORCED — rule-ID rejection coverage now pinned for AgentRevision, NetworkAccess, CodeExecution, AgentSpawn, SchedulerAccess, Evaluation, and WriteAccess in `constitution_rights_late_bucket.rs` |
 | Ri-0.4 truthful budget | R++1 (#48) | ENFORCED — `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` |
-| Ri-0.5 degradation notice | R-7.18 (#61) | ENFORCED — lifecycle injects turn-start degraded-mode notice with rule IDs + causal evidence (`constitution_right_ri_0_5.rs`) |
+| Ri-0.5 degradation notice | P-7.18 (#61) | ENFORCED — lifecycle injects turn-start degraded-mode notice with rule IDs + causal evidence (`constitution_right_ri_0_5.rs`) |
 | Ri-0.8 amendment proposal | R+++1 (#92) | ENFORCED — `constitution_propose_amendment` endpoint + `constitutional_proposals` persistence; covered by `constitution_rights_amendment_proposal.rs` |
-| Ri-0.9 last-word before terminal | R-7.18 (#61) + emergency-stop | ENFORCED — explicit `notify_where_practical` on degrade/emergency-stop; `session.last_word_notice` / `session.last_word_foreclosed`; queued Ri-0.9 notice messages; `session.last_word_response` after notice delivery + completing turn (`constitution_right_ri_0_9.rs`) |
+| Ri-0.9 last-word before terminal | P-7.18 (#61) + emergency-stop | ENFORCED — explicit `notify_where_practical` on degrade/emergency-stop; `session.last_word_notice` / `session.last_word_foreclosed`; queued Ri-0.9 notice messages; `session.last_word_response` after notice delivery + completing turn (`constitution_right_ri_0_9.rs`) |
 
 Test: `constitution_rights_late_bucket.rs` — 11 tests (Ri-0.1, expanded Ri-0.3 rejection coverage, Ri-0.12 cross-check).
 
@@ -1012,12 +1012,12 @@ exact implementation shape; the enforced invariant is still met.
 
 **Threat.** Per-invariant failure handling is ad-hoc. Vault key
 missing → ? fsync fails → ? causal-chain hash mismatch mid-session
-→ ? OpenRouter catalog down → silently disabled (R-6.5, the archetype
+→ ? OpenRouter catalog down → silently disabled (P-6.5, the archetype
 to fix). The silent-disable pattern is how invariants die.
 
 **Implementation.** Landed as `fail_mode.rs` with a central fail-mode
 table (`RefuseBoot`, `RefuseSessionStart`, `Degrade`, `EmergencyStop`,
-`LogOnly`) and shared lookup helpers. R-6.5 catalog-unavailable behavior
+`LogOnly`) and shared lookup helpers. P-6.5 catalog-unavailable behavior
 is wired through this model in both `session_budget.rs` and
 `root_session_budget.rs`.
 
@@ -1160,7 +1160,7 @@ Size: M. Completed via declarative registry loader + constitutional test pin.
 ### 4.8 Cost-budget silent-disable on catalog failure — **ENFORCED**
 
 Fail-shut is now the default when price-capped sessions cannot obtain
-model price metadata (`R-6.5` + `R++10`, `RefuseSessionStart` mode).
+model price metadata (`P-6.5` + `R++10`, `RefuseSessionStart` mode).
 The runtime preflight checks catalog availability before first LLM call
 for price-capped sessions; unavailable pricing refuses session start.
 

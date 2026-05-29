@@ -1,6 +1,6 @@
 //! Constitution Ri-0.13a+b: Private-under-law reasoning.
 //!
-//! Ri-0.13a: The dumbness invariant (I-8) — policy decisions are functions
+//! Ri-0.13a: The Lawful-Executor invariant (I-8) — policy decisions are functions
 //! only of declared actions, capabilities, and recorded state. They are NOT
 //! functions of agent reasoning content. Test verifies PolicyEngine decisions
 //! are identical regardless of CoT content.
@@ -54,7 +54,7 @@ fn minimal_manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
 }
 
 // ---------------------------------------------------------------------------
-// Ri-0.13a: Dumbness invariant — policy decisions are CoT-blind
+// Ri-0.13a: Lawful-Executor invariant — policy decisions are CoT-blind
 // ---------------------------------------------------------------------------
 
 #[test]

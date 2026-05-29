@@ -358,7 +358,7 @@ Agents declare optional `io.accepts` (input) and `io.returns` (output) JSON Sche
 
 ### Design choices and rationale
 
-**Schema authorship is LLM-owned.** The gateway is a dumb enforcement layer — it stores and validates schemas verbatim, never creates them. Agent-factory and specialized_builder include `io` in their install intent delegation so newly created agents carry schemas from birth.
+**Schema authorship is LLM-owned.** The gateway is a Lawful Executor — it stores and validates schemas verbatim, never creates them. Agent-factory and specialized_builder include `io` in their install intent delegation so newly created agents carry schemas from birth.
 
 **Asymmetric guidance: `io.returns` encouraged, `io.accepts` discouraged for reasoning agents.** Reasoning agents receive natural-language messages from the planner; over-constraining the input schema blocks valid callers with validation errors. Script agents with structured CLI arguments benefit from `io.accepts`.
 
@@ -893,7 +893,7 @@ Properties:
 - **Invalidation is coarse but correct**: a mutating tool clears the affected tag class (`AgentExistence` / `ArtifactMetadata`) across *all* session caches, so a child session's promote invalidates the parent's `agent_exists` cache. `content_read` is never invalidated.
 - **Audited**: a cache hit emits a `tool_call.cache_hit` causal event (and the normal execution trace still records), so the causal chain shows every logical tool call.
 
-Grounding: extends the determinism-skip principle of R-2.6 / R-2.7 (approved-execution caching) to pure reads, where the safety argument is stronger — there is no side effect to skip.
+Grounding: extends the determinism-skip principle of P-2.6 / P-2.7 (approved-execution caching) to pure reads, where the safety argument is stronger — there is no side effect to skip.
 
 ---
 
@@ -1177,8 +1177,8 @@ The planner orchestrates federation: it inspects the artifact type, spawns the a
 
 When federation roles (`static_evaluator` or `unit_test_runner`) have recorded verdicts for an artifact, the promotion gate mechanically enforces:
 
-1. **Distinct identity** (R-2.17): each federation role's agent ID must differ from the revision proposer and from every other federation role
-2. **Operator approval** (R-2.22): an approved `EscalationMessage` must exist for the artifact + revision pair
+1. **Distinct identity** (P-2.17): each federation role's agent ID must differ from the revision proposer and from every other federation role
+2. **Operator approval** (P-2.22): an approved `EscalationMessage` must exist for the artifact + revision pair
 3. **Legacy compatibility**: artifacts without federation verdicts continue through the existing Full/AuditOnly gate
 
 This is a fifth gate mode (`FullJury`) that activates on top of the legacy gate when federation verdicts are present. A compromised planner cannot bypass it — the gateway checks `has_federation_roles()` mechanically and refuses promotion without an approved escalation.
@@ -1456,12 +1456,12 @@ The guard has four independent trip conditions, each attributed on the `loop_gua
 
 | `reason` | Condition | Rule |
 |---|---|---|
-| `tool_failure_budget` | A single tool exceeds `max_tool_failures` (default 5) | R-7.5 |
-| `no_meaningful_progress` | `current_loops` reaches `max_loops_without_progress` — consecutive LLM steps with no progress-resetting tool result | R-7.7 |
-| `rotating_polling_pattern` | The last `rotation_window_size` (default 16) successful calls hold ≤ `rotation_distinct_floor` (default 6) distinct fingerprints — an agent cycling a small set of read-only tools without semantic progress. A result carrying `side_effect_state: "committed"` clears the window. | R-7.19 |
-| `child_failure_budget` | Child-task failures reach `max_child_failures` (default 3); does not reset on progress | R-7.20 |
+| `tool_failure_budget` | A single tool exceeds `max_tool_failures` (default 5) | P-7.5 |
+| `no_meaningful_progress` | `current_loops` reaches `max_loops_without_progress` — consecutive LLM steps with no progress-resetting tool result | P-7.7 |
+| `rotating_polling_pattern` | The last `rotation_window_size` (default 16) successful calls hold ≤ `rotation_distinct_floor` (default 6) distinct fingerprints — an agent cycling a small set of read-only tools without semantic progress. A result carrying `side_effect_state: "committed"` clears the window. | P-7.19 |
+| `child_failure_budget` | Child-task failures reach `max_child_failures` (default 3); does not reset on progress | P-7.20 |
 
-`no_meaningful_progress` (R-7.7) and `rotating_polling_pattern` (R-7.19) are complementary: R-7.7 catches the absence of progress-making results; R-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset R-7.7's counter).
+`no_meaningful_progress` (P-7.7) and `rotating_polling_pattern` (P-7.19) are complementary: P-7.7 catches the absence of progress-making results; P-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset P-7.7's counter).
 
 ### Design Rule
 
@@ -1475,7 +1475,7 @@ Flow-control responses (e.g., `approval_required: true`, `suspended: true`) may 
 
 ## Design Principles
 
-1. **Gateway as Dumb Secure Pipe**: Execute proposals, don't make decisions
+1. **Gateway as Lawful Executor**: deterministic enforcement, no improvised judgment — execute proposals, don't make decisions
 2. **Agents as Pure Reasoners**: LLMs plan; gateway validates and acts
 3. **Autonomy Through Composition**: Complex behavior emerges from simple primitives
 4. **No Hardcoded Heuristics**: Business logic in SKILL.md, not platform code

@@ -1,7 +1,7 @@
 //! Approval resolution for the background scheduler.
 //! Handles loading, approving, and rejecting approval requests.
 //!
-//! The gateway follows a "Dumb Gate / Agent Retry" model: on approval it merely
+//! The gateway follows a "Lawful Gate / Agent Retry" model: on approval it merely
 //! unblocks the workflow and notifies the agent, which retries the tool call
 //! with an approval_ref. The gateway never auto-executes tool calls on behalf
 //! of the agent.
@@ -440,7 +440,7 @@ pub fn approve_request_with_options(
         }
     }
 
-    // Dumb Gate model: notify the waiting session, do not auto-execute.
+    // Lawful Gate model: notify the waiting session, do not auto-execute.
     if should_resume_waiting_session(&decision) {
         if let Err(e) =
             resume_session_after_approval(config, gateway_store, &decision, hook_executor)
@@ -635,7 +635,7 @@ fn cancel_approval_request(
 /// gateway-owned delivery loops and/or channel clients (for example, the TUI
 /// chat client resuming on its own connection).
 ///
-/// Under the "Dumb Gate" model, the gateway never auto-executes tool calls.
+/// Under the "Lawful Gate" model, the gateway never auto-executes tool calls.
 /// It merely notifies the agent that approval was granted, and the agent
 /// retries the tool call with an approval_ref.
 fn resume_session_after_approval(

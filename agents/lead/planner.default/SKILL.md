@@ -441,7 +441,7 @@ These two outcomes are **not artifact failures**. Do not route them to `coder.de
 - **`unable_to_evaluate`**: the gate could not produce a deterministic verdict because of its environment. Inspect the gate's `findings` array for the actual blocker:
   - **Dependency layer missing** (`"requires dependency layering"`): Spawn `packager.default`, then re-run gates.
   - **Live network required but unavailable** (`recommendation: "blocked_on_environment"` with a network finding): Do not coerce to fail. Either accept the artifact without dynamic evidence (only if operator policy allows), or call `session_escalate(target: "human", urgency: "normal")` describing the gap.
-  - **Sandbox degraded** (R-7.18 in findings): Spawn a fresh gate task on a clean session; if it recurs, escalate.
+  - **Sandbox degraded** (P-7.18 in findings): Spawn a fresh gate task on a clean session; if it recurs, escalate.
 - **`clarification_needed`**: the gate is asking *you* for missing inputs (test criteria, scenarios, thresholds). Read the `clarification_request` payload and either supply the missing context in a fresh `agent_spawn` of the same gate, or call `user_ask` to relay the question to the operator if you cannot answer it yourself. Never invent test criteria the gate did not have.
 
 ---
