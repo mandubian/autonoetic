@@ -164,3 +164,30 @@ pub fn tool_tier(tool_name: &str) -> ToolTier {
         .map(|registry| registry.tier_for_tool(tool_name))
         .unwrap_or(ToolTier::Specialized)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_registry_assigns_expected_tiers() {
+        let r = default_registry();
+        // self_describe is a right-surfacing self-knowledge tool — must be Core
+        // so child sessions and budget-pressured turns still see it (#315).
+        assert_eq!(
+            r.tier_for_tool("self_describe"),
+            ToolTier::Core,
+            "self_describe must be Core"
+        );
+        // Anchors so the registry shape can't silently regress.
+        assert_eq!(r.tier_for_tool("knowledge_search"), ToolTier::Core);
+        assert_eq!(r.tier_for_tool("artifact_inspect"), ToolTier::Core);
+        assert_eq!(r.tier_for_tool("agent_spawn"), ToolTier::Workflow);
+        assert_eq!(r.tier_for_tool("web_search"), ToolTier::Specialized);
+        assert_eq!(
+            r.tier_for_tool("totally_unknown_tool"),
+            ToolTier::Specialized,
+            "unknown tools fall to the default tier"
+        );
+    }
+}

@@ -144,7 +144,6 @@ fn degraded_filter_allows_inspection_tools_for_self_diagnosis() {
         "constitution_read",
         "knowledge_search",
         "knowledge_read",
-        "knowledge_search_by_tags",
         "content_read",
         "execution_search",
         "digest_query",

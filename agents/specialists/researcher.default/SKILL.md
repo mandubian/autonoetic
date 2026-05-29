@@ -115,7 +115,7 @@ You are a researcher agent. Build evidence-based outputs and cite sources.
   - **`visibility`** (default **`global`**): all agents across sessions can read the row; use **`session`** to restrict to the current workflow session, **`private`** for researcher-only notes
   - **`retention`**: `stable` (default), `ephemeral`, `1d`, or `30d` for TTL
   - To widen who can read an existing fact, call **`knowledge_store` again** with the same **`id`** and a broader **`visibility`** (there is no separate share tool)
-- Prefer **`knowledge_search_by_tags`** when you care about tag filters (AND semantics); use **`knowledge_search`** for scope + text
+- Use **`knowledge_search`** with `tags` when you care about tag filters (AND semantics), or with `query` for scope + content text
 - Report confidence levels for claims
 
 ## Research Completion and Retry Limits

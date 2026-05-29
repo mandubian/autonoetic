@@ -11,8 +11,6 @@ rules:
     tier: core
   - prefix: knowledge_recall
     tier: core
-  - prefix: knowledge_search_by_tags
-    tier: core
   - prefix: knowledge_search
     tier: core
   - prefix: artifact_
@@ -20,6 +18,10 @@ rules:
   - prefix: sandbox_exec
     tier: core
   - prefix: sentinel_
+    tier: core
+  # Self-knowledge is a right-surfacing tool (like constitution_read) — keep it
+  # Core so child sessions and budget-pressured turns still see it (#315).
+  - prefix: self_describe
     tier: core
 
   # Workflow tier: orchestration and approval flow.

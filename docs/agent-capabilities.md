@@ -57,8 +57,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 |------|---------------------|-------|
 | `knowledge_recall` | `ReadAccess` | Recall stored knowledge (visibility + session + expiry enforced) |
 | `knowledge_store` | `WriteAccess` | Store or update knowledge; `visibility` (`session` default) and `retention` |
-| `knowledge_search` | `ReadAccess` | Search knowledge base |
-| `knowledge_search_by_tags` | `ReadAccess` | Tag-AND search in a scope |
+| `knowledge_search` | `ReadAccess` | Search a scope by content and/or AND-matched tags |
 | `digest_query` | `ReadAccess` | Post-session narrative / digest |
 
 ### Sandbox Tools
