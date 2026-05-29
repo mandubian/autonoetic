@@ -110,6 +110,7 @@ Reference bundles are under `agents/`:
 - **Causal Chain**: Every session produces a hash-chained audit trail of turns and events
 - **Checkpoint**: Universal session snapshots at every yield point (hibernation, approval, budget exhaustion, emergency stop). Enables crash recovery and session forking.
 - **Queryable Event Store**: Causal events mirrored to SQLite (`causal_events` table) for agent learning queries
+- **Contract Health**: Standing view of how often each constitutional clause (principle/right) has been enforced. Enforcement events carry their legacy rule ID (e.g. `loop_guard.tripped` → `R-7.19`); the `enforcement_register` reverse-maps these to their owning clause, and `GatewayStore::contract_health` tallies occurrences by clause (unrecognised IDs surfaced as `unattributed`). Surfaced via `autonoetic trace contract-health`.
 - **Execution Traces**: Full code execution results (stdout, stderr, exit_code) in `execution_traces` table — not truncated
 - **Live Digest**: Real-time session narrative in `digest.md`, replacing flat timeline
 - **Artifact Store**: Content-addressed (SHA-256) storage; agents pass handles, not inline blobs

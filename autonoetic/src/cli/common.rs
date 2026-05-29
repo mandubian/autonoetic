@@ -1065,6 +1065,15 @@ pub enum TraceCommands {
         #[arg(long)]
         follow: bool,
     },
+    /// Contract-health view: how often each constitutional clause has been enforced (#302)
+    ContractHealth {
+        /// Only count enforcement events at or after this RFC3339 timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

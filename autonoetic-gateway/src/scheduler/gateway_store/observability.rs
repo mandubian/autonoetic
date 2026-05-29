@@ -356,6 +356,65 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// Standing **contract-health** view (#302): tally how often each
+    /// constitutional clause (principle/right) has been enforced, by reading
+    /// the `enforced_rules` carried on causal events and attributing each
+    /// legacy rule/right ID to its owning clause via the enforcement register.
+    ///
+    /// The `R+++3` event-attribution placeholder (every event carries it by
+    /// default) is skipped — only events that named a concrete rule/right
+    /// contribute. Real rule IDs not yet in the register surface in
+    /// `ContractHealth::unattributed`, keeping migration gaps visible rather
+    /// than silently dropped.
+    ///
+    /// `since` is an optional RFC3339 lower bound on `timestamp`; `None` scans
+    /// all retained events. The bound is parsed and compared by absolute
+    /// instant (not raw text), so offset forms like `Z` vs `+02:00` behave
+    /// correctly and malformed operator input fails clearly.
+    pub fn contract_health(
+        &self,
+        since: Option<&str>,
+    ) -> Result<crate::enforcement_register::ContractHealth> {
+        // Parse + validate the bound up front: raw SQLite text comparison on
+        // RFC3339 is wrong across offset forms, and an unparsed string would
+        // silently yield empty/partial results instead of a clear error.
+        let since_dt = match since {
+            Some(ts) => Some(chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
+                anyhow::anyhow!("invalid `since` timestamp {ts:?}: {e} (expected RFC3339)")
+            })?),
+            None => None,
+        };
+
+        let conn = self.conn.lock().unwrap();
+        let placeholder = autonoetic_types::causal_chain::RULE_ID_EVENT_ATTRIBUTION;
+
+        let mut stmt = conn.prepare("SELECT enforced_rules, timestamp FROM causal_events")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+
+        let mut legacy_ids: Vec<String> = Vec::new();
+        for r in rows {
+            let (raw, ts) = r?;
+            // Filter by absolute time when a bound is set. An event whose own
+            // timestamp won't parse is kept rather than dropped — we never
+            // hide enforcement activity over a formatting quirk.
+            if let Some(bound) = since_dt {
+                if let Ok(event_dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    if event_dt < bound {
+                        continue;
+                    }
+                }
+            }
+            // Each cell is a JSON array of rule/right IDs; tolerate malformed
+            // rows by skipping rather than failing the whole tally.
+            if let Ok(ids) = serde_json::from_str::<Vec<String>>(&raw) {
+                legacy_ids.extend(ids.into_iter().filter(|id| id != placeholder));
+            }
+        }
+
+        Ok(crate::enforcement_register::contract_health(legacy_ids))
+    }
+
     /// List curator decision events (`category = 'curator'`, `action = 'decision'`)
     /// for a specific target URI/id. Used by operator workflows asking
     /// "why was memory X dropped" (issue #30). The underlying `idx_causal_target`

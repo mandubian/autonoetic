@@ -258,6 +258,32 @@ modify session state. Pure observer.
 
 Each phase is independently shippable and provides value on its own.
 
+## 5b. Principle-Aware Correlation (Contract Health) — implemented foundation
+
+The Sentinel correlates breaches by **constitutional clause**, not by ad-hoc
+rule strings. This foundation is implemented (#302) ahead of the Layer-1
+monitor and is reusable by both layers:
+
+- **Events carry clause attribution.** Enforcement events keep their legacy
+  rule/right IDs in `enforced_rules`; richer events (e.g.
+  `loop_guard.tripped`) also resolve the owning clause into their payload
+  (`rule_id` + `clause`).
+- **Reverse lookup.** `enforcement_register::clause_of_legacy(legacy_id)` maps
+  a legacy `R-x.y` / `Ri-x.y` ID to its owning principle or right. The register
+  is the single source of truth for code ↔ constitution agreement, so the
+  Sentinel never hard-codes rule→clause mappings.
+- **Contract-health tally.** `GatewayStore::contract_health(since)` aggregates
+  occurrences per clause over `causal_events`, surfacing IDs not yet migrated
+  into the register as `unattributed` (a visible migration-coverage signal
+  rather than a silent drop). The `R+++3` event-attribution placeholder is
+  excluded.
+- **Operator surface.** `autonoetic trace contract-health [--since] [--json]`.
+
+This gives the "report" half of report-and-correct a standing, queryable view:
+which principles trip, how often, and whether enforcement is concentrating on
+particular clauses. Layer 1 consumes the same correlation when emitting
+`divergence.*` events; Layer 2 can cite per-clause history in its judgment.
+
 ## 6. Validating the "Digest-Reader Bias" Hypothesis
 
 Before building Layer 2, run a **falsifiable experiment** on archived

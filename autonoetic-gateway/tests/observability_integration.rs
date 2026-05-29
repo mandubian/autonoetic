@@ -446,3 +446,78 @@ fn test_observability_search_after_publish() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Contract-health view (#302): the store tallies `enforced_rules` carried on
+/// causal events by their constitutional clause, attributing legacy rule/right
+/// IDs via the enforcement register and surfacing unrecognised IDs separately.
+#[test]
+fn test_contract_health_tallies_by_clause() -> anyhow::Result<()> {
+    use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
+
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = GatewayStore::open(&gateway_dir)?;
+
+    // Helper to insert a causal event carrying a given set of enforced rules.
+    let mut seq = 0u64;
+    let mut emit = |rules: Vec<&str>| -> anyhow::Result<()> {
+        seq += 1;
+        store.create_causal_event(&CausalEventRecord {
+            event_id: format!("evt-{seq}"),
+            agent_id: "agent.x".to_string(),
+            session_id: "sess-1".to_string(),
+            turn_id: None,
+            event_seq: seq,
+            timestamp: format!("2026-05-29T00:00:{:02}Z", seq),
+            category: "loop_guard".to_string(),
+            action: "tripped".to_string(),
+            status: EntryStatus::Error.to_string(),
+            enforced_rules: rules.into_iter().map(|s| s.to_string()).collect(),
+            target: None,
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        })
+    };
+
+    // R-7.19 + R-7.5 both belong to principle P-7; Ri-0.14 is its own clause.
+    // R-9.99 is not (yet) in the register → unattributed. The bare placeholder
+    // event contributes nothing.
+    emit(vec!["R-7.19"])?;
+    emit(vec!["R-7.19"])?;
+    emit(vec!["R-7.5"])?;
+    emit(vec!["Ri-0.14"])?;
+    emit(vec!["R-9.99"])?;
+    emit(vec!["R+++3"])?; // default placeholder — skipped entirely
+
+    let health = store.contract_health(None)?;
+    assert_eq!(
+        health.by_clause,
+        vec![("P-7".to_string(), 3), ("Ri-0.14".to_string(), 1)]
+    );
+    assert_eq!(health.unattributed, 1);
+
+    // `since` filter excludes the earliest events.
+    let health_since = store.contract_health(Some("2026-05-29T00:00:04Z"))?;
+    // Only Ri-0.14 (seq 4), R-9.99 (seq 5), placeholder (seq 6) remain.
+    assert_eq!(health_since.by_clause, vec![("Ri-0.14".to_string(), 1)]);
+    assert_eq!(health_since.unattributed, 1);
+
+    // `since` is compared by absolute instant, not raw text: an offset form
+    // equal to 00:00:04Z must filter identically to the `Z` form above.
+    let health_offset = store.contract_health(Some("2026-05-29T02:00:04+02:00"))?;
+    assert_eq!(health_offset, health_since);
+
+    // Malformed `since` fails clearly rather than silently returning nothing.
+    let err = store
+        .contract_health(Some("not-a-timestamp"))
+        .expect_err("invalid since must error");
+    assert!(
+        err.to_string().contains("invalid `since` timestamp"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}

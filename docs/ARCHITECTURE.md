@@ -18,6 +18,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Causal Chain](#causal-chain)
 - [Session Checkpoints, Continuations, and Forks](#session-checkpoints-continuations-and-forks)
 - [Queryable Event Store](#queryable-event-store)
+- [Contract Health](#contract-health)
 - [Live Digest](#live-digest)
 - [Observability Surface](#observability-surface)
 - [Hook System](#hook-system)
@@ -763,9 +764,19 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 | `category` | tool_invoke, llm, lifecycle, memory... |
 | `action` | requested, completed, failure... |
 | `status` | SUCCESS, ERROR, DENIED |
+| `enforced_rules` | JSON array of constitutional rule/right IDs this event enforced (default placeholder `R+++3` when none) |
 | `target` | Tool name, model name, etc. |
 | `payload` | Full JSON (not truncated) |
 | `timestamp` | RFC3339 |
+
+#### Principle-aware enforcement events
+
+Enforcement events carry the legacy rule/right IDs they enforce in
+`enforced_rules`, and (for richer events like `loop_guard.tripped`) the
+resolved owning **clause** in the payload. The `enforcement_register`
+reverse-maps a legacy `R-x.y` / `Ri-x.y` ID to its owning principle or right,
+so breaches correlate by **constitutional clause**, not by ad-hoc rule
+strings. See [Contract Health](#contract-health) below.
 
 **`execution_traces`** — Full code execution results:
 
@@ -801,6 +812,29 @@ Causal chain events are mirrored to SQLite for agent learning queries.
   "limit": 10
 }
 ```
+
+---
+
+## Contract Health
+
+Trust-through-predictability holds only if breaches are detected and corrected —
+so "report and correct" is a peer of "constrain." The contract-health view is
+the standing tally behind that half of the loop: how often each constitutional
+clause (principle/right) has actually been enforced.
+
+It reads the `enforced_rules` carried on `causal_events`, attributes each legacy
+rule/right ID to its owning clause via the `enforcement_register`
+(`clause_of_legacy`), and tallies occurrences per clause. The `R+++3`
+event-attribution placeholder is skipped (every event carries it by default);
+real rule IDs not yet migrated into the register surface as `unattributed`, so
+coverage gaps stay visible rather than silently dropped.
+
+- **Code**: `GatewayStore::contract_health(since)` →
+  `enforcement_register::ContractHealth { by_clause, unattributed }`
+- **CLI**: `autonoetic trace contract-health [--since <RFC3339>] [--json]`
+
+This is the foundation for principle-aware sentinel correlation; see
+`docs/design/divergence-sentinel-design.md`.
 
 ---
 
