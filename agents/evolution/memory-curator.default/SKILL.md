@@ -240,7 +240,7 @@ For each agent observed in the traces, compute the multi-signal score:
 | Approval denial rate | Approvals with status=rejected | > 2 in window |
 | Low eval scores | eval results | avg < 0.5 |
 | Escalation frequency | user_interactions where kind=escalation | >= 2 |
-| Negative digest memories | knowledge_search_by_tags | >= 3 patterns |
+| Negative digest memories | knowledge_search | >= 3 patterns |
 
 For each agent:
 - Count how many signals are triggered

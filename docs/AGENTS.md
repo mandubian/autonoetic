@@ -336,8 +336,7 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 |------|-----------|-------------|
 | `knowledge_store` | `(id, content, scope?, tags?, confidence?, retention?, visibility?) → record` | Upsert a fact. **`visibility`**: `session` (default), `private`, or `global`. **`retention`**: `stable` (default), `ephemeral`, `1d`, `30d`. Widen access by calling again with the same `id` and a broader `visibility`. |
 | `knowledge_recall` | `(id: string) → fact` | Retrieve fact if visible to this agent/session |
-| `knowledge_search` | `(scope: string, query: string) → [facts]` | Search facts by scope and content |
-| `knowledge_search_by_tags` | `(scope, tags, text?, limit?) → [facts]` | AND match on JSON tags |
+| `knowledge_search` | `(scope, query?, tags?, limit?) → [facts]` | Search a scope by content (`query`) and/or AND-matched `tags` |
 | `digest_query` | `(session_id?, narrative_handle?) → narrative` | Read post-session narrative / digest content |
 
 **Cross-agent memory sharing:** Facts stored with `session` visibility (the default for both `knowledge_store` and `sdk.memory.remember`) are readable by all agents participating in the same root session. This includes the planner reading memories written by sub-agents (e.g., a fibonacci calculator storing results via `sdk.memory.remember`). Use `private` visibility for data that should only be accessible to the writing agent, or Tier 1 `memory.write`/`memory.read` for scratch data.
@@ -363,6 +362,8 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 - **how do I evolve** — the revision, skill-promotion, and (capability-permitting) constitutional-amendment paths open to you
 
 It takes no arguments, reports only your own self and the public constitution, and is **always available** — an agent always has the standing to know itself. Rights are sourced from the enforcement register (`docs/constitution/enforcement-register.md`), so they stay in sync with what the gateway actually upholds.
+
+`self_describe` is **Core tier** (like `constitution_read`) so it is visible to every agent including child sessions. **Use `self_describe` to inspect yourself; use `agent_inspect` only for *other* agents** — do not `agent_inspect` your own id.
 
 ### Skill Install Tool
 

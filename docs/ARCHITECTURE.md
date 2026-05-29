@@ -401,7 +401,7 @@ Content uses root-session visibility. Default is `session` (collaborative within
 
 Gateway-managed facts with provenance:
 
-**Tools:** `knowledge_store`, `knowledge_recall`, `knowledge_search`, `knowledge_search_by_tags`, `digest_query`
+**Tools:** `knowledge_store`, `knowledge_recall`, `knowledge_search`, `digest_query`
 
 Sharing is done by **storing (or re-storing) with the right visibility** — there is no separate share tool. To expose a fact to collaborators in the same root workflow, use `knowledge_store` with default `visibility: "session"` (or call `knowledge_store` again with the same `id` to widen visibility).
 
@@ -805,7 +805,7 @@ strings. See [Contract Health](#contract-health) below.
 }
 ```
 
-**`knowledge_search_by_tags`** — Search tagged memories:
+**`knowledge_search`** (with `tags`) — AND-match tagged memories:
 ```json
 {
   "tags": ["type:error_lesson", "domain:http"],
@@ -1044,7 +1044,7 @@ All transactional state in a single SQLite database:
 │
 │   ── Memory & Artifacts ──
 ├── memories               # Tier 2 durable memory
-├── memory_tags            # Tag index for knowledge_search_by_tags
+├── memory_tags            # Tag index for knowledge_search tag filtering
 ├── artifact_refs          # Short ref → digest mapping
 ├── short_id_index         # LLM-friendly short IDs for revisions and runs
 │

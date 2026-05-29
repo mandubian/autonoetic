@@ -344,8 +344,7 @@ Autonoetic provides two memory tiers:
 |------|-------------|
 | `knowledge_store` | Store or upsert a durable fact (`visibility`, `retention`, tags, …) |
 | `knowledge_recall` | Retrieve by id if visible |
-| `knowledge_search` | Search by scope and text |
-| `knowledge_search_by_tags` | AND search on tags |
+| `knowledge_search` | Search by scope, content, and/or AND-matched tags |
 
 Tier 1 working files still map to SDK helpers / `content.*` for session files under `state/`.
 

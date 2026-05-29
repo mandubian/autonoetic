@@ -20,8 +20,7 @@ Core runtime model:
 3. Knowledge is for durable facts with provenance.
 - Use `knowledge_store(id, content, ...)` to persist facts. **`visibility`** defaults to **`session`**: any agent in the same workflow session can read the row; use **`private`** for writer/owner only, or **`global`** for all agents. **`retention`** selects TTL (`stable`, `ephemeral`, `1d`, `30d`). To share something that was private, call **`knowledge_store` again** with the same `id` and a wider `visibility` (upsert). ⚠️ **`content` must be a plain string** — passing a JSON object as `content` is a schema error. If storing structured data, serialize it to a JSON string first.
 - Use `knowledge_recall(id)` to retrieve a specific fact (only if visible to you in the current session).
-- Use `knowledge_search(scope, query)` to find facts by scope and content.
-- Use `knowledge_search_by_tags(scope, tags, text?, limit?)` when tags matter: every tag you list must appear on the stored record (AND semantics), with optional substring filter on content.
+- Use `knowledge_search(scope, query?, tags?, limit?)` to find facts in a scope. Pass `tags` when tags matter — every tag you list must appear on the stored record (AND semantics); `query` is an optional substring filter on content.
 - There is **no** `knowledge_share` tool — sharing is expressed entirely through `knowledge_store` and `visibility`.
 - Knowledge includes full provenance tracking (who wrote it, when, from what source).
 

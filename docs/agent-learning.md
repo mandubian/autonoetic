@@ -11,7 +11,7 @@ Every session produces structured data that agents can query later:
 | Data | Tool | Table |
 |------|------|-------|
 | Code execution results | `execution_search` | `execution_traces` |
-| Tagged memories/lessons | `knowledge_search_by_tags` | `memories` |
+| Tagged memories/lessons | `knowledge_search` | `memories` |
 | Session narratives | `digest_query` | Content store (digest.md) |
 
 This enables patterns like:
@@ -90,7 +90,7 @@ Returns:
 
 ---
 
-## knowledge_search_by_tags
+## knowledge_search
 
 Search tagged memories for lessons, decisions, and facts.
 
@@ -199,13 +199,13 @@ Before starting a task, search for related lessons:
 
 ```json
 // 1. Check for error lessons in this domain
-knowledge_search_by_tags({
+knowledge_search({
   "tags": ["type:error_lesson", "domain:http"],
   "limit": 5
 })
 
 // 2. Check for past approaches
-knowledge_search_by_tags({
+knowledge_search({
   "tags": ["type:approach"],
   "text": "http client",
   "limit": 5
@@ -233,7 +233,7 @@ execution_search({
 })
 
 // Check if this error was seen before
-knowledge_search_by_tags({
+knowledge_search({
   "tags": ["type:error_lesson"],
   "text": "<error_message_snippet>",
   "limit": 3
@@ -245,7 +245,7 @@ knowledge_search_by_tags({
 Before making a significant decision, review past decisions:
 
 ```json
-knowledge_search_by_tags({
+knowledge_search({
   "tags": ["type:decision"],
   "text": "<relevant_keyword>",
   "limit": 5

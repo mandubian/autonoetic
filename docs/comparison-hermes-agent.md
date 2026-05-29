@@ -30,7 +30,7 @@
 |---|---|---|
 | **Tier 1 (working)** | Content-addressable store (SHA-256), visibility model (private/session/global), artifacts for trust boundary | File-based working memory, conversation context |
 | **Tier 2 (durable)** | Gateway-managed `knowledge.*` tools with provenance, scope, visibility | Procedural memory via **Skills** (autonomous creation from experience), `MEMORY.md`/`USER.md` |
-| **Cross-session recall** | `execution_search`, `knowledge_search_by_tags`, `digest_query` — three native tools querying unified gateway DB | FTS5 session search with LLM summarization, Honcho dialectic user modeling |
+| **Cross-session recall** | `execution_search`, `knowledge_search`, `digest_query` — three native tools querying unified gateway DB | FTS5 session search with LLM summarization, Honcho dialectic user modeling |
 | **Post-session memory extraction** | **Implemented**: LLM-driven digest agent extracts error lessons, decisions, approaches, facts, open items; stores as tagged Tier-2 memories (`post_session_digest.rs`, 397 lines) | Background memory review thread after sessions end (turn-count triggered) |
 | **Self-improvement** | **Partially implemented**: evolution agents exist as static bundles; learning tools and background scheduler are fully wired; no autonomous closed-loop skill creation/improvement yet | **Closed learning loop**: skills self-improve during use, autonomous skill creation after complex tasks (5+ tool calls), periodic nudges to persist knowledge |
 | **Audit trail** | Hash-chained JSONL causal chain (immutable, verifiable) | Trajectory saving (for RL training), session persistence |
@@ -95,7 +95,7 @@ This table reflects what is actually implemented in the codebase, not just docum
 
 | Feature | Autonoetic Status | Hermes Status |
 |---|---|---|
-| **Learning tools** (`execution_search`, `knowledge_search_by_tags`, `digest_query`) | **Fully implemented** — native tools at `tools.rs`, integration tested | N/A (uses FTS5 session search instead) |
+| **Learning tools** (`execution_search`, `knowledge_search`, `digest_query`) | **Fully implemented** — native tools at `tools.rs`, integration tested | N/A (uses FTS5 session search instead) |
 | **Post-session memory extraction** | **Fully implemented** — `post_session_digest.rs` (397 lines), wired into execution lifecycle | **Implemented** — background review thread |
 | **Background scheduling** | **Fully implemented** — 9-module scheduler (`scheduler/`), tick loop, wake predicates, workflow tasks, approval gating, signal delivery | **Implemented** — cron scheduler with JSON job storage |
 | **Context compression** | **Partial** — token counting, context %, session pruning, text truncation exist; no LLM summarization when approaching limits | **Implemented** — iterative summarization at configurable threshold |
@@ -1046,7 +1046,7 @@ LIMIT ?6
 
 #### ACL enforcement (query-time filter)
 
-Follows the same capability-check pattern used by `execution_search` and `knowledge_search_by_tags`. The key constraint: agents should only see sessions they participated in, their child sessions, or sessions explicitly shared with them.
+Follows the same capability-check pattern used by `execution_search` and `knowledge_search`. The key constraint: agents should only see sessions they participated in, their child sessions, or sessions explicitly shared with them.
 
 ```rust
 fn enforce_search_acl(
@@ -1087,7 +1087,7 @@ After this feature, autonoetic has three complementary search surfaces:
 | Tool | What it searches | Data source | Use case |
 |---|---|---|---|
 | `execution_search` | Tool execution records (commands, stdout, errors) | `execution_traces` table | "What commands failed?" "How did we fix that build error?" |
-| `knowledge_search_by_tags` | Durable facts stored by agents | Tier 2 memory (per-agent SQLite) | "What API patterns did we learn?" "What user preferences exist?" |
+| `knowledge_search` | Durable facts stored by agents | Tier 2 memory (per-agent SQLite) | "What API patterns did we learn?" "What user preferences exist?" |
 | `session_search` (**new**) | Conversation content across sessions | `session_transcripts` + FTS5 | "When did we discuss the caching strategy?" "Find sessions where we debugged timeouts" |
 
 The post-session digest (`post_session_digest.rs`) bridges conversation → knowledge: it extracts structured memories from conversation content and stores them as Tier 2 knowledge. `session_search` provides the raw conversation search that complements those extracted memories.

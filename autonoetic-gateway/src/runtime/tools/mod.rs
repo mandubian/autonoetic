@@ -149,7 +149,6 @@ impl ToolTierFilter {
                 | "constitution_read"
                 | "knowledge_search"
                 | "knowledge_read"
-                | "knowledge_search_by_tags"
                 | "content_read"
                 | "execution_search"
                 | "digest_query"

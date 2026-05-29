@@ -63,7 +63,6 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(KnowledgeStoreTool));
     registry.register(Box::new(KnowledgeRecallTool));
     registry.register(Box::new(KnowledgeSearchTool));
-    registry.register(Box::new(KnowledgeSearchByTagsTool));
     registry.register(Box::new(DigestQueryTool));
 }
 
@@ -310,12 +309,14 @@ impl NativeTool for KnowledgeSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search the knowledge base by scope and optional query. Returns all knowledge in the scope that you have access to, optionally filtered by content matching the query.".to_string(),
+            description: "Search the knowledge base in a scope. Without `tags`, returns scope contents optionally filtered by `query` substring. With `tags` (AND semantics — every tag must be present on a record), filters to tagged records, with `query` as an optional substring filter on content.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "scope": { "type": "string", "description": "The scope/namespace to search in (e.g., 'api-keys', 'user-preferences')" },
-                    "query": { "type": "string", "description": "Optional search term to filter by content" }
+                    "scope": { "type": "string", "description": "The scope/namespace to search in (e.g., 'api-keys', 'lessons')" },
+                    "query": { "type": "string", "description": "Optional substring filter on content" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional AND-match tags: every tag listed must appear on a record's tags list" },
+                    "limit": { "type": "integer", "description": "Max results (1–100)", "default": 10 }
                 },
                 "required": ["scope"],
                 "additionalProperties": false
@@ -340,110 +341,18 @@ impl NativeTool for KnowledgeSearchTool {
         struct Args {
             scope: String,
             query: Option<String>,
-        }
-        let args: Args = serde_json::from_str(arguments_json)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
-
-        anyhow::ensure!(!args.scope.trim().is_empty(), "scope must not be empty");
-
-        let Some(gw_dir) = gateway_dir else {
-            return Ok(ToolError::resource("Knowledge requires gateway directory to be configured", None::<String>).to_error_response());
-        };
-
-        let mem = tier2_memory_for_native_tool(
-            gw_dir,
-            gateway_store.as_ref(),
-            &manifest.agent.id,
-            session_id,
-        )?;
-        let results = block_on_memory(mem.search(&args.scope, args.query.as_deref()))?;
-
-        let items: Vec<serde_json::Value> = results
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "id": m.memory_id,
-                    "content": m.content,
-                    "writer": m.writer_agent_id,
-                    "created_at": m.created_at,
-                    "confidence": m.confidence,
-                    "expires_at": m.expires_at,
-                })
-            })
-            .collect();
-
-        serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "scope": args.scope,
-            "results": items,
-            "count": items.len(),
-        }))
-        .map_err(Into::into)
-    }
-}
-
-pub struct KnowledgeSearchByTagsTool;
-
-impl NativeTool for KnowledgeSearchByTagsTool {
-    fn name(&self) -> &'static str {
-        "knowledge_search_by_tags"
-    }
-
-    fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name().to_string(),
-            description: "Search the knowledge base by scope and tags. Each result's `tags` JSON array must contain every tag you pass (AND semantics). Optional `text` filters `content` with a SQL LIKE substring match.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "scope": { "type": "string", "description": "Scope/namespace (e.g. 'lessons', 'general')" },
-                    "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "All of these tag strings must appear in the record's tags list" },
-                    "text": { "type": "string", "description": "Optional substring filter on content" },
-                    "limit": { "type": "integer", "description": "Max results (1–100)", "default": 10 }
-                },
-                "required": ["scope", "tags"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    fn execute(
-        &self,
-        manifest: &AgentManifest,
-        _policy: &PolicyEngine,
-        _agent_dir: &Path,
-        gateway_dir: Option<&Path>,
-        arguments_json: &str,
-        session_id: Option<&str>,
-        _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
-        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
-    ) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            scope: String,
+            #[serde(default)]
             tags: Vec<String>,
-            text: Option<String>,
-            #[serde(default = "default_limit")]
+            #[serde(default = "default_search_limit")]
             limit: u32,
         }
-        fn default_limit() -> u32 {
+        fn default_search_limit() -> u32 {
             10
         }
-
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         anyhow::ensure!(!args.scope.trim().is_empty(), "scope must not be empty");
-        anyhow::ensure!(!args.tags.is_empty(), "tags must be a non-empty array");
         anyhow::ensure!(
             (1..=100).contains(&args.limit),
             "limit must be between 1 and 100 inclusive"
@@ -460,12 +369,20 @@ impl NativeTool for KnowledgeSearchByTagsTool {
             &manifest.agent.id,
             session_id,
         )?;
-        let results = block_on_memory(mem.search_by_tags(
-            &args.scope,
-            &args.tags,
-            args.text.as_deref(),
-            limit,
-        ))?;
+
+        // Tags present → AND-match tag search; otherwise plain scope/content search.
+        let results = if args.tags.is_empty() {
+            let mut r = block_on_memory(mem.search(&args.scope, args.query.as_deref()))?;
+            r.truncate(limit);
+            r
+        } else {
+            block_on_memory(mem.search_by_tags(
+                &args.scope,
+                &args.tags,
+                args.query.as_deref(),
+                limit,
+            ))?
+        };
 
         let items: Vec<serde_json::Value> = results
             .iter()
