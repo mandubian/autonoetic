@@ -3733,25 +3733,139 @@ fn draw_hints_pane(f: &mut Frame, app: &App, area: Rect) {
 fn message_role_style(role: MessageRole) -> Style {
     match role {
         MessageRole::User => Style::default().fg(Color::Green),
-        MessageRole::Assistant => Style::default().fg(Color::Blue),
+        MessageRole::Assistant => Style::default().fg(Color::Reset),
         MessageRole::System => Style::default().fg(Color::Yellow),
-        MessageRole::Signal => Style::default().fg(Color::Cyan),
+        MessageRole::Signal => Style::default().fg(Color::LightCyan),
         MessageRole::SignalLow => Style::default().fg(Color::DarkGray),
         MessageRole::AgentOutput => Style::default().fg(Color::Magenta),
     }
 }
 
-/// Lightweight inline markdown: **bold**, `inline code`, and heading prefix.
-/// Returns styled spans and the plain-text length (for scroll/wrap calculations).
-fn parse_inline_markdown(text: &str, base_style: Style) -> (Vec<Span<'static>>, usize) {
+/// Lightweight markdown: headings, lists, blockquotes, HR,
+/// **bold**, `inline code`, ~~strikethrough~~, [links](url).
+/// `in_code_block` toggles dim background rendering for fenced code blocks.
+fn parse_inline_markdown(
+    text: &str,
+    base_style: Style,
+    in_code_block: bool,
+) -> (Vec<Span<'static>>, usize) {
+    if in_code_block {
+        let s = Span::styled(text.to_string(), base_style.bg(Color::Black).add_modifier(Modifier::DIM));
+        return (vec![s], text.len());
+    }
+
+    let trimmed = text.trim_start();
+
+    // Horizontal rules: ---, ***, ___
+    if is_horizontal_rule(trimmed) {
+        let rule = "─".repeat(text.len().max(1));
+        return (vec![Span::styled(rule, base_style.add_modifier(Modifier::DIM))], text.len());
+    }
+
+    // Headings: # ## ### #### ##### ######
+    if let Some(level) = heading_level(trimmed) {
+        let content = trimmed.trim_start_matches('#').trim();
+        let heading_style = match level {
+            1 => base_style
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
+            _ => base_style.fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        };
+        let (spans, plain_len) = parse_inline_spans(content, base_style);
+        let styled: Vec<Span<'static>> = spans
+            .into_iter()
+            .map(|s| Span::styled(s.content.clone(), heading_style))
+            .collect();
+        return (styled, plain_len);
+    }
+
+    // Unordered lists: - * +
+    if let Some(content) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+    {
+        let bullet = Span::styled("• ", base_style);
+        let (spans, plain_len) = parse_inline_spans(content, base_style);
+        let mut result = vec![bullet];
+        result.extend(spans);
+        return (result, plain_len + 2);
+    }
+
+    // Ordered lists: 1. 2. etc.
+    if let Some(num_str) = ordered_list_prefix(trimmed) {
+        let prefix_text = format!("{}. ", num_str);
+        let prefix_len = prefix_text.len();
+        let prefix = Span::styled(prefix_text, base_style);
+        let content = trimmed.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.')
+            .trim_start();
+        let (spans, plain_len) = parse_inline_spans(content, base_style);
+        let mut result = vec![prefix];
+        result.extend(spans);
+        return (result, plain_len + prefix_len);
+    }
+
+    // Blockquotes: >
+    if trimmed.starts_with("> ") || trimmed.starts_with('>') {
+        let content = trimmed.trim_start_matches('>').trim_start();
+        let pipe = Span::styled("│ ".to_string(), base_style.add_modifier(Modifier::DIM).fg(Color::DarkGray));
+        let (spans, plain_len) = parse_inline_spans(content, base_style);
+        let mut result = vec![pipe];
+        result.extend(spans);
+        return (result, plain_len + 2);
+    }
+
+    parse_inline_spans(text, base_style)
+}
+
+/// Detects heading level (1-6) or returns None.
+fn heading_level(s: &str) -> Option<usize> {
+    let mut count = 0;
+    for ch in s.chars() {
+        if ch == '#' {
+            count += 1;
+        } else if ch == ' ' && count > 0 && count <= 6 {
+            return Some(count);
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+/// True when line is purely `---`, `***`, `___` (with optional spaces).
+fn is_horizontal_rule(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() < 3 {
+        return false;
+    }
+    let ch = s.chars().next().unwrap();
+    (ch == '-' || ch == '*' || ch == '_') && s.chars().all(|c| c == ch || c == ' ')
+}
+
+/// Returns the numeric prefix of an ordered list item (e.g. "1" from "1. text").
+fn ordered_list_prefix(s: &str) -> Option<&str> {
+    let s = s.trim_start();
+    let num_end = s.find(|c: char| !c.is_ascii_digit())?;
+    let after = &s[num_end..];
+    if after.starts_with(". ") || after.starts_with('.') {
+        Some(&s[..num_end])
+    } else {
+        None
+    }
+}
+
+/// Inline span parsing: **bold**, `code`, ~~strikethrough~~, [text](url).
+fn parse_inline_spans(text: &str, base_style: Style) -> (Vec<Span<'static>>, usize) {
     use std::fmt::Write;
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut plain = String::new();
     let mut rest = text;
 
     while !rest.is_empty() {
+        // Bold: **text**
         if let Some(pos) = rest.find("**") {
-            // Text before bold marker
             if pos > 0 {
                 let before = &rest[..pos];
                 spans.push(Span::styled(before.to_string(), base_style));
@@ -3771,6 +3885,28 @@ fn parse_inline_markdown(text: &str, base_style: Style) -> (Vec<Span<'static>>, 
                 plain.push_str("**");
                 rest = after_marker;
             }
+        // Strikethrough: ~~text~~
+        } else if let Some(pos) = rest.find("~~") {
+            if pos > 0 {
+                let before = &rest[..pos];
+                spans.push(Span::styled(before.to_string(), base_style));
+                let _ = write!(plain, "{}", before);
+            }
+            let after_marker = &rest[pos + 2..];
+            if let Some(end) = after_marker.find("~~") {
+                let strike = &after_marker[..end];
+                spans.push(Span::styled(
+                    strike.to_string(),
+                    base_style.add_modifier(Modifier::CROSSED_OUT),
+                ));
+                let _ = write!(plain, "{}", strike);
+                rest = &after_marker[end + 2..];
+            } else {
+                spans.push(Span::styled("~~".to_string(), base_style));
+                plain.push_str("~~");
+                rest = after_marker;
+            }
+        // Inline code: `code`
         } else if let Some(pos) = rest.find('`') {
             if pos > 0 {
                 let before = &rest[..pos];
@@ -3782,7 +3918,7 @@ fn parse_inline_markdown(text: &str, base_style: Style) -> (Vec<Span<'static>>, 
                 let code = &after_marker[..end];
                 spans.push(Span::styled(
                     code.to_string(),
-                    base_style.fg(Color::Cyan).bg(Color::Black),
+                    base_style.fg(Color::LightGreen).bg(Color::Black),
                 ));
                 let _ = write!(plain, "{}", code);
                 rest = &after_marker[end + 1..];
@@ -3790,6 +3926,50 @@ fn parse_inline_markdown(text: &str, base_style: Style) -> (Vec<Span<'static>>, 
                 spans.push(Span::styled("`".to_string(), base_style));
                 plain.push('`');
                 rest = after_marker;
+            }
+        // Links: [text](url)
+        } else if let Some(pos) = rest.find('[') {
+            if pos > 0 {
+                let before = &rest[..pos];
+                spans.push(Span::styled(before.to_string(), base_style));
+                let _ = write!(plain, "{}", before);
+            }
+            let after_bracket = &rest[pos + 1..];
+            if let Some(close) = after_bracket.find(']') {
+                let link_text = &after_bracket[..close];
+                let after_close = &after_bracket[close + 1..];
+                if let Some(url_start) = after_close.strip_prefix('(') {
+                    if let Some(url_end) = url_start.find(')') {
+                        let _url = &url_start[..url_end];
+                        spans.push(Span::styled(
+                            link_text.to_string(),
+                            base_style
+                                .fg(Color::LightCyan)
+                                .add_modifier(Modifier::UNDERLINED),
+                        ));
+                        let _ = write!(plain, "{}", link_text);
+                        rest = &url_start[url_end + 1..];
+                    } else {
+                        // Unterminated — render literal
+                        spans.push(Span::styled(
+                            format!("[{link_text}]("),
+                            base_style,
+                        ));
+                        let _ = write!(plain, "[{link_text}](",);
+                        rest = url_start;
+                    }
+                } else {
+                    spans.push(Span::styled(
+                        format!("[{link_text}]"),
+                        base_style,
+                    ));
+                    let _ = write!(plain, "[{link_text}]");
+                    rest = after_close;
+                }
+            } else {
+                spans.push(Span::styled("[".to_string(), base_style));
+                plain.push('[');
+                rest = after_bracket;
             }
         } else {
             spans.push(Span::styled(rest.to_string(), base_style));
@@ -3874,7 +4054,13 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
             };
             let style = message_role_style(msg.role);
 
+            let mut in_code_block = false;
             for (i, text_line) in msg.content.lines().enumerate() {
+                let trimmed = text_line.trim();
+                if trimmed.starts_with("```") {
+                    in_code_block = !in_code_block;
+                }
+
                 let prefix = if i == 0 { icon } else { "  " };
                 let visual_line_count = transcript_wrap_line_count(
                     Line::from(vec![
@@ -3909,6 +4095,12 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                         (sel_col_end, sel_col_start)
                     };
 
+                    let text_style = if in_code_block {
+                        style.bg(Color::Black).add_modifier(Modifier::DIM)
+                    } else {
+                        style
+                    };
+
                     let mut spans: Vec<Span> = Vec::new();
                     spans.push(Span::raw(prefix));
 
@@ -3937,20 +4129,20 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                     let after_sel = &text_line[sel_end_clamped..];
 
                     if !before_sel.is_empty() {
-                        spans.push(Span::styled(before_sel.to_string(), style));
+                        spans.push(Span::styled(before_sel.to_string(), text_style));
                     }
                     if !in_sel.is_empty() {
                         spans
-                            .push(Span::styled(in_sel.to_string(), style.bg(Color::DarkGray)));
+                            .push(Span::styled(in_sel.to_string(), text_style.bg(Color::DarkGray)));
                     }
                     if !after_sel.is_empty() {
-                        spans.push(Span::styled(after_sel.to_string(), style));
+                        spans.push(Span::styled(after_sel.to_string(), text_style));
                     }
 
                     lines.push(Line::from(spans));
                 } else if include_line {
                     let line_spans = if matches!(msg.role, MessageRole::Assistant) {
-                        let (spans, _) = parse_inline_markdown(text_line, style);
+                        let (spans, _) = parse_inline_markdown(text_line, style, in_code_block);
                         let mut all = vec![Span::raw(prefix)];
                         all.extend(spans);
                         all
