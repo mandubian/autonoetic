@@ -1341,6 +1341,8 @@ fn reset_for_session_switch(
     app.pending_approval_ids.clear();
     app.announced_store_approval_ids.clear();
     app.post_approval_pending_ids.clear();
+    app.task_lifecycles.clear();
+    app.task_lifecycle_msg_idx.clear();
     app.seen_causal_policy_event_ids.clear();
     app.policy_causal_pane.clear();
     app.gate_history_approvals.clear();

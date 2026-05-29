@@ -766,6 +766,7 @@ impl NativeTool for ArtifactExecTool {
             .ok_or_else(|| anyhow::anyhow!("Agent directory is not valid UTF-8"))?;
 
         let mut mounts = Vec::new();
+        let mut layer_python_paths: Vec<String> = Vec::new();
         let temp_base = std::env::temp_dir()
             .join("autonoetic_artifact")
             .join(artifact_id.replace('/', "_"));
@@ -794,7 +795,6 @@ impl NativeTool for ArtifactExecTool {
                     mount_path: l.mount_path.clone(),
                 })
                 .collect();
-            let mut layer_python_paths = Vec::new();
             crate::runtime::tools::sandbox::extract_and_mount_layers(
                 &artifact_layers,
                 gw_dir,
@@ -855,6 +855,19 @@ impl NativeTool for ArtifactExecTool {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+
+        if !layer_python_paths.is_empty() {
+            let layer_pp = layer_python_paths.join(":");
+            match extra_env.iter().position(|(k, _)| k == "PYTHONPATH") {
+                Some(idx) => {
+                    let existing = std::mem::take(&mut extra_env[idx].1);
+                    extra_env[idx].1 = format!("{}:{}", layer_pp, existing);
+                }
+                None => {
+                    extra_env.push(("PYTHONPATH".to_string(), layer_pp));
+                }
+            }
+        }
 
         if let Some(credential_mappings) = &args.credential_env {
             if let (Some(gw_dir), Some(store)) = (gateway_dir, &gateway_store) {
@@ -1054,6 +1067,7 @@ fn execute_with_ticket(
         .ok_or_else(|| anyhow::anyhow!("Agent directory is not valid UTF-8"))?;
 
     let mut mounts = Vec::new();
+    let mut layer_python_paths: Vec<String> = Vec::new();
     let temp_base = std::env::temp_dir()
         .join("autonoetic_artifact")
         .join(args.artifact_ref.replace('/', "_"));
@@ -1082,7 +1096,6 @@ fn execute_with_ticket(
                 mount_path: l.mount_path.clone(),
             })
             .collect();
-        let mut layer_python_paths = Vec::new();
         crate::runtime::tools::sandbox::extract_and_mount_layers(
             &artifact_layers,
             gw_dir,
@@ -1141,6 +1154,19 @@ fn execute_with_ticket(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+
+    if !layer_python_paths.is_empty() {
+        let layer_pp = layer_python_paths.join(":");
+        match extra_env.iter().position(|(k, _)| k == "PYTHONPATH") {
+            Some(idx) => {
+                let existing = std::mem::take(&mut extra_env[idx].1);
+                extra_env[idx].1 = format!("{}:{}", layer_pp, existing);
+            }
+            None => {
+                extra_env.push(("PYTHONPATH".to_string(), layer_pp));
+            }
+        }
+    }
 
     if !ticket.credential_env.is_empty() {
         let store = gateway_store.as_ref().ok_or_else(|| {

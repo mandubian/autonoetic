@@ -66,17 +66,27 @@ pub fn extract_and_mount_layers(
         );
 
         mounts.push(SandboxMount {
-            source: layer_temp_base,
+            source: layer_temp_base.clone(),
             dest: layer.mount_path.clone(),
             readonly: true,
         });
 
-        let python_site_packages = std::path::Path::new(&layer.mount_path)
-            .join("lib")
-            .join("python3.12")
-            .join("site-packages");
-        if python_site_packages.starts_with("/") {
-            python_paths.push(python_site_packages.to_string_lossy().to_string());
+        let mut found_site_packages = false;
+        if let Ok(lib_entries) = std::fs::read_dir(layer_temp_base.join("lib")) {
+            for entry in lib_entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("python3.") {
+                    let site = std::path::Path::new(&layer.mount_path)
+                        .join("lib")
+                        .join(name_str.as_ref())
+                        .join("site-packages");
+                    if site.starts_with("/") {
+                        python_paths.push(site.to_string_lossy().to_string());
+                        found_site_packages = true;
+                    }
+                }
+            }
         }
         python_paths.push(layer.mount_path.clone());
     }

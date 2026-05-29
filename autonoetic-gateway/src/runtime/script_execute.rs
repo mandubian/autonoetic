@@ -590,7 +590,53 @@ mod tests {
             assert_eq!(mounts.len(), 1);
             assert_eq!(mounts[0].dest, "/tmp/venv");
             assert!(python_paths.contains(&"/tmp/venv".to_string()));
-            assert!(python_paths.contains(&"/tmp/venv/lib/python3.12/site-packages".to_string()));
+        }
+
+        #[test]
+        fn runtime_lock_layers_detect_python_version_dynamically() {
+            let temp = tempfile::tempdir().expect("tempdir should create");
+            let gateway_dir = temp.path().join(".gateway");
+            let agent_dir = temp.path().join("agent");
+            let layer_src = temp.path().join("layer-src");
+
+            std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+            std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+            std::fs::create_dir_all(layer_src.join("lib").join("python3.13").join("site-packages"))
+                .expect("site-packages should create");
+            std::fs::write(
+                layer_src.join("lib").join("python3.13").join("site-packages").join("depmod.py"),
+                "VALUE = 1\n",
+            )
+            .expect("layer file should write");
+
+            let layer_store =
+                crate::layer_store::LayerStore::new(&gateway_dir, Default::default()).unwrap();
+            let captured = layer_store
+                .create_from_dir(&layer_src, "python-deps", "/tmp/venv", None)
+                .expect("layer should capture");
+
+            let runtime_lock = crate::runtime::install_contract::scaffold_runtime_lock(
+                None,
+                None,
+                &[ArtifactLayer {
+                    layer_id: captured.layer_id.clone(),
+                    name: captured.name.clone(),
+                    mount_path: captured.mount_path.clone(),
+                    digest: captured.digest.clone(),
+                }],
+            )
+            .expect("runtime lock should scaffold");
+            let runtime_lock_yaml = serde_yaml::to_string(&runtime_lock).expect("runtime lock yaml");
+            std::fs::write(agent_dir.join("runtime.lock"), runtime_lock_yaml)
+                .expect("runtime lock should write");
+
+            let (mounts, python_paths) =
+                prepare_runtime_lock_layer_mounts(&agent_dir, "runtime.lock", Some(&gateway_dir))
+                    .expect("runtime lock layers should resolve");
+
+            assert_eq!(mounts.len(), 1);
+            assert!(python_paths.contains(&"/tmp/venv/lib/python3.13/site-packages".to_string()));
+            assert!(python_paths.contains(&"/tmp/venv".to_string()));
         }
     }
 
