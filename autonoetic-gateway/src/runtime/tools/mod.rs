@@ -963,6 +963,7 @@ pub mod capsule;
 pub mod constitution;
 pub mod content;
 pub mod credential;
+pub mod resolve;
 pub mod digest;
 pub mod evaluation;
 pub mod execution;
@@ -1005,6 +1006,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::digest::register_tools(&mut registry);
     crate::runtime::tools::session::register_tools(&mut registry);
     crate::runtime::tools::content::register_tools(&mut registry);
+    crate::runtime::tools::resolve::register_tools(&mut registry);
     crate::runtime::tools::agent::register_tools(&mut registry);
     crate::runtime::tools::agent_inspect::register_tools(&mut registry);
     crate::runtime::tools::agent_revision::register_tools(&mut registry);

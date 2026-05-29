@@ -344,7 +344,7 @@ fn skill_path_repair_hint(gateway_dir: &Path, input: &str) -> Option<String> {
     None
 }
 
-fn try_read_artifact_ref_file(
+pub(crate) fn try_read_artifact_ref_file(
     gw_dir: &Path,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     name_or_handle: &str,

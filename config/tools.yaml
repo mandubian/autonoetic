@@ -15,6 +15,9 @@ rules:
     tier: core
   - prefix: artifact_
     tier: core
+  # One front door for any artifact/content handle (#312).
+  - prefix: resolve
+    tier: core
   - prefix: sandbox_exec
     tier: core
   - prefix: sentinel_

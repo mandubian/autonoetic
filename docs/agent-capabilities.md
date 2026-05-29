@@ -29,7 +29,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 |------|---------------------|-------|
 | `artifact_build` | `WriteAccess` | Build immutable artifact from session content |
 | `artifact_inspect` | `ReadAccess` | Inspect artifact files and metadata |
-| `artifact_resolve_ref` | `ReadAccess` | Resolve scoped artifact refs to canonical artifact IDs |
+| `resolve` | `ReadAccess` | One front door: resolve any artifact/content handle |
 | `artifact_prepare` | `CodeExecution` | Preflight for artifact execution (approval + credentials) |
 | `artifact_exec` | `CodeExecution` | Execute artifact entrypoint with artifact-bound approval reuse |
 
