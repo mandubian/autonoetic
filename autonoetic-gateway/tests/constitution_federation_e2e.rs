@@ -4,7 +4,7 @@
 //! 1. Positive path: legacy gate passes + federation roles + approved escalation → promote succeeds
 //! 2. Negative path: federation roles exist but no approved escalation → promote blocked
 //! 3. Bypass attempt: legacy gate passes but FullJury blocks without escalation
-//! 4. Distinct identity (R-2.17): federation role shares identity with proposer → blocked
+//! 4. Distinct identity (P-2.17): federation role shares identity with proposer → blocked
 //! 5. Legacy regression: no federation roles → legacy gate still works unchanged
 
 mod support;
@@ -824,8 +824,8 @@ fn test_federation_blocks_when_role_shares_proposer_identity() {
     );
     let err = result.unwrap_err();
     assert!(
-        err.contains("FullJury") && err.contains("R-2.17"),
-        "error should mention R-2.17 distinct identity: {err}"
+        err.contains("FullJury") && err.contains("P-2.17"),
+        "error should mention P-2.17 distinct identity: {err}"
     );
 }
 
@@ -905,9 +905,9 @@ fn test_federation_blocks_when_roles_share_identity() {
     let err = result.unwrap_err();
     assert!(
         err.contains("FullJury")
-            && err.contains("R-2.17")
+            && err.contains("P-2.17")
             && err.contains("same agent"),
-        "error should mention same-agent R-2.17 violation: {err}"
+        "error should mention same-agent P-2.17 violation: {err}"
     );
 }
 

@@ -9,7 +9,7 @@
 //! 2. **Tool failure budget exhausted**: A single tool has failed more than
 //!    `max_tool_failures` times total in the session, regardless of arguments
 //!    or targets. This catches alternating-failure patterns.
-//! 3. **Rotating-polling pattern (sister rule to R-7.7, issue #287)**: The
+//! 3. **Rotating-polling pattern (sister rule to P-7.7, issue #287)**: The
 //!    last `max_window_size` successful tool calls contain only
 //!    `max_distinct_floor` or fewer distinct (tool, args) fingerprints. This
 //!    catches agents that cycle through a small set of read-only tools
@@ -66,18 +66,18 @@ impl LoopGuardTripReason {
     /// Constitutional rule this trip enforces. Used to populate
     /// `enforced_rules` on the `loop_guard.tripped` causal event so the
     /// audit chain attributes each trip to the rule whose text actually
-    /// describes it (rather than blanket-labelling every trip R-7.7).
+    /// describes it (rather than blanket-labelling every trip P-7.7).
     ///
-    /// - `ToolFailureBudget`       → R-7.5 (per-tool failure budget)
-    /// - `NoMeaningfulProgress`    → R-7.7 (consecutive steps w/o successful result)
-    /// - `RotatingPollingPattern`  → R-7.19 (no semantic progress across successes)
-    /// - `ChildFailureBudget`      → R-7.20 (child-failure delegation-loop budget)
+    /// - `ToolFailureBudget`     → P-7.5 (per-tool failure budget)
+    /// - `NoMeaningfulProgress`  → P-7.7 (consecutive steps w/o successful result)
+    /// - `RotatingPollingPattern`→ P-7.19 (no semantic progress across successes)
+    /// - `ChildFailureBudget`    → P-7.20 (child-failure delegation-loop budget)
     pub fn rule_id(&self) -> &'static str {
         match self {
-            LoopGuardTripReason::ToolFailureBudget { .. } => "R-7.5",
-            LoopGuardTripReason::NoMeaningfulProgress { .. } => "R-7.7",
-            LoopGuardTripReason::RotatingPollingPattern { .. } => "R-7.19",
-            LoopGuardTripReason::ChildFailureBudget { .. } => "R-7.20",
+            LoopGuardTripReason::ToolFailureBudget { .. } => "P-7.5",
+            LoopGuardTripReason::NoMeaningfulProgress { .. } => "P-7.7",
+            LoopGuardTripReason::RotatingPollingPattern { .. } => "P-7.19",
+            LoopGuardTripReason::ChildFailureBudget { .. } => "P-7.20",
         }
     }
 }
@@ -203,7 +203,7 @@ impl LoopGuard {
     /// `max_loops_without_progress`, or any single tool failure count has
     /// reached 80% of `max_tool_failures`.
     ///
-    /// This is the trigger for R-7.18 degraded-mode entry via loop-guard
+    /// This is the trigger for P-7.18 degraded-mode entry via loop-guard
     /// sub-trip warnings.
     pub fn is_sub_trip_warning(&self) -> bool {
         let loop_threshold = ((self.max_loops_without_progress as u64 * 4 + 4) / 5) as u32;
@@ -256,7 +256,7 @@ impl LoopGuard {
     }
 
     /// Track a successful tool call whose result carried
-    /// `side_effect_state: "committed"` (R-5.14 / R-6.26). This is treated
+    /// `side_effect_state: "committed"` (P-5.14 / P-6.26). This is treated
     /// as terminal-progress evidence — the rotating-polling detector window
     /// is cleared because a real side effect just landed. The classical
     /// progress accounting (max_loops_without_progress / consecutive
@@ -278,7 +278,7 @@ impl LoopGuard {
 
         // Trip condition #3: rotating-polling detector.
         //
-        // - A terminal side effect (per R-5.14) clears the window — the
+        // - A terminal side effect (per P-5.14) clears the window — the
         //   agent just made committed progress, so any prior monotony is
         //   stale.
         // - Otherwise, append the new fingerprint, evicting the oldest if
@@ -559,6 +559,25 @@ mod tests {
         }
         guard.register_failure("web_fetch", r#"{"url":"https://example.com/z"}"#, None);
         assert!(guard.check_loop().is_err());
+    }
+
+    /// Child-failure budget trip (P-7.20). Child failures accumulate and do
+    /// NOT reset on progress; the guard trips once `max_child_failures`
+    /// (default 3) is reached. Pinning test cited by the enforcement
+    /// register for P-7 / P-7.20.
+    #[test]
+    fn test_loop_guard_trips_on_child_failures() {
+        let mut guard = LoopGuard::new(100); // high loop budget so the child budget is the trip cause
+        guard.register_child_failure();
+        guard.register_child_failure();
+        assert!(guard.check_loop().is_ok(), "2 < default max_child_failures(3)");
+        guard.register_child_failure(); // now 3
+        let err = guard.check_loop().expect_err("3 >= max_child_failures must trip");
+        assert!(err.to_string().contains("child"), "unexpected error: {err}");
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(crate::runtime::guard::LoopGuardTripReason::ChildFailureBudget { .. })
+        ));
     }
 
     #[test]
@@ -893,7 +912,7 @@ mod tests {
         );
     }
 
-    /// Terminal-progress events (R-5.14 `side_effect_state: committed`)
+    /// Terminal-progress events (P-5.14 `side_effect_state: committed`)
     /// clear the rotation window. An agent rotating on read-only tools
     /// can survive past the trip threshold if it interleaves a terminal
     /// event before the window fills.
@@ -1024,11 +1043,11 @@ mod tests {
                 failures: 1,
             }
             .rule_id(),
-            "R-7.5"
+            "P-7.5"
         );
         assert_eq!(
             LoopGuardTripReason::NoMeaningfulProgress { cycles: 5 }.rule_id(),
-            "R-7.7"
+            "P-7.7"
         );
         assert_eq!(
             LoopGuardTripReason::RotatingPollingPattern {
@@ -1037,11 +1056,11 @@ mod tests {
                 floor: 6,
             }
             .rule_id(),
-            "R-7.19"
+            "P-7.19"
         );
         assert_eq!(
             LoopGuardTripReason::ChildFailureBudget { failures: 3 }.rule_id(),
-            "R-7.20"
+            "P-7.20"
         );
     }
 

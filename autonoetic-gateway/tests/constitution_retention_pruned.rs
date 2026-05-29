@@ -1,4 +1,4 @@
-//! Constitution R+17 / R-8.17: Retention pruning emits causal event.
+//! Constitution R+17 / P-8.17: Retention pruning emits causal event.
 //!
 //! When data retention is applied, the gateway must emit a single
 //! `retention.pruned` causal event per batch with counts and bounds.
@@ -94,8 +94,8 @@ fn r_plus_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
     assert_eq!(payload["retention_config"]["causal_events_days"], 1);
 
     assert!(
-        pruned.enforced_rules.iter().any(|r| r == "R-8.17"),
-        "retention.pruned event must cite R-8.17 in enforced_rules"
+        pruned.enforced_rules.iter().any(|r| r == "P-8.17"),
+        "retention.pruned event must cite P-8.17 in enforced_rules"
     );
 
     Ok(())

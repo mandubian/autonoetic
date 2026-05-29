@@ -495,6 +495,22 @@ View the conversation history of a session.
 autonoetic trace history <session_id> [--json]
 ```
 
+### `autonoetic trace contract-health`
+
+Standing **contract-health** view: how often each constitutional clause
+(principle/right) has been enforced. Reads the `enforced_rules` carried on
+causal events and attributes each `P-x.y` / `Ri-x.y` rule/right ID to its owning
+clause via the enforcement register. Rule IDs not present in the register are
+reported as `unattributed` (a visible coverage-gap signal). See
+[Contract Health](ARCHITECTURE.md#contract-health).
+
+```bash
+autonoetic trace contract-health [--since <RFC3339>] [--json]
+```
+
+- `--since` — only count enforcement events at or after this RFC3339 timestamp.
+- `--json` — machine-readable output (`by_clause` with clause/count/title/binds, plus `unattributed`).
+
 ---
 
 ## Capsule Commands

@@ -396,7 +396,7 @@ fn spawn_depth_tracks_session_path() {
     }
 }
 
-/// R-6.23 amendment: attestation includes user interaction and escalation gate IDs.
+/// P-6.23 amendment: attestation includes user interaction and escalation gate IDs.
 #[test]
 fn pending_gate_ids_include_all_gate_kinds() {
     let dir = tempdir().expect("tempdir");

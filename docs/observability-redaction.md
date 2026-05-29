@@ -29,7 +29,7 @@ Three classes, ordered by decreasing redaction:
 |---|---|---|
 | `Agent` | An autonoetic agent reading observability/approval data via gateway tools. | **Most redacted.** Body text, headers, payloads, evidence references blanked. *Note: `SandboxExec.command` for approval subjects is currently preserved verbatim — see issue #158, fixed by PR #160.* |
 | `Operator` | A human operator using the CLI / chat TUI. | **Targeted redaction.** Secret-named keys in JSON payloads have values replaced with `"***REDACTED***"`. Non-JSON strings get precise in-place masking via `redact_embedded_secrets` (Bearer headers, env-var assignments, URL query secrets are masked; surrounding prose preserved). Commands, hosts, request shapes are visible for triage. |
-| `Admin` | An admin with full access (currently equivalent to "no redaction applied at this layer"). | Identity. The original record is returned unchanged. Secret material is still subject to the R+9 redaction-before-write invariant — see [R+9 and `RedactedPayload`](#r9-and-redactedpayload). |
+| `Admin` | An admin with full access (currently equivalent to "no redaction applied at this layer"). | Identity. The original record is returned unchanged. Secret material is still subject to the P-4.14 redaction-before-write invariant — see [P-4.14 and `RedactedPayload`](#p-414-and-redactedpayload). |
 
 The default is `Operator` (`ViewerClass::default()`). See [the default-Operator footgun](#the-default-operator-footgun) for what to watch out for.
 
@@ -110,7 +110,7 @@ Other paths today do **not** invoke `ViewerClass`-aware redaction:
 - **CLI rendering of approvals** formats `ApprovalRequest.action` directly (truncating `SandboxExec.command`, etc.) without going through `redact_for_display` or `redact_for_viewer(Operator)`. The CLI is operator-only and the data is already operator-class, but applying the redaction layer would be more defensible — tracked as a follow-up.
 - **HTTP API readers** go through unredacted store readers gated by HMAC auth (the assumption is that HMAC-authenticated callers are equivalent to `Admin`).
 
-> **Convention:** any code path that emits trace, event, or approval data to a non-Admin consumer should pass `ViewerClass::Agent` if the consumer is an autonoetic agent, `ViewerClass::Operator` if it is a human, `ViewerClass::Admin` only when the consumer is part of the gateway core (e.g. log persistence, where R+9 already redacted at write time). When in doubt, pass `Agent` — too restrictive is recoverable; too permissive is not.
+> **Convention:** any code path that emits trace, event, or approval data to a non-Admin consumer should pass `ViewerClass::Agent` if the consumer is an autonoetic agent, `ViewerClass::Operator` if it is a human, `ViewerClass::Admin` only when the consumer is part of the gateway core (e.g. log persistence, where P-4.14 already redacted at write time). When in doubt, pass `Agent` — too restrictive is recoverable; too permissive is not.
 
 ---
 
@@ -132,7 +132,7 @@ The primitives live in **`autonoetic-types/src/redaction.rs`** (centralised in #
 
 1. `causal_chain::redact_for_viewer` — for `ExecutionTraceRecord` and `CausalEventRecord`.
 2. `background::ScheduledAction::redact_for_viewer` — for approval subjects.
-3. `gateway::log_redaction` — re-exports the canonical helpers; `RedactedPayload` (the R+9 wrapper) stays local.
+3. `gateway::log_redaction` — re-exports the canonical helpers; `RedactedPayload` (the P-4.14 wrapper) stays local.
 
 Public functions:
 
@@ -151,13 +151,13 @@ The fallback for values that can't be masked in place is restricted to PEM block
 
 ---
 
-## R+9 and `RedactedPayload`
+## P-4.14 and `RedactedPayload`
 
-`ViewerClass` is a *read-time* defence. The complementary *write-time* invariant is **R+9 (redaction-before-write)**, enforced by `gateway::log_redaction::RedactedPayload`. The newtype wraps `serde_json::Value`; constructors run `redact_json_value` before the payload reaches the causal chain. Direct `Value` cannot be passed to `CausalLogger::log` — only `RedactedPayload` can.
+`ViewerClass` is a *read-time* defence. The complementary *write-time* invariant is **P-4.14 (redaction-before-write)**, enforced by `gateway::log_redaction::RedactedPayload`. The newtype wraps `serde_json::Value`; constructors run `redact_json_value` before the payload reaches the causal chain. Direct `Value` cannot be passed to `CausalLogger::log` — only `RedactedPayload` can.
 
 The two layers compose:
 
-- R+9 ensures secrets never enter the causal chain in the first place. An Admin reading a trace cannot leak what was never written.
+- P-4.14 ensures secrets never enter the causal chain in the first place. An Admin reading a trace cannot leak what was never written.
 - `ViewerClass` is the second line: even when a record is innocuous at write time, the read path strips fields that lower-trust consumers don't need.
 
 ---
@@ -192,8 +192,8 @@ They cooperate; neither subsumes the other.
 ### What this does NOT protect against
 
 - **A compromised gateway.** ViewerClass is part of the trusted reader stack; an attacker who controls the gateway can read raw rows.
-- **A malicious admin.** The `Admin` viewer class is identity. By design — admins trace incidents and need full data. Defence here is upstream (`R+9`, audit trail of admin reads, organisational controls).
-- **Secrets that bypass the redaction pipeline at write time.** If `R+9` fails — e.g. a payload bypasses `RedactedPayload` and reaches the causal chain unwrapped — the row contains the raw secret and the read-time redaction may not catch every credential shape. The sentinel's credential-leak check (`autonoetic-gateway/src/sentinel/checks/credential.rs`) is the backstop, scanning persisted payloads for known credential patterns.
+- **A malicious admin.** The `Admin` viewer class is identity. By design — admins trace incidents and need full data. Defence here is upstream (`P-4.14`, audit trail of admin reads, organisational controls).
+- **Secrets that bypass the redaction pipeline at write time.** If `P-4.14` fails — e.g. a payload bypasses `RedactedPayload` and reaches the causal chain unwrapped — the row contains the raw secret and the read-time redaction may not catch every credential shape. The sentinel's credential-leak check (`autonoetic-gateway/src/sentinel/checks/credential.rs`) is the backstop, scanning persisted payloads for known credential patterns.
 
 ---
 

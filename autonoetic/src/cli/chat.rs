@@ -1706,7 +1706,7 @@ fn format_why_explanation(
                     if !gate_rules.is_empty() {
                         lines.push(String::new());
                         lines.push(
-                            autonoetic_types::constitution_glossary::format_enforced_rules(&gate_rules),
+                            autonoetic_gateway::constitution_glossary::format_enforced_rules(&gate_rules),
                         );
                     }
                 }
@@ -6299,7 +6299,7 @@ fn format_store_approval_card(
     let inferred_rules = infer_rules_for_action(&req.action);
     if !inferred_rules.is_empty() {
         lines.push(String::new());
-        lines.push(autonoetic_types::constitution_glossary::format_enforced_rules(&inferred_rules));
+        lines.push(autonoetic_gateway::constitution_glossary::format_enforced_rules(&inferred_rules));
     }
     if let Some(ref phrase) = req.confirm_phrase {
         lines.push(String::new());
@@ -6318,15 +6318,15 @@ fn infer_rules_for_action(action: &autonoetic_types::background::ScheduledAction
         | autonoetic_types::background::ScheduledAction::WebCall { .. }
         | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. }
         | autonoetic_types::background::ScheduledAction::CredentialRequest { .. } => {
-            vec!["R-2.1", "R-2.18"]
+            vec!["P-2.1", "P-2.18"]
         }
         autonoetic_types::background::ScheduledAction::RevisionPromote { .. } => {
-            vec!["R++2", "R-2.18"]
+            vec!["P-2.16", "P-2.18"]
         }
         autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => {
-            vec!["R-2.18"]
+            vec!["P-2.18"]
         }
-        _ => vec!["R-2.18"],
+        _ => vec!["P-2.18"],
     }
 }
 

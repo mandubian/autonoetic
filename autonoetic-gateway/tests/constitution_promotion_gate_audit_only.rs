@@ -10,7 +10,7 @@
 //!   2. Allow promotion when an auditor `promotion_record(pass=true)` is
 //!      present — even with no evaluator record (audit_only mode).
 //!   3. Reject promotion when the auditor identity equals the revision
-//!      proposer's identity (R-2.17 reduced: auditor ≠ proposer for the
+//!      proposer's identity (P-2.17 reduced: auditor ≠ proposer for the
 //!      audit_only mode).
 //!   4. Reject promotion when the auditor's record has `pass=false`.
 //!   5. **Not** weaken existing enforcement: a revision that declares
@@ -157,7 +157,7 @@ layers: []
 }
 
 /// Identity for the agent that proposes installs (acts as
-/// `rev.created_by_id` for the audit_only R-2.17-reduced check).
+/// `rev.created_by_id` for the audit_only P-2.17-reduced check).
 fn proposer_manifest() -> AgentManifest {
     AgentManifest {
         version: "1.0".to_string(),
@@ -568,7 +568,7 @@ fn audit_only_promote_fails_with_auditor_record_pass_false() {
 
 #[test]
 fn audit_only_promote_fails_when_auditor_is_proposer_self_approval() {
-    // R-2.17 reduced for audit_only: the auditor identity must differ from
+    // P-2.17 reduced for audit_only: the auditor identity must differ from
     // the revision's proposer (the agent that created the revision).
     //
     // The promotion_record tool gates by `is_promotion_agent` (only
@@ -622,8 +622,8 @@ fn audit_only_promote_fails_when_auditor_is_proposer_self_approval() {
     match result {
         Err(msg) => {
             assert!(
-                msg.contains("R-2.17") && msg.contains("same identity that proposed"),
-                "expected R-2.17 audit_only self-approval rejection, got: {}",
+                msg.contains("P-2.17") && msg.contains("same identity that proposed"),
+                "expected P-2.17 audit_only self-approval rejection, got: {}",
                 msg
             );
         }

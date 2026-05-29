@@ -22,7 +22,7 @@ metadata:
     sandbox_network: normal
     capabilities:
       - type: "SandboxFunctions"
-        # Prefixes match canonical tool ids (`knowledge_store`, `sandbox_exec`, `promotion_record`) for R-1.1.
+        # Prefixes match canonical tool ids (`knowledge_store`, `sandbox_exec`, `promotion_record`) for P-1.1.
         allowed: ["knowledge_", "sandbox_", "promotion_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "npm ", "bash -c ", "sh -c ", "go test", "cargo test"]
@@ -123,7 +123,7 @@ If you found NO tests, **do NOT call `promotion_record`**. The role is inapplica
 - **If some tests exist**: run all of them, report total/passed/failed
 - **If all tests pass**: `status = "pass"`, `evaluator_pass = true`
 - **If any test fails**: `status = "fail"`, `evaluator_pass = false`, include failure output in findings
-- **If tests require network**: return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (cannot be evaluated in sealed sandbox per R+16)
+- **If tests require network**: return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (cannot be evaluated in sealed sandbox per P-3.10)
 
 ## Output Format
 

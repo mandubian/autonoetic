@@ -1,7 +1,7 @@
 //! Constitution Ri-0.6 + Ri-0.12: Rights audit mid bucket.
 //!
 //! Ri-0.6: No silent capability reduction. Capabilities can only narrow via
-//! declared paths (degraded mode R-7.18, operator command). Each narrowing
+//! declared paths (degraded mode P-7.18, operator command). Each narrowing
 //! emits a causal event.
 //!
 //! Ri-0.12: Closed list of termination/suspension reasons. YieldReason is the
@@ -86,7 +86,7 @@ async fn ri_0_6_operator_degrade_emits_causal_event() {
         .iter()
         .find(|e| e.action == "session.degraded")
         .expect("degrade_session must emit session.degraded causal event");
-    assert!(degraded.enforced_rules.contains(&"R-7.18".to_string()));
+    assert!(degraded.enforced_rules.contains(&"P-7.18".to_string()));
     let payload: serde_json::Value =
         serde_json::from_str(degraded.payload.as_deref().unwrap_or("{}")).unwrap();
     assert_eq!(payload["source"], "operator");
@@ -119,7 +119,7 @@ async fn ri_0_6_operator_clear_degradation_emits_causal_event() {
         .iter()
         .find(|e| e.action == "session.degradation_cleared")
         .expect("clear must emit session.degradation_cleared causal event");
-    assert!(cleared.enforced_rules.contains(&"R-7.18".to_string()));
+    assert!(cleared.enforced_rules.contains(&"P-7.18".to_string()));
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn ri_0_6_core_only_filter_blocks_specialized_tools() {
 #[test]
 fn ri_0_6_capability_narrowing_only_via_declared_paths() {
     let declared_paths = vec![
-        ("degraded_mode", "R-7.18"),
+        ("degraded_mode", "P-7.18"),
         ("operator_command", "session.degrade"),
     ];
     assert_eq!(

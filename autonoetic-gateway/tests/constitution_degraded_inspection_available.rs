@@ -1,4 +1,4 @@
-//! Constitution R-7.18 — Degraded session retains inspection tools.
+//! Constitution P-7.18 — Degraded session retains inspection tools.
 //!
 //! When a session is degraded the gateway revokes specialized capabilities
 //! (sandbox_exec, web_*, agent_spawn, agent_revision_*, scheduler_*,
@@ -212,7 +212,7 @@ fn degraded_filter_in_default_registry_exposes_inspection_but_not_actions() {
     // look up its own degradation rule.
     assert!(
         visible.iter().any(|n| n == "constitution_read"),
-        "degraded registry must expose constitution_read so the agent can look up R-7.18: {:?}",
+        "degraded registry must expose constitution_read so the agent can look up P-7.18: {:?}",
         visible
     );
     assert!(

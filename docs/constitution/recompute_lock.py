@@ -116,7 +116,7 @@ def main() -> None:
 
     text = constitution_path.read_text()
     rights = extract_enforcement_table(text, "Ri-")
-    rules = extract_enforcement_table(text, "R-")
+    rules = extract_enforcement_table(text, "P-")
 
     digest_payload = {
         "constitution_text": text,

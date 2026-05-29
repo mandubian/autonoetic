@@ -1,4 +1,4 @@
-//! Constitution test: R+3 / R-7.15 — Spawn-chain depth cap.
+//! Constitution test: R+3 / P-7.15 — Spawn-chain depth cap.
 //!
 //! Verifies that agents whose session depth equals or exceeds the configured
 //! ceiling are refused the right to spawn further children. The effective

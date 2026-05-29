@@ -387,7 +387,7 @@ async fn check_approval_timeouts(
                     }),
                 );
                 // DO NOT delete the continuation file — it can be resumed if
-                // the operator approves later (R-2.11, R-7.11). Just emit workflow event.
+                // the operator approves later (P-2.11, P-7.11). Just emit workflow event.
                 let timeout_event = autonoetic_types::workflow::WorkflowEventRecord {
                     event_id: format!("wevt-approval-t-{}", &task.task_id),
                     workflow_id: wf_id.clone(),

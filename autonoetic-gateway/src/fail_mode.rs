@@ -7,7 +7,7 @@
 //! |---|---|
 //! | `RefuseBoot` | Gateway refuses to start. |
 //! | `RefuseSessionStart` | Gateway refuses to create / resume / continue a session. Applies at session creation and at any mid-session enforcement point where the invariant cannot be verified (e.g. cost-budget catalog unavailable). |
-//! | `Degrade` | Session enters degraded mode (R-7.18). |
+//! | `Degrade` | Session enters degraded mode (P-7.18). |
 //! | `EmergencyStop` | Session is killed immediately. |
 //! | `LogOnly` | No enforcement action; event is logged for audit. |
 
@@ -95,645 +95,645 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
     },
     // §1 Capability & Rights
     FailModeEntry {
-        rule_id: "R-1.1",
+        rule_id: "P-1.1",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.2",
+        rule_id: "P-1.2",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.3",
+        rule_id: "P-1.3",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.4",
+        rule_id: "P-1.4",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.5",
+        rule_id: "P-1.5",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.6",
+        rule_id: "P-1.6",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.7",
+        rule_id: "P-1.7",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.8",
+        rule_id: "P-1.8",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.9",
+        rule_id: "P-1.9",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.10",
+        rule_id: "P-1.10",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-1.11",
+        rule_id: "P-1.11",
         fail_mode: FailMode::RefuseSessionStart,
     },
     // §2 Approval Gates
     FailModeEntry {
-        rule_id: "R-2.1",
+        rule_id: "P-2.1",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.2",
+        rule_id: "P-2.2",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-2.3",
+        rule_id: "P-2.3",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-2.4",
+        rule_id: "P-2.4",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-2.5",
+        rule_id: "P-2.5",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-2.6",
+        rule_id: "P-2.6",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-2.7",
+        rule_id: "P-2.7",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-2.8",
+        rule_id: "P-2.8",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.9",
+        rule_id: "P-2.9",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.10",
+        rule_id: "P-2.10",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-2.11",
+        rule_id: "P-2.11",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-2.12",
+        rule_id: "P-2.12",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-2.13",
+        rule_id: "P-2.13",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.14",
+        rule_id: "P-2.14",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.15",
+        rule_id: "P-2.15",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-2.16",
+        rule_id: "P-2.16",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.17",
+        rule_id: "P-2.17",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.18",
+        rule_id: "P-2.18",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-2.19",
+        rule_id: "P-2.19",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-2.20",
+        rule_id: "P-2.20",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-2.21",
+        rule_id: "P-2.21",
         fail_mode: FailMode::RefuseSessionStart,
     },
     // §3 Sandbox Isolation
     FailModeEntry {
-        rule_id: "R-3.1",
+        rule_id: "P-3.1",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-3.2",
+        rule_id: "P-3.2",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-3.3",
+        rule_id: "P-3.3",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-3.4",
+        rule_id: "P-3.4",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-3.5",
+        rule_id: "P-3.5",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-3.6",
+        rule_id: "P-3.6",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-3.7",
+        rule_id: "P-3.7",
         fail_mode: FailMode::Degrade,
     },
     FailModeEntry {
-        rule_id: "R-3.8",
+        rule_id: "P-3.8",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-3.9",
+        rule_id: "P-3.9",
         fail_mode: FailMode::RefuseSessionStart,
     },
     // §4 Credential & Secret Protection
     FailModeEntry {
-        rule_id: "R-4.1",
+        rule_id: "P-4.1",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-4.2",
+        rule_id: "P-4.2",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-4.3",
+        rule_id: "P-4.3",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-4.4",
+        rule_id: "P-4.4",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-4.5",
+        rule_id: "P-4.5",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-4.6",
+        rule_id: "P-4.6",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-4.7",
+        rule_id: "P-4.7",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-4.8",
+        rule_id: "P-4.8",
         fail_mode: FailMode::Degrade,
     },
     FailModeEntry {
-        rule_id: "R-4.9",
+        rule_id: "P-4.9",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-4.10",
+        rule_id: "P-4.10",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-4.11",
+        rule_id: "P-4.11",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-4.12",
+        rule_id: "P-4.12",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-4.13",
+        rule_id: "P-4.13",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-4.14",
+        rule_id: "P-4.14",
         fail_mode: FailMode::EmergencyStop,
     },
     // §5 I/O Schema Validation
     FailModeEntry {
-        rule_id: "R-5.1",
+        rule_id: "P-5.1",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.2",
+        rule_id: "P-5.2",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.3",
+        rule_id: "P-5.3",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.4",
+        rule_id: "P-5.4",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-5.5",
+        rule_id: "P-5.5",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.6",
+        rule_id: "P-5.6",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.7",
+        rule_id: "P-5.7",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.8",
+        rule_id: "P-5.8",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.9",
+        rule_id: "P-5.9",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.10",
+        rule_id: "P-5.10",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-5.11",
+        rule_id: "P-5.11",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-5.12",
+        rule_id: "P-5.12",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-5.13",
+        rule_id: "P-5.13",
         fail_mode: FailMode::RefuseSessionStart,
     },
     // §6 Session, Workflow & Budget
     FailModeEntry {
-        rule_id: "R-6.1",
+        rule_id: "P-6.1",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-6.2",
+        rule_id: "P-6.2",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-6.3",
+        rule_id: "P-6.3",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-6.4",
+        rule_id: "P-6.4",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-6.5",
+        rule_id: "P-6.5",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-6.6",
+        rule_id: "P-6.6",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-6.7",
+        rule_id: "P-6.7",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-6.8",
+        rule_id: "P-6.8",
         fail_mode: FailMode::Degrade,
     },
     FailModeEntry {
-        rule_id: "R-6.9",
+        rule_id: "P-6.9",
         fail_mode: FailMode::Degrade,
     },
     FailModeEntry {
-        rule_id: "R-6.10",
+        rule_id: "P-6.10",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-6.11",
+        rule_id: "P-6.11",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-6.12",
+        rule_id: "P-6.12",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-6.13",
+        rule_id: "P-6.13",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-6.14",
+        rule_id: "P-6.14",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-6.15",
+        rule_id: "P-6.15",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-6.16",
+        rule_id: "P-6.16",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-6.17",
+        rule_id: "P-6.17",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-6.18",
+        rule_id: "P-6.18",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-6.19",
+        rule_id: "P-6.19",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-6.20",
+        rule_id: "P-6.20",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-6.21",
+        rule_id: "P-6.21",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-6.22",
+        rule_id: "P-6.22",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-6.23",
+        rule_id: "P-6.23",
         fail_mode: FailMode::RefuseSessionStart,
     },
     // §7 Abuse / Hard-Stop / Circuit Breakers
     FailModeEntry {
-        rule_id: "R-7.1",
+        rule_id: "P-7.1",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.2",
+        rule_id: "P-7.2",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.3",
+        rule_id: "P-7.3",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.4",
+        rule_id: "P-7.4",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-7.5",
+        rule_id: "P-7.5",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.6",
+        rule_id: "P-7.6",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.7",
+        rule_id: "P-7.7",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.8",
+        rule_id: "P-7.8",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.9",
+        rule_id: "P-7.9",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.10",
+        rule_id: "P-7.10",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.11",
+        rule_id: "P-7.11",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.12",
+        rule_id: "P-7.12",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.13",
+        rule_id: "P-7.13",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.14",
+        rule_id: "P-7.14",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.15",
+        rule_id: "P-7.15",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.16",
+        rule_id: "P-7.16",
         fail_mode: FailMode::EmergencyStop,
     },
     FailModeEntry {
-        rule_id: "R-7.17",
+        rule_id: "P-7.17",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-7.18",
+        rule_id: "P-7.18",
         fail_mode: FailMode::Degrade,
     },
     // §8 Audit & Traceability
     FailModeEntry {
-        rule_id: "R-8.1",
+        rule_id: "P-8.1",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-8.2",
+        rule_id: "P-8.2",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.3",
+        rule_id: "P-8.3",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.4",
+        rule_id: "P-8.4",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-8.5",
+        rule_id: "P-8.5",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.6",
+        rule_id: "P-8.6",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.7",
+        rule_id: "P-8.7",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.8",
+        rule_id: "P-8.8",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.9",
+        rule_id: "P-8.9",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-8.10",
+        rule_id: "P-8.10",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.11",
+        rule_id: "P-8.11",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-8.12",
+        rule_id: "P-8.12",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-8.13",
+        rule_id: "P-8.13",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.14",
+        rule_id: "P-8.14",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-8.15",
+        rule_id: "P-8.15",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.16",
+        rule_id: "P-8.16",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-8.17",
+        rule_id: "P-8.17",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.18",
+        rule_id: "P-8.18",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-8.19",
+        rule_id: "P-8.19",
         fail_mode: FailMode::LogOnly,
     },
     // §9 Agent Install & Provenance
     FailModeEntry {
-        rule_id: "R-9.1",
+        rule_id: "P-9.1",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-9.2",
+        rule_id: "P-9.2",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-9.3",
+        rule_id: "P-9.3",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-9.4",
+        rule_id: "P-9.4",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-9.5",
+        rule_id: "P-9.5",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-9.6",
+        rule_id: "P-9.6",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-9.7",
+        rule_id: "P-9.7",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-9.8",
+        rule_id: "P-9.8",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-9.9",
+        rule_id: "P-9.9",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-9.10",
+        rule_id: "P-9.10",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-9.11",
+        rule_id: "P-9.11",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-9.12",
+        rule_id: "P-9.12",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-9.13",
+        rule_id: "P-9.13",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-9.14",
+        rule_id: "P-9.14",
         fail_mode: FailMode::LogOnly,
     },
     // §10 Federation / Remote
     FailModeEntry {
-        rule_id: "R-10.1",
+        rule_id: "P-10.1",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-10.2",
+        rule_id: "P-10.2",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-10.3",
+        rule_id: "P-10.3",
         fail_mode: FailMode::RefuseBoot,
     },
     FailModeEntry {
-        rule_id: "R-10.4",
+        rule_id: "P-10.4",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-10.5",
+        rule_id: "P-10.5",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-10.6",
+        rule_id: "P-10.6",
         fail_mode: FailMode::LogOnly,
     },
     FailModeEntry {
-        rule_id: "R-10.7",
+        rule_id: "P-10.7",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-10.8",
+        rule_id: "P-10.8",
         fail_mode: FailMode::RefuseBoot,
     },
     // §11 Inter-Agent Messaging
     FailModeEntry {
-        rule_id: "R-11.1",
+        rule_id: "P-11.1",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-11.2",
+        rule_id: "P-11.2",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-11.3",
+        rule_id: "P-11.3",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-11.4",
+        rule_id: "P-11.4",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-11.5",
+        rule_id: "P-11.5",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-11.6",
+        rule_id: "P-11.6",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-11.7",
+        rule_id: "P-11.7",
         fail_mode: FailMode::RefuseSessionStart,
     },
     FailModeEntry {
-        rule_id: "R-11.8",
+        rule_id: "P-11.8",
         fail_mode: FailMode::EmergencyStop,
     },
     // R+ additions

@@ -186,7 +186,6 @@ Shared type definitions used across all crates.
 | `ToolError` | `tool_error.rs` | Structured tool error for repair |
 | `Profile` | `config.rs` | Complexity profile enum (`Starter`/`Standard`/`Expert`) with behavior methods |
 | `AutoLearningConfig` | `config.rs` | Auto-learning pipeline config (digest, quality signals, curation cron) |
-| `constitution_glossary` | `constitution_glossary.rs` | Rule ID to human-readable explanation mapping |
 
 ---
 

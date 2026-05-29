@@ -25,26 +25,26 @@ Fields marked **required** must be present or the gateway will fail to start.
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
 | `node_id` | string | `"gateway"` | Node identity for OFP federation and causal chain authorship. Overridable by `AUTONOETIC_NODE_ID` env var. |
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.29/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.30/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.30/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | Require a valid constitution lock signature at startup (`fail-shut` on missing/invalid signature). |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trusted signer registry (`signer_id` -> base64 Ed25519 public key, 32 bytes). Used for non-`gateway:*` signer IDs. |
 | `max_concurrent_spawns` | usize | `8` | Maximum agent runtime executions allowed concurrently across all sessions. |
 | `max_pending_spawns_per_agent` | usize | `4` | Maximum pending executions admitted per target agent (includes the currently running execution). |
-| `max_spawn_depth` | u32 | `8` | System-wide ceiling for spawn-chain depth (R+3 / R-7.15). Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins. |
-| `max_pending_approvals_per_root` | usize | `50` | Maximum concurrent pending approvals per root session. When a new request would push the count above this cap, the request is rejected with `approval_flood`. Set to `0` to disable (not recommended). Controls the R+5 / R-7.17 approval flood cap. |
+| `max_spawn_depth` | u32 | `8` | System-wide ceiling for spawn-chain depth (P-7.15). Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins. |
+| `max_pending_approvals_per_root` | usize | `50` | Maximum concurrent pending approvals per root session. When a new request would push the count above this cap, the request is rejected with `approval_flood`. Set to `0` to disable (not recommended). Controls the P-7.17 approval flood cap. |
 | `continuation_key` | string | `null` | HMAC-SHA256 key for signing turn continuation files. When unset, the gateway derives a deterministic key from `node_id` (development convenience only). Production deployments should set this to a high-entropy secret. Rotate by changing the value — existing continuations will fail integrity verification and be rejected. |
 | `approval_timeout_secs` | u64 | `600` | Maximum seconds a workflow task can remain in `AwaitingApproval` before auto-failing. `0` disables (not recommended for production). |
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
 | `stuck_task_timeout_secs` | u64 \| null | `600` | Max seconds a `Running` workflow task can go without progress before the sweeper force-completes it. The task is **always resolved as `Succeeded`** (not `Failed`), using whatever exit evidence the sweeper can find (manifest exit, digest tail, implicit artifacts); when no evidence is found the task is still resolved as `Succeeded` to keep the parent workflow unblocked. `null` uses the default (600). Set to `0` to disable. |
-| `approval_dwell_multiplier` | f64 | `1.0` | Multiplier applied to approval dwell times (R++4). Values above `1.0` slow down approval resolution. Set to `0` to disable dwell enforcement (tests). |
+| `approval_dwell_multiplier` | f64 | `1.0` | Multiplier applied to approval dwell times (P-2.24). Values above `1.0` slow down approval resolution. Set to `0` to disable dwell enforcement (tests). |
 | `signal_delivery_timeout_secs` | u64 | `60` | Timeout in seconds for signal delivery responses (approval resolution, workflow join). The signal sender waits this long for the planner to finish processing the triggered `event.ingest` turn. |
 | `default_workflow_wait_secs` | u64 | `30` | Default blocking timeout for `workflow.wait` when the caller omits `timeout_secs`. The tool blocks (signal-driven, via the per-session notify registry) until all watched task IDs reach a terminal state or this deadline elapses; it does **not** poll. Set to `0` to restore the legacy immediate-return ("probe") behaviour. See Ri-0.14 — orchestration should prefer the `WaitingForChild` wake-up over blocking here. |
 | `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
 | `capability_delta_gate_mode` | string | `"strict"` | Capability delta gating during `agent.revision.promote`: `"strict"` (any broadening requires approval), `"evolving"` (broadening inside wildcard envelopes auto-allowed), `"bootstrap"` (gating disabled, dev only). |
 | `interaction_answer_orchestration` | bool | `true` | When `true`, JSON-RPC `interaction.answer` / `interaction.resolve_and_answer` persist answers and orchestrate workflow task or session resume. When `false`, the method fails fast (legacy detection). |
-| `allow_runtime_lock_drift` | bool | `false` | Allow sessions to start when `runtime.lock` gateway section disagrees with the running binary (R+7 / R-8.12). Drift is still logged as a causal event. |
+| `allow_runtime_lock_drift` | bool | `false` | Allow sessions to start when `runtime.lock` gateway section disagrees with the running binary (P-8.12). Drift is still logged as a causal event. |
 | `trust_unsigned_bundles` | bool | `false` | Allow revision creation without a gateway signature when the identity key is unavailable (dev escape hatch). See `docs/revision-signing.md`. |
 | `profile` | string | `"standard"` | Complexity profile: `starter` (simplified UX, auto-approve safe tools), `standard` (current behavior), or `expert` (full constitutional visibility). See [Profiles](#profiles). |
 | `persona_path` | string (path) \| null | `null` | Path to a Markdown file injected into every agent's system prompt. Enables cross-agent user context and communication preferences. Relative paths resolve from the config directory. When `null`, the gateway looks for `persona.md` next to the config file (used only if it exists). |
@@ -59,8 +59,8 @@ Controls which constitutional release the gateway enforces.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.29/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.30/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.30/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | If `true`, unsigned locks are rejected and signed locks must verify. |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trust store for constitution lock signatures. Keys are signer IDs, values are base64 Ed25519 public keys (32 bytes). |
 
@@ -99,8 +99,8 @@ Example:
 
 ```yaml
 constitution:
-  source_path: "docs/constitution/versions/2026.05.29/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.05.30/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.30/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -110,8 +110,8 @@ To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
 
 ```yaml
 constitution:
-  source_path: ".gateway/constitution/versions/2026.05.29/constitution.md"
-  lock_path: ".gateway/constitution/versions/2026.05.29/gateway-constitution.lock.json"
+  source_path: ".gateway/constitution/versions/2026.05.30/constitution.md"
+  lock_path: ".gateway/constitution/versions/2026.05.30/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -264,7 +264,7 @@ gates but before the sentinel gate. When a protected agent is promoted:
 
 1. `required_eval_run_id` must be provided and must reference a **passed**
    eval run targeting the exact revision being promoted.
-2. The standard capability-delta gate (R++2) still fires for any broadening.
+2. The standard capability-delta gate (P-2.16) still fires for any broadening.
 3. The sentinel pre-promotion gate still fires (if enabled).
 
 When the gate blocks promotion, the error response includes:
@@ -449,7 +449,7 @@ The loop guard trips when ANY of these conditions is met:
 
 "Meaningful progress" requires a tool call with a fingerprint different from the previous `max_consecutive_same_progress` calls. This prevents agents from spinning on the same successful-but-useless tool call indefinitely.
 
-**Terminal-progress exemption.** Tools may opt out of the rotating-polling window by stamping `side_effect_state: "committed"` in their result (R-5.14 / R-6.26 uniform error/result envelope). A committed side effect clears the window — the agent just landed real state, so any prior monotony is stale. Read-only tools should not set this; mutating tools (`artifact.build`, `agent.spawn`, `agent.revision.promote`, `content.write`, `knowledge.write`, etc.) are encouraged to. The exemption itself is backward-compatible: existing tools that do not set `side_effect_state` continue to be tracked by the detector (the intended behavior for read-only tools), while tools that adopt the `committed` stamp gain the window-clear benefit.
+**Terminal-progress exemption.** Tools may opt out of the rotating-polling window by stamping `side_effect_state: "committed"` in their result (P-5.14 / P-6.26 uniform error/result envelope). A committed side effect clears the window — the agent just landed real state, so any prior monotony is stale. Read-only tools should not set this; mutating tools (`artifact.build`, `agent.spawn`, `agent.revision.promote`, `content.write`, `knowledge.write`, etc.) are encouraged to. The exemption itself is backward-compatible: existing tools that do not set `side_effect_state` continue to be tracked by the detector (the intended behavior for read-only tools), while tools that adopt the `committed` stamp gain the window-clear benefit.
 
 When the guard trips, it emits a `loop_guard.tripped` causal event with `reason` taken from a stable identifier (`no_meaningful_progress`, `tool_failure_budget`, `rotating_polling_pattern`, `child_failure_budget`) and the parsed detail in the payload. The divergence sentinel correlates these events to detect cross-session pathologies.
 
@@ -1029,8 +1029,8 @@ tls: false
 node_id: "gateway"
 node_name: "gateway"
 constitution:
-  source_path: "docs/constitution/versions/2026.05.29/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.05.30/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.30/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="

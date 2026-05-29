@@ -146,7 +146,7 @@ Skip coder. Compose the agent's SKILL body in-place, build an
 intent-only artifact bundle from it, then hand the bundle's
 `artifact_ref` to `specialized_builder.default`. This makes the
 install **artifact-addressed** even for pure-skill agents — the audit
-target, the install source, and the R++2 capability-delta key all
+target, the install source, and the P-2.16 capability-delta key all
 agree on one content-addressed identity.
 
 **1. Compose the SKILL body** as a single markdown string —
@@ -224,7 +224,7 @@ from `io.accepts`.
 `instructions`:** specialized_builder uses the `instructions` field
 to compose the canonical SKILL.md server-side. The bundled artifact's
 SKILL body must match this string exactly — that is the property
-audit verifies in §5.8 and that R++2 keys on. Compose once, bundle
+audit verifies in §5.8 and that P-2.16 keys on. Compose once, bundle
 once, pass the same string in `instructions`. Do not edit the body
 between steps 1 and 4.
 

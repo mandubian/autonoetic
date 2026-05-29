@@ -251,7 +251,7 @@ pub enum ScheduledAction {
         command: String,
     },
     /// Approval subject only: an `agent_revision_promote` would broaden the agent's
-    /// capability set relative to the currently-active revision (R++2). The operator
+    /// capability set relative to the currently-active revision (P-2.16). The operator
     /// must explicitly acknowledge each added or broadened capability by name when
     /// approving. Not executed by the scheduler; once approved with the matching
     /// acknowledgement, the caller retries `agent_revision_promote` with

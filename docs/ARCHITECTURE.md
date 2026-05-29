@@ -18,6 +18,7 @@ Autonoetic is a Rust-first runtime for autonomous, self-evolving AI agents with 
 - [Causal Chain](#causal-chain)
 - [Session Checkpoints, Continuations, and Forks](#session-checkpoints-continuations-and-forks)
 - [Queryable Event Store](#queryable-event-store)
+- [Contract Health](#contract-health)
 - [Live Digest](#live-digest)
 - [Observability Surface](#observability-surface)
 - [Hook System](#hook-system)
@@ -252,7 +253,7 @@ Two cooperating mechanisms control how sensitive data flows through the gateway:
 - **`ViewerClass` (Agent / Operator / Admin)** controls *what an observability or approval reader sees* based on who they are. Agents reading `execution.search` get trace metadata only — no stdout, no commands, no arguments, no result. Agents reading `approval_summary` for `WriteFile` see the path but not content; for `CredentialRequest` they see only `credential_id`/`url`/`method` (headers / body / payload blanked). One known gap (issue #158, fixed by PR #160): `SandboxExec.command` is currently preserved verbatim for the Agent class. Operators see structural fields with secret-named JSON keys redacted; non-JSON strings get precise in-place masking via `redact_embedded_secrets`. Admins see the raw record. Class is selected at the call site.
 - **`DisclosureClass` (Public / Restricted)** controls *what an LLM may quote in its assistant reply*. Per-content classification configured via `DisclosurePolicy` rules in `SKILL.md`.
 
-Together with **R+9** (the redaction-before-write invariant enforced by `RedactedPayload`), these form three layers: R+9 keeps secrets out of the causal chain at write time; `ViewerClass` strips fields per consumer at read time; `DisclosureClass` filters the LLM's reply.
+Together with **P-4.14** (the redaction-before-write invariant enforced by `RedactedPayload`), these form three layers: P-4.14 keeps secrets out of the causal chain at write time; `ViewerClass` strips fields per consumer at read time; `DisclosureClass` filters the LLM's reply.
 
 Redaction primitives are centralised in `autonoetic-types/src/redaction.rs`. Per-record field-by-field tables, call-site conventions, and the threat model are documented in [`docs/observability-redaction.md`](observability-redaction.md).
 
@@ -357,7 +358,7 @@ Agents declare optional `io.accepts` (input) and `io.returns` (output) JSON Sche
 
 ### Design choices and rationale
 
-**Schema authorship is LLM-owned.** The gateway is a dumb enforcement layer — it stores and validates schemas verbatim, never creates them. Agent-factory and specialized_builder include `io` in their install intent delegation so newly created agents carry schemas from birth.
+**Schema authorship is LLM-owned.** The gateway is a Lawful Executor — it stores and validates schemas verbatim, never creates them. Agent-factory and specialized_builder include `io` in their install intent delegation so newly created agents carry schemas from birth.
 
 **Asymmetric guidance: `io.returns` encouraged, `io.accepts` discouraged for reasoning agents.** Reasoning agents receive natural-language messages from the planner; over-constraining the input schema blocks valid callers with validation errors. Script agents with structured CLI arguments benefit from `io.accepts`.
 
@@ -763,9 +764,19 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 | `category` | tool_invoke, llm, lifecycle, memory... |
 | `action` | requested, completed, failure... |
 | `status` | SUCCESS, ERROR, DENIED |
+| `enforced_rules` | JSON array of constitutional rule/right IDs this event enforced (default placeholder `R+++3` when none) |
 | `target` | Tool name, model name, etc. |
 | `payload` | Full JSON (not truncated) |
 | `timestamp` | RFC3339 |
+
+#### Principle-aware enforcement events
+
+Enforcement events carry the `P-x.y` / `Ri-x.y` rule/right IDs they enforce in
+`enforced_rules`, and (for richer events like `loop_guard.tripped`) the
+resolved owning **clause** in the payload. The `enforcement_register`
+reverse-maps a `P-x.y` / `Ri-x.y` ID to its owning principle or right,
+so breaches correlate by **constitutional clause**, not by ad-hoc rule
+strings. See [Contract Health](#contract-health) below.
 
 **`execution_traces`** — Full code execution results:
 
@@ -801,6 +812,29 @@ Causal chain events are mirrored to SQLite for agent learning queries.
   "limit": 10
 }
 ```
+
+---
+
+## Contract Health
+
+Trust-through-predictability holds only if breaches are detected and corrected —
+so "report and correct" is a peer of "constrain." The contract-health view is
+the standing tally behind that half of the loop: how often each constitutional
+clause (principle/right) has actually been enforced.
+
+It reads the `enforced_rules` carried on `causal_events`, attributes each
+`P-x.y` / `Ri-x.y` rule/right ID to its owning clause via the
+`enforcement_register` (`clause_of_rule`), and tallies occurrences per clause.
+The `R+++3` event-attribution placeholder is skipped (every event carries it by
+default); rule IDs not present in the register surface as `unattributed`, so
+coverage gaps stay visible rather than silently dropped.
+
+- **Code**: `GatewayStore::contract_health(since)` →
+  `enforcement_register::ContractHealth { by_clause, unattributed }`
+- **CLI**: `autonoetic trace contract-health [--since <RFC3339>] [--json]`
+
+This is the foundation for principle-aware sentinel correlation; see
+`docs/design/divergence-sentinel-design.md`.
 
 ---
 
@@ -859,7 +893,7 @@ Properties:
 - **Invalidation is coarse but correct**: a mutating tool clears the affected tag class (`AgentExistence` / `ArtifactMetadata`) across *all* session caches, so a child session's promote invalidates the parent's `agent_exists` cache. `content_read` is never invalidated.
 - **Audited**: a cache hit emits a `tool_call.cache_hit` causal event (and the normal execution trace still records), so the causal chain shows every logical tool call.
 
-Grounding: extends the determinism-skip principle of R-2.6 / R-2.7 (approved-execution caching) to pure reads, where the safety argument is stronger — there is no side effect to skip.
+Grounding: extends the determinism-skip principle of P-2.6 / P-2.7 (approved-execution caching) to pure reads, where the safety argument is stronger — there is no side effect to skip.
 
 ---
 
@@ -1143,8 +1177,8 @@ The planner orchestrates federation: it inspects the artifact type, spawns the a
 
 When federation roles (`static_evaluator` or `unit_test_runner`) have recorded verdicts for an artifact, the promotion gate mechanically enforces:
 
-1. **Distinct identity** (R-2.17): each federation role's agent ID must differ from the revision proposer and from every other federation role
-2. **Operator approval** (R-2.22): an approved `EscalationMessage` must exist for the artifact + revision pair
+1. **Distinct identity** (P-2.17): each federation role's agent ID must differ from the revision proposer and from every other federation role
+2. **Operator approval** (P-2.22): an approved `EscalationMessage` must exist for the artifact + revision pair
 3. **Legacy compatibility**: artifacts without federation verdicts continue through the existing Full/AuditOnly gate
 
 This is a fifth gate mode (`FullJury`) that activates on top of the legacy gate when federation verdicts are present. A compromised planner cannot bypass it — the gateway checks `has_federation_roles()` mechanically and refuses promotion without an approved escalation.
@@ -1422,12 +1456,12 @@ The guard has four independent trip conditions, each attributed on the `loop_gua
 
 | `reason` | Condition | Rule |
 |---|---|---|
-| `tool_failure_budget` | A single tool exceeds `max_tool_failures` (default 5) | R-7.5 |
-| `no_meaningful_progress` | `current_loops` reaches `max_loops_without_progress` — consecutive LLM steps with no progress-resetting tool result | R-7.7 |
-| `rotating_polling_pattern` | The last `rotation_window_size` (default 16) successful calls hold ≤ `rotation_distinct_floor` (default 6) distinct fingerprints — an agent cycling a small set of read-only tools without semantic progress. A result carrying `side_effect_state: "committed"` clears the window. | R-7.19 |
-| `child_failure_budget` | Child-task failures reach `max_child_failures` (default 3); does not reset on progress | R-7.20 |
+| `tool_failure_budget` | A single tool exceeds `max_tool_failures` (default 5) | P-7.5 |
+| `no_meaningful_progress` | `current_loops` reaches `max_loops_without_progress` — consecutive LLM steps with no progress-resetting tool result | P-7.7 |
+| `rotating_polling_pattern` | The last `rotation_window_size` (default 16) successful calls hold ≤ `rotation_distinct_floor` (default 6) distinct fingerprints — an agent cycling a small set of read-only tools without semantic progress. A result carrying `side_effect_state: "committed"` clears the window. | P-7.19 |
+| `child_failure_budget` | Child-task failures reach `max_child_failures` (default 3); does not reset on progress | P-7.20 |
 
-`no_meaningful_progress` (R-7.7) and `rotating_polling_pattern` (R-7.19) are complementary: R-7.7 catches the absence of progress-making results; R-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset R-7.7's counter).
+`no_meaningful_progress` (P-7.7) and `rotating_polling_pattern` (P-7.19) are complementary: P-7.7 catches the absence of progress-making results; P-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset P-7.7's counter).
 
 ### Design Rule
 
@@ -1441,7 +1475,7 @@ Flow-control responses (e.g., `approval_required: true`, `suspended: true`) may 
 
 ## Design Principles
 
-1. **Gateway as Dumb Secure Pipe**: Execute proposals, don't make decisions
+1. **Gateway as Lawful Executor**: deterministic enforcement, no improvised judgment — execute proposals, don't make decisions
 2. **Agents as Pure Reasoners**: LLMs plan; gateway validates and acts
 3. **Autonomy Through Composition**: Complex behavior emerges from simple primitives
 4. **No Hardcoded Heuristics**: Business logic in SKILL.md, not platform code

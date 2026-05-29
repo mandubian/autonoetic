@@ -109,7 +109,7 @@ The problem isn't the adapter pattern — it's the gateway accumulating domain-s
 
 ---
 
-## The Gateway as Dumb Secure Pipe
+## The Gateway as Lawful Executor
 
 Strip the gateway down to its essential primitives:
 

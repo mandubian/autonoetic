@@ -1,4 +1,4 @@
-//! Constitution R-8.6 — retention policy is applied at gateway startup.
+//! Constitution P-8.6 — retention policy is applied at gateway startup.
 
 mod support;
 

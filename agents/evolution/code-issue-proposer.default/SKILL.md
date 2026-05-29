@@ -77,7 +77,7 @@ This agent is strictly bounded to the following capabilities, enforced at the ga
 - Has CodeExecution capability (cannot run arbitrary shell commands)
 - Makes network requests outside the configured GitHub API scope
 
-Any expansion of this capability set requires a constitutional amendment through the R++2 gate.
+Any expansion of this capability set requires a constitutional amendment through the P-2.16 gate.
 
 ## Issue Body Format
 

@@ -38,14 +38,14 @@ When `docs/constitution/versions/<version>/constitution.md` changes, run the
 maintained script (requires PyNaCl: `python3 -m pip install pynacl`):
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.05.29 \
+python3 docs/constitution/recompute_lock.py --version 2026.05.30 \
   --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
 ```
 
 To intentionally rotate signer material:
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.05.29 --generate-key
+python3 docs/constitution/recompute_lock.py --version 2026.05.30 --generate-key
 ```
 
 If signer key rotated, update `trusted_signers` for
@@ -110,6 +110,8 @@ Reference bundles are under `agents/`:
 - **Causal Chain**: Every session produces a hash-chained audit trail of turns and events
 - **Checkpoint**: Universal session snapshots at every yield point (hibernation, approval, budget exhaustion, emergency stop). Enables crash recovery and session forking.
 - **Queryable Event Store**: Causal events mirrored to SQLite (`causal_events` table) for agent learning queries
+- **Constitution Structure**: The signed constitution (`docs/constitution/versions/<date>/constitution.md`) is **principles + a Bill of Rights**. Rules (§1–§11, `P-x.y`, e.g. `P-7.19`) bind the agent; rights (§0 Bill of Rights, `Ri-x.y`) bind the gateway. The gateway is a **Lawful Executor** (deterministic enforcement, no improvised judgment); a place where it would exercise reserved judgment is a tracked **DISCRETION LEAK**. The `enforcement_register` (code) maps each numbered rule → its parent principle/right and the code+test that enforce it.
+- **Contract Health**: Standing view of how often each constitutional clause (principle/right) has been enforced. Enforcement events carry their rule ID (e.g. `loop_guard.tripped` → `P-7.19`); the `enforcement_register` reverse-maps these to their owning clause, and `GatewayStore::contract_health` tallies occurrences by clause (unrecognised IDs surfaced as `unattributed`). Surfaced via `autonoetic trace contract-health`.
 - **Execution Traces**: Full code execution results (stdout, stderr, exit_code) in `execution_traces` table — not truncated
 - **Live Digest**: Real-time session narrative in `digest.md`, replacing flat timeline
 - **Artifact Store**: Content-addressed (SHA-256) storage; agents pass handles, not inline blobs

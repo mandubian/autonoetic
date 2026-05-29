@@ -1201,9 +1201,16 @@ impl AgentExecutor {
                 if let (Some(reason), Some(store)) =
                     (self.guard.last_trip_reason(), self.gateway_store.as_ref())
                 {
+                    // Attribute the trip to its constitutional clause (a
+                    // principle *or* a right, via the enforcement register) in
+                    // addition to the rule ID, so the detection loop can
+                    // correlate breaches by clause, not just by rule string
+                    // (#302).
                     let payload = serde_json::json!({
                         "reason": reason.code(),
                         "detail": format!("{:?}", reason),
+                        "rule_id": reason.rule_id(),
+                        "clause": crate::enforcement_register::clause_of_rule(reason.rule_id()),
                     });
                     let session_id_for_event =
                         self.session_id.clone().unwrap_or_default();
@@ -1218,9 +1225,9 @@ impl AgentExecutor {
                         action: "tripped".to_string(),
                         status: "active".to_string(),
                         // Attribute the trip to the rule whose text actually
-                        // describes it (R-7.5 failure budget / R-7.7 no
-                        // successful result / R-7.19 no semantic progress /
-                        // R-7.20 child-failure budget), not a blanket R-7.7.
+                        // describes it (P-7.5 failure budget / P-7.7 no
+                        // successful result / P-7.19 no semantic progress /
+                        // P-7.20 child-failure budget), not a blanket P-7.7.
                         enforced_rules: vec![reason.rule_id().to_string()],
                         target: None,
                         payload: Some(payload.to_string()),
@@ -1257,7 +1264,7 @@ impl AgentExecutor {
                         category: "session".to_string(),
                         action: "session.degraded".to_string(),
                         status: "active".to_string(),
-                        enforced_rules: vec!["R-7.18".to_string()],
+                        enforced_rules: vec!["P-7.18".to_string()],
                         target: None,
                         payload: Some(serde_json::json!({"reason": "loop_guard_sub_trip_warning"}).to_string()),
                         payload_ref: None,
@@ -1308,7 +1315,7 @@ impl AgentExecutor {
                 }
             }
 
-            // Root session tree budget check (R+4 / R-6.21)
+            // Root session tree budget check (R+4 / P-6.21)
             if let Some(root_budget) = self.root_session_budget.as_ref() {
                 if let Err(e) = root_budget.check_pre_llm(root_session_id) {
                     let _ = self.save_yield_checkpoint(
@@ -2432,7 +2439,7 @@ impl AgentExecutor {
                                     // Tools may opt into terminal-progress
                                     // semantics by stamping
                                     // `side_effect_state: "committed"` in
-                                    // their result (R-5.14 / R-6.26).
+                                    // their result (P-5.14 / P-6.26).
                                     // Terminal events clear the
                                     // rotating-polling window — a real
                                     // side effect just landed, so any

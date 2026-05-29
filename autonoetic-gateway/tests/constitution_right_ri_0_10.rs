@@ -103,10 +103,13 @@ fn empty_args_returns_full_constitution() {
         text.starts_with("# Gateway Constitution"),
         "starts with title"
     );
-    assert!(text.contains("## 0. Rights"), "contains rights section");
+    assert!(
+        text.contains("## 0. Bill of Rights"),
+        "contains Bill of Rights section"
+    );
     assert!(
         text.contains("## 14."),
-        "contains dumbness invariant section"
+        "contains Lawful-Executor invariant section"
     );
     assert!(text.contains("Ri-0.10"), "contains Ri-0.10 row");
 

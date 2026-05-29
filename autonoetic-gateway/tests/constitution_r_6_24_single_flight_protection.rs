@@ -1,4 +1,4 @@
-//! Constitution R-6.24: equivalent durable operations must coalesce instead of
+//! Constitution P-6.24: equivalent durable operations must coalesce instead of
 //! faning out into parallel work.
 
 use autonoetic_gateway::policy::PolicyEngine;

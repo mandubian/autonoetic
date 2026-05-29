@@ -3,7 +3,7 @@
 //! - `constitution_read` (Ri-0.10, issue #95): every agent's right to read
 //!   the full text of the constitution it operates under, addressed by
 //!   digest. No capability gate.
-//! - `constitution_propose_amendment` (Ri-0.8 / R+++1, issue #92): agents
+//! - `constitution_propose_amendment` (Ri-0.8, issue #92): agents
 //!   holding the `ConstitutionalProposal` capability submit amendment
 //!   proposals through a declared, durable channel. Proposals receive a
 //!   durable ID, enter a review queue, and cannot be silently dropped.
@@ -69,7 +69,7 @@ impl NativeTool for ConstitutionReadTool {
                 Returns the full document or a single section/rule when `section` is given. \
                 Use this before proposing amendments, when a rule ID appears in an error, \
                 or any time you need to understand your obligations and rights. \
-                Section selector accepts rule IDs (`Ri-0.10`, `R-7.5`, `R+5`, `R++1`, `R+++3`) \
+                Section selector accepts clause IDs (`Ri-0.10`, `P-7.5`, `P-10.9`) \
                 and numbered sections (`§0` … `§14`). The returned digest identifies the exact \
                 configured constitutional release and lock file."
                 .to_string(),
@@ -78,7 +78,7 @@ impl NativeTool for ConstitutionReadTool {
                 "properties": {
                     "section": {
                         "type": "string",
-                        "description": "Optional selector. Rule IDs (Ri-0.10, R-7.5, R+5, R++1, R+++3) or numbered sections (§0..§14). Omit to receive the full document."
+                        "description": "Optional selector. Clause IDs (Ri-0.10, P-7.5, P-10.9) or numbered sections (§0..§14). Omit to receive the full document."
                     }
                 },
                 "additionalProperties": false
@@ -128,7 +128,7 @@ impl NativeTool for ConstitutionReadTool {
                 None => {
                     return Ok(ToolError::validation(
                         format!("section selector '{}' did not match any rule ID or section in the constitution", selector),
-                        Some("Use a rule ID like 'Ri-0.10', 'R-7.5', 'R+5', 'R++1', 'R+++3', or a section like '§0'..'§14'. Omit `section` to receive the full document."),
+                        Some("Use a clause ID like 'Ri-0.10', 'P-7.5', 'P-10.9', or a section like '§0'..'§14'. Omit `section` to receive the full document."),
                     )
                     .to_error_response());
                 }
@@ -234,7 +234,7 @@ fn extract_rule_row(doc: &str, rule_id: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// constitution_propose_amendment — Ri-0.8 / R+++1 (issue #92)
+// constitution_propose_amendment — Ri-0.8 (issue #92)
 // ---------------------------------------------------------------------------
 
 pub struct ConstitutionProposeAmendmentTool;
@@ -273,7 +273,7 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
                     },
                     "target_id": {
                         "type": "string",
-                        "description": "Existing rule or right ID (Ri-X.Y, R-X.Y, R+N…). Required for modify_* and remove_* kinds."
+                        "description": "Existing rule or right ID (Ri-X.Y, P-X.Y). Required for modify_* and remove_* kinds."
                     },
                     "proposed_text": {
                         "type": "string",
@@ -343,7 +343,7 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
         // be allowed to propose `modify_rule` but not `remove_right`, etc.
         if !has_constitutional_proposal_capability(manifest, &args.kind) {
             return Ok(ToolError::permission(format!(
-                "agent does not hold ConstitutionalProposal capability covering kind '{}' (Ri-0.8 / R+++1). \
+                "agent does not hold ConstitutionalProposal capability covering kind '{}' (Ri-0.8). \
                  Declare a ConstitutionalProposal capability whose `patterns` include this kind, or use '*'.",
                 args.kind
             ))
@@ -512,12 +512,13 @@ mod tests {
     }
 
     #[test]
-    fn extract_pending_rule() {
+    fn extract_numbered_rule_row() {
         init_default_constitution();
-        // R+++3 is in the constitution as a pending constitutional rule.
+        // P-10.9 is the federation constitution-digest rule (graduated from
+        // the former R+++2) — a normal numbered rule row.
         let extract =
-            extract_section(constitution_text().as_ref(), "R+++3").expect("R+++3 must exist");
-        assert!(extract.contains("R+++3"));
+            extract_section(constitution_text().as_ref(), "P-10.9").expect("P-10.9 must exist");
+        assert!(extract.contains("P-10.9"));
     }
 
     #[test]

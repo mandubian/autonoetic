@@ -1,4 +1,4 @@
-# Revision Signing (R+11)
+# Revision Signing (P-9.13)
 
 ## Overview
 
@@ -88,7 +88,7 @@ changes.
 ## Gateway Identity Key
 
 The signing key is the same `GatewayIdentityKey` used for turn-boundary state attestations
-(R++1):
+(P-6.23):
 
 - **Private**: `.gateway/state_attestation.ed25519` (mode `0o600`, auto-generated on first load)
 - **Public**: `.gateway/state_attestation.ed25519.pub` (32 bytes, Ed25519 verifying key)
@@ -105,10 +105,11 @@ permissions or the filesystem is read-only.
 When `true`, revision creation proceeds without a signature if the key is unavailable.
 This is intended only for local development or constrained environments.
 
-### Why This Replaced the Old R+11 Gate
+### Why This Replaced the Original Caller-Supplied Gate
 
-The original R+11 design required the **caller** (agent/CLI) to provide an Ed25519
-signature in the tool arguments. This was a deadlock:
+The original design (before P-9.13 took its current gateway-side form) required
+the **caller** (agent/CLI) to provide an Ed25519 signature in the tool
+arguments. This was a deadlock:
 
 1. The agent doesn't have the gateway's private key, so it can't produce a valid signature.
 2. The gateway doesn't auto-sign, so there's no way to get a signature.

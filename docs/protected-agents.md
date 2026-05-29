@@ -35,7 +35,7 @@ protected_agents:
 When a protected agent is promoted via `agent_revision_promote`:
 
 1. **Eval evidence required**: `required_eval_run_id` must be provided and must reference a **passed** eval run for the exact revision being promoted.
-2. **Standard gates still fire**: capability-delta (R++2), artifact promotion, sentinel pre-promotion gate.
+2. **Standard gates still fire**: capability-delta (P-2.16), artifact promotion, sentinel pre-promotion gate.
 3. **No eval run = blocked**: the tool returns `protected_agent_requires_eval_run` with a repair hint.
 
 ### Disabling the Gate

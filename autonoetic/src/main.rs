@@ -370,6 +370,13 @@ async fn main() -> anyhow::Result<()> {
                 cli::trace::handle_trace_graph(&config_path, session_or_workflow, *json, *follow)
                     .await?;
             }
+            cli::common::TraceCommands::ContractHealth { since, json } => {
+                cli::trace::handle_trace_contract_health(
+                    &config_path,
+                    since.as_deref(),
+                    *json,
+                )?;
+            }
         },
 
         Commands::Skill(args) => match &args.command {
