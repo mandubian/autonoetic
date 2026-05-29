@@ -92,16 +92,17 @@ Returns:
 
 ## knowledge_search
 
-Search tagged memories for lessons, decisions, and facts.
+Search memories for lessons, decisions, and facts within a scope — by content,
+by tags, or both.
 
 ### Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `scope` | string | Knowledge namespace (e.g. `digest.lesson`, `general`), not the same as visibility |
-| `tags` | [string] | Required tags (AND logic) |
-| `text` | string | Optional text search in content |
-| `limit` | number | Max results (default: 10) |
+| `scope` | string | **Required.** Knowledge namespace (e.g. `digest.lesson`, `general`), not the same as visibility |
+| `query` | string | Optional substring filter on content |
+| `tags` | [string] | Optional tags — AND logic (every listed tag must be present) |
+| `limit` | number | Max results, 1–100 (default: 10) |
 
 ### Tag Conventions
 
@@ -146,8 +147,9 @@ Returns:
 
 ```json
 {
+  "scope": "decisions",
   "tags": ["type:decision"],
-  "text": "retry",
+  "query": "retry",
   "limit": 5
 }
 ```
@@ -200,14 +202,16 @@ Before starting a task, search for related lessons:
 ```json
 // 1. Check for error lessons in this domain
 knowledge_search({
+  "scope": "lessons",
   "tags": ["type:error_lesson", "domain:http"],
   "limit": 5
 })
 
 // 2. Check for past approaches
 knowledge_search({
+  "scope": "lessons",
   "tags": ["type:approach"],
-  "text": "http client",
+  "query": "http client",
   "limit": 5
 })
 
@@ -234,8 +238,9 @@ execution_search({
 
 // Check if this error was seen before
 knowledge_search({
+  "scope": "lessons",
   "tags": ["type:error_lesson"],
-  "text": "<error_message_snippet>",
+  "query": "<error_message_snippet>",
   "limit": 3
 })
 ```
@@ -246,8 +251,9 @@ Before making a significant decision, review past decisions:
 
 ```json
 knowledge_search({
+  "scope": "decisions",
   "tags": ["type:decision"],
-  "text": "<relevant_keyword>",
+  "query": "<relevant_keyword>",
   "limit": 5
 })
 ```

@@ -87,7 +87,7 @@ Return a JSON object:
 ### Step 1: Gather current agent state
 
 1. `agent_revision_inspect(agent_id)` or `agent_revision_list(agent_id)` — get current SKILL.md, capabilities, execution mode, runtime.lock.
-2. `knowledge_search(tags=["source:memory_curator", "agent:<agent_id>"])` — historical curated patterns beyond this run's window.
+2. `knowledge_search(scope="evolution/patterns", tags=["source:memory_curator", "agent:<agent_id>"])` — historical curated patterns beyond this run's window (memory-curator stores under that scope).
 
 ### Step 2: Classify root cause
 

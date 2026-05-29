@@ -309,7 +309,7 @@ impl NativeTool for KnowledgeSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search the knowledge base in a scope. Without `tags`, returns scope contents optionally filtered by `query` substring. With `tags` (AND semantics — every tag must be present on a record), filters to tagged records, with `query` as an optional substring filter on content.".to_string(),
+            description: "Search the knowledge base in a scope. Without `tags`, returns scope contents optionally filtered by `query` substring. With `tags` (AND semantics — every tag must be present on a record), filters to tagged records, with `query` as an optional substring filter on content. Results are capped at `limit` (default 10, max 100).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
