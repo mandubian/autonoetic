@@ -113,6 +113,8 @@ pub struct GatewayStore {
     /// hold an `Arc<GatewayStore>` for other hooks.
     policy_hook_executor: Mutex<Option<Weak<crate::scheduler::hooks::HookExecutor>>>,
     pub task_notify: crate::scheduler::task_notify::TaskNotifyRegistry,
+    /// Session-scoped result cache for pure read tools (issue #289).
+    pub session_read_cache: crate::runtime::session_read_cache::SessionReadCacheRegistry,
 }
 
 impl GatewayStore {
@@ -137,6 +139,8 @@ impl GatewayStore {
             escalation_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             policy_hook_executor: Mutex::new(None),
             task_notify: crate::scheduler::task_notify::TaskNotifyRegistry::new(),
+            session_read_cache:
+                crate::runtime::session_read_cache::SessionReadCacheRegistry::default(),
         };
         {
             let mut conn = store.conn.lock().unwrap();
