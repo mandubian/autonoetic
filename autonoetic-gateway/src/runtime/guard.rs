@@ -562,6 +562,25 @@ mod tests {
         assert!(guard.check_loop().is_err());
     }
 
+    /// Child-failure budget trip (R-7.20). Child failures accumulate and do
+    /// NOT reset on progress; the guard trips once `max_child_failures`
+    /// (default 3) is reached. Pinning test cited by the enforcement
+    /// register for P-7 / R-7.20.
+    #[test]
+    fn test_loop_guard_trips_on_child_failures() {
+        let mut guard = LoopGuard::new(100); // high loop budget so the child budget is the trip cause
+        guard.register_child_failure();
+        guard.register_child_failure();
+        assert!(guard.check_loop().is_ok(), "2 < default max_child_failures(3)");
+        guard.register_child_failure(); // now 3
+        let err = guard.check_loop().expect_err("3 >= max_child_failures must trip");
+        assert!(err.to_string().contains("child"), "unexpected error: {err}");
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(crate::runtime::guard::LoopGuardTripReason::ChildFailureBudget { .. })
+        ));
+    }
+
     #[test]
     fn test_loop_guard_alternating_hosts_exhausts_budget() {
         let mut guard = LoopGuard::new(100);
