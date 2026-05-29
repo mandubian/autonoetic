@@ -957,6 +957,7 @@ pub mod approval;
 pub mod artifact;
 pub mod artifact_exec;
 pub mod artifact_prepare;
+pub mod agent_inspect;
 pub mod capsule;
 pub mod constitution;
 pub mod content;
@@ -1002,6 +1003,8 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::digest::register_tools(&mut registry);
     crate::runtime::tools::session::register_tools(&mut registry);
     crate::runtime::tools::content::register_tools(&mut registry);
+    crate::runtime::tools::agent::register_tools(&mut registry);
+    crate::runtime::tools::agent_inspect::register_tools(&mut registry);
     crate::runtime::tools::agent_revision::register_tools(&mut registry);
     crate::runtime::tools::approval::register_tools(&mut registry);
     crate::runtime::tools::evaluation::register_tools(&mut registry);

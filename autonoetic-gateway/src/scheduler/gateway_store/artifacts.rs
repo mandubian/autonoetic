@@ -341,6 +341,19 @@ impl GatewayStore {
         Ok(true)
     }
 
+    pub fn promote_artifact_ref_to_global(&self, artifact_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE artifact_refs
+             SET scope_type = 'global', scope_id = '__global__'
+             WHERE artifact_id = ?1
+               AND revoked_at IS NULL
+               AND scope_type != 'global'",
+            params![artifact_id],
+        )?;
+        Ok(updated > 0)
+    }
+
     fn parse_rfc3339_utc(
         value: &str,
         field_name: &'static str,

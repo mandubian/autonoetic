@@ -2742,6 +2742,16 @@ impl NativeTool for AgentRevisionPromoteTool {
 
         crate::bootstrap::update_latest_symlink(gateway_dir, &args.agent_id, &args.revision_id);
 
+        if let Some(art_id) = &rev.artifact_id {
+            if let Err(e) = gateway_store.promote_artifact_ref_to_global(art_id) {
+                tracing::warn!(
+                    target: "agent_revision",
+                    artifact_id = %art_id,
+                    "Failed to promote artifact ref to global scope: {}", e
+                );
+            }
+        }
+
         let short_ref = format!("{}@rev_{}", args.agent_id, rev.short_id);
         Ok(serde_json::json!({
             "ok": true,
