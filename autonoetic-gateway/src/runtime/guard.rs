@@ -62,6 +62,24 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::ChildFailureBudget { .. } => "child_failure_budget",
         }
     }
+
+    /// Constitutional rule this trip enforces. Used to populate
+    /// `enforced_rules` on the `loop_guard.tripped` causal event so the
+    /// audit chain attributes each trip to the rule whose text actually
+    /// describes it (rather than blanket-labelling every trip R-7.7).
+    ///
+    /// - `ToolFailureBudget`     → R-7.5 (per-tool failure budget)
+    /// - `NoMeaningfulProgress`  → R-7.7 (consecutive steps w/o successful result)
+    /// - `RotatingPollingPattern`→ R-7.19 (no semantic progress across successes)
+    /// - `ChildFailureBudget`    → R-7.20 (child-failure delegation-loop budget)
+    pub fn rule_id(&self) -> &'static str {
+        match self {
+            LoopGuardTripReason::ToolFailureBudget { .. } => "R-7.5",
+            LoopGuardTripReason::NoMeaningfulProgress { .. } => "R-7.7",
+            LoopGuardTripReason::RotatingPollingPattern { .. } => "R-7.19",
+            LoopGuardTripReason::ChildFailureBudget { .. } => "R-7.20",
+        }
+    }
 }
 
 pub struct LoopGuard {
@@ -992,6 +1010,39 @@ mod tests {
         assert_eq!(
             LoopGuardTripReason::ChildFailureBudget { failures: 3 }.code(),
             "child_failure_budget"
+        );
+    }
+
+    /// Each trip reason must attribute to the constitutional rule whose
+    /// text describes it — these feed `enforced_rules` on the
+    /// `loop_guard.tripped` event. Pinned so a rule renumber or a new
+    /// reason can't silently mislabel the audit trail.
+    #[test]
+    fn trip_reason_rule_ids_are_pinned() {
+        assert_eq!(
+            LoopGuardTripReason::ToolFailureBudget {
+                tool: "x".to_string(),
+                failures: 1,
+            }
+            .rule_id(),
+            "R-7.5"
+        );
+        assert_eq!(
+            LoopGuardTripReason::NoMeaningfulProgress { cycles: 5 }.rule_id(),
+            "R-7.7"
+        );
+        assert_eq!(
+            LoopGuardTripReason::RotatingPollingPattern {
+                window_size: 16,
+                distinct_count: 6,
+                floor: 6,
+            }
+            .rule_id(),
+            "R-7.19"
+        );
+        assert_eq!(
+            LoopGuardTripReason::ChildFailureBudget { failures: 3 }.rule_id(),
+            "R-7.20"
         );
     }
 

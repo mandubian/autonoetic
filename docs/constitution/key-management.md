@@ -42,7 +42,7 @@ This reduces key exposure and makes release signatures reproducible.
 Generate once when intentionally establishing or rotating signer material:
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.05.27 --generate-key
+python3 docs/constitution/recompute_lock.py --version 2026.05.29 --generate-key
 ```
 
 Record outputs immediately:
@@ -82,7 +82,7 @@ export AUTONOETIC_CONSTITUTION_SIGNING_SK_B64="<base64_seed>"
 3. Run:
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.05.27
+python3 docs/constitution/recompute_lock.py --version 2026.05.29
 ```
 
 Do not pass `--generate-key` unless you are rotating.
