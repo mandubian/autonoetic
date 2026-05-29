@@ -6,14 +6,17 @@ Core runtime model:
 
 1. Content storage is the primary way to persist files and data.
 - Use `content_write(name, content)` to save files, scripts, and data to the session.
-- Use `content_read(name_or_handle)` to retrieve content by name or SHA-256 handle.
+- Use `content_read(name_or_handle)` to retrieve content by session content identifier or by scoped artifact file ref `ar.<ref>:<filename>`.
 - Default visibility is `session` — visible to all agents under the same root session.
 - Use `visibility: "private"` for scratchpads, drafts, or intermediate outputs.
 - Content works locally and remotely — agents don't need filesystem access.
 
 2. Artifacts are the mandatory boundary for review/install/execution.
 - Use `artifact_build(inputs, entrypoints?)` to build an immutable artifact bundle.
-- Use `artifact_inspect(artifact_id)` to review an artifact's files and metadata.
+- `artifact_build.inputs` accepts session content identifiers or whole-artifact identifiers (`ar.*`, `art_*`). It does not accept scoped file refs like `ar.<ref>:requirements.txt`.
+- Use `artifact_inspect(artifact_ref)` to review an artifact's files and metadata.
+- Artifact-oriented tools (`artifact_inspect`, `artifact_prepare`, `artifact_exec`, `artifact_build` artifact reuse) take the whole artifact as `ar.*` or `art_*`.
+- File-oriented reads use `content_read` with session content IDs or `ar.<ref>:<filename>`.
 - NO artifact = NO review = NO install = NO execution beyond scratch.
 - Artifacts are the ONLY units that may cross trust boundaries.
 

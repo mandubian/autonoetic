@@ -91,6 +91,30 @@ pub(crate) fn resolve_artifact_ref_or_canonical(
     }
 }
 
+fn normalize_artifact_build_inputs(
+    inputs: &[String],
+    session_id: &str,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    gateway_dir: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let mut normalized = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if input.starts_with("ar.") || input.starts_with(ARTIFACT_ID_PREFIX) {
+            let store = gateway_store.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "artifact_build requires GatewayStore to resolve artifact input '{}'",
+                    input
+                )
+            })?;
+            let resolved = resolve_artifact_ref_or_canonical(input, session_id, store, gateway_dir)?;
+            normalized.push(resolved.artifact_id);
+        } else {
+            normalized.push(input.clone());
+        }
+    }
+    Ok(normalized)
+}
+
 pub struct ArtifactBuildTool;
 
 impl NativeTool for ArtifactBuildTool {
@@ -115,7 +139,7 @@ impl NativeTool for ArtifactBuildTool {
                     "inputs": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of content names or handles to include in the artifact"
+                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. Use `ar.<ref>:<filename>` only with content_read, not here."
                     },
                     "entrypoints": {
                         "type": "array",
@@ -177,6 +201,17 @@ impl NativeTool for ArtifactBuildTool {
 
         let sid = _session_id.unwrap_or(&_manifest.agent.id);
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
+        let normalized_inputs = match normalize_artifact_build_inputs(
+            &args.inputs,
+            sid,
+            gateway_store.as_deref(),
+            gw_dir,
+        ) {
+            Ok(inputs) => inputs,
+            Err(e) => {
+                return Ok(ToolError::resource(e.to_string(), None::<String>).to_error_response());
+            }
+        };
 
         if let Some(ref layers) = args.layers {
             let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
@@ -218,7 +253,7 @@ impl NativeTool for ArtifactBuildTool {
             k
         } else {
             let mut inherited: Option<autonoetic_types::artifact::ArtifactKind> = None;
-            for input in &args.inputs {
+            for input in &normalized_inputs {
                 if input.starts_with("art_") {
                     if let Ok(bundle) = store.inspect(input) {
                         if bundle.kind != autonoetic_types::artifact::ArtifactKind::Binary {
@@ -232,7 +267,7 @@ impl NativeTool for ArtifactBuildTool {
         };
 
         let bundle = store.build_with_kind(
-            &args.inputs,
+            &normalized_inputs,
             args.entrypoints.as_deref(),
             args.layers.as_deref(),
             kind.clone(),
@@ -342,6 +377,66 @@ impl NativeTool for ArtifactBuildTool {
             }
         }
         meta
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact_store::ArtifactStore;
+    use crate::runtime::content_store::ContentStore;
+    use crate::scheduler::gateway_store::GatewayStore;
+    use autonoetic_types::artifact::{ArtifactKind, ArtifactRefRecord, ArtifactRefScopeType};
+    use tempfile::tempdir;
+
+    #[test]
+    fn normalize_artifact_build_inputs_accepts_scoped_artifact_refs() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+        let gateway_store = GatewayStore::open(&gateway_dir).unwrap();
+        let content_store = ContentStore::new(&gateway_dir).unwrap();
+
+        let source_handle = content_store.write(b"print('ok')\n").unwrap();
+        content_store
+            .register_name("session-1/coder.default-test", "main.py", &source_handle)
+            .unwrap();
+
+        let bundle = artifact_store
+            .build_with_kind(
+                &["main.py".to_string()],
+                Some(&["main.py".to_string()]),
+                None,
+                ArtifactKind::AgentBundle,
+                "session-1/coder.default-test",
+            )
+            .unwrap();
+
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: "ar.test12345678".to_string(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: "session-1".to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "coder.default".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let normalized = normalize_artifact_build_inputs(
+            &["ar.test12345678".to_string()],
+            "session-1/packager.default-test",
+            Some(&gateway_store),
+            &gateway_dir,
+        )
+        .unwrap();
+
+        assert_eq!(normalized, vec![bundle.artifact_id]);
     }
 }
 
