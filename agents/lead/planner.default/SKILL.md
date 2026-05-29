@@ -81,6 +81,8 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
   **Before re-running credential onboarding for a service**, call `agent_list` to check whether an agent for that service already exists (e.g., `agent_id` contains the service name). If found, spawn it directly instead of re-fetching, re-normalizing, and re-registering. This applies to **any flow** that produces durable state — check first, compute second.
 
+  **Missing user input is not reusable work.** If the next step depends on operator choices, confirmation, credentials, or other facts you do not yet have, do not fall back to `agent_list`, `agent_discover`, or repeated `workflow_state` reads. Ask the operator with `user_ask` when you need an answer now, or return `clarification_needed` and end the turn. After you have asked, stop until the gateway wakes you with the answer.
+
 5. **Sequential dependencies are sequential.** If B uses A's output, they cannot be parallelized. Agent creation and post-research integration are always sequential chains. Only independent tasks may be parallelized with `async=true` — see **Coordinating With Children** for how to wait (yield for a single/sequential child; one `workflow_wait` join for a parallel fan-out).
 
 6. **Artifact refs come from structured results — use the child's FINAL artifact_ref only.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. When a child agent (e.g. coder) made multiple `artifact_build` calls in its session — for example after correcting an earlier mistake — **only the `artifact_ref` in the child's final JSON reply is canonical**. Ignore every other `artifact_ref` that appeared in intermediate tool results: those are stale and may have the wrong `kind`, wrong digest, or both. Re-reading the child's last `result_summary` is the safest source. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child — if `kind` is not `agent_bundle` (or `binary` for compiled agents), you have the wrong ref. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles. **Note:** Tools accept both short refs (`ar.*`) and canonical IDs (`art_*`) directly. When passing refs to child agents via `agent.spawn`, prefer the short `ar.*` form — it is scoped to the session and works across child sessions.
@@ -169,6 +171,8 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 2. Check session-visible knowledge for an existing record keyed by the same source, goal, or intent.
 3. If reusable content already exists, read the existing handle and continue locally.
 4. If matching work is still running, do not spawn a second child — end your turn and the gateway wakes you when it transitions (Ri-0.14).
+
+**If progress depends on user input instead of missing child work:** do not probe workflow or agent directories. Emit the needed `user_ask` or `clarification_needed` response once, then stop until a new user reply arrives.
 
 ---
 
@@ -494,7 +498,7 @@ Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in m
 
 ## Delegating to Agents With Declared Input Schemas
 
-Before you call `agent_spawn`, look the target up via `agent_list`. Each entry includes `io_accepts` (a JSON Schema describing the input the target expects) and `io_returns`. This applies to both reasoning and script agents — the mechanism is the same.
+Only call `agent_list` before `agent_spawn` when the target agent is genuinely unknown, dynamic, or chosen by capability search. If the workflow step, prompt, prior child result, or foundational role already gives you the exact `agent_id`, spawn that target directly. Use `agent_list` to inspect `io_accepts` / `io_returns` only when you still need to choose among candidates or when the exact target is not already known.
 
 **If `io_accepts` is `null`** — pass the raw task as `message`, same as you've always done.
 
@@ -504,6 +508,6 @@ Before you call `agent_spawn`, look the target up via `agent_list`. Each entry i
 - Target `io_accepts`: `{ "type": "object", "required": ["location", "date"], "properties": { "location": {"type": "string"}, "date": {"type": "string", "format": "date"} } }`
 - You spawn with: `message = "{\"location\": \"paris\", \"date\": \"<tomorrow-as-ISO>\"}"`
 
-**On rejection** — when you get an input wrong, `agent_spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }`. Read `expected_schema`, fix your payload, retry. Do not give up after one mismatch — the gateway is telling you exactly what it needs.
+**On rejection** — when you get an input wrong, `agent_spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }`. Read `expected_schema`, fix your payload, retry the same target. Do not rediscover with `agent_list` unless the target identity itself is still unknown — the gateway is telling you exactly what this target needs.
 
 **Script-mode specifics** — script agents receive the normalized task payload via `AUTONOETIC_INPUT_PATH` / `AUTONOETIC_INPUT` and, when metadata exists, delegation metadata via `AUTONOETIC_META_PATH` / `AUTONOETIC_META`. The injected SDK exposes `load_invocation()` / `load_input()` so the script does not need to parse env vars manually. When `script_input_mode: stdin`, the normalized payload is also written to stdin; when `args`, the same normalized payload is passed as `$1`. If the target declares `io_accepts`, the same JSON-shape rule above applies.

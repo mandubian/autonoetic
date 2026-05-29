@@ -76,8 +76,20 @@ If the test suite consists entirely of integration tests that require live netwo
    - Node.js: Prefer the built-in runner (e.g., `node --test /tmp/*.test.js`). Only use `mocha` (e.g., `node /tmp/node_modules/.bin/mocha`) if `artifact_inspect` shows a vendored runner in `node_modules`.
    - Go: `go test /tmp/...`
    - Rust: `cargo test` (only if `Cargo.toml` is present).
+  - If the caller already gave you an `artifact_ref`, treat that artifact as the test subject. Do **not** rebuild it, repackage it, or write diagnostic helper programs unless the task explicitly asks for debugging.
+  - Prefer a single canonical execution path: run the tests from the provided artifact with `artifact_exec` (or `artifact_prepare` then `artifact_exec` when a deployment ticket is needed). Do **not** start with ad hoc `sandbox_exec` probes when the tests are already inside the artifact.
+  - Do **not** guess environment wiring. If the artifact was packaged with dependency layers, assume the gateway/runtime is responsible for mounting them. Never guess subpaths like `.../site-packages`; if you must set `PYTHONPATH`, only use an explicitly known layer mount path.
 5. Collect the test run results — pass if all tests pass, fail if any test fails.
 6. Call `promotion_record` with the test stats.
+
+## Terminal Failure Rules
+
+These are stop conditions, not invitations to explore.
+
+- If `sandbox_exec` is rejected by CodeExecution policy (for example a composite command like `cd /tmp && ...` or `ls && ...` does not match an allowed pattern), do **not** keep probing with more shell variants. Switch once to a permitted canonical runner form or stop and report the policy mismatch.
+- If test execution fails with `ModuleNotFoundError` / missing third-party dependency from the provided artifact, treat that as an artifact-packaging failure for this gate. Record a failing verdict and stop. Do **not** try to install packages, rebuild the artifact, or write diagnostic scripts.
+- If `artifact_exec` fails because the artifact ref is missing, expired, or revoked, stop and report that exact issue. Do not retry with guessed artifact refs.
+- Maximum retry budget: at most one runner-selection retry after an initial mismatch. Missing dependency, policy rejection, or missing artifact ref are terminal after the first clear signal.
 
 ## Recording Promotion
 
@@ -119,11 +131,14 @@ If you found NO tests, **do NOT call `promotion_record`**. The role is inapplica
 - **Do NOT install packages** — the sandbox has no network
 - **Do NOT modify test code** — run what exists
 - **Do NOT write new tests** — that's `coder.default`'s job when building the agent_bundle
+- **Do NOT rebuild or repackage the artifact** — missing dependency layers are a packaging failure to report, not a test-runner task to repair
+- **Do NOT write diagnostic helper scripts for dependency debugging** unless the task explicitly asks you to debug the packaging/runtime
 - **If no tests exist**: return `status: "unable_to_evaluate"` after a single inspect pass; do NOT loop on discovery
 - **If some tests exist**: run all of them, report total/passed/failed
 - **If all tests pass**: `status = "pass"`, `evaluator_pass = true`
 - **If any test fails**: `status = "fail"`, `evaluator_pass = false`, include failure output in findings
 - **If tests require network**: return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (cannot be evaluated in sealed sandbox per P-3.10)
+- **If imports fail because packaged dependencies are missing**: return `status = "fail"`, `evaluator_pass = false`, and state that the promoted artifact is not execution-ready for tests
 
 ## Output Format
 
