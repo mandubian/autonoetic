@@ -65,7 +65,7 @@ Tools are classified into three tiers for progressive disclosure and budget enfo
 | Tier | Tools | When included |
 |------|-------|---------------|
 | **Core** | `content.*`, `knowledge.*`, `artifact.*`, `sandbox_exec` | Always (unless explicitly filtered) |
-| **Workflow** | `agent_spawn`, `agent_exists`, `agent_discover`, `approval.*`, `workflow.*`, `eval.*`, `user.*`, `digest.*` | Default; excluded by `core_only` filtering |
+| **Workflow** | `agent_spawn`, `agent_discover`, `approval.*`, `workflow.*`, `eval.*`, `user.*`, `digest.*` | Default; excluded by `core_only` filtering |
 | **Specialized** | `web.*`, `execution.*`, `promotion.*`, `agent.revision.*`, and uncategorized tools | Excluded by `demote_tools` and `core_and_workflow` filtering |
 
 ### Manifest-Level Tier Filtering

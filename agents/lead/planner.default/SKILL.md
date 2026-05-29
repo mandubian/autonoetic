@@ -212,7 +212,7 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
    → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
    → If a proven artifact already exists, also give it: artifact_ref, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
    → When agent-factory completes, the agent is installed and ready. Do NOT spawn additional specialized_builder, coder, or promotion tasks. The agent-factory handles the full pipeline internally.
-   → **CRITICAL: Never spawn specialized_builder.default yourself.** The gateway rejects duplicate installs for the same agent_id. If agent-factory failed, check agent_exists before retrying — a revision may already exist. Do NOT start a parallel builder while agent-factory is still running.
+   → **CRITICAL: Never spawn specialized_builder.default yourself.** The gateway rejects duplicate installs for the same agent_id. If agent-factory failed, check agent_inspect before retrying — a revision may already exist. Do NOT start a parallel builder while agent-factory is still running.
 
 3. Research / evidence / URL fetch
    → researcher.default
@@ -437,7 +437,7 @@ When a child task fails (the wake-up notification reports a failed child, or `wo
 
 - **Output schema error** (`"reply is not valid JSON"` or `"[output_schema]"`): If `promotion_record` was called, the work completed — proceed to the next stage. Do NOT re-spawn.
 - **Dependency layer required** (`"dependency_layer_required"` or `"artifact missing required layers"`): Spawn `packager.default`, wait, then retry with the layered artifact_ref.
-- **Install-state conflict** (`"already has active revision"`, `"Archived"`, `"rollback lineage mismatch"`, `"content-addressed dedup"`, `"no alias found"`): This is not a coder bug. Do NOT spawn `coder.default` or `specialized_builder.default` again. Inspect installed state first (`agent_exists`, `agent_revision_list`, `agent_revision_inspect`), then report or escalate for operator intervention.
+- **Install-state conflict** (`"already has active revision"`, `"Archived"`, `"rollback lineage mismatch"`, `"content-addressed dedup"`, `"no alias found"`): This is not a coder bug. Do NOT spawn `coder.default` or `specialized_builder.default` again. Inspect installed state first (`agent_inspect`, `agent_revision_list`, `agent_revision_inspect`), then report or escalate for operator intervention.
 - **Transient infrastructure failure** (connection errors, HTTP 5xx from model endpoint): Treat as an environment failure, not an artifact failure. Do NOT restart onboarding or re-spawn coder. Escalate to human if the failure persists.
 - **Static evaluator fails**: Route findings to `coder.default` for code fixes, then re-run the full federation. Do NOT proceed to operator review until static findings are resolved.
 - **Unit test runner fails**: Route test output to `coder.default` for test fixes, then re-run unit tests. If unit tests are absent (no verdict recorded), proceed without them.

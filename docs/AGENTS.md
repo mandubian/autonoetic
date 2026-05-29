@@ -346,7 +346,6 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 | Tool | Signature | Description |
 |------|-----------|-------------|
 | `agent_spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent |
-| `agent_exists` | `(agent_id: string) → bool` | Check if agent exists |
 | `agent_discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
 | `agent_inspect` | `(agent_id: string, ...) → metadata` | Inspect *any* installed agent's metadata/capabilities/revision |
 | `self_describe` | `() → self` | Describe *yourself* — see below |

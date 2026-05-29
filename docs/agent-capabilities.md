@@ -37,8 +37,8 @@ This document describes the capability system used by Autonoetic agents. Capabil
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
 | `agent_spawn` | `AgentSpawn` | Spawn child agent sessions |
-| `agent_exists` | `SandboxFunctions: ["agent."]` | Check if agent exists |
 | `agent_discover` | `SandboxFunctions: ["agent."]` | Discover available agents |
+| `agent_inspect` | `ReadAccess` | Inspect any agent's metadata/capabilities/revision (existence check = it resolves) |
 
 ### Revision & Activation Tools
 | Tool | Requires Capability | Notes |
