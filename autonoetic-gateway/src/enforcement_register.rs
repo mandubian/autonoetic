@@ -241,18 +241,27 @@ pub struct ContractHealth {
 }
 
 /// Tally enforcement occurrences (each identified by its legacy rule/right
-/// ID) into a [`ContractHealth`], attributing each to its clause via
-/// [`clause_of_legacy`].
+/// ID) into a [`ContractHealth`], attributing each to its clause.
+///
+/// Builds the legacy-ID → clause map once up front (rather than rescanning
+/// the register per occurrence via [`clause_of_legacy`]), keeping the tally
+/// `O(register_entries + occurrences)` even as the register grows during
+/// migration (#303).
 pub fn contract_health<I, S>(legacy_ids: I) -> ContractHealth
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     use std::collections::BTreeMap;
+    let legacy_to_clause: std::collections::HashMap<&'static str, &'static str> =
+        enforcement_register()
+            .iter()
+            .map(|e| (e.legacy_id, e.clause_id))
+            .collect();
     let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
     let mut unattributed = 0u64;
     for id in legacy_ids {
-        match clause_of_legacy(id.as_ref()) {
+        match legacy_to_clause.get(id.as_ref()) {
             Some(clause) => *counts.entry(clause).or_insert(0) += 1,
             None => unattributed += 1,
         }

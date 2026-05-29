@@ -1201,15 +1201,16 @@ impl AgentExecutor {
                 if let (Some(reason), Some(store)) =
                     (self.guard.last_trip_reason(), self.gateway_store.as_ref())
                 {
-                    // Attribute the trip to its constitutional principle/right
-                    // (via the enforcement register) in addition to the legacy
-                    // rule ID, so the detection loop can correlate breaches by
-                    // principle, not just by rule string (#302).
+                    // Attribute the trip to its constitutional clause (a
+                    // principle *or* a right, via the enforcement register) in
+                    // addition to the legacy rule ID, so the detection loop can
+                    // correlate breaches by clause, not just by rule string
+                    // (#302).
                     let payload = serde_json::json!({
                         "reason": reason.code(),
                         "detail": format!("{:?}", reason),
                         "rule_id": reason.rule_id(),
-                        "principle": crate::enforcement_register::clause_of_legacy(reason.rule_id()),
+                        "clause": crate::enforcement_register::clause_of_legacy(reason.rule_id()),
                     });
                     let session_id_for_event =
                         self.session_id.clone().unwrap_or_default();
