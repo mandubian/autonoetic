@@ -25,8 +25,8 @@ Fields marked **required** must be present or the gateway will fail to start.
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
 | `node_id` | string | `"gateway"` | Node identity for OFP federation and causal chain authorship. Overridable by `AUTONOETIC_NODE_ID` env var. |
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.27/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.27/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.29/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | Require a valid constitution lock signature at startup (`fail-shut` on missing/invalid signature). |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trusted signer registry (`signer_id` -> base64 Ed25519 public key, 32 bytes). Used for non-`gateway:*` signer IDs. |
 | `max_concurrent_spawns` | usize | `8` | Maximum agent runtime executions allowed concurrently across all sessions. |
@@ -59,8 +59,8 @@ Controls which constitutional release the gateway enforces.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.27/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.27/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.05.29/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | If `true`, unsigned locks are rejected and signed locks must verify. |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trust store for constitution lock signatures. Keys are signer IDs, values are base64 Ed25519 public keys (32 bytes). |
 
@@ -99,8 +99,8 @@ Example:
 
 ```yaml
 constitution:
-  source_path: "docs/constitution/versions/2026.05.27/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.27/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.05.29/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -110,8 +110,8 @@ To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
 
 ```yaml
 constitution:
-  source_path: ".gateway/constitution/versions/2026.05.27/constitution.md"
-  lock_path: ".gateway/constitution/versions/2026.05.27/gateway-constitution.lock.json"
+  source_path: ".gateway/constitution/versions/2026.05.29/constitution.md"
+  lock_path: ".gateway/constitution/versions/2026.05.29/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -1029,8 +1029,8 @@ tls: false
 node_id: "gateway"
 node_name: "gateway"
 constitution:
-  source_path: "docs/constitution/versions/2026.05.27/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.27/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.05.29/constitution.md"
+  lock_path: "docs/constitution/versions/2026.05.29/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="

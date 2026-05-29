@@ -1217,7 +1217,11 @@ impl AgentExecutor {
                         category: "loop_guard".to_string(),
                         action: "tripped".to_string(),
                         status: "active".to_string(),
-                        enforced_rules: vec!["R-7.7".to_string()],
+                        // Attribute the trip to the rule whose text actually
+                        // describes it (R-7.5 failure budget / R-7.7 no
+                        // successful result / R-7.19 no semantic progress /
+                        // R-7.20 child-failure budget), not a blanket R-7.7.
+                        enforced_rules: vec![reason.rule_id().to_string()],
                         target: None,
                         payload: Some(payload.to_string()),
                         payload_ref: None,
