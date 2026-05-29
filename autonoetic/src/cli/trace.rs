@@ -484,6 +484,99 @@ pub fn handle_trace_digest(
     Ok(())
 }
 
+/// `autonoetic trace contract-health` — the standing contract-health view
+/// (#302). Tallies how often each constitutional clause (principle/right) has
+/// been enforced, sourced from the `enforced_rules` carried on causal events
+/// and attributed to clauses via the enforcement register.
+pub fn handle_trace_contract_health(
+    config_path: &Path,
+    since: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
+    let health = store.contract_health(since)?;
+
+    if json_output {
+        let body = serde_json::json!({
+            "since": since,
+            "by_clause": health.by_clause.iter().map(|(clause, count)| {
+                serde_json::json!({
+                    "clause": clause,
+                    "count": count,
+                    "title": autonoetic_gateway::enforcement_register::clause_title(clause),
+                    "binds": autonoetic_gateway::enforcement_register::binds(clause)
+                        .map(|b| b.label()),
+                })
+            }).collect::<Vec<_>>(),
+            "unattributed": health.unattributed,
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    println!(
+        "{}Contract health{} {}",
+        color::BOLD,
+        color::RESET,
+        match since {
+            Some(ts) => color::dim(&format!("(since {ts})")),
+            None => color::dim("(all retained events)"),
+        }
+    );
+    println!();
+
+    if health.by_clause.is_empty() {
+        println!(
+            "{}No clause enforcements recorded.{}",
+            color::DIM,
+            color::RESET
+        );
+    } else {
+        println!(
+            "{}{}{:<10} {:<8} {:<8} {}{}",
+            color::DIM,
+            color::BOLD,
+            "CLAUSE",
+            "COUNT",
+            "BINDS",
+            "TITLE",
+            color::RESET
+        );
+        println!("{}", color::separator(72));
+        for (clause, count) in &health.by_clause {
+            let title = autonoetic_gateway::enforcement_register::clause_title(clause)
+                .unwrap_or("<unknown>");
+            let binds = autonoetic_gateway::enforcement_register::binds(clause)
+                .map(|b| b.label())
+                .unwrap_or("-");
+            println!(
+                "{}{:<10}{} {}{:<8}{} {:<8} {}",
+                color::BRIGHT_CYAN,
+                clause,
+                color::RESET,
+                color::BRIGHT_YELLOW,
+                count,
+                color::RESET,
+                binds,
+                title,
+            );
+        }
+    }
+
+    if health.unattributed > 0 {
+        println!();
+        println!(
+            "{}{} unattributed enforcement(s){} — legacy rule/right IDs not yet in the register (migration gap).",
+            color::YELLOW,
+            health.unattributed,
+            color::RESET
+        );
+    }
+    Ok(())
+}
+
 pub fn load_agent_traces(
     config_path: &Path,
     requested_agent: Option<&str>,

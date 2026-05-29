@@ -194,6 +194,14 @@ pub fn clause_exists(clause_id: &str) -> bool {
     principle(clause_id).is_some() || right(clause_id).is_some()
 }
 
+/// Human-readable title for a clause (principle *or* right). `None` if the
+/// clause is unknown.
+pub fn clause_title(clause_id: &str) -> Option<&'static str> {
+    principle(clause_id)
+        .map(|p| p.title)
+        .or_else(|| right(clause_id).map(|r| r.title))
+}
+
 /// Bind direction for a clause: principles bind the agent, rights bind the
 /// gateway. `None` if the clause is unknown.
 pub fn binds(clause_id: &str) -> Option<Binds> {

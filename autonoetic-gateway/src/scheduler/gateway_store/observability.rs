@@ -356,6 +356,52 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// Standing **contract-health** view (#302): tally how often each
+    /// constitutional clause (principle/right) has been enforced, by reading
+    /// the `enforced_rules` carried on causal events and attributing each
+    /// legacy rule/right ID to its owning clause via the enforcement register.
+    ///
+    /// The `R+++3` event-attribution placeholder (every event carries it by
+    /// default) is skipped — only events that named a concrete rule/right
+    /// contribute. Real rule IDs not yet in the register surface in
+    /// `ContractHealth::unattributed`, keeping migration gaps visible rather
+    /// than silently dropped.
+    ///
+    /// `since` is an optional RFC3339 lower bound on `timestamp`; `None` scans
+    /// all retained events.
+    pub fn contract_health(
+        &self,
+        since: Option<&str>,
+    ) -> Result<crate::enforcement_register::ContractHealth> {
+        let conn = self.conn.lock().unwrap();
+        let placeholder = autonoetic_types::causal_chain::RULE_ID_EVENT_ATTRIBUTION;
+
+        let (query, params): (&str, Vec<rusqlite::types::Value>) = match since {
+            Some(ts) => (
+                "SELECT enforced_rules FROM causal_events WHERE timestamp >= ?1",
+                vec![rusqlite::types::Value::Text(ts.to_string())],
+            ),
+            None => ("SELECT enforced_rules FROM causal_events", Vec::new()),
+        };
+
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
+
+        let mut legacy_ids: Vec<String> = Vec::new();
+        for raw in rows {
+            let raw = raw?;
+            // Each cell is a JSON array of rule/right IDs; tolerate malformed
+            // rows by skipping rather than failing the whole tally.
+            if let Ok(ids) = serde_json::from_str::<Vec<String>>(&raw) {
+                legacy_ids.extend(ids.into_iter().filter(|id| id != placeholder));
+            }
+        }
+
+        Ok(crate::enforcement_register::contract_health(legacy_ids))
+    }
+
     /// List curator decision events (`category = 'curator'`, `action = 'decision'`)
     /// for a specific target URI/id. Used by operator workflows asking
     /// "why was memory X dropped" (issue #30). The underlying `idx_causal_target`
