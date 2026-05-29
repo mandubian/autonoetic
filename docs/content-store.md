@@ -175,8 +175,8 @@ Homogeneity rule:
   "artifact_canonical_digest": "sha256:...",
   "artifact_manifest_digest": "sha256:...",
   "files": [
-    {"name": "src/main.py", "handle": "sha256:...", "alias": "a1b2c3d4"},
-    {"name": "src/utils.py", "handle": "sha256:...", "alias": "u5e6f7g8"}
+    {"name": "src/main.py", "alias": "a1b2c3d4", "content_read_ref": "ar.a1b2c3d4ab12:src/main.py"},
+    {"name": "src/utils.py", "alias": "u5e6f7g8", "content_read_ref": "ar.a1b2c3d4ab12:src/utils.py"}
   ],
   "entrypoints": ["src/main.py"],
   "created_at": "2026-03-19T..."

@@ -344,10 +344,13 @@ impl NativeTool for ArtifactBuildTool {
             "artifact_manifest_digest": bundle.artifact_manifest_digest,
             "kind": serde_json::to_value(&bundle.kind)
                 .unwrap_or(serde_json::Value::String("binary".to_string())),
+            // Emit the agent-usable read handle, not the full sha256 `handle`
+            // (matches artifact_inspect; avoids models mistaking the digest for
+            // a path). #312 output minimization.
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
-                "handle": f.handle,
                 "alias": f.alias,
+                "content_read_ref": artifact_ref.as_ref().map(|r| format!("{}:{}", r, f.name)),
             })).collect::<Vec<_>>(),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
