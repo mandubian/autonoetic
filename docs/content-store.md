@@ -115,7 +115,7 @@ Read by name, handle, or alias with root-based resolution.
 ```
 
 Resolution order:
-1. If `art_<id>:<filename>` or `art_<id>/<filename>` → read that file directly from the artifact bundle
+1. If `ar.<ref>:<filename>` → read that file directly from the artifact bundle after scope resolution
 2. If `cnt_<8 hex>` (or `cnt:<8 hex>`) → alias lookup (session, then root, then global)
 3. If `sha256:...` → direct content lookup (with `sha256:<8 hex>` treated as alias fallback)
 4. If bare 8 hex chars → alias lookup (session, then root, then global)

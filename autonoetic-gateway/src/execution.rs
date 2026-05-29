@@ -1821,6 +1821,8 @@ impl GatewayExecutionService {
                     &loaded.manifest.capabilities,
                     loaded.manifest.script_input_mode,
                     credential_env,
+                    &loaded.manifest.runtime.runtime_lock,
+                    Some(&gateway_dir),
                 )
                 .await;
 
