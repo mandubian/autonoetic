@@ -149,7 +149,25 @@ Build an immutable artifact bundle from session content.
   "inputs": ["src/main.py", "src/utils.py"],
   "entrypoints": ["src/main.py"]
 }
+```
 
+Accepted `inputs` forms:
+
+| Tool field | Accepts | Does not accept |
+|---|---|---|
+| `artifact_build.inputs[]` | session content names, `cnt_...`, `sha256:...`, bare alias, existing artifact refs `ar.*`, canonical artifact IDs `art_*` | scoped artifact file refs like `ar.<ref>:requirements.txt` |
+| `content_read.name_or_handle` | session content names, `cnt_...`, `sha256:...`, bare alias, scoped artifact file refs `ar.<ref>:<filename>` | bare artifact refs when you want structure/review metadata |
+| `artifact_inspect.artifact_ref` | `ar.*`, `art_*` | `ar.<ref>:<filename>`, content handles |
+| `artifact_prepare.artifact_ref` / `artifact_exec.artifact_ref` | `ar.*`, `art_*` | content handles, scoped artifact file refs |
+| `artifact_resolve_ref.ref_id` | short scoped ref `ar.*` together with explicit `scope_type` and `scope_id` | `art_*`, `ar.<ref>:<filename>` |
+
+Homogeneity rule:
+
+- When a tool is artifact-oriented (`artifact_inspect`, `artifact_prepare`, `artifact_exec`, `artifact_build` artifact reuse), pass the artifact itself as `ar.*` or `art_*`.
+- When a tool is file-oriented (`content_read`), pass a session content identifier or a scoped artifact file ref `ar.<ref>:<filename>`.
+- Do not switch namespaces mid-flow: `ar.<ref>:<filename>` is for reading one file out of an artifact, while bare `ar.*` / `art_*` means the whole artifact.
+
+```json
 // Response
 {
   "ok": true,

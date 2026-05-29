@@ -184,7 +184,7 @@ The gateway:
 
 ### 2.6 `sandbox_exec` with Layer-Aware Artifacts
 
-When `sandbox_exec` runs with an `artifact_id` that has layers:
+When `sandbox_exec` runs with an `artifact_ref`/artifact that has layers:
 
 1. Mount flat files as today (read-only bind from content store)
 2. For each layer, extract `contents.tar.zst` into a temp dir and bind-mount at `mount_path`
@@ -193,7 +193,7 @@ When `sandbox_exec` runs with an `artifact_id` that has layers:
 The evaluator just runs:
 ```jsonc
 sandbox_exec({
-  "artifact_id": "art_1756ca5a",
+  "artifact_ref": "ar.example123456",
   "command": "PYTHONPATH=/tmp/deps python3 weather_fetcher.py Paris"
 })
 ```
@@ -262,14 +262,14 @@ Complete flow for the weather demo:
           "layers": [{"layer_id": "layer_abc123", "name": "python-deps", "mount_path": "/tmp/deps"}],
           "entrypoints": ["weather_fetcher.py"]
         })
-        → artifact art_with_deps
+       → artifact ref ar.example123456
 
 5. planner delegates to evaluator:
-     "Validate artifact art_with_deps, run weather_fetcher.py Paris"
+    "Validate artifact ar.example123456, run weather_fetcher.py Paris"
 
    evaluator:
      a. sandbox_exec({
-          "artifact_id": "art_with_deps",
+      "artifact_ref": "ar.example123456",
           "command": "PYTHONPATH=/tmp/deps python3 weather_fetcher.py Paris"
         })
         → runs successfully, returns weather data
@@ -331,7 +331,7 @@ Same source files + different dependency versions → different artifact ID. Cor
 
 ### 3.4 Sandbox Mount Changes
 
-`sandbox_exec` with `artifact_id` currently:
+`sandbox_exec` resolves an external `artifact_ref` to an internal `artifact_id`, then currently:
 ```rust
 fn resolve_files(artifact_id) → Vec<(name, content_bytes)>
 // Write each to temp, bind-mount at /tmp/<name>
