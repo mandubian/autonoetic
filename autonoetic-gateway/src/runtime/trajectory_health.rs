@@ -517,15 +517,15 @@ mod tests {
 
     #[test]
     fn loop_guard_picks_worst_failing_tool_for_evidence() {
-        let mut state = state_with(0, 5, 0, 3);
-        state.tool_failure_counts.insert("web.search".into(), 2);
-        state.tool_failure_counts.insert("sandbox.exec".into(), 4); // 4/5 = 0.80 → warn
+        let mut state = state_with(0, 10, 0, 5);
+        state.tool_failure_counts.insert("web.search".into(), 3);
+        state.tool_failure_counts.insert("sandbox.exec".into(), 7); // 7/8 = 0.875 → warn
         let signals = signals_from_loop_guard(&state);
         assert_eq!(signals.len(), 1);
         let s = &signals[0];
         assert_eq!(s.kind, DivergenceSignalKind::FailurePressure);
         assert!(s.evidence.as_deref().unwrap().contains("sandbox.exec"));
-        assert!(s.evidence.as_deref().unwrap().contains("4 times"));
+        assert!(s.evidence.as_deref().unwrap().contains("7 times"));
     }
 
     #[test]
@@ -578,8 +578,8 @@ mod tests {
 
     #[test]
     fn loop_guard_multiple_pressures_aggregate_to_diverging() {
-        let mut state = state_with(4, 5, 0, 3); // loop pressure: warn
-        state.tool_failure_counts.insert("sandbox.exec".into(), 4); // failure pressure: warn
+        let mut state = state_with(8, 10, 0, 5); // loop pressure: 8/10 = 0.80 → warn
+        state.tool_failure_counts.insert("sandbox.exec".into(), 7); // failure pressure: 7/8 = 0.875 → warn
         let health = aggregate(signals_from_loop_guard(&state));
         assert!(matches!(health, TrajectoryHealth::Diverging { signals } if signals.len() == 2));
     }

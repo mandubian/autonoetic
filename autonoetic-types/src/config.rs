@@ -1840,11 +1840,11 @@ impl Default for LoopGuardConfig {
 }
 
 fn default_max_loops_without_progress() -> u32 {
-    5
+    10
 }
 
 fn default_max_tool_failures() -> u32 {
-    5
+    8
 }
 
 fn default_max_consecutive_same_progress() -> u32 {
@@ -1852,7 +1852,7 @@ fn default_max_consecutive_same_progress() -> u32 {
 }
 
 fn default_max_child_failures() -> u32 {
-    3
+    5
 }
 
 fn default_rotation_window_size() -> usize {
@@ -2043,7 +2043,7 @@ fn default_stuck_task_timeout_secs_val() -> Option<u64> {
 }
 
 fn default_max_session_turns() -> u32 {
-    12
+    25
 }
 
 fn default_signal_delivery_timeout_secs() -> u64 {
@@ -2250,10 +2250,10 @@ pub struct TrajectoryDigestStallConfig {
 }
 
 fn default_digest_stall_warn_turns() -> u32 {
-    5
+    8
 }
 fn default_digest_stall_critical_turns() -> u32 {
-    8
+    12
 }
 
 impl Default for TrajectoryDigestStallConfig {
@@ -2312,10 +2312,10 @@ pub struct TrajectoryErrorBurstConfig {
 }
 
 fn default_error_burst_warn_count() -> u32 {
-    5
+    8
 }
 fn default_error_burst_critical_count() -> u32 {
-    8
+    12
 }
 
 impl Default for TrajectoryErrorBurstConfig {

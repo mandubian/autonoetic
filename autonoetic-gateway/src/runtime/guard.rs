@@ -68,10 +68,10 @@ impl LoopGuardTripReason {
     /// audit chain attributes each trip to the rule whose text actually
     /// describes it (rather than blanket-labelling every trip R-7.7).
     ///
-    /// - `ToolFailureBudget`     → R-7.5 (per-tool failure budget)
-    /// - `NoMeaningfulProgress`  → R-7.7 (consecutive steps w/o successful result)
-    /// - `RotatingPollingPattern`→ R-7.19 (no semantic progress across successes)
-    /// - `ChildFailureBudget`    → R-7.20 (child-failure delegation-loop budget)
+    /// - `ToolFailureBudget`       → R-7.5 (per-tool failure budget)
+    /// - `NoMeaningfulProgress`    → R-7.7 (consecutive steps w/o successful result)
+    /// - `RotatingPollingPattern`  → R-7.19 (no semantic progress across successes)
+    /// - `ChildFailureBudget`      → R-7.20 (child-failure delegation-loop budget)
     pub fn rule_id(&self) -> &'static str {
         match self {
             LoopGuardTripReason::ToolFailureBudget { .. } => "R-7.5",
@@ -114,9 +114,9 @@ impl LoopGuard {
     pub fn new(max_loops_without_progress: u32) -> Self {
         Self {
             max_loops_without_progress,
-            max_tool_failures: 5,
+            max_tool_failures: 8,
             max_consecutive_same_progress: 1,
-            max_child_failures: 3,
+            max_child_failures: 5,
             max_window_size: default_rotation_window_size(),
             max_distinct_floor: default_rotation_distinct_floor(),
             progress_budget_tools: HashMap::new(),
@@ -221,16 +221,15 @@ impl LoopGuard {
 
     /// Track a tool failure — failures accumulate per tool name regardless of arguments.
     ///
-    /// Permission errors are excluded from the budget: the agent cannot fix
-    /// them by retrying with different arguments, so counting them would
-    /// unfairly exhaust the budget and abort the session prematurely.
+    /// Permission errors are excluded entirely: the agent cannot fix by
+    /// retrying — it needs authorization.
     pub fn register_failure(
         &mut self,
         tool_name: &str,
         _arguments: &str,
         error_type: Option<&ToolErrorType>,
     ) {
-        if let Some(ToolErrorType::Permission) = error_type {
+        if matches!(error_type, Some(ToolErrorType::Permission)) {
             return;
         }
         *self
@@ -479,10 +478,10 @@ pub struct LoopGuardState {
 impl Default for LoopGuardState {
     fn default() -> Self {
         Self {
-            max_loops_without_progress: 5,
-            max_tool_failures: 5,
+            max_loops_without_progress: 10,
+            max_tool_failures: 8,
             max_consecutive_same_progress: 1,
-            max_child_failures: 3,
+            max_child_failures: 5,
             max_window_size: default_rotation_window_size(),
             max_distinct_floor: default_rotation_distinct_floor(),
             progress_budget_tools: HashMap::new(),
@@ -553,7 +552,7 @@ mod tests {
         let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
-        for _ in 0..4 {
+        for _ in 0..7 {
             guard.register_failure("web_fetch", r#"{"url":"https://example.com/a"}"#, None);
             guard.register_progress("web_fetch", r#"{"url":"https://example.com/a"}"#);
             assert!(guard.check_loop().is_ok());
@@ -567,7 +566,7 @@ mod tests {
         let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
-        for i in 0..4 {
+        for i in 0..7 {
             let url = if i % 2 == 0 {
                 "https://accuweather.com/a"
             } else {
@@ -587,7 +586,7 @@ mod tests {
         let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
-        for _ in 0..4 {
+        for _ in 0..7 {
             guard.register_failure("web_fetch", r#"{"url":"https://example.com"}"#, None);
             guard.register_failure("sandbox_exec", r#"{"command":"python3 test.py"}"#, None);
             guard.register_progress("sandbox_exec", r#"{"command":"python3 test.py"}"#);
@@ -603,7 +602,7 @@ mod tests {
         let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
-        for _ in 0..4 {
+        for _ in 0..7 {
             guard.register_failure("sandbox_exec", r#"{"command":"python3 test.py"}"#, None);
             guard.register_progress("sandbox_exec", r#"{"command":"python3 test.py"}"#);
             assert!(guard.check_loop().is_ok());
@@ -669,11 +668,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_errors_do_count_against_budget() {
+    fn test_validation_errors_count_against_tool_budget() {
         let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
-        for _ in 0..4 {
+        for _ in 0..7 {
             guard.register_failure(
                 "web_fetch",
                 r#"{"url":"https://bad.com"}"#,
