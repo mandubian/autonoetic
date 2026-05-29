@@ -81,7 +81,14 @@ pub fn read_cache_policy(tool_name: &str) -> Option<ReadCachePolicy> {
 /// not affect any cached read class.
 pub fn invalidation_tag_for(tool_name: &str) -> Option<CacheTag> {
     match tool_name {
-        "agent_install"
+        // Tools that change what `agent_exists` would return. `agent_exists`
+        // reports `unpromoted` as soon as a revision exists (see
+        // `AgentExistsTool::execute`), so revision *creation* — not just
+        // promotion — must invalidate. `skill_install` installs a SKILL.md
+        // as a brand-new agent. (There is no `agent_install` tool; that
+        // string is only an approval-action kind.)
+        "skill_install"
+        | "agent_revision_create"
         | "agent_revision_create_from_intent"
         | "agent_revision_promote"
         | "agent_revision_rollback" => Some(CacheTag::AgentExistence),
@@ -294,7 +301,8 @@ mod tests {
     #[test]
     fn invalidation_tag_table() {
         for t in [
-            "agent_install",
+            "skill_install",
+            "agent_revision_create",
             "agent_revision_create_from_intent",
             "agent_revision_promote",
             "agent_revision_rollback",
@@ -306,6 +314,11 @@ mod tests {
             Some(CacheTag::ArtifactMetadata)
         );
         assert_eq!(invalidation_tag_for("content_read"), None);
+        // `agent_install` is NOT a real tool (only an approval-action kind),
+        // so it must not be in the invalidation set.
+        assert_eq!(invalidation_tag_for("agent_install"), None);
+        // Read-only revision tools must not invalidate.
+        assert_eq!(invalidation_tag_for("agent_revision_list"), None);
     }
 
     #[test]

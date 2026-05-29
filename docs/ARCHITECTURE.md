@@ -848,7 +848,7 @@ A per-session, in-memory result cache for **pure read tools** memoizes determini
 | Tool | Policy | Invalidated by |
 |---|---|---|
 | `content_read` | Cache forever in-session (content-addressed) | never |
-| `agent_exists` | Cache | `agent_install`, `agent_revision_create_from_intent`, `agent_revision_promote`, `agent_revision_rollback` |
+| `agent_exists` | Cache | `skill_install`, `agent_revision_create`, `agent_revision_create_from_intent`, `agent_revision_promote`, `agent_revision_rollback` |
 | `artifact_inspect` | Cache | `artifact_build` |
 
 Properties:
