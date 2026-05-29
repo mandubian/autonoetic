@@ -185,7 +185,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn federation_rules_for_message_continuity() -> Vec<String> {
     let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
     rules.push("R++7".to_string());
-    rules.push("R-10.6".to_string());
+    rules.push("P-10.6".to_string());
     rules
 }
 
@@ -1021,7 +1021,7 @@ mod tests {
     fn base_profile() -> ConstitutionProfile {
         ConstitutionProfile {
             rules_enforcement: BTreeMap::from([(
-                "R-1.1".to_string(),
+                "P-1.1".to_string(),
                 "tool_call_processor".to_string(),
             )]),
             rights_enforcement: BTreeMap::from([(
@@ -1132,7 +1132,7 @@ mod tests {
         let local_profile = base_profile();
         let mut peer_profile = base_profile();
         peer_profile.rules_enforcement.insert(
-            "R-9.9".to_string(),
+            "P-9.9".to_string(),
             "extra_enforcement_reference".to_string(),
         );
         evaluate_constitution_compatibility(

@@ -876,7 +876,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_pending_spawns_per_agent")]
     pub max_pending_spawns_per_agent: usize,
 
-    /// System-wide ceiling for spawn-chain depth (R+3 / R-7.15).
+    /// System-wide ceiling for spawn-chain depth (R+3 / P-7.15).
     /// Any agent whose session depth (counting `/` in session_id) equals or exceeds
     /// this value is refused the right to spawn further children.
     /// Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins.
@@ -925,7 +925,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub session_budget: SessionBudgetConfig,
 
-    /// Tree-wide budgets aggregated across all descendants of a root session (R+4 / R-6.21).
+    /// Tree-wide budgets aggregated across all descendants of a root session (R+4 / P-6.21).
     /// Applies in addition to per-session limits; the tighter bound wins.
     #[serde(default)]
     pub root_session_budget: RootSessionBudgetConfig,
@@ -936,7 +936,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
-    /// Maximum number of concurrent pending approvals per root_session_id (R+5 / R-7.17).
+    /// Maximum number of concurrent pending approvals per root_session_id (R+5 / P-7.17).
     /// When a new approval request would push the count above this cap, the insert is
     /// rejected with `approval_flood`. Set to 0 to disable (not recommended).
     /// Default: 50.
@@ -958,7 +958,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_grant_ttl_secs")]
     pub default_grant_ttl_secs: u64,
 
-    /// Number of sandbox-escape indicators per session that triggers R-7.18
+    /// Number of sandbox-escape indicators per session that triggers P-7.18
     /// degraded mode. Set to 0 to disable. Default: 5.
     #[serde(default = "default_escape_attempt_degrade_threshold")]
     pub escape_attempt_degrade_threshold: usize,

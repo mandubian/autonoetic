@@ -124,7 +124,7 @@ async fn ri_0_5_degraded_mode_notice_injected_with_rule_and_evidence() {
             category: "session".to_string(),
             action: "session.degraded".to_string(),
             status: "active".to_string(),
-            enforced_rules: vec!["R-7.18".to_string()],
+            enforced_rules: vec!["P-7.18".to_string()],
             target: None,
             payload: Some(
                 serde_json::json!({
@@ -172,7 +172,7 @@ async fn ri_0_5_degraded_mode_notice_injected_with_rule_and_evidence() {
         "degraded sessions must inject Ri-0.5 notice"
     );
     assert!(
-        system_prompt.contains("Rule IDs: R-7.18"),
+        system_prompt.contains("Rule IDs: P-7.18"),
         "notice must include rule IDs"
     );
     assert!(

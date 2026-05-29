@@ -1,4 +1,4 @@
-//! Constitution R-6.25: stage-local retries must be bounded and observable.
+//! Constitution P-6.25: stage-local retries must be bounded and observable.
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::scheduler::workflow_store::{self, save_task_run, save_workflow_run};

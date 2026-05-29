@@ -273,7 +273,7 @@ impl PromotionStore {
     }
 
     /// Returns the agent IDs of all federation roles that recorded a verdict,
-    /// for distinct-identity enforcement (R-2.17 extension).
+    /// for distinct-identity enforcement (P-2.17 extension).
     /// Includes StaticEvaluator, UnitTestRunner, and SealedEvaluator (if present).
     pub fn federation_agent_ids(&self, artifact_id: &str) -> Vec<String> {
         let records = self.records.lock().unwrap();

@@ -1,4 +1,4 @@
-//! Constitution R-6.26: workflow-visible failures must report side-effect state
+//! Constitution P-6.26: workflow-visible failures must report side-effect state
 //! so retry policy can stay mechanical.
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;

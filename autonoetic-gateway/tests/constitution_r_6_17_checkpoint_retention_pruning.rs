@@ -1,4 +1,4 @@
-//! Constitution R-6.17 — checkpoint retention pruning keeps only configured tail.
+//! Constitution P-6.17 — checkpoint retention pruning keeps only configured tail.
 
 mod support;
 

@@ -29,7 +29,7 @@ fn causal_decision_events_include_enforced_rule_ids() -> anyhow::Result<()> {
         Some(serde_json::json!({
             "tool_name": "sandbox_exec",
             "reason": "missing capability",
-            "enforced_rules": ["R-1.1", "R-1.10"]
+            "enforced_rules": ["P-1.1", "P-1.10"]
         })),
     )?;
 
@@ -59,7 +59,7 @@ fn causal_decision_events_include_enforced_rule_ids() -> anyhow::Result<()> {
         .iter()
         .find(|event| event.action == "tool.rejected")
         .expect("expected tool.rejected event");
-    assert_eq!(rejected.enforced_rules, vec!["R-1.1", "R-1.10"]);
+    assert_eq!(rejected.enforced_rules, vec!["P-1.1", "P-1.10"]);
 
     Ok(())
 }

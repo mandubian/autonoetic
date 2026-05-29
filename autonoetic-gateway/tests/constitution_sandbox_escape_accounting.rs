@@ -2,7 +2,7 @@
 //!
 //! Sandbox escape indicators (SIGSYS, seccomp denials, mount/ptrace attempts)
 //! are detected in sandbox output, recorded per session, and counted.
-//! Crossing the degradation threshold triggers R-7.18 degraded mode;
+//! Crossing the degradation threshold triggers P-7.18 degraded mode;
 //! crossing the emergency threshold triggers emergency stop.
 
 mod support;

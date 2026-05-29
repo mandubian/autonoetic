@@ -176,13 +176,13 @@ impl AgentExecutor {
             return Ok(());
         }
 
-        let mode = crate::fail_mode::lookup_fail_mode("R-6.5")
+        let mode = crate::fail_mode::lookup_fail_mode("P-6.5")
             .map(|m| m.to_string())
             .unwrap_or_else(|| "refuse-session-start".to_string());
         let Some(catalog) = self.openrouter_catalog.as_ref() else {
             anyhow::bail!(
                 "Session start refused: cost-budget enforcement requires price metadata but \
-                 catalog is unavailable (R-6.5, R++10: fail-mode={}). \
+                 catalog is unavailable (P-6.5, R++10: fail-mode={}). \
                  Add capability 'budget.no_price_available.allow' to override intentionally.",
                 mode
             );
@@ -190,7 +190,7 @@ impl AgentExecutor {
         if catalog.estimate_cost_usd(model_id, 1, 1).await.is_none() {
             anyhow::bail!(
                 "Session start refused: cost-budget enforcement requires price metadata for model '{}' \
-                 but catalog is unavailable (R-6.5, R++10: fail-mode={}). \
+                 but catalog is unavailable (P-6.5, R++10: fail-mode={}). \
                  Add capability 'budget.no_price_available.allow' to override intentionally.",
                 model_id,
                 mode

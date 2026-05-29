@@ -6318,15 +6318,15 @@ fn infer_rules_for_action(action: &autonoetic_types::background::ScheduledAction
         | autonoetic_types::background::ScheduledAction::WebCall { .. }
         | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. }
         | autonoetic_types::background::ScheduledAction::CredentialRequest { .. } => {
-            vec!["R-2.1", "R-2.18"]
+            vec!["P-2.1", "P-2.18"]
         }
         autonoetic_types::background::ScheduledAction::RevisionPromote { .. } => {
-            vec!["R++2", "R-2.18"]
+            vec!["R++2", "P-2.18"]
         }
         autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => {
-            vec!["R-2.18"]
+            vec!["P-2.18"]
         }
-        _ => vec!["R-2.18"],
+        _ => vec!["P-2.18"],
     }
 }
 

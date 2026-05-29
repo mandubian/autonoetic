@@ -1,4 +1,4 @@
-//! Constitution R-10.7 — approval grants cannot be reused across root sessions.
+//! Constitution P-10.7 — approval grants cannot be reused across root sessions.
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{GrantScope, GrantTarget};

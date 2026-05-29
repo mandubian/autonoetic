@@ -1,4 +1,4 @@
-//! Constitution R-3.7 — docker/microvm paths require explicit driver profiles.
+//! Constitution P-3.7 — docker/microvm paths require explicit driver profiles.
 //!
 //! Resource quotas for these drivers are externalized to the selected runtime
 //! profile (container image / firecracker config). The gateway must fail shut

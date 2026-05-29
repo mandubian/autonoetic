@@ -124,7 +124,7 @@ async fn catalog_unavailable_with_price_cap_refuses_session_start() -> anyhow::R
         msg
     );
     assert!(
-        msg.contains("R-6.5"),
+        msg.contains("P-6.5"),
         "error should reference constitutional rule, got: {}",
         msg
     );

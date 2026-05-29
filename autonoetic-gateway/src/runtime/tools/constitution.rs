@@ -69,7 +69,7 @@ impl NativeTool for ConstitutionReadTool {
                 Returns the full document or a single section/rule when `section` is given. \
                 Use this before proposing amendments, when a rule ID appears in an error, \
                 or any time you need to understand your obligations and rights. \
-                Section selector accepts rule IDs (`Ri-0.10`, `R-7.5`, `R+5`, `R++1`, `R+++3`) \
+                Section selector accepts rule IDs (`Ri-0.10`, `P-7.5`, `R+5`, `R++1`, `R+++3`) \
                 and numbered sections (`§0` … `§14`). The returned digest identifies the exact \
                 configured constitutional release and lock file."
                 .to_string(),
@@ -78,7 +78,7 @@ impl NativeTool for ConstitutionReadTool {
                 "properties": {
                     "section": {
                         "type": "string",
-                        "description": "Optional selector. Rule IDs (Ri-0.10, R-7.5, R+5, R++1, R+++3) or numbered sections (§0..§14). Omit to receive the full document."
+                        "description": "Optional selector. Rule IDs (Ri-0.10, P-7.5, R+5, R++1, R+++3) or numbered sections (§0..§14). Omit to receive the full document."
                     }
                 },
                 "additionalProperties": false
@@ -128,7 +128,7 @@ impl NativeTool for ConstitutionReadTool {
                 None => {
                     return Ok(ToolError::validation(
                         format!("section selector '{}' did not match any rule ID or section in the constitution", selector),
-                        Some("Use a rule ID like 'Ri-0.10', 'R-7.5', 'R+5', 'R++1', 'R+++3', or a section like '§0'..'§14'. Omit `section` to receive the full document."),
+                        Some("Use a rule ID like 'Ri-0.10', 'P-7.5', 'R+5', 'R++1', 'R+++3', or a section like '§0'..'§14'. Omit `section` to receive the full document."),
                     )
                     .to_error_response());
                 }

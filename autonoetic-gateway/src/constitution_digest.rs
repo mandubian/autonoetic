@@ -534,10 +534,10 @@ mod tests {
     fn extracts_rule_enforcement_rows() {
         init_default_constitution();
         let rules = canonical_rule_enforcement_table();
-        assert!(rules.contains_key("R-1.1"));
+        assert!(rules.contains_key("P-1.1"));
         assert!(rules
-            .get("R-1.1")
-            .expect("R-1.1 must exist")
+            .get("P-1.1")
+            .expect("P-1.1 must exist")
             .contains("tool_call_processor"));
     }
 

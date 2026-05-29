@@ -1,12 +1,12 @@
-//! Constitution R+14 / R-1.11: Deny-by-default on unknown tool names.
+//! Constitution R+14 / P-1.11: Deny-by-default on unknown tool names.
 //!
 //! R+14: Unknown tool names must deny by default, not silent-allow.
 //! The policy engine already implements this — these tests pin the
 //! behavior so any regression is caught.
 //!
-//! Note: `can_invoke_tool` attributes decisions to R-1.1 (the tool invocation
-//! rule), which is the enforcement mechanism for R-1.11 (deny-by-default).
-//! All tests assert R-1.1 as the enforced rule ID.
+//! Note: `can_invoke_tool` attributes decisions to P-1.1 (the tool invocation
+//! rule), which is the enforcement mechanism for P-1.11 (deny-by-default).
+//! All tests assert P-1.1 as the enforced rule ID.
 
 mod support;
 
@@ -94,8 +94,8 @@ fn r_plus_14_unknown_tool_name_denied() {
     let decision = policy.can_invoke_tool("totally_bogus_tool_xyz");
     assert!(!decision.is_allowed(), "unknown tool name must be denied");
     assert!(
-        decision.enforced_rules.contains(&"R-1.1"),
-        "denial must cite rule R-1.1"
+        decision.enforced_rules.contains(&"P-1.1"),
+        "denial must cite rule P-1.1"
     );
 }
 

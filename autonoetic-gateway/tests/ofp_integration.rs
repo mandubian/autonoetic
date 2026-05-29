@@ -1066,7 +1066,7 @@ async fn test_handshake_accepts_superset_profile_in_superset_mode() {
     let mut peer_rules =
         autonoetic_gateway::constitution_digest::canonical_rule_enforcement_table();
     peer_rules.insert(
-        "R-99.1".to_string(),
+        "P-99.1".to_string(),
         "peer_extra_rule_enforcement".to_string(),
     );
     let mut peer_rights =

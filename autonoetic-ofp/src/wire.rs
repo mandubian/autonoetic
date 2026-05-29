@@ -493,7 +493,7 @@ mod tests {
                 constitution_digest: Some("abc123".to_string()),
                 constitution_profile: Some(ConstitutionProfile {
                     rules_enforcement: BTreeMap::from([(
-                        "R-1.1".to_string(),
+                        "P-1.1".to_string(),
                         "tool_call_processor".to_string(),
                     )]),
                     rights_enforcement: BTreeMap::from([(

@@ -266,7 +266,7 @@ fn emit_reclamation_event(
     now: &chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
     let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-    rules.push("R-8.17".to_string());
+    rules.push("P-8.17".to_string());
 
     let payload = serde_json::json!({
         "reclamation": {

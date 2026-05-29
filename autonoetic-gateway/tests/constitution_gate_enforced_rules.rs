@@ -64,7 +64,7 @@ fn make_action(url: &str) -> ScheduledAction {
     }
 }
 
-/// R+++3: pre-validated bypass records R-2.6.
+/// R+++3: pre-validated bypass records P-2.6.
 #[test]
 fn r3_pre_validated_bypass_enforces_r_2_6() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -91,14 +91,14 @@ fn r3_pre_validated_bypass_enforces_r_2_6() -> Result<()> {
     assert!(result.is_cleared());
     let rules = result.enforced_rules();
     assert!(
-        rules.contains(&"R-2.6"),
-        "pre-validated bypass must record R-2.6, got {:?}",
+        rules.contains(&"P-2.6"),
+        "pre-validated bypass must record P-2.6, got {:?}",
         rules
     );
     Ok(())
 }
 
-/// R+++3: session grant clearance records R-2.4.
+/// R+++3: session grant clearance records P-2.4.
 #[test]
 fn r3_session_grant_clearance_enforces_r_2_4() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -138,14 +138,14 @@ fn r3_session_grant_clearance_enforces_r_2_4() -> Result<()> {
     assert!(result.is_cleared());
     let rules = result.enforced_rules();
     assert!(
-        rules.contains(&"R-2.4"),
-        "session grant clearance must record R-2.4, got {:?}",
+        rules.contains(&"P-2.4"),
+        "session grant clearance must record P-2.4, got {:?}",
         rules
     );
     Ok(())
 }
 
-/// R+++3: dedup returns AlreadyPending with R-2.3.
+/// R+++3: dedup returns AlreadyPending with P-2.3.
 #[test]
 fn r3_dedup_enforces_r_2_3() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -191,14 +191,14 @@ fn r3_dedup_enforces_r_2_3() -> Result<()> {
     assert!(matches!(result2, GateResult::AlreadyPending { .. }));
     let rules = result2.enforced_rules();
     assert!(
-        rules.contains(&"R-2.3"),
-        "dedup must record R-2.3, got {:?}",
+        rules.contains(&"P-2.3"),
+        "dedup must record P-2.3, got {:?}",
         rules
     );
     Ok(())
 }
 
-/// R+++3: new approval suspension records R-2.1, R-2.2, R-2.18.
+/// R+++3: new approval suspension records P-2.1, P-2.2, P-2.18.
 #[test]
 fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -224,13 +224,13 @@ fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"R-2.1"), "must record R-2.1, got {:?}", rules);
-    assert!(rules.contains(&"R-2.2"), "must record R-2.2, got {:?}", rules);
-    assert!(rules.contains(&"R-2.18"), "must record R-2.18, got {:?}", rules);
+    assert!(rules.contains(&"P-2.1"), "must record P-2.1, got {:?}", rules);
+    assert!(rules.contains(&"P-2.2"), "must record P-2.2, got {:?}", rules);
+    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
     Ok(())
 }
 
-/// R+++3: approval_ref clearance records R-2.6.
+/// R+++3: approval_ref clearance records P-2.6.
 #[test]
 fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -293,8 +293,8 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
     assert!(result.is_cleared());
     let rules = result.enforced_rules();
     assert!(
-        rules.contains(&"R-2.6"),
-        "approval_ref clearance must record R-2.6, got {:?}",
+        rules.contains(&"P-2.6"),
+        "approval_ref clearance must record P-2.6, got {:?}",
         rules
     );
     match result {
@@ -307,7 +307,7 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
     Ok(())
 }
 
-/// R+++3: user_input gate records R-2.13 and R-2.18.
+/// R+++3: user_input gate records P-2.13 and P-2.18.
 #[test]
 fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -335,12 +335,12 @@ fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"R-2.13"), "must record R-2.13, got {:?}", rules);
-    assert!(rules.contains(&"R-2.18"), "must record R-2.18, got {:?}", rules);
+    assert!(rules.contains(&"P-2.13"), "must record P-2.13, got {:?}", rules);
+    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
     Ok(())
 }
 
-/// R+++3: escalation gate records R-2.18.
+/// R+++3: escalation gate records P-2.18.
 #[test]
 fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -364,11 +364,11 @@ fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"R-2.18"), "must record R-2.18, got {:?}", rules);
+    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
     Ok(())
 }
 
-/// R-2.19: gate enrichment messages are recorded with sender and content.
+/// P-2.19: gate enrichment messages are recorded with sender and content.
 #[test]
 fn r_2_19_gate_enrichment_recorded_with_sender() -> Result<()> {
     let tmp = tempfile::tempdir()?;
