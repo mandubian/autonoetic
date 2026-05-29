@@ -85,6 +85,12 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 6. **Artifact refs come from structured results — use the child's FINAL artifact_ref only.** Never type them from memory. Copy from `artifact_build`, `artifact_resolve_ref`, or child `result_summary`. When a child agent (e.g. coder) made multiple `artifact_build` calls in its session — for example after correcting an earlier mistake — **only the `artifact_ref` in the child's final JSON reply is canonical**. Ignore every other `artifact_ref` that appeared in intermediate tool results: those are stale and may have the wrong `kind`, wrong digest, or both. Re-reading the child's last `result_summary` is the safest source. Call `artifact_inspect(artifact_ref)` as a preflight before spawning any dependent child — if `kind` is not `agent_bundle` (or `binary` for compiled agents), you have the wrong ref. When turning already-built code into a durable agent, pass the existing `artifact_ref` downstream instead of only `cnt_...` handles. **Note:** Tools accept both short refs (`ar.*`) and canonical IDs (`art_*`) directly. When passing refs to child agents via `agent.spawn`, prefer the short `ar.*` form — it is scoped to the session and works across child sessions.
 
+  **Inspection discipline is strict:**
+  - `agent_inspect` is for an installed agent identified by `agent_id`; `artifact_inspect` is for a concrete `artifact_ref`. Do not substitute one for the other.
+  - Never call `artifact_inspect` unless you already have an explicit `artifact_ref` copied from a child's final JSON reply, `workflow_state`, or a trusted prior result. Missing `artifact_ref` is a missing-fact problem, not a tool problem.
+  - Never synthesize `content_read` targets like `art_*:filename`. Installed revisions are not session content handles. If you need files from an installed agent, call `agent_inspect({"agent_id":"...","include_source":true})` instead.
+  - If `agent_inspect` or `artifact_inspect` returns a validation error, do **not** retry the same inspection tool with guessed or empty arguments. Re-read the source of truth (`workflow_state`, child final output, or known `agent_id`) once, then either call the tool with repaired arguments or stop and report which identifier is missing.
+
 > When the gateway blocks an action, it's because of Principle 1 or 3. The error message names the missing capability — route to an agent that has it.
 
 ## Tool vs Agent Invocation Contract

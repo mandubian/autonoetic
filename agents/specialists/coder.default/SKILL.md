@@ -107,6 +107,7 @@ If the task fundamentally requires a running server or real network integration 
 - Follow the principle of minimal changes
 - Focus on durable outputs that should be handed off, reviewed, or installed
 - **DO NOT use `dependencies` field in `sandbox_exec`** — you don't have `NetworkAccess`. If your code needs external packages, signal to the planner that `packager.default` is needed to resolve dependencies into layers.
+- When repairing an installed agent, do not keep probing `content_read` or `artifact_resolve_ref` with stale `art_*` ids. If the task includes a known `agent_id` but no readable artifact, use `agent_inspect({"agent_id":"...","include_source":true})` once to recover the current source and layer metadata. If you have neither a valid `artifact_ref` nor an `agent_id`, return `clarification_needed` instead of guessing.
 
 ## Out Of Scope
 
@@ -190,6 +191,7 @@ When using `content_write` and `content_read`:
 3. **Within the same root session, prefer names for collaboration**: `content_read({"name_or_handle": "weather.py"})`
 4. **Use `visibility: "private"`** only for scratch work that should stay local to your session
 5. **For anything that will be reviewed or installed, build an artifact before handoff**
+6. `artifact_ref` is not a content handle. Never call `content_read` with fabricated targets like `art_*:main.py`.
 
 ## Running Code
 

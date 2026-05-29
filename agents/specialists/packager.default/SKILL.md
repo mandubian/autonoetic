@@ -138,20 +138,24 @@ Pass the `captured_layers` from step 1 into `artifact_build`:
 
 ## Entrypoint Setup
 
-The artifact's main script must find the layer packages at the `mount_path`. For Python:
+For Python dependency layers mounted through `artifact_build` / installed `runtime.lock`, the gateway adds the mounted layer paths to `PYTHONPATH` at execution time. Do not rewrite the script just to add `sys.path.insert(...)` for a standard dependency layer.
 
-```python
-import sys
-sys.path.insert(0, "/tmp/venv")
-```
-
-If the script doesn't already do this, use `content_write` to add it before building the artifact.
+Only modify the entrypoint if the task explicitly requires source changes unrelated to packaging, or if the code uses a nonstandard import layout that still cannot resolve from the mounted layer path.
 
 ## Return Format
 
 ```json
 { "status": "ok", "artifact_ref": "ar.example" }
 ```
+
+## Input Discipline
+
+- You need either a valid `artifact_ref` or explicit source files already available in session content. Do not invent file handles from an artifact id.
+- `content_read` accepts content names/handles and scoped artifact file refs of the form `ar.<ref>:<filename>`. It does **not** accept synthetic paths like `art_*:requirements.txt`.
+- If you need to inspect an existing artifact, call `artifact_inspect(artifact_ref)` once. Use the artifact metadata directly, or if you must open a file, use a scoped `ar.<ref>:<filename>` ref.
+- If the task is to add layers to an existing artifact, prefer rebuilding from the artifact itself: call `artifact_build` with the original artifact ref in `inputs` plus the new `layers`. Do **not** read `main.py` / `requirements.txt` just to carry them forward unless you are actually modifying those files.
+- If you only know an installed `agent_id` and need source text for a real source edit, ask the planner for `agent_inspect({"agent_id":"...","include_source":true})` output or for explicit session content files. Do not guess artifact file handles.
+- If the provided `artifact_ref` is absent, stale, or unreadable, stop and return a failure asking the planner for a fresh `ar.*` or for extracted source files. Do **not** loop on `content_read` / `artifact_resolve_ref` variants trying different shapes of the same missing reference.
 
 ## Resumption
 

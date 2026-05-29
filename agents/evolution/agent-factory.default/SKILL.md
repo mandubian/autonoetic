@@ -128,6 +128,8 @@ If the spawn message includes `source_artifact_ref`, treat it as the canonical i
 4. If gates are required, go to Step 4 with the same artifact.
 5. Only fall back to coder if the artifact is malformed or missing the required entry script.
 
+If `source_artifact_ref` is missing, stale, or `artifact_inspect` fails validation/resource checks, do **not** retry `artifact_inspect` with guessed payloads or alternate shapes. End with `status: "clarification_needed"` and ask the planner for a fresh `artifact_ref` or a coder-produced replacement.
+
 Do NOT rewrite code, regenerate multiple draft payload files, or rebuild equivalent artifacts when a suitable `source_artifact_ref` already exists.
 
 **Kind-mismatch recovery — do NOT rebuild.** If a downstream tool (e.g. `agent_revision_create_from_intent`) rejects `source_artifact_ref` because its `kind` is wrong (`skill_bundle` when `agent_bundle` is required, etc.), **do not call `artifact_build` to "fix" it**. Rebuilding produces a new content-addressed digest, which silently invalidates every prior `promotion_record` attached to the original artifact and breaks the install pipeline (downstream gates will fail with "no promotion.record found for artifact ..."). Instead, end your session with `status: "clarification_needed"` and `reason` explaining the kind mismatch — the planner must spawn `coder.default` again to produce a correctly-typed artifact at the original digest source. The promotion-record chain is anchored to a single content-addressed identity; preserving it is non-negotiable.
