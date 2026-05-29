@@ -1655,10 +1655,10 @@ mod tests {
         .with_session_context(Some("inv-sess".to_string()), Some("t1".to_string()));
 
         let ea = r#"{"agent_id":"x"}"#;
-        // exists #1 (real), exists #2 (cache hit) → 1 execution.
+        // inspect #1 (real), inspect #2 (cache hit) → 1 execution.
         processor.process_tool_calls(&[call("a1", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         processor.process_tool_calls(&[call("a2", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
-        assert_eq!(exists_calls.load(Ordering::SeqCst), 1, "second exists should be cached");
+        assert_eq!(exists_calls.load(Ordering::SeqCst), 1, "second agent_inspect should be cached");
 
         // A promote invalidates the AgentExistence class. `agent_revision_*`
         // is intent-gated, so a real intent must be supplied for the tool to
@@ -1666,9 +1666,9 @@ mod tests {
         // rejected pre-execution and must NOT invalidate.
         processor.process_tool_calls(&[call("p1", "agent_revision_promote", r#"{"intent":"promote x for invalidation test"}"#)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
 
-        // exists #3 must re-execute (cache invalidated) → 2 executions.
+        // inspect #3 must re-execute (cache invalidated) → 2 executions.
         processor.process_tool_calls(&[call("a3", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
-        assert_eq!(exists_calls.load(Ordering::SeqCst), 2, "exists after promote must re-execute");
+        assert_eq!(exists_calls.load(Ordering::SeqCst), 2, "agent_inspect after promote must re-execute");
     }
 
     #[tokio::test(flavor = "multi_thread")]

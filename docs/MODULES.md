@@ -94,6 +94,7 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | `tools/web.rs` | `web_search`, `web_fetch` |
 | `tools/knowledge.rs` | `knowledge.*`, `digest_query` |
 | `tools/agent.rs` | `agent_spawn`, `agent_discover` |
+| `tools/agent_inspect.rs` | `agent_inspect` (existence + metadata of any agent) |
 | `tools/agent_revision.rs` | `agent_revision_*` |
 | `tools/evaluation.rs` | `eval.*` |
 | `tools/workflow.rs` | `workflow.*`, `approval_status` |
