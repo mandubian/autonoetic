@@ -389,9 +389,84 @@ fn test_resolve_artifact_metadata_and_files() -> anyhow::Result<()> {
     assert!(v.get("artifact_id").is_none(), "raw art_* id must not be exposed");
     assert_eq!(v["file_count"].as_u64(), Some(1));
     assert_eq!(v["files"][0]["name"].as_str(), Some("data.py"));
+    // The file selector is the `file` param, not a packed `ar.<ref>:<file>`:
+    // no per-file packed ref, and a top-level read_file shows the param form.
+    assert!(
+        v["files"][0].get("content_read_ref").is_none(),
+        "packed ar.<ref>:<file> must not be surfaced"
+    );
     assert_eq!(
-        v["files"][0]["content_read_ref"].as_str(),
-        Some(format!("{artifact_ref}:data.py").as_str())
+        v["read_file"].as_str(),
+        Some(format!("resolve(ref=\"{artifact_ref}\", include=\"content\", file=<name>)").as_str())
+    );
+    Ok(())
+}
+
+/// Read one file out of an artifact: address the artifact by its ref and name
+/// the file with the separate `file` argument (no `ar.<ref>:<file>` packing).
+#[test]
+fn test_resolve_artifact_file_via_file_param() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let config = GatewayConfig { agents_dir: agents_dir.clone(), ..GatewayConfig::default() };
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let writer = writer_manifest();
+    let writer_policy = PolicyEngine::new(writer.clone());
+    let reader = reader_manifest();
+    let reader_policy = PolicyEngine::new(reader.clone());
+    let registry = default_registry();
+    let agent_dir = agents_dir.join("coder.default");
+    std::fs::create_dir_all(&agent_dir)?;
+
+    let cs = ContentStore::new(&gateway_dir)?;
+    let h = cs.write(b"resolved content")?;
+    cs.register_name("sess-r", "data.py", &h)?;
+
+    let build_out = registry.execute(
+        "artifact_build", &writer, &writer_policy, &agent_dir, Some(&gateway_dir),
+        &serde_json::json!({ "inputs": ["data.py"] }).to_string(),
+        Some("sess-r"), None, Some(&config), Some(store.clone()), None,
+    )?;
+    let build_v: serde_json::Value = serde_json::from_str(&build_out)?;
+    let artifact_ref = build_v["artifact_ref"].as_str().expect("artifact_ref").to_string();
+
+    // Param form succeeds and returns the file bytes.
+    let out = registry.execute(
+        "resolve", &reader, &reader_policy, &agent_dir, Some(&gateway_dir),
+        &serde_json::json!({ "ref": artifact_ref, "include": "content", "file": "data.py" }).to_string(),
+        Some("sess-r"), None, Some(&config), Some(store.clone()), None,
+    )?;
+    let v: serde_json::Value = serde_json::from_str(&out)?;
+    assert_eq!(v["ok"], serde_json::json!(true));
+    assert_eq!(v["kind"].as_str(), Some("artifact_file"));
+    assert_eq!(v["file"].as_str(), Some("data.py"));
+    assert_eq!(v["content"].as_str(), Some("resolved content"));
+
+    // include=content without a file is a validation error pointing at `file`.
+    let out = registry.execute(
+        "resolve", &reader, &reader_policy, &agent_dir, Some(&gateway_dir),
+        &serde_json::json!({ "ref": artifact_ref, "include": "content" }).to_string(),
+        Some("sess-r"), None, Some(&config), Some(store.clone()), None,
+    )?;
+    let v: serde_json::Value = serde_json::from_str(&out)?;
+    assert_eq!(v["ok"], serde_json::json!(false));
+    assert_eq!(v["error_type"].as_str(), Some("validation"));
+
+    // The legacy packed `ar.<ref>:<file>` form is rejected with a nudge to `file`.
+    let packed = format!("{artifact_ref}:data.py");
+    let out = registry.execute(
+        "resolve", &reader, &reader_policy, &agent_dir, Some(&gateway_dir),
+        &serde_json::json!({ "ref": packed, "include": "content" }).to_string(),
+        Some("sess-r"), None, Some(&config), Some(store.clone()), None,
+    )?;
+    let v: serde_json::Value = serde_json::from_str(&out)?;
+    assert_eq!(v["ok"], serde_json::json!(false));
+    assert_eq!(v["error_type"].as_str(), Some("validation"));
+    assert!(
+        v["message"].as_str().unwrap_or_default().contains("file"),
+        "nudge must point at the `file` parameter, got: {}", v["message"]
     );
     Ok(())
 }

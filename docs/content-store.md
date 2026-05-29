@@ -99,12 +99,14 @@ Use `sandbox_path` when passing files to `sandbox_exec`.
 
 ### `resolve`
 
-Read by name, handle, or alias with root-based resolution.
+Read by name, handle, or alias with root-based resolution. `include="content"`
+returns the bytes; the default `include="metadata"` only checks existence.
 
 ```json
 // Request
 {
-  "name_or_handle": "main.py"
+  "ref": "main.py",
+  "include": "content"
 }
 
 // Response
@@ -114,19 +116,28 @@ Read by name, handle, or alias with root-based resolution.
 }
 ```
 
-Resolution order:
-1. If `ar.<ref>:<filename>` → read that file directly from the artifact bundle after scope resolution
-2. If `cnt_<8 hex>` (or `cnt:<8 hex>`) → alias lookup (session, then root, then global)
-3. If `sha256:...` → direct content lookup (with `sha256:<8 hex>` treated as alias fallback)
-4. If bare 8 hex chars → alias lookup (session, then root, then global)
-5. Otherwise → name lookup (session, then root, then global)
+To read one file out of an artifact, address the artifact by its ref and name
+the file with the `file` argument — there is no `ar.<ref>:<file>` packing:
+
+```json
+{ "ref": "ar.abcdef012345", "include": "content", "file": "requirements.txt" }
+```
+
+Resolution order for `ref` (content path):
+1. If `cnt_<8 hex>` (or `cnt:<8 hex>`) → alias lookup (session, then root, then global)
+2. If `sha256:...` → direct content lookup (with `sha256:<8 hex>` treated as alias fallback)
+3. If bare 8 hex chars → alias lookup (session, then root, then global)
+4. Otherwise → name lookup (session, then root, then global)
+
+An `ar.*` / `art_*` `ref` takes the artifact path instead; pass `file` to read a
+single file inside it.
 
 ### `resolve` vs `artifact_inspect`
 
 These tools intentionally overlap a bit, but they serve different jobs:
 
 - `artifact_inspect` is for **artifact structure and trust-boundary review**: file list, entrypoints, layers, digest, builder metadata.
-- `resolve` is for **retrieving bytes/text**: either session content (`name`, alias, handle) or a specific artifact file (`ar.<ref>:<filename>`).
+- `resolve` is for **retrieving bytes/text**: either session content (`name`, alias, handle) or a specific artifact file (`ref="ar.<ref>"` with `file="<filename>"`).
 
 Why this is usually not an issue:
 
@@ -155,16 +166,16 @@ Accepted `inputs` forms:
 
 | Tool field | Accepts | Does not accept |
 |---|---|---|
-| `artifact_build.inputs[]` | session content names, `cnt_...`, `sha256:...`, bare alias, existing artifact refs `ar.*`, canonical artifact IDs `art_*` | scoped artifact file refs like `ar.<ref>:requirements.txt` |
-| `artifact_inspect.artifact_ref` | `ar.*`, `art_*` | `ar.<ref>:<filename>`, content handles |
-| `artifact_prepare.artifact_ref` / `artifact_exec.artifact_ref` | `ar.*`, `art_*` | content handles, scoped artifact file refs |
-| `resolve.ref` | any artifact/content handle — `ar.*`, `art_*`, `cnt_*`, bare alias, content name, `sha256:...`, or `ar.<ref>:<filename>` (scope inferred from the session) | — |
+| `artifact_build.inputs[]` | session content names, `cnt_...`, `sha256:...`, bare alias, existing artifact refs `ar.*`, canonical artifact IDs `art_*` | single files (read one with `resolve(..., file=…)` and write it to content first) |
+| `artifact_inspect.artifact_ref` | `ar.*`, `art_*` | content handles, single-file selectors |
+| `artifact_prepare.artifact_ref` / `artifact_exec.artifact_ref` | `ar.*`, `art_*` | content handles, single-file selectors |
+| `resolve.ref` | any artifact/content handle — `ar.*`, `art_*`, `cnt_*`, bare alias, content name, `sha256:...` (scope inferred from the session); for one file inside an artifact, add `file="<name>"` | — |
 
 Homogeneity rule:
 
 - When a tool is artifact-oriented (`artifact_inspect`, `artifact_prepare`, `artifact_exec`, `artifact_build` artifact reuse), pass the artifact itself as `ar.*` or `art_*`.
-- When a tool is file-oriented (`resolve`), pass a session content identifier or a scoped artifact file ref `ar.<ref>:<filename>`.
-- Do not switch namespaces mid-flow: `ar.<ref>:<filename>` is for reading one file out of an artifact, while bare `ar.*` / `art_*` means the whole artifact.
+- When a tool is file-oriented (`resolve`), pass a session content identifier, or address an artifact file as `ref="ar.<ref>"` plus `file="<filename>"`.
+- Do not switch namespaces mid-flow: `ref="ar.*"` + `file=…` reads one file out of an artifact, while bare `ar.*` / `art_*` means the whole artifact.
 
 ```json
 // Response

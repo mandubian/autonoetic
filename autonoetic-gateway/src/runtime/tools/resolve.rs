@@ -1,13 +1,14 @@
 //! `resolve` — the single front door for any artifact/content handle (#312).
 //!
 //! Agents juggle several handle shapes — `art_<id>`, `ar.<ref>`, `cnt_<alias>`,
-//! a bare 8-char alias, a content `name`, `sha256:…`, and `ar.<ref>:<file>`.
+//! a bare 8-char alias, a content `name`, and `sha256:…`.
 //! Choosing *which tool* consumes *which shape* is exactly the decision that
 //! drives tool-thrashing. `resolve` takes **any** of them and answers "what is
 //! this / show me this" without that choice:
 //!
 //! - artifact-shaped refs (`art_` / `ar.`) → artifact resolution, with scope
-//!   inferred from the session (no explicit `scope_type`/`scope_id`);
+//!   inferred from the session (no explicit `scope_type`/`scope_id`); a single
+//!   file inside is selected with the `file` argument, not packed into the ref;
 //! - everything else → the content store.
 //!
 //! The agent's decision collapses to: **run it → `artifact_exec`; see it →
@@ -48,14 +49,14 @@ impl NativeTool for ResolveTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles, or `ar.<ref>:<file>`. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. `include` controls depth: 'metadata' (default — identity + existence), 'files' (an artifact's file list with read refs), or 'content' (inline the bytes; for an artifact pass `file` to choose which file). To RUN an artifact use artifact_exec; to SEE one use resolve."
+            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. `include` controls depth: 'metadata' (default — identity + existence), 'files' (an artifact's file list), or 'content' (inline the bytes; for an artifact pass `file` to choose which file inside it). To RUN an artifact use artifact_exec; to SEE one use resolve."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "ref": { "type": "string", "description": "Any handle: art_<id>, ar.<ref>, cnt_<alias>, 8-char alias, content name, sha256:…, or ar.<ref>:<file>" },
+                    "ref": { "type": "string", "description": "Any handle: art_<id>, ar.<ref>, cnt_<alias>, 8-char alias, content name, or sha256:…" },
                     "include": { "type": "string", "enum": ["metadata", "files", "content"], "description": "Depth: metadata (default), files (artifact file list), content (inline bytes)" },
-                    "file": { "type": "string", "description": "For include=content on an artifact: which file inside it to read" }
+                    "file": { "type": "string", "description": "For include=content on an artifact: which file inside it to read (the file name from include=files)" }
                 },
                 "required": ["ref"],
                 "additionalProperties": false
@@ -103,20 +104,24 @@ impl NativeTool for ResolveTool {
         };
         let sid = session_id.unwrap_or(&manifest.agent.id);
 
-        // Artifact-shaped refs (`art_` / `ar.`) take the artifact path; an
-        // `ar.<ref>:<file>` carries an embedded file selector.
+        // Artifact-shaped refs (`art_` / `ar.`) take the artifact path. The
+        // file selector is the `file` parameter — it is NOT packed into the
+        // ref. Reject the legacy `ar.<ref>:<file>` packing with a nudge.
         if reference.starts_with("art_") || reference.starts_with("ar.") {
-            let (artifact_ref, embedded_file) = match reference.split_once(':') {
-                Some((r, f)) => (r, Some(f.to_string())),
-                None => (reference, None),
-            };
+            if reference.contains(':') {
+                return Ok(ToolError::validation(
+                    "the file is selected with the `file` parameter, not packed into the ref — e.g. resolve(ref=\"ar.xxxx\", include=\"content\", file=\"foo.txt\")",
+                    Some("Drop the ':<file>' suffix from ref and pass file=<name>."),
+                )
+                .to_error_response());
+            }
             return self.resolve_artifact(
                 gw_dir,
                 gateway_store,
                 sid,
-                artifact_ref,
+                reference,
                 include,
-                embedded_file.or(args.file),
+                args.file,
             );
         }
 
@@ -142,21 +147,20 @@ impl ResolveTool {
             .to_error_response());
         };
 
-        // `include=content` on an artifact reads a single file via the
-        // `ar.<ref>:<file>` content-store path.
+        // `include=content` on an artifact reads a single named file.
         if include == "content" {
             let Some(file) = file else {
                 return Ok(ToolError::validation(
-                    "resolve(include=content) on an artifact needs a `file` (or an ar.<ref>:<file> ref); use include=files to list them",
-                    Some("Pass file=<name> or include=files."),
+                    "resolve(include=content) on an artifact needs a `file` (the file name inside it); use include=files to list them",
+                    Some("Pass file=<name>, or call include=files first."),
                 )
                 .to_error_response());
             };
-            let ar_file = format!("{artifact_ref}:{file}");
-            return match crate::runtime::tools::content::try_read_artifact_ref_file(
+            return match crate::runtime::tools::content::read_artifact_file(
                 gw_dir,
                 Some(&gs),
-                &ar_file,
+                artifact_ref,
+                &file,
                 sid,
             ) {
                 Ok(bytes) => {
@@ -234,9 +238,15 @@ impl ResolveTool {
                         .map(|f| json!({
                             "name": f.name,
                             "alias": f.alias,
-                            "content_read_ref": format!("{}:{}", resolved.display_ref, f.name),
                         }))
                         .collect::<Vec<_>>()),
+                );
+                obj.insert(
+                    "read_file".to_string(),
+                    json!(format!(
+                        "resolve(ref=\"{}\", include=\"content\", file=<name>)",
+                        resolved.display_ref
+                    )),
                 );
             }
         }
