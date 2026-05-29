@@ -505,5 +505,19 @@ fn test_contract_health_tallies_by_clause() -> anyhow::Result<()> {
     assert_eq!(health_since.by_clause, vec![("Ri-0.14".to_string(), 1)]);
     assert_eq!(health_since.unattributed, 1);
 
+    // `since` is compared by absolute instant, not raw text: an offset form
+    // equal to 00:00:04Z must filter identically to the `Z` form above.
+    let health_offset = store.contract_health(Some("2026-05-29T02:00:04+02:00"))?;
+    assert_eq!(health_offset, health_since);
+
+    // Malformed `since` fails clearly rather than silently returning nothing.
+    let err = store
+        .contract_health(Some("not-a-timestamp"))
+        .expect_err("invalid since must error");
+    assert!(
+        err.to_string().contains("invalid `since` timestamp"),
+        "unexpected error: {err}"
+    );
+
     Ok(())
 }

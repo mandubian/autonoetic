@@ -368,30 +368,43 @@ impl GatewayStore {
     /// than silently dropped.
     ///
     /// `since` is an optional RFC3339 lower bound on `timestamp`; `None` scans
-    /// all retained events.
+    /// all retained events. The bound is parsed and compared by absolute
+    /// instant (not raw text), so offset forms like `Z` vs `+02:00` behave
+    /// correctly and malformed operator input fails clearly.
     pub fn contract_health(
         &self,
         since: Option<&str>,
     ) -> Result<crate::enforcement_register::ContractHealth> {
+        // Parse + validate the bound up front: raw SQLite text comparison on
+        // RFC3339 is wrong across offset forms, and an unparsed string would
+        // silently yield empty/partial results instead of a clear error.
+        let since_dt = match since {
+            Some(ts) => Some(chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
+                anyhow::anyhow!("invalid `since` timestamp {ts:?}: {e} (expected RFC3339)")
+            })?),
+            None => None,
+        };
+
         let conn = self.conn.lock().unwrap();
         let placeholder = autonoetic_types::causal_chain::RULE_ID_EVENT_ATTRIBUTION;
 
-        let (query, params): (&str, Vec<rusqlite::types::Value>) = match since {
-            Some(ts) => (
-                "SELECT enforced_rules FROM causal_events WHERE timestamp >= ?1",
-                vec![rusqlite::types::Value::Text(ts.to_string())],
-            ),
-            None => ("SELECT enforced_rules FROM causal_events", Vec::new()),
-        };
-
-        let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
-            row.get::<_, String>(0)
-        })?;
+        let mut stmt = conn.prepare("SELECT enforced_rules, timestamp FROM causal_events")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
 
         let mut legacy_ids: Vec<String> = Vec::new();
-        for raw in rows {
-            let raw = raw?;
+        for r in rows {
+            let (raw, ts) = r?;
+            // Filter by absolute time when a bound is set. An event whose own
+            // timestamp won't parse is kept rather than dropped — we never
+            // hide enforcement activity over a formatting quirk.
+            if let Some(bound) = since_dt {
+                if let Ok(event_dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    if event_dt < bound {
+                        continue;
+                    }
+                }
+            }
             // Each cell is a JSON array of rule/right IDs; tolerate malformed
             // rows by skipping rather than failing the whole tally.
             if let Ok(ids) = serde_json::from_str::<Vec<String>>(&raw) {
