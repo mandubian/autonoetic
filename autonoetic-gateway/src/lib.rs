@@ -11,6 +11,7 @@ pub mod capsule;
 pub mod causal_chain;
 pub mod config;
 pub mod constitution_digest;
+pub mod enforcement_register;
 pub mod execution;
 pub mod fail_mode;
 pub mod interaction_answer;
