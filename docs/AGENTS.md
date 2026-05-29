@@ -349,6 +349,20 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 | `agent_spawn` | `(agent_id: string, message: any, ...) → result` | Spawn child agent |
 | `agent_exists` | `(agent_id: string) → bool` | Check if agent exists |
 | `agent_discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
+| `agent_inspect` | `(agent_id: string, ...) → metadata` | Inspect *any* installed agent's metadata/capabilities/revision |
+| `self_describe` | `() → self` | Describe *yourself* — see below |
+
+### Self-Awareness (`self_describe`)
+
+*Autonoetic* consciousness is self-knowing across time. `self_describe` makes that a first-class, single-call capability for the **calling** agent, rather than something assembled from scattered tools. It answers:
+
+- **who am I** — identity + persona
+- **what may I do** — declared capabilities + allowed tool tiers
+- **what am I guaranteed** — your **rights** under the constitution (the Bill of Rights), surfaced front-line: these *bind the gateway* on your behalf, not granted at discretion
+- **what have I done** — where your history lives (`digest_query`, `observability_*`)
+- **how do I evolve** — the revision, skill-promotion, and (capability-permitting) constitutional-amendment paths open to you
+
+It takes no arguments, reports only your own self and the public constitution, and is **always available** — an agent always has the standing to know itself. Rights are sourced from the enforcement register (`docs/constitution/enforcement-register.md`), so they stay in sync with what the gateway actually upholds.
 
 ### Skill Install Tool
 
