@@ -326,7 +326,7 @@ For reviewable/installable file bundles:
 |------|-----------|-------------|
 | `artifact_build` | `(inputs: [string], entrypoints?: [string]) → artifact` | Build immutable artifact from session content |
 | `artifact_inspect` | `(artifact_ref: string) → artifact` | Inspect artifact files, entrypoints, digest |
-| `artifact_resolve_ref` | `(artifact_ref: string) → resolved` | Resolve an artifact ref to canonical/manifest digests |
+| `resolve` | `(ref, include?) → resolved` | One front door: resolve any artifact/content handle (metadata/files/content) |
 
 ### Knowledge Tools (Durable Memory)
 

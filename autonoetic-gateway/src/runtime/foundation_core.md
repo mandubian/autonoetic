@@ -15,6 +15,7 @@ Core runtime model:
 - Use `artifact_build(inputs, entrypoints?)` to build an immutable artifact bundle.
 - `artifact_build.inputs` accepts session content identifiers or whole-artifact identifiers (`ar.*`, `art_*`). It does not accept scoped file refs like `ar.<ref>:requirements.txt`.
 - Use `artifact_inspect(artifact_ref)` to review an artifact's files and metadata.
+- **When unsure what a handle is or how to read it, use `resolve(ref, include?)`** — the one front door for ANY artifact/content handle (`art_`, `ar.`, `cnt_`, alias, name, `sha256:`, `ar.<ref>:<file>`). `include`: `metadata` (default), `files` (an artifact's files), `content` (inline bytes; pass `file` to pick a file in an artifact). The decision is simply: **run it → `artifact_exec`; see it → `resolve`.**
 - Artifact-oriented tools (`artifact_inspect`, `artifact_prepare`, `artifact_exec`, `artifact_build` artifact reuse) take the whole artifact as `ar.*` or `art_*`.
 - File-oriented reads use `content_read` with session content IDs or `ar.<ref>:<filename>`.
 - NO artifact = NO review = NO install = NO execution beyond scratch.

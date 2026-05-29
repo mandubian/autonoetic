@@ -101,7 +101,8 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | `tools/user_interaction.rs` | `user_ask`, `user_interaction_status` |
 | `human_gate.rs` | Unified `GateService` — centralizes dedup, grants, `approval_ref` validation, enrichment threads, and secret redaction for all human-gated operations (approvals, `user_ask`, escalations) |
 | `quality_signal.rs` | Per-session quality signal computation (turn count, error count, completion) — persisted as Tier-2 memories |
-| `tools/artifact.rs` | `artifact_build`, `artifact_inspect`, `artifact_resolve_ref` |
+| `tools/artifact.rs` | `artifact_build`, `artifact_inspect` |
+| `tools/resolve.rs` | `resolve` (one front door for any artifact/content handle) |
 | `tools/artifact_prepare.rs` | `artifact_prepare` |
 | `tools/artifact_exec.rs` | `artifact_exec` |
 | `tools/content.rs` | `content_write`, `content_read` |

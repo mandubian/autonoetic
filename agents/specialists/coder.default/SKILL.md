@@ -107,7 +107,7 @@ If the task fundamentally requires a running server or real network integration 
 - Follow the principle of minimal changes
 - Focus on durable outputs that should be handed off, reviewed, or installed
 - **DO NOT use `dependencies` field in `sandbox_exec`** — you don't have `NetworkAccess`. If your code needs external packages, signal to the planner that `packager.default` is needed to resolve dependencies into layers.
-- When repairing an installed agent, do not keep probing `content_read` or `artifact_resolve_ref` with stale `art_*` ids. If the task includes a known `agent_id` but no readable artifact, use `agent_inspect({"agent_id":"...","include_source":true})` once to recover the current source and layer metadata. If you have neither a valid `artifact_ref` nor an `agent_id`, return `clarification_needed` instead of guessing.
+- When repairing an installed agent, do not keep probing `content_read` or `resolve` with stale `art_*` ids. If the task includes a known `agent_id` but no readable artifact, use `agent_inspect({"agent_id":"...","include_source":true})` once to recover the current source and layer metadata. If you have neither a valid `artifact_ref` nor an `agent_id`, return `clarification_needed` instead of guessing.
 
 ## Out Of Scope
 

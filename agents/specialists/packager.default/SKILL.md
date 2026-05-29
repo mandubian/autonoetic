@@ -156,7 +156,7 @@ Only modify the entrypoint if the task explicitly requires source changes unrela
 - If you need to inspect an existing artifact, call `artifact_inspect(artifact_ref)` once. Use the artifact metadata directly, or if you must open a file, use a scoped `ar.<ref>:<filename>` ref.
 - If the task is to add layers to an existing artifact, prefer rebuilding from the artifact itself: call `artifact_build` with the original artifact ref in `inputs` plus the new `layers`. Do **not** read `main.py` / `requirements.txt` just to carry them forward unless you are actually modifying those files.
 - If you only know an installed `agent_id` and need source text for a real source edit, ask the planner for `agent_inspect({"agent_id":"...","include_source":true})` output or for explicit session content files. Do not guess artifact file handles.
-- If the provided `artifact_ref` is absent, stale, or unreadable, stop and return a failure asking the planner for a fresh `ar.*` or for extracted source files. Do **not** loop on `content_read` / `artifact_resolve_ref` variants trying different shapes of the same missing reference.
+- If the provided `artifact_ref` is absent, stale, or unreadable, stop and return a failure asking the planner for a fresh `ar.*` or for extracted source files. Do **not** loop on `content_read` / `resolve` variants trying different shapes of the same missing reference.
 
 ## Resumption
 

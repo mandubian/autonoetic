@@ -300,7 +300,7 @@ Single implementation pass. No phases, no compatibility shims.
 1. Add `artifact_canonical_digest` to `ArtifactBundle` and compute it from closure-only fields.
 2. Drop `artifact_id` from all tool input schemas and tool output payloads.
 3. Replace `artifact_id` in tool inputs with `artifact_ref`.
-4. Return `artifact_ref` and `artifact_canonical_digest` from `artifact_build`, `artifact_inspect`, `artifact_resolve_ref`.
+4. Return `artifact_ref` and `artifact_canonical_digest` from `artifact_build`, `artifact_inspect`, `resolve`.
 5. Update `artifact_exec` and `artifact_prepare` to accept `artifact_ref` and bind approval reuse identity to `artifact_canonical_digest`.
 6. Update `content_read` to resolve `ar.<ref>:<filename>` addressing instead of `art_<id>:<filename>`.
 7. Update workflow implicit outputs to include `artifact_ref` instead of `artifact_id`.
@@ -328,7 +328,7 @@ Single implementation pass. No phases, no compatibility shims.
 - `autonoetic-gateway/src/runtime/tools/artifact.rs`
   - `artifact_build`: return `artifact_ref` + `artifact_canonical_digest`; drop `artifact_id` from agent-visible output
   - `artifact_inspect`: accept `artifact_ref`; return canonical digest + manifest digest + files
-  - `artifact_resolve_ref`: return canonical digest; drop raw `artifact_id` from output
+  - `resolve`: one front door for any artifact/content handle; returns identity / files / content by `include` (replaces `artifact_resolve_ref`)
 
 - `autonoetic-gateway/src/runtime/tools/artifact_exec.rs`
 - `autonoetic-gateway/src/runtime/tools/artifact_prepare.rs`

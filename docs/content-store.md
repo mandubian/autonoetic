@@ -159,7 +159,7 @@ Accepted `inputs` forms:
 | `content_read.name_or_handle` | session content names, `cnt_...`, `sha256:...`, bare alias, scoped artifact file refs `ar.<ref>:<filename>` | bare artifact refs when you want structure/review metadata |
 | `artifact_inspect.artifact_ref` | `ar.*`, `art_*` | `ar.<ref>:<filename>`, content handles |
 | `artifact_prepare.artifact_ref` / `artifact_exec.artifact_ref` | `ar.*`, `art_*` | content handles, scoped artifact file refs |
-| `artifact_resolve_ref.ref_id` | short scoped ref `ar.*` together with explicit `scope_type` and `scope_id` | `art_*`, `ar.<ref>:<filename>` |
+| `resolve.ref` | any artifact/content handle — `ar.*`, `art_*`, `cnt_*`, bare alias, content name, `sha256:...`, or `ar.<ref>:<filename>` (scope inferred from the session) | — |
 
 Homogeneity rule:
 
