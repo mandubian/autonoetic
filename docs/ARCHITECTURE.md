@@ -771,10 +771,10 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 
 #### Principle-aware enforcement events
 
-Enforcement events carry the legacy rule/right IDs they enforce in
+Enforcement events carry the `P-x.y` / `Ri-x.y` rule/right IDs they enforce in
 `enforced_rules`, and (for richer events like `loop_guard.tripped`) the
 resolved owning **clause** in the payload. The `enforcement_register`
-reverse-maps a legacy `R-x.y` / `Ri-x.y` ID to its owning principle or right,
+reverse-maps a `P-x.y` / `Ri-x.y` ID to its owning principle or right,
 so breaches correlate by **constitutional clause**, not by ad-hoc rule
 strings. See [Contract Health](#contract-health) below.
 
@@ -822,11 +822,11 @@ so "report and correct" is a peer of "constrain." The contract-health view is
 the standing tally behind that half of the loop: how often each constitutional
 clause (principle/right) has actually been enforced.
 
-It reads the `enforced_rules` carried on `causal_events`, attributes each legacy
-rule/right ID to its owning clause via the `enforcement_register`
-(`clause_of_rule`), and tallies occurrences per clause. The `R+++3`
-event-attribution placeholder is skipped (every event carries it by default);
-real rule IDs not yet migrated into the register surface as `unattributed`, so
+It reads the `enforced_rules` carried on `causal_events`, attributes each
+`P-x.y` / `Ri-x.y` rule/right ID to its owning clause via the
+`enforcement_register` (`clause_of_rule`), and tallies occurrences per clause.
+The `R+++3` event-attribution placeholder is skipped (every event carries it by
+default); rule IDs not present in the register surface as `unattributed`, so
 coverage gaps stay visible rather than silently dropped.
 
 - **Code**: `GatewayStore::contract_health(since)` →

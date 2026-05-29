@@ -105,10 +105,11 @@ permissions or the filesystem is read-only.
 When `true`, revision creation proceeds without a signature if the key is unavailable.
 This is intended only for local development or constrained environments.
 
-### Why This Replaced the Old P-9.13 Gate
+### Why This Replaced the Original Caller-Supplied Gate
 
-The original P-9.13 design required the **caller** (agent/CLI) to provide an Ed25519
-signature in the tool arguments. This was a deadlock:
+The original design (before P-9.13 took its current gateway-side form) required
+the **caller** (agent/CLI) to provide an Ed25519 signature in the tool
+arguments. This was a deadlock:
 
 1. The agent doesn't have the gateway's private key, so it can't produce a valid signature.
 2. The gateway doesn't auto-sign, so there's no way to get a signature.
