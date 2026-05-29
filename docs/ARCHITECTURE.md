@@ -882,7 +882,7 @@ A per-session, in-memory result cache for **pure read tools** memoizes determini
 | Tool | Policy | Invalidated by |
 |---|---|---|
 | `content_read` | Cache forever in-session (content-addressed) | never |
-| `agent_exists` | Cache | `skill_install`, `agent_revision_create`, `agent_revision_create_from_intent`, `agent_revision_promote`, `agent_revision_rollback` |
+| `agent_inspect` | Cache | `skill_install`, `agent_revision_create`, `agent_revision_create_from_intent`, `agent_revision_promote`, `agent_revision_rollback` |
 | `artifact_inspect` | Cache | `artifact_build` |
 
 Properties:
@@ -890,7 +890,7 @@ Properties:
 - **Keyed by exact session id**, not root — a cached `content_read` result is never served to a sibling session, preserving per-session content visibility.
 - **Wraps only the raw `registry.execute` output**; disclosure registration and secret redaction still run on every hit, so caching is transparent to those invariants.
 - **Bounded + size-guarded**: per-session LRU of 128 entries; results over 1 MiB are never stored.
-- **Invalidation is coarse but correct**: a mutating tool clears the affected tag class (`AgentExistence` / `ArtifactMetadata`) across *all* session caches, so a child session's promote invalidates the parent's `agent_exists` cache. `content_read` is never invalidated.
+- **Invalidation is coarse but correct**: a mutating tool clears the affected tag class (`AgentExistence` / `ArtifactMetadata`) across *all* session caches, so a child session's promote invalidates the parent's `agent_inspect` cache. `content_read` is never invalidated.
 - **Audited**: a cache hit emits a `tool_call.cache_hit` causal event (and the normal execution trace still records), so the causal chain shows every logical tool call.
 
 Grounding: extends the determinism-skip principle of P-2.6 / P-2.7 (approved-execution caching) to pure reads, where the safety argument is stronger — there is no side effect to skip.

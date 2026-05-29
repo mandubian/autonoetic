@@ -538,7 +538,7 @@ mod tests {
             }
             assert!(guard.check_loop().is_ok(), "epoch {}", epoch);
             guard.register_progress(
-                "agent_exists",
+                "agent_inspect",
                 &format!(
                     r#"{{"agent_id":"weather.default","intent":"check-{epoch}"}}"#
                 ),

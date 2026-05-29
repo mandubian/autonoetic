@@ -5,7 +5,7 @@
 //!
 //! - `content_read` — content-addressed (`sha256:` handle → identical
 //!   bytes), so the result never changes for a given handle.
-//! - `agent_exists` — gateway-global existence/status fact; changes only
+//! - `agent_inspect` — agent existence + active metadata; changes only
 //!   via explicit agent-mutating tools.
 //! - `artifact_inspect` — artifact metadata; changes only via
 //!   `artifact_build`.
@@ -49,8 +49,9 @@ pub const DEFAULT_MAX_VALUE_BYTES: usize = 1024 * 1024;
 /// a mutating tool clears one tag across every session cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CacheTag {
-    /// `agent_exists` results — cleared by agent install / revision
-    /// create / promote / rollback.
+    /// `agent_inspect` results — cleared by agent install / revision
+    /// create / promote / rollback (anything that changes an agent's
+    /// existence or active metadata).
     AgentExistence,
     /// `artifact_inspect` results — cleared by `artifact_build`.
     ArtifactMetadata,
@@ -71,7 +72,7 @@ pub enum ReadCachePolicy {
 pub fn read_cache_policy(tool_name: &str) -> Option<ReadCachePolicy> {
     match tool_name {
         "content_read" => Some(ReadCachePolicy::CacheStable),
-        "agent_exists" => Some(ReadCachePolicy::CacheUnderTag(CacheTag::AgentExistence)),
+        "agent_inspect" => Some(ReadCachePolicy::CacheUnderTag(CacheTag::AgentExistence)),
         "artifact_inspect" => Some(ReadCachePolicy::CacheUnderTag(CacheTag::ArtifactMetadata)),
         _ => None,
     }
@@ -81,12 +82,11 @@ pub fn read_cache_policy(tool_name: &str) -> Option<ReadCachePolicy> {
 /// not affect any cached read class.
 pub fn invalidation_tag_for(tool_name: &str) -> Option<CacheTag> {
     match tool_name {
-        // Tools that change what `agent_exists` would return. `agent_exists`
-        // reports `unpromoted` as soon as a revision exists (see
-        // `AgentExistsTool::execute`), so revision *creation* — not just
-        // promotion — must invalidate. `skill_install` installs a SKILL.md
-        // as a brand-new agent. (There is no `agent_install` tool; that
-        // string is only an approval-action kind.)
+        // Tools that change what `agent_inspect` would return. A revision
+        // exists (and is inspectable) as soon as it is created, so revision
+        // *creation* — not just promotion — must invalidate. `skill_install`
+        // installs a SKILL.md as a brand-new agent. (There is no
+        // `agent_install` tool; that string is only an approval-action kind.)
         "skill_install"
         | "agent_revision_create"
         | "agent_revision_create_from_intent"
@@ -287,7 +287,7 @@ mod tests {
             Some(ReadCachePolicy::CacheStable)
         );
         assert_eq!(
-            read_cache_policy("agent_exists"),
+            read_cache_policy("agent_inspect"),
             Some(ReadCachePolicy::CacheUnderTag(CacheTag::AgentExistence))
         );
         assert_eq!(
@@ -369,13 +369,13 @@ mod tests {
     fn agent_existence_invalidation_clears_only_that_tag() {
         let reg = SessionReadCacheRegistry::default();
         reg.put(S, "content_read", r#"{"name":"f"}"#, "BYTES");
-        reg.put(S, "agent_exists", r#"{"agent_id":"x"}"#, r#"{"exists":false}"#);
+        reg.put(S, "agent_inspect", r#"{"agent_id":"x"}"#, r#"{"exists":false}"#);
         reg.put(S, "artifact_inspect", r#"{"artifact_ref":"a"}"#, r#"{"files":[]}"#);
 
         reg.invalidate_tag_all_sessions(CacheTag::AgentExistence);
 
-        // agent_exists cleared; content_read + artifact_inspect untouched.
-        assert!(reg.get(S, "agent_exists", r#"{"agent_id":"x"}"#).is_none());
+        // agent_inspect cleared; content_read + artifact_inspect untouched.
+        assert!(reg.get(S, "agent_inspect", r#"{"agent_id":"x"}"#).is_none());
         assert_eq!(reg.get(S, "content_read", r#"{"name":"f"}"#).as_deref(), Some("BYTES"));
         assert!(reg.get(S, "artifact_inspect", r#"{"artifact_ref":"a"}"#).is_some());
     }
@@ -383,12 +383,12 @@ mod tests {
     #[test]
     fn invalidation_spans_all_sessions() {
         let reg = SessionReadCacheRegistry::default();
-        reg.put("sess-A", "agent_exists", r#"{"agent_id":"x"}"#, "false");
-        reg.put("sess-B", "agent_exists", r#"{"agent_id":"x"}"#, "false");
+        reg.put("sess-A", "agent_inspect", r#"{"agent_id":"x"}"#, "false");
+        reg.put("sess-B", "agent_inspect", r#"{"agent_id":"x"}"#, "false");
         // A mutation in any session invalidates the existence class everywhere.
         reg.invalidate_tag_all_sessions(CacheTag::AgentExistence);
-        assert!(reg.get("sess-A", "agent_exists", r#"{"agent_id":"x"}"#).is_none());
-        assert!(reg.get("sess-B", "agent_exists", r#"{"agent_id":"x"}"#).is_none());
+        assert!(reg.get("sess-A", "agent_inspect", r#"{"agent_id":"x"}"#).is_none());
+        assert!(reg.get("sess-B", "agent_inspect", r#"{"agent_id":"x"}"#).is_none());
     }
 
     #[test]

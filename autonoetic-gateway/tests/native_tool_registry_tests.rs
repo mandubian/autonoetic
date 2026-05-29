@@ -171,7 +171,6 @@ fn test_native_tool_registry_availability() {
     let defs_spawn = registry.available_definitions(&manifest_spawn);
     assert!(defs_spawn.len() >= 8);
     assert!(defs_spawn.iter().any(|d| d.name == "agent_spawn"));
-    assert!(defs_spawn.iter().any(|d| d.name == "agent_exists"));
     assert!(defs_spawn.iter().any(|d| d.name == "agent_discover"));
     assert!(defs_spawn.iter().any(|d| d.name == "workflow_wait"));
 

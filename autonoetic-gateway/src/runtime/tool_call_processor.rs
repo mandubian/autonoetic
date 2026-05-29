@@ -1491,13 +1491,13 @@ mod tests {
         }
     }
 
-    /// A fake `agent_exists` whose result counts executions.
-    struct FakeAgentExists {
+    /// A fake `agent_inspect` whose result counts executions.
+    struct FakeAgentInspect {
         calls: Arc<AtomicUsize>,
     }
-    impl NativeTool for FakeAgentExists {
+    impl NativeTool for FakeAgentInspect {
         fn name(&self) -> &'static str {
-            "agent_exists"
+            "agent_inspect"
         }
         fn definition(&self) -> ToolDefinition {
             ToolDefinition {
@@ -1624,7 +1624,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn mutator_invalidates_agent_exists_cache() {
+    async fn mutator_invalidates_agent_inspect_cache() {
         let temp = tempdir().unwrap();
         let gw_dir = temp.path().join("gateway");
         std::fs::create_dir_all(&gw_dir).unwrap();
@@ -1636,7 +1636,7 @@ mod tests {
         let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
         let mut registry = NativeToolRegistry::new();
         let exists_calls = Arc::new(AtomicUsize::new(0));
-        registry.register(Box::new(FakeAgentExists {
+        registry.register(Box::new(FakeAgentInspect {
             calls: Arc::clone(&exists_calls),
         }));
         registry.register(Box::new(FakePromote));
@@ -1656,8 +1656,8 @@ mod tests {
 
         let ea = r#"{"agent_id":"x"}"#;
         // exists #1 (real), exists #2 (cache hit) → 1 execution.
-        processor.process_tool_calls(&[call("a1", "agent_exists", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
-        processor.process_tool_calls(&[call("a2", "agent_exists", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        processor.process_tool_calls(&[call("a1", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        processor.process_tool_calls(&[call("a2", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         assert_eq!(exists_calls.load(Ordering::SeqCst), 1, "second exists should be cached");
 
         // A promote invalidates the AgentExistence class. `agent_revision_*`
@@ -1667,7 +1667,7 @@ mod tests {
         processor.process_tool_calls(&[call("p1", "agent_revision_promote", r#"{"intent":"promote x for invalidation test"}"#)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
 
         // exists #3 must re-execute (cache invalidated) → 2 executions.
-        processor.process_tool_calls(&[call("a3", "agent_exists", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        processor.process_tool_calls(&[call("a3", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         assert_eq!(exists_calls.load(Ordering::SeqCst), 2, "exists after promote must re-execute");
     }
 

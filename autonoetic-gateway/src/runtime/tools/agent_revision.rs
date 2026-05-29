@@ -1309,7 +1309,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 return Ok(ToolError::fatal(
                     format!(
                         "Agent '{}' already has an active revision ({}). \
-                         Use agent_exists to check before installing. \
+                         Use agent_inspect to check before installing. \
                          If you need to update, pass replace: true to archive the existing revision first.",
                         args.agent_id,
                         active_revisions.join(", ")

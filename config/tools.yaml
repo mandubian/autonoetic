@@ -27,8 +27,6 @@ rules:
   # Workflow tier: orchestration and approval flow.
   - prefix: agent_spawn
     tier: workflow
-  - prefix: agent_exists
-    tier: workflow
   - prefix: agent_list
     tier: workflow
   - prefix: agent_discover
