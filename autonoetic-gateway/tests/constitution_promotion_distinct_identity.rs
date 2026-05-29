@@ -328,8 +328,8 @@ fn same_agent_identity_rejected_even_if_both_passed() {
     );
     let err = result.unwrap_err();
     assert!(
-        err.contains("R-2.17"),
-        "error should reference R-2.17: {err}"
+        err.contains("P-2.17"),
+        "error should reference P-2.17: {err}"
     );
     assert!(
         err.contains("same agent"),

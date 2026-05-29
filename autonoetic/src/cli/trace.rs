@@ -568,7 +568,7 @@ pub fn handle_trace_contract_health(
     if health.unattributed > 0 {
         println!();
         println!(
-            "{}{} unattributed enforcement(s){} — legacy rule/right IDs not yet in the register (migration gap).",
+            "{}{} unattributed enforcement(s){} — rule/right IDs not yet in the register (migration gap).",
             color::YELLOW,
             health.unattributed,
             color::RESET

@@ -15,7 +15,7 @@
 //! turn. This module memoizes the raw tool result keyed by
 //! `(tool_name, sha256(normalized_args))`, scoped to one session.
 //!
-//! Constitutional grounding: same family as R-2.6 / R-2.7 (deterministic
+//! Constitutional grounding: same family as P-2.6 / P-2.7 (deterministic
 //! operations skip re-execution), extended to pure reads where the safety
 //! argument is stronger — there is no side effect to skip.
 //!

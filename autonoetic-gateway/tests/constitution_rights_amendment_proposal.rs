@@ -136,7 +136,7 @@ fn capability_holder_proposal_persists_with_durable_id() {
         &manifest,
         r#"{
             "kind": "modify_rule",
-            "target_id": "R-7.5",
+            "target_id": "P-7.5",
             "proposed_text": "Approval flood cap raised from 10 to 50 per root session.",
             "justification": "Throughput-limited workflows hit the cap during legitimate burst review.",
             "evidence": ["evt-aaaa", "evt-bbbb"]
@@ -154,7 +154,7 @@ fn capability_holder_proposal_persists_with_durable_id() {
         .expect("query")
         .expect("row exists");
     assert_eq!(row.kind, "modify_rule");
-    assert_eq!(row.target_id.as_deref(), Some("R-7.5"));
+    assert_eq!(row.target_id.as_deref(), Some("P-7.5"));
     assert_eq!(row.status, "pending");
     assert_eq!(row.proposer_agent_id, "test-agent");
     assert_eq!(row.proposer_session_id.as_deref(), Some("test-session"));
@@ -232,7 +232,7 @@ fn modify_kind_requires_target_and_text() {
     let no_text = invoke(
         &h,
         &manifest,
-        r#"{"kind":"modify_rule","target_id":"R-7.5","justification":"j"}"#,
+        r#"{"kind":"modify_rule","target_id":"P-7.5","justification":"j"}"#,
     );
     assert_eq!(no_text["ok"], false);
     assert!(no_text["message"]
@@ -275,9 +275,9 @@ fn operator_approve_reject_defer_transitions() {
         );
         resp["proposal_id"].as_str().unwrap().to_string()
     };
-    let p_approve = make("modify_rule", "R-1.1");
-    let p_reject = make("modify_rule", "R-1.2");
-    let p_defer = make("modify_rule", "R-1.3");
+    let p_approve = make("modify_rule", "P-1.1");
+    let p_reject = make("modify_rule", "P-1.2");
+    let p_defer = make("modify_rule", "P-1.3");
 
     assert!(h
         .store
@@ -338,7 +338,7 @@ fn under_review_transition_does_not_record_decision() {
     let resp = invoke(
         &h,
         &manifest,
-        r#"{"kind":"modify_rule","target_id":"R-1.1","proposed_text":"x","justification":"j"}"#,
+        r#"{"kind":"modify_rule","target_id":"P-1.1","proposed_text":"x","justification":"j"}"#,
     );
     let id = resp["proposal_id"].as_str().unwrap().to_string();
 
@@ -391,9 +391,9 @@ fn release_marks_only_approved_unpublished() {
         );
         resp["proposal_id"].as_str().unwrap().to_string()
     };
-    let p_a = make("modify_rule", "R-1.1");
-    let p_b = make("modify_rule", "R-1.2");
-    let p_c = make("modify_rule", "R-1.3");
+    let p_a = make("modify_rule", "P-1.1");
+    let p_b = make("modify_rule", "P-1.2");
+    let p_c = make("modify_rule", "P-1.3");
 
     h.store
         .decide_constitutional_proposal(&p_a, "approved", "op", None)

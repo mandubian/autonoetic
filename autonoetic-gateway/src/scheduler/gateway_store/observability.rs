@@ -112,7 +112,7 @@ impl GatewayStore {
 
         if traces_pruned > 0 || events_pruned > 0 {
             let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
-            rules.push("R-8.17".to_string());
+            rules.push("P-8.17".to_string());
 
             let payload = serde_json::json!({
                 "execution_traces_pruned": traces_pruned,
@@ -359,7 +359,7 @@ impl GatewayStore {
     /// Standing **contract-health** view (#302): tally how often each
     /// constitutional clause (principle/right) has been enforced, by reading
     /// the `enforced_rules` carried on causal events and attributing each
-    /// legacy rule/right ID to its owning clause via the enforcement register.
+    /// rule/right ID to its owning clause via the enforcement register.
     ///
     /// The `R+++3` event-attribution placeholder (every event carries it by
     /// default) is skipped — only events that named a concrete rule/right
@@ -392,7 +392,7 @@ impl GatewayStore {
         let rows = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
 
-        let mut legacy_ids: Vec<String> = Vec::new();
+        let mut rule_ids: Vec<String> = Vec::new();
         for r in rows {
             let (raw, ts) = r?;
             // Filter by absolute time when a bound is set. An event whose own
@@ -408,11 +408,11 @@ impl GatewayStore {
             // Each cell is a JSON array of rule/right IDs; tolerate malformed
             // rows by skipping rather than failing the whole tally.
             if let Ok(ids) = serde_json::from_str::<Vec<String>>(&raw) {
-                legacy_ids.extend(ids.into_iter().filter(|id| id != placeholder));
+                rule_ids.extend(ids.into_iter().filter(|id| id != placeholder));
             }
         }
 
-        Ok(crate::enforcement_register::contract_health(legacy_ids))
+        Ok(crate::enforcement_register::contract_health(rule_ids))
     }
 
     /// List curator decision events (`category = 'curator'`, `action = 'decision'`)

@@ -24,7 +24,7 @@ metadata:
       approval_mode: preapproved
     capabilities:
       - type: "SandboxFunctions"
-        # Prefixes match canonical tool ids (`knowledge_store`, `sandbox_exec`, `promotion_record`) for R-1.1.
+        # Prefixes match canonical tool ids (`knowledge_store`, `sandbox_exec`, `promotion_record`) for P-1.1.
         allowed: ["knowledge_", "sandbox_", "promotion_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "bash -c ", "sh -c ", "python3 scripts/", "python scripts/"]

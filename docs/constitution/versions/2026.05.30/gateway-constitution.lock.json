@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "constitution_id": "autonoetic-gateway-constitution",
+  "constitution_version": "2026.05.30",
+  "constitution_source": "docs/constitution/versions/2026.05.30/constitution.md",
+  "constitution_digest": "PENDING_OPERATOR_SIGNATURE",
+  "rule_enforcement_count": 0,
+  "right_enforcement_count": 0,
+  "canonicalization": {
+    "algorithm": "sha256",
+    "payload": "json({constitution_text,rights_enforcement,rules_enforcement})",
+    "rules_prefix": "P-",
+    "rights_prefix": "Ri-"
+  }
+}

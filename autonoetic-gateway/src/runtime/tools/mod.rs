@@ -106,7 +106,7 @@ impl ToolTierFilter {
         }
     }
 
-    /// Filter for `SessionState::Degraded` (R-7.18): Core tier + inspection
+    /// Filter for `SessionState::Degraded` (P-7.18): Core tier + inspection
     /// tools. The agent has lost specialized capabilities but retains the
     /// ability to read its own causal chain, look up the rule that degraded
     /// it, and inspect what it was doing — so recovery and reporting are

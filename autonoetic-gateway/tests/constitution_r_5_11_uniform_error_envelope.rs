@@ -1,4 +1,4 @@
-//! Constitution R-5.11 — native tool failures use a uniform error envelope.
+//! Constitution P-5.11 — native tool failures use a uniform error envelope.
 
 mod support;
 

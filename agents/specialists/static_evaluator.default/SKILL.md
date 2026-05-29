@@ -21,7 +21,7 @@ metadata:
       temperature: 0.1
     capabilities:
       - type: "SandboxFunctions"
-        # Prefixes match canonical tool ids (`knowledge_store`, `promotion_record`) for R-1.1.
+        # Prefixes match canonical tool ids (`knowledge_store`, `promotion_record`) for P-1.1.
         allowed: ["knowledge_", "promotion_"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]

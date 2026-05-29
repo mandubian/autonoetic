@@ -389,7 +389,7 @@ fn fetch_markdown_for_skill_normalize(
     let host = extract_host(url).map_err(|e| e.to_string())?;
     if !policy.can_connect_net(&host).is_allowed() {
         return Err(format!(
-            "skill_normalize received only a URL in `content`, but NetworkAccess does not allow host '{}' (rule R-1.5). \
+            "skill_normalize received only a URL in `content`, but NetworkAccess does not allow host '{}' (rule P-1.5). \
 Fetch the document with a network-capable step and pass the markdown body in `content`, or add this host to NetworkAccess.",
             host
         ));
@@ -693,7 +693,7 @@ impl NativeTool for SkillNormalizeTool {
                     },
                     "content": {
                         "type": "string",
-                        "description": "Full markdown text of the external skill/API spec. If this value is a single line containing only an http(s) URL, the gateway fetches it (requires NetworkAccess for that host, rule R-1.5) and normalizes the response body."
+                        "description": "Full markdown text of the external skill/API spec. If this value is a single line containing only an http(s) URL, the gateway fetches it (requires NetworkAccess for that host, rule P-1.5) and normalizes the response body."
                     },
                     "service": {
                         "type": "string",
@@ -782,7 +782,7 @@ impl NativeTool for SkillNormalizeTool {
                 "ok": false,
                 "error_type": "permission",
                 "error": format!(
-                    "WriteAccess denied for normalized skill path '{}' (policy R-1.4)",
+                    "WriteAccess denied for normalized skill path '{}' (policy P-1.4)",
                     rel
                 ),
             })

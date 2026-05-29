@@ -448,7 +448,7 @@ fn test_observability_search_after_publish() -> anyhow::Result<()> {
 }
 
 /// Contract-health view (#302): the store tallies `enforced_rules` carried on
-/// causal events by their constitutional clause, attributing legacy rule/right
+/// causal events by their constitutional clause, attributing rule/right
 /// IDs via the enforcement register and surfacing unrecognised IDs separately.
 #[test]
 fn test_contract_health_tallies_by_clause() -> anyhow::Result<()> {
@@ -482,14 +482,14 @@ fn test_contract_health_tallies_by_clause() -> anyhow::Result<()> {
         })
     };
 
-    // R-7.19 + R-7.5 both belong to principle P-7; Ri-0.14 is its own clause.
-    // R-9.99 is not (yet) in the register → unattributed. The bare placeholder
+    // P-7.19 + P-7.5 both belong to principle P-7; Ri-0.14 is its own clause.
+    // P-9.99 is not (yet) in the register → unattributed. The bare placeholder
     // event contributes nothing.
-    emit(vec!["R-7.19"])?;
-    emit(vec!["R-7.19"])?;
-    emit(vec!["R-7.5"])?;
+    emit(vec!["P-7.19"])?;
+    emit(vec!["P-7.19"])?;
+    emit(vec!["P-7.5"])?;
     emit(vec!["Ri-0.14"])?;
-    emit(vec!["R-9.99"])?;
+    emit(vec!["P-9.99"])?;
     emit(vec!["R+++3"])?; // default placeholder — skipped entirely
 
     let health = store.contract_health(None)?;
@@ -501,7 +501,7 @@ fn test_contract_health_tallies_by_clause() -> anyhow::Result<()> {
 
     // `since` filter excludes the earliest events.
     let health_since = store.contract_health(Some("2026-05-29T00:00:04Z"))?;
-    // Only Ri-0.14 (seq 4), R-9.99 (seq 5), placeholder (seq 6) remain.
+    // Only Ri-0.14 (seq 4), P-9.99 (seq 5), placeholder (seq 6) remain.
     assert_eq!(health_since.by_clause, vec![("Ri-0.14".to_string(), 1)]);
     assert_eq!(health_since.unattributed, 1);
 

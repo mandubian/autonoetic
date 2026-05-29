@@ -1,4 +1,4 @@
-//! Constitution R-5.14: workflow failures must expose gateway-owned typed
+//! Constitution P-5.14: workflow failures must expose gateway-owned typed
 //! classification while preserving the legacy summary surface during rollout.
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;

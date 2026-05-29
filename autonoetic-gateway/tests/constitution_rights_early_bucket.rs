@@ -183,7 +183,7 @@ fn ri_0_2_agent_without_read_access_cannot_use_observability() {
     );
     assert_eq!(
         parsed["error_type"], "permission",
-        "refusal must use the permission envelope (R-5.11)"
+        "refusal must use the permission envelope (P-5.11)"
     );
 }
 

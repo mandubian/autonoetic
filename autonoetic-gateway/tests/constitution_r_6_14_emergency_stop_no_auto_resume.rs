@@ -1,4 +1,4 @@
-//! Constitution R-6.14 — EmergencyStop checkpoints never auto-resume.
+//! Constitution P-6.14 — EmergencyStop checkpoints never auto-resume.
 
 mod support;
 

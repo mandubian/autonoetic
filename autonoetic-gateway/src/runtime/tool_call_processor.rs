@@ -134,7 +134,7 @@ impl<'a> ToolCallProcessor<'a> {
 
             if self.is_degraded_blocked_tool(&tool_name) {
                 let tool_error = ToolError::permission(format!(
-                    "session_degraded: tool '{}' blocked in degraded mode (R-7.18). \
+                    "session_degraded: tool '{}' blocked in degraded mode (P-7.18). \
                      CodeExecution is refused until operator clears degradation.",
                     tool_name
                 ));

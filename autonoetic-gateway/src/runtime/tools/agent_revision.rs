@@ -2327,7 +2327,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             );
             let audit_id = record.auditor_id.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Promotion gate: auditor identity missing for artifact '{}' (R-2.17). \
+                    "Promotion gate: auditor identity missing for artifact '{}' (P-2.17). \
                      Re-run auditor.default to record its identity.",
                     artifact_id
                 )
@@ -2350,26 +2350,26 @@ impl NativeTool for AgentRevisionPromoteTool {
                         .or(record.static_evaluator_id.as_deref())
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "Promotion gate: evaluator identity missing for artifact '{}' (R-2.17). \
+                                "Promotion gate: evaluator identity missing for artifact '{}' (P-2.17). \
                                  Re-run an evaluator role to record its identity.",
                                 artifact_id
                             )
                         })?;
                     anyhow::ensure!(
                         eval_id != audit_id,
-                        "Promotion gate: evaluator and auditor are the same agent '{}' (R-2.17). \
+                        "Promotion gate: evaluator and auditor are the same agent '{}' (P-2.17). \
                          A single agent cannot self-approve. Use distinct evaluator and auditor agents.",
                         eval_id
                     );
                 }
                 PromotionGateMode::AuditOnly => {
-                    // R-2.17 reduced: auditor must be a distinct identity
+                    // P-2.17 reduced: auditor must be a distinct identity
                     // from the agent that proposed the install. With no
                     // evaluator in this mode, the proposer is the relevant
                     // counterparty for the self-approval ban.
                     anyhow::ensure!(
                         audit_id != rev.created_by_id,
-                        "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (R-2.17, audit-only). \
+                        "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (P-2.17, audit-only). \
                          A single agent cannot propose and audit. Use a distinct auditor identity.",
                         audit_id,
                         args.revision_id
@@ -2407,7 +2407,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                 category: "revision".to_string(),
                 action: "revision.promotion_gate_enforced".to_string(),
                 status: "active".to_string(),
-                enforced_rules: vec!["R-2.8".to_string(), "R-2.17".to_string(), "R-2.22".to_string()],
+                enforced_rules: vec!["P-2.8".to_string(), "P-2.17".to_string(), "P-2.22".to_string()],
                 target: artifact_id.map(|s| s.to_string()),
                 payload: Some(
                     serde_json::json!({
@@ -2505,7 +2505,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             if promo_store.has_federation_roles(artifact_id) {
                 let fed_ids = promo_store.federation_agent_ids(artifact_id);
 
-                // R-2.17 extended: each federation role identity must differ
+                // P-2.17 extended: each federation role identity must differ
                 // from every other federation role identity AND from the
                 // revision proposer.
                 let proposer = rev.created_by_id.as_str();
@@ -2513,7 +2513,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                     anyhow::ensure!(
                         id != proposer,
                         "Promotion gate (FullJury): federation role '{}' is the same identity \
-                         that proposed revision '{}' (R-2.17). Each federation role must be \
+                         that proposed revision '{}' (P-2.17). Each federation role must be \
                          a distinct agent from the proposer.",
                         id,
                         args.revision_id
@@ -2525,7 +2525,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                             anyhow::ensure!(
                                 fed_ids[i] != fed_ids[j],
                                 "Promotion gate (FullJury): federation roles '{}' and '{}' \
-                                 are the same agent (R-2.17). Each federation role must be \
+                                 are the same agent (P-2.17). Each federation role must be \
                                  a distinct agent.",
                                 fed_ids[i],
                                 fed_ids[j]

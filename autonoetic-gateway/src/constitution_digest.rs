@@ -89,7 +89,7 @@ impl ConstitutionRuntime {
         })?;
 
         let rights_enforcement = extract_enforcement_table(&text, "Ri-");
-        let rules_enforcement = extract_enforcement_table(&text, "R-");
+        let rules_enforcement = extract_enforcement_table(&text, "P-");
         let payload = canonical_digest_payload(&text, &rights_enforcement, &rules_enforcement);
         let mut hasher = Sha256::new();
         hasher.update(payload.as_bytes());
@@ -242,8 +242,8 @@ pub fn verify_constitution_lock_integrity() -> anyhow::Result<()> {
         "constitution lock canonicalization.payload must match the canonical digest payload declaration"
     );
     anyhow::ensure!(
-        lock.canonicalization.rules_prefix == "R-",
-        "constitution lock canonicalization.rules_prefix must be 'R-'"
+        lock.canonicalization.rules_prefix == "P-",
+        "constitution lock canonicalization.rules_prefix must be 'P-'"
     );
     anyhow::ensure!(
         lock.canonicalization.rights_prefix == "Ri-",
@@ -534,10 +534,10 @@ mod tests {
     fn extracts_rule_enforcement_rows() {
         init_default_constitution();
         let rules = canonical_rule_enforcement_table();
-        assert!(rules.contains_key("R-1.1"));
+        assert!(rules.contains_key("P-1.1"));
         assert!(rules
-            .get("R-1.1")
-            .expect("R-1.1 must exist")
+            .get("P-1.1")
+            .expect("P-1.1 must exist")
             .contains("tool_call_processor"));
     }
 
@@ -610,7 +610,7 @@ mod tests {
         );
         assert_eq!(
             lock.constitution_source,
-            "docs/constitution/versions/2026.05.29/constitution.md"
+            "docs/constitution/versions/2026.05.30/constitution.md"
         );
     }
 }

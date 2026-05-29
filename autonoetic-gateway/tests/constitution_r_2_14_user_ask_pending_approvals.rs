@@ -1,4 +1,4 @@
-//! Constitution R-2.14 — `user_ask` is blocked while approvals are pending.
+//! Constitution P-2.14 — `user_ask` is blocked while approvals are pending.
 
 mod support;
 

@@ -237,7 +237,7 @@ fn ri_0_13c_execute_rejects_path_traversal() -> anyhow::Result<()> {
     );
     assert_eq!(
         parsed["error_type"], "validation",
-        "rejection must use the validation envelope (R-5.11)"
+        "rejection must use the validation envelope (P-5.11)"
     );
 
     let result2 = tool.execute(
@@ -261,7 +261,7 @@ fn ri_0_13c_execute_rejects_path_traversal() -> anyhow::Result<()> {
     );
     assert_eq!(
         parsed2["error_type"], "validation",
-        "rejection must use the validation envelope (R-5.11)"
+        "rejection must use the validation envelope (P-5.11)"
     );
 
     Ok(())

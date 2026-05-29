@@ -1,4 +1,4 @@
-//! Constitution R+2 / R-5.13 — Egress schema validation on tool results.
+//! Constitution R+2 / P-5.13 — Egress schema validation on tool results.
 //!
 //! Child → parent tool results validate against `io.returns` on egress,
 //! symmetric to ingress `io.accepts`.  Fail-open for missing schema,

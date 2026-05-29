@@ -136,12 +136,12 @@ impl RootSessionBudgetRegistry {
         } else if let Some(max_price) = self.limits.max_session_price_usd {
             if max_price >= 0.0 {
                 if !allow_unpriced_completion {
-                    let mode = crate::fail_mode::lookup_fail_mode("R-6.5")
+                    let mode = crate::fail_mode::lookup_fail_mode("P-6.5")
                         .map(|m| m.to_string())
                         .unwrap_or_else(|| "refuse-session-start".to_string());
                     anyhow::bail!(
                         "Root session cost-budget enforcement requires price estimation but \
-                         catalog is unavailable (R-6.5, R++10: fail-mode={}). \
+                         catalog is unavailable (P-6.5, R++10: fail-mode={}). \
                          Refusing untracked LLM completion (root: {})",
                         mode,
                         root_session_id

@@ -371,7 +371,7 @@ When `sandbox_exec` returns `approval_required: true` with `request_id`, the gat
 When `sandbox_exec` returns `"error_type": "permission"`:
 
 - If the message is **static analysis / security policy** (destructive commands, privilege escalation, environment disclosure, etc.), **do not retry** the same command.
-- If the message references **rule R-1.9** / **CodeExecution pattern** / **command does not match any** declared capability, the shell is **not allowed by this agent's manifest** (this is **not** missing operator network approval). **Do not retry** the same shape: fix patterns/`commands` via promotion, use an allowed prefix, or delegate.
+- If the message references **rule P-1.9** / **CodeExecution pattern** / **command does not match any** declared capability, the shell is **not allowed by this agent's manifest** (this is **not** missing operator network approval). **Do not retry** the same shape: fix patterns/`commands` via promotion, use an allowed prefix, or delegate.
 
 **Options:**
 1. Check if the command matches allowed patterns (`python3 `, `node `, `bash -c `, `sh -c `) or the `commands` allow-list

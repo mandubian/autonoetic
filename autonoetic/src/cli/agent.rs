@@ -2425,7 +2425,7 @@ Use tools when needed.
         let es = err.to_string();
         assert!(
             es.contains("blocked by security policy (static analysis)")
-                || es.contains("rule R-1.9")
+                || es.contains("rule P-1.9")
                 || es.contains("sandbox command denied by security policy")
                 || es.contains("sandbox command denied by CodeExecution policy")
                 || es.contains("LoopGuard tripped"),

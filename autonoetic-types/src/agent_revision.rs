@@ -175,7 +175,7 @@ pub struct AgentRevisionRecord {
     #[serde(default)]
     pub short_id: String,
     /// Ed25519 signature over the canonical revision content digest (base64).
-    /// Produced by the gateway at revision creation time (R+11 auto-sign).
+    /// Produced by the gateway at revision creation time (P-9.13 auto-sign).
     /// Verified against the signer's public key for integrity attestation.
     #[serde(default)]
     pub signature: Option<String>,

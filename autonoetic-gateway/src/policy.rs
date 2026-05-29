@@ -91,7 +91,7 @@ impl PolicyDecision {
                 a.reason.as_deref().unwrap_or("security threats detected")
             ),
             _ => format!(
-                "{} not permitted: this command does not match any CodeExecution pattern or allowed command (rule R-1.9). \
+                "{} not permitted: this command does not match any CodeExecution pattern or allowed command (rule P-1.9). \
 This is not a missing operator approval step—remote/network gating runs only after the command is allowed here. \
 Fix: widen the agent's CodeExecution patterns or `commands` list, wrap with an allowed prefix when appropriate (e.g. `bash -c 'curl …'`), or delegate HTTP to a gateway fetch tool / another agent.",
                 context_label
@@ -467,7 +467,7 @@ impl PolicyEngine {
         // First, run security analysis
         let security = SecurityAnalyzer::analyze_command(command);
         if !security.is_safe {
-            return PolicyDecision::deny_with_analysis("R-3.8", security);
+            return PolicyDecision::deny_with_analysis("P-3.8", security);
         }
 
         // Then check against capability patterns
@@ -486,7 +486,7 @@ impl PolicyEngine {
                             continue;
                         }
                         if trimmed.starts_with(prefix) {
-                            return PolicyDecision::allow("R-1.9");
+                            return PolicyDecision::allow("P-1.9");
                         }
                     }
                 }
@@ -508,7 +508,7 @@ impl PolicyEngine {
                         }
                         for cmd in commands {
                             if SecurityAnalyzer::contains_shell_word(trimmed, cmd) {
-                                return PolicyDecision::allow("R-1.9");
+                                return PolicyDecision::allow("P-1.9");
                             }
                         }
                     }
@@ -516,7 +516,7 @@ impl PolicyEngine {
             }
         }
 
-        PolicyDecision::deny("R-1.9")
+        PolicyDecision::deny("P-1.9")
     }
 
     /// Check if the agent is allowed to execute a given command string.
@@ -529,11 +529,11 @@ impl PolicyEngine {
         for cap in &self.manifest.capabilities {
             if let Capability::NetworkAccess { hosts } = cap {
                 if hosts.iter().any(|h| h == host || h == "*") {
-                    return PolicyDecision::allow("R-1.5");
+                    return PolicyDecision::allow("P-1.5");
                 }
             }
         }
-        PolicyDecision::deny("R-1.5")
+        PolicyDecision::deny("P-1.5")
     }
 
     /// Check if the agent is allowed to invoke a named tool (typically MCP tools).
@@ -543,12 +543,12 @@ impl PolicyEngine {
                 for pattern in allowed {
                     let prefix = pattern.trim_end_matches('*');
                     if tool_name.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.1")
+        PolicyDecision::deny("P-1.1")
     }
 
     /// Check if the agent is allowed to read from a relative file path.
@@ -558,12 +558,12 @@ impl PolicyEngine {
                 for scope in scopes {
                     let prefix = scope.trim_end_matches('*');
                     if path.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.4");
+                        return PolicyDecision::allow("P-1.4");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.4")
+        PolicyDecision::deny("P-1.4")
     }
 
     /// Check if the agent is allowed to write to a relative file path.
@@ -573,22 +573,22 @@ impl PolicyEngine {
                 for scope in scopes {
                     let prefix = scope.trim_end_matches('*');
                     if path.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.4");
+                        return PolicyDecision::allow("P-1.4");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.4")
+        PolicyDecision::deny("P-1.4")
     }
 
     /// Check if the agent is allowed to spawn child agents.
     pub fn can_spawn_agent(&self) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if matches!(cap, Capability::AgentSpawn { .. }) {
-                return PolicyDecision::allow("R-1.7");
+                return PolicyDecision::allow("P-1.7");
             }
         }
-        PolicyDecision::deny("R-1.7")
+        PolicyDecision::deny("P-1.7")
     }
 
     /// Privileged: request gateway emergency stop for a root session.
@@ -599,9 +599,9 @@ impl PolicyEngine {
             .iter()
             .any(|c| matches!(c, Capability::EmergencyStop))
         {
-            PolicyDecision::allow("R-7.1")
+            PolicyDecision::allow("P-7.1")
         } else {
-            PolicyDecision::deny("R-7.1")
+            PolicyDecision::deny("P-7.1")
         }
     }
 
@@ -638,12 +638,12 @@ impl PolicyEngine {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if target_agent.starts_with(prefix) {
-                        return PolicyDecision::allow("R-11.5");
+                        return PolicyDecision::allow("P-11.5");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-11.5")
+        PolicyDecision::deny("P-11.5")
     }
 
     pub fn can_agent_revision(&self, target: &str) -> PolicyDecision {
@@ -652,12 +652,12 @@ impl PolicyEngine {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if target.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.3");
+                        return PolicyDecision::allow("P-1.3");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.3")
+        PolicyDecision::deny("P-1.3")
     }
 
     pub fn can_evaluate_suite(&self, suite_id: &str, subject_agent_id: &str) -> PolicyDecision {
@@ -666,15 +666,15 @@ impl PolicyEngine {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if suite_id.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                     if !subject_agent_id.is_empty() && subject_agent_id.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.1")
+        PolicyDecision::deny("P-1.1")
     }
 
     pub fn can_evaluate_suite_publish(&self, suite_name: &str) -> PolicyDecision {
@@ -683,12 +683,12 @@ impl PolicyEngine {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if suite_name.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.1")
+        PolicyDecision::deny("P-1.1")
     }
 
     /// Return background reevaluation limits, if configured.
@@ -722,17 +722,17 @@ impl PolicyEngine {
                     .iter()
                     .any(|s| s == "*" || s.trim_end_matches('*').is_empty())
                 {
-                    return PolicyDecision::allow("R-1.4");
+                    return PolicyDecision::allow("P-1.4");
                 }
                 for allowed_scope in scopes {
                     let prefix = allowed_scope.trim_end_matches('*');
                     if scope.starts_with(prefix) || scope == allowed_scope {
-                        return PolicyDecision::allow("R-1.4");
+                        return PolicyDecision::allow("P-1.4");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.4")
+        PolicyDecision::deny("P-1.4")
     }
 
     /// Check if the agent can read from a Tier 2 memory scope.
@@ -744,17 +744,17 @@ impl PolicyEngine {
                     .iter()
                     .any(|s| s == "*" || s.trim_end_matches('*').is_empty())
                 {
-                    return PolicyDecision::allow("R-1.4");
+                    return PolicyDecision::allow("P-1.4");
                 }
                 for allowed_scope in scopes {
                     let prefix = allowed_scope.trim_end_matches('*');
                     if scope.starts_with(prefix) || scope == allowed_scope {
-                        return PolicyDecision::allow("R-1.4");
+                        return PolicyDecision::allow("P-1.4");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.4")
+        PolicyDecision::deny("P-1.4")
     }
 
     /// Check if the agent is allowed to perform a scheduler/cron operation.
@@ -764,12 +764,12 @@ impl PolicyEngine {
                 for pattern in patterns {
                     let prefix = pattern.trim_end_matches('*');
                     if operation.starts_with(prefix) {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.1")
+        PolicyDecision::deny("P-1.1")
     }
 
     /// Check if the agent is allowed to install a skill from a given URL host.
@@ -778,12 +778,12 @@ impl PolicyEngine {
             if let Capability::SkillInstall { allowed_sources } = cap {
                 for source in allowed_sources {
                     if source == "*" || source == url_host {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.1")
+        PolicyDecision::deny("P-1.1")
     }
 
     pub fn can_create_github_issue(&self, repo: &str) -> PolicyDecision {
@@ -791,19 +791,19 @@ impl PolicyEngine {
             if let Capability::GithubIssueCreate { patterns } = cap {
                 for pattern in patterns {
                     if pattern == "*" {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                     if let Some(prefix) = pattern.strip_suffix('*') {
                         if repo.starts_with(prefix) {
-                            return PolicyDecision::allow("R-1.1");
+                            return PolicyDecision::allow("P-1.1");
                         }
                     } else if repo == pattern {
-                        return PolicyDecision::allow("R-1.1");
+                        return PolicyDecision::allow("P-1.1");
                     }
                 }
             }
         }
-        PolicyDecision::deny("R-1.1")
+        PolicyDecision::deny("P-1.1")
     }
 
     /// Gate `capsule.export` / `capsule.import` on the `CapsuleExport`
@@ -813,10 +813,10 @@ impl PolicyEngine {
     pub fn can_use_capsule(&self) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if matches!(cap, Capability::CapsuleExport) {
-                return PolicyDecision::allow("R-1.1");
+                return PolicyDecision::allow("P-1.1");
             }
         }
-        PolicyDecision::deny("R-1.1")
+        PolicyDecision::deny("P-1.1")
     }
 
     pub fn can_audit_reasoning(&self, target_agent_id: &str) -> PolicyDecision {
@@ -1092,7 +1092,7 @@ mod tests {
         let decision = policy.can_exec_shell_detailed("curl -s https://example.com");
         assert!(!decision.is_allowed());
         let msg = decision.explain_shell_denial("Sandbox execution");
-        assert!(msg.contains("R-1.9"), "{msg}");
+        assert!(msg.contains("P-1.9"), "{msg}");
         assert!(msg.contains("operator approval"), "{msg}");
     }
 

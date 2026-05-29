@@ -22,7 +22,7 @@ metadata:
     sandbox_network: normal
     capabilities:
       - type: "SandboxFunctions"
-        # Prefixes match canonical tool ids (`knowledge_store`, `sandbox_exec`, `promotion_record`) for R-1.1.
+        # Prefixes match canonical tool ids (`knowledge_store`, `sandbox_exec`, `promotion_record`) for P-1.1.
         allowed: ["knowledge_", "sandbox_", "promotion_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "npm ", "bash -c ", "sh -c ", "go test", "cargo test"]

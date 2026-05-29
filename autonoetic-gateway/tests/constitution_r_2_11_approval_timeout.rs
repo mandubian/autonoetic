@@ -1,4 +1,4 @@
-//! Constitution R-2.11 & R-7.11 — approval timeout marks the task Failed
+//! Constitution P-2.11 & P-7.11 — approval timeout marks the task Failed
 //! while preserving the continuation for operator-driven resume.
 
 mod support;

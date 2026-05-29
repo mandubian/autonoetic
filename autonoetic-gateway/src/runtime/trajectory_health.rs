@@ -44,7 +44,7 @@ pub const DIVERGENCE_ACTION_ESCALATED: &str = "escalated";
 /// Default warn fraction (80%) used to derive a `Warn` severity from
 /// LoopGuard pressure values. Matches the existing
 /// `LoopGuard::is_sub_trip_warning` threshold so the new substrate stays
-/// consistent with R-7.18 degraded-mode entry.
+/// consistent with P-7.18 degraded-mode entry.
 pub const DEFAULT_WARN_THRESHOLD: f32 = 0.80;
 
 /// Default critical fraction (95%) used to derive a `Critical` severity.
@@ -269,7 +269,7 @@ pub fn classify_pressure(kind: DivergenceSignalKind, current: f32) -> Option<Div
 ///
 /// This is the bridge between the existing `LoopGuard::is_sub_trip_warning`
 /// behavior (a single bool) and the richer multi-signal view the monitor
-/// consumes. The bool stays where it is for R-7.18 degraded-mode entry;
+/// consumes. The bool stays where it is for P-7.18 degraded-mode entry;
 /// this function is additive.
 ///
 /// Signals returned:
