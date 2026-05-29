@@ -213,6 +213,69 @@ pub fn entries_for(clause_id: &str) -> impl Iterator<Item = &'static Enforcement
         .filter(move |e| e.clause_id == clause_id)
 }
 
+/// Reverse-lookup: which clause does a legacy `R-x.y` / `Ri-x.y` ID belong
+/// to? Lets enforcement events that still carry legacy rule IDs (e.g.
+/// `loop_guard.tripped`'s `enforced_rules`) be attributed to their
+/// principle/right for detection-loop correlation (#302). `None` if the
+/// legacy ID is not (yet) in the register.
+pub fn clause_of_legacy(legacy_id: &str) -> Option<&'static str> {
+    enforcement_register()
+        .iter()
+        .find(|e| e.legacy_id == legacy_id)
+        .map(|e| e.clause_id)
+}
+
+/// A per-clause tally of enforcement occurrences — the raw signal behind a
+/// "contract health" view (#302): which principles/rights are tripping, and
+/// how often. Pure aggregation over occurrences the caller has already
+/// gathered (e.g. from `causal_events`), so it is trivially testable and
+/// carries no I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractHealth {
+    /// `(clause_id, count)` sorted by descending count, then clause_id.
+    pub by_clause: Vec<(String, u64)>,
+    /// Occurrences whose legacy ID did not resolve to any register clause
+    /// (e.g. a not-yet-migrated rule) — surfaced rather than dropped so
+    /// coverage gaps stay visible.
+    pub unattributed: u64,
+}
+
+/// Tally enforcement occurrences (each identified by its legacy rule/right
+/// ID) into a [`ContractHealth`], attributing each to its clause.
+///
+/// Builds the legacy-ID → clause map once up front (rather than rescanning
+/// the register per occurrence via [`clause_of_legacy`]), keeping the tally
+/// `O(register_entries + occurrences)` even as the register grows during
+/// migration (#303).
+pub fn contract_health<I, S>(legacy_ids: I) -> ContractHealth
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    use std::collections::BTreeMap;
+    let legacy_to_clause: std::collections::HashMap<&'static str, &'static str> =
+        enforcement_register()
+            .iter()
+            .map(|e| (e.legacy_id, e.clause_id))
+            .collect();
+    let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
+    let mut unattributed = 0u64;
+    for id in legacy_ids {
+        match legacy_to_clause.get(id.as_ref()) {
+            Some(clause) => *counts.entry(clause).or_insert(0) += 1,
+            None => unattributed += 1,
+        }
+    }
+    let mut by_clause: Vec<(String, u64)> =
+        counts.into_iter().map(|(c, n)| (c.to_string(), n)).collect();
+    // Descending count, then clause_id for stable ordering.
+    by_clause.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ContractHealth {
+        by_clause,
+        unattributed,
+    }
+}
+
 /// Render the register as a stable markdown document. This is the generated
 /// artifact committed at `docs/constitution/enforcement-register.md`; the
 /// [`tests::generated_register_matches_committed_doc`] test guards against
@@ -360,6 +423,35 @@ mod tests {
             assert_eq!(binds(r.id), Some(Binds::Gateway), "right {} must bind gateway", r.id);
         }
         assert_eq!(binds("nope"), None);
+    }
+
+    // ── Detection-loop foundation (#302) ────────────────────────────────
+
+    #[test]
+    fn clause_of_legacy_resolves_and_misses() {
+        assert_eq!(clause_of_legacy("R-7.19"), Some("P-7"));
+        assert_eq!(clause_of_legacy("R-7.5"), Some("P-7"));
+        assert_eq!(clause_of_legacy("Ri-0.14"), Some("Ri-0.14"));
+        assert_eq!(clause_of_legacy("R-9.99"), None);
+    }
+
+    #[test]
+    fn contract_health_tallies_by_clause_descending() {
+        let occurrences = ["R-7.19", "R-7.19", "R-7.5", "Ri-0.14", "R-9.99"];
+        let health = contract_health(occurrences);
+        // R-7.19 + R-7.5 both → P-7 (3), Ri-0.14 → Ri-0.14 (1); R-9.99 unattributed.
+        assert_eq!(health.by_clause, vec![
+            ("P-7".to_string(), 3),
+            ("Ri-0.14".to_string(), 1),
+        ]);
+        assert_eq!(health.unattributed, 1);
+    }
+
+    #[test]
+    fn contract_health_empty_is_empty() {
+        let health = contract_health(Vec::<String>::new());
+        assert!(health.by_clause.is_empty());
+        assert_eq!(health.unattributed, 0);
     }
 
     // ── Code ↔ register bridge (real, not aspirational) ─────────────────
