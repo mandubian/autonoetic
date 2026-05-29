@@ -53,6 +53,7 @@ pub mod session_resume;
 pub mod session_context;
 pub mod session_outcome_writer;
 pub mod session_overview;
+pub mod session_read_cache;
 pub mod session_report;
 pub mod session_tracer;
 pub mod state_attestation;

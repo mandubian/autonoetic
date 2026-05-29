@@ -336,19 +336,57 @@ impl<'a> ToolCallProcessor<'a> {
                 .call_tool(tool_name, &sanitized_args)
                 .await?
         } else if self.registry.has_tool(tool_name) {
-            self.registry.execute(
-                tool_name,
-                self.manifest,
-                &policy,
-                agent_dir,
-                gateway_dir,
-                &sanitized_args,
-                self.session_id.as_deref(),
-                self.turn_id.as_deref(),
-                self.config,
-                self.gateway_store.clone(),
-                self.run_context.as_ref(),
-            )?
+            // #289 session-scoped read cache: for pure read tools, return a
+            // memoized result instead of re-executing (and re-injecting the
+            // same content into the transcript). Caching wraps only the raw
+            // `registry.execute` output; disclosure + secret redaction below
+            // still run on every hit, so this is transparent to those
+            // invariants. The cache is consulted only when we have both a
+            // session id and a gateway store to hold the per-session cache.
+            let cache_ctx = match (self.session_id.as_deref(), self.gateway_store.as_ref()) {
+                (Some(sid), Some(store)) => Some((sid.to_string(), store.clone())),
+                _ => None,
+            };
+
+            if let Some((sid, store)) = cache_ctx.as_ref() {
+                if let Some(hit) = store
+                    .session_read_cache
+                    .get(sid, tool_name, &sanitized_args)
+                {
+                    self.emit_cache_hit_event(store, tool_name);
+                    hit
+                } else {
+                    let r = self.registry.execute(
+                        tool_name,
+                        self.manifest,
+                        &policy,
+                        agent_dir,
+                        gateway_dir,
+                        &sanitized_args,
+                        self.session_id.as_deref(),
+                        self.turn_id.as_deref(),
+                        self.config,
+                        self.gateway_store.clone(),
+                        self.run_context.as_ref(),
+                    )?;
+                    self.maybe_cache_or_invalidate(store, sid, tool_name, &sanitized_args, &r);
+                    r
+                }
+            } else {
+                self.registry.execute(
+                    tool_name,
+                    self.manifest,
+                    &policy,
+                    agent_dir,
+                    gateway_dir,
+                    &sanitized_args,
+                    self.session_id.as_deref(),
+                    self.turn_id.as_deref(),
+                    self.config,
+                    self.gateway_store.clone(),
+                    self.run_context.as_ref(),
+                )?
+            }
         } else {
             let agent_like_hint = if tc.name.contains('.') {
                 " This looks like an agent ID, not a tool name. Use agent_spawn with {\"agent_id\": \"...\", \"message\": \"...\"}."
@@ -378,6 +416,71 @@ impl<'a> ToolCallProcessor<'a> {
         }
 
         Ok(result)
+    }
+
+    /// After a successful `registry.execute` for a tool with cache
+    /// relevance: store cacheable read results, and invalidate the
+    /// affected cache-tag class when the tool was a mutator (#289).
+    fn maybe_cache_or_invalidate(
+        &self,
+        store: &std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+        session_id: &str,
+        tool_name: &str,
+        arguments_json: &str,
+        result: &str,
+    ) {
+        use crate::runtime::session_read_cache::{invalidation_tag_for, read_cache_policy};
+
+        // Only memoize / invalidate on a successful result — a failed read
+        // must not be cached, and a failed mutation must not invalidate.
+        if !crate::runtime::tool_dispatch::tool_result_counts_as_progress(result) {
+            return;
+        }
+
+        if read_cache_policy(tool_name).is_some() {
+            store
+                .session_read_cache
+                .put(session_id, tool_name, arguments_json, result);
+        }
+
+        if let Some(tag) = invalidation_tag_for(tool_name) {
+            store.session_read_cache.invalidate_tag_all_sessions(tag);
+        }
+    }
+
+    /// Emit a `tool_call.cache_hit` causal event so the audit chain still
+    /// records the logical tool call when it was served from the #289
+    /// read cache. Best-effort: a failed write is logged, not fatal.
+    fn emit_cache_hit_event(
+        &self,
+        store: &std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+        tool_name: &str,
+    ) {
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("cachehit-{}", uuid::Uuid::new_v4()),
+            agent_id: self.manifest.agent.id.clone(),
+            session_id: self.session_id.clone().unwrap_or_default(),
+            turn_id: self.turn_id.clone(),
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "tool_call".to_string(),
+            action: "cache_hit".to_string(),
+            status: "SUCCESS".to_string(),
+            enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+            target: Some(tool_name.to_string()),
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        };
+        if let Err(e) = store.create_causal_event(&event) {
+            tracing::warn!(
+                target: "session_read_cache",
+                error = %e,
+                tool = %tool_name,
+                "failed to emit tool_call.cache_hit causal event"
+            );
+        }
     }
 
     fn log_tool_failure(
@@ -1346,6 +1449,257 @@ mod tests {
         assert!(!proc.is_degraded_blocked_tool("content_write"));
         assert!(!proc.is_degraded_blocked_tool("knowledge_store"));
         assert!(!proc.is_degraded_blocked_tool("artifact_build"));
+    }
+
+    // ── #289 session read-cache wiring ──────────────────────────────────
+
+    /// A fake `content_read` that returns `{"ok":true,...}` and counts
+    /// real executions, so a cache hit is observable as "counter did not
+    /// increment".
+    struct FakeContentRead {
+        calls: Arc<AtomicUsize>,
+    }
+    impl NativeTool for FakeContentRead {
+        fn name(&self) -> &'static str {
+            "content_read"
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "fake".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+        fn is_available(&self, _m: &AgentManifest) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            _m: &AgentManifest,
+            _p: &PolicyEngine,
+            _ad: &Path,
+            _gd: Option<&Path>,
+            _args: &str,
+            _sid: Option<&str>,
+            _tid: Option<&str>,
+            _cfg: Option<&autonoetic_types::config::GatewayConfig>,
+            _gs: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _rc: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+        ) -> anyhow::Result<String> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({ "ok": true, "content": format!("bytes-{n}") }).to_string())
+        }
+    }
+
+    /// A fake `agent_exists` whose result counts executions.
+    struct FakeAgentExists {
+        calls: Arc<AtomicUsize>,
+    }
+    impl NativeTool for FakeAgentExists {
+        fn name(&self) -> &'static str {
+            "agent_exists"
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "fake".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+        fn is_available(&self, _m: &AgentManifest) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            _m: &AgentManifest,
+            _p: &PolicyEngine,
+            _ad: &Path,
+            _gd: Option<&Path>,
+            _args: &str,
+            _sid: Option<&str>,
+            _tid: Option<&str>,
+            _cfg: Option<&autonoetic_types::config::GatewayConfig>,
+            _gs: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _rc: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+        ) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({ "ok": true, "exists": false }).to_string())
+        }
+    }
+
+    /// A fake `agent_revision_promote` mutator (returns ok; the processor
+    /// invalidates the AgentExistence cache class on success).
+    struct FakePromote;
+    impl NativeTool for FakePromote {
+        fn name(&self) -> &'static str {
+            "agent_revision_promote"
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "fake".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+        fn is_available(&self, _m: &AgentManifest) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            _m: &AgentManifest,
+            _p: &PolicyEngine,
+            _ad: &Path,
+            _gd: Option<&Path>,
+            _args: &str,
+            _sid: Option<&str>,
+            _tid: Option<&str>,
+            _cfg: Option<&autonoetic_types::config::GatewayConfig>,
+            _gs: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _rc: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+        ) -> anyhow::Result<String> {
+            Ok(serde_json::json!({ "ok": true }).to_string())
+        }
+    }
+
+    fn call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: args.to_string(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_cache_serves_repeat_content_read_without_re_executing() {
+        let temp = tempdir().unwrap();
+        let gw_dir = temp.path().join("gateway");
+        std::fs::create_dir_all(&gw_dir).unwrap();
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gw_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.register(Box::new(FakeContentRead {
+            calls: Arc::clone(&calls),
+        }));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(Some("cache-sess".to_string()), Some("t1".to_string()));
+
+        let args = r#"{"name":"f"}"#;
+        // First call executes for real.
+        let (_ok1, r1) = processor
+            .process_tool_calls(&[call("tc1", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer())
+            .await
+            .unwrap();
+        // Second identical call must be served from cache (no re-exec).
+        let (_ok2, r2) = processor
+            .process_tool_calls(&[call("tc2", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer())
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "second read must hit cache, not re-execute");
+        assert_eq!(r1[0].2, r2[0].2, "cached result must be byte-identical");
+
+        // Audit: a tool_call.cache_hit causal event was recorded.
+        let events = store.search_causal_events(Some("cache-sess"), None, 50).unwrap();
+        assert!(
+            events.iter().any(|e| e.category == "tool_call" && e.action == "cache_hit"),
+            "expected a tool_call.cache_hit causal event; got {:?}",
+            events.iter().map(|e| format!("{}.{}", e.category, e.action)).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mutator_invalidates_agent_exists_cache() {
+        let temp = tempdir().unwrap();
+        let gw_dir = temp.path().join("gateway");
+        std::fs::create_dir_all(&gw_dir).unwrap();
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gw_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        let exists_calls = Arc::new(AtomicUsize::new(0));
+        registry.register(Box::new(FakeAgentExists {
+            calls: Arc::clone(&exists_calls),
+        }));
+        registry.register(Box::new(FakePromote));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(Some("inv-sess".to_string()), Some("t1".to_string()));
+
+        let ea = r#"{"agent_id":"x"}"#;
+        // exists #1 (real), exists #2 (cache hit) → 1 execution.
+        processor.process_tool_calls(&[call("a1", "agent_exists", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        processor.process_tool_calls(&[call("a2", "agent_exists", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        assert_eq!(exists_calls.load(Ordering::SeqCst), 1, "second exists should be cached");
+
+        // A promote invalidates the AgentExistence class. `agent_revision_*`
+        // is intent-gated, so a real intent must be supplied for the tool to
+        // actually execute (and thus invalidate) — a missing intent would be
+        // rejected pre-execution and must NOT invalidate.
+        processor.process_tool_calls(&[call("p1", "agent_revision_promote", r#"{"intent":"promote x for invalidation test"}"#)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+
+        // exists #3 must re-execute (cache invalidated) → 2 executions.
+        processor.process_tool_calls(&[call("a3", "agent_exists", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        assert_eq!(exists_calls.load(Ordering::SeqCst), 2, "exists after promote must re-execute");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_cache_noop_without_gateway_store() {
+        // No gateway store → no cache; the tool executes every time.
+        let temp = tempdir().unwrap();
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.register(Box::new(FakeContentRead {
+            calls: Arc::clone(&calls),
+        }));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_session_context(Some("no-store".to_string()), Some("t1".to_string()));
+
+        let args = r#"{"name":"f"}"#;
+        processor.process_tool_calls(&[call("c1", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        processor.process_tool_calls(&[call("c2", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "no cache without a gateway store");
     }
 }
 

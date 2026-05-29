@@ -841,6 +841,28 @@ Agent: {agent_id} | Started: {timestamp}
 
 ---
 
+## Session Read Cache
+
+A per-session, in-memory result cache for **pure read tools** memoizes deterministic reads so an agent that re-reads the same handle across turns does not re-execute the tool or re-inject identical content into the transcript. It lives on `GatewayStore` (`session_read_cache`) keyed by exact `session_id`, and is consulted in `ToolCallProcessor::execute_tool_call` *before* dispatch.
+
+| Tool | Policy | Invalidated by |
+|---|---|---|
+| `content_read` | Cache forever in-session (content-addressed) | never |
+| `agent_exists` | Cache | `agent_install`, `agent_revision_create_from_intent`, `agent_revision_promote`, `agent_revision_rollback` |
+| `artifact_inspect` | Cache | `artifact_build` |
+
+Properties:
+
+- **Keyed by exact session id**, not root — a cached `content_read` result is never served to a sibling session, preserving per-session content visibility.
+- **Wraps only the raw `registry.execute` output**; disclosure registration and secret redaction still run on every hit, so caching is transparent to those invariants.
+- **Bounded + size-guarded**: per-session LRU of 128 entries; results over 1 MiB are never stored.
+- **Invalidation is coarse but correct**: a mutating tool clears the affected tag class (`AgentExistence` / `ArtifactMetadata`) across *all* session caches, so a child session's promote invalidates the parent's `agent_exists` cache. `content_read` is never invalidated.
+- **Audited**: a cache hit emits a `tool_call.cache_hit` causal event (and the normal execution trace still records), so the causal chain shows every logical tool call.
+
+Grounding: extends the determinism-skip principle of R-2.6 / R-2.7 (approved-execution caching) to pure reads, where the safety argument is stronger — there is no side effect to skip.
+
+---
+
 ## Observability Surface
 
 The observability surface lets agents discover and inspect session reports across sessions. It is built on top of the causal chain (the authoritative spine) and is complementary to `execution_search` (which searches raw tool traces within a session).
