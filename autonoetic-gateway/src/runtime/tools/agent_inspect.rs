@@ -62,12 +62,16 @@ impl NativeTool for AgentInspectTool {
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: serde_json::Value = serde_json::from_str(arguments_json)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}. Usage: {} {{\"agent_id\": \"<agent-name>\"}}", self.name(), e, self.name()))?;
 
         let agent_id = args
             .get("agent_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("agent_id is required"))?;
+            .ok_or_else(|| anyhow::anyhow!(
+                "{}: missing required field 'agent_id'. Usage: {} {{\"agent_id\": \"<agent-name>\"}} (e.g., \"daily-trading-signal\", \"coder.default\")",
+                self.name(),
+                self.name(),
+            ))?;
 
         crate::runtime::tools::validate_agent_id(agent_id)?;
 

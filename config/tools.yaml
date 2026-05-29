@@ -27,6 +27,8 @@ rules:
     tier: workflow
   - prefix: agent_exists
     tier: workflow
+  - prefix: agent_list
+    tier: workflow
   - prefix: agent_discover
     tier: workflow
   - prefix: approval_
@@ -38,6 +40,8 @@ rules:
   - prefix: user_
     tier: workflow
   - prefix: digest_
+    tier: workflow
+  - prefix: agent_inspect
     tier: workflow
 
   # Specialized tier: expensive or role-specific operations.

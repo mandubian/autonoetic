@@ -153,6 +153,8 @@ impl ToolTierFilter {
                 | "content_read"
                 | "execution_search"
                 | "digest_query"
+                | "agent_list"
+                | "agent_inspect"
         )
     }
 
@@ -1097,6 +1099,22 @@ mod tests {
         assert!(!filter.allows("web_search"));
         assert!(!filter.allows("promotion_record"));
         assert!(!filter.allows("agent_revision_create"));
+    }
+
+    #[test]
+    fn test_tool_tier_filter_degraded_keeps_agent_directory_reads() {
+        let filter = ToolTierFilter::degraded();
+        assert!(filter.allows("agent_list"));
+        assert!(filter.allows("agent_inspect"));
+        assert!(!filter.allows("agent_spawn"));
+    }
+
+    #[test]
+    fn test_tool_tier_filter_clarification_keeps_agent_directory_reads() {
+        let filter = ToolTierFilter::clarification();
+        assert!(filter.allows("agent_list"));
+        assert!(filter.allows("agent_inspect"));
+        assert!(!filter.allows("agent_spawn"));
     }
 
     #[test]
