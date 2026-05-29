@@ -268,7 +268,7 @@ monitor and is reusable by both layers:
   rule/right IDs in `enforced_rules`; richer events (e.g.
   `loop_guard.tripped`) also resolve the owning clause into their payload
   (`rule_id` + `clause`).
-- **Reverse lookup.** `enforcement_register::clause_of_legacy(legacy_id)` maps
+- **Reverse lookup.** `enforcement_register::clause_of_rule(rule_id)` maps
   a legacy `R-x.y` / `Ri-x.y` ID to its owning principle or right. The register
   is the single source of truth for code ↔ constitution agreement, so the
   Sentinel never hard-codes rule→clause mappings.

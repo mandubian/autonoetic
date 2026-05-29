@@ -301,7 +301,7 @@ artifact_exec({
 
 ### Promotion Evaluation Has No Network
 
-Artifacts that go through promotion evaluation are tested in a sandbox with no network access (gateway constitution rule R+16). All tests must mock external services — a test that makes a real HTTP call will fail with `ECONNREFUSED`. Use `constitution.read` to inspect the full rule.
+Artifacts that go through promotion evaluation are tested in a sandbox with no network access (gateway constitution rule P-3.10). All tests must mock external services — a test that makes a real HTTP call will fail with `ECONNREFUSED`. Use `constitution.read` to inspect the full rule.
 
 ### When to Use Dependencies
 You don't have `NetworkAccess`, so you cannot install packages directly. If your code needs external packages:
