@@ -563,6 +563,52 @@ fn normalize_config_path_label(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn first_sentence_splits_on_terminators() {
+        // Period, semicolon, colon (each followed by a space) terminate.
+        assert_eq!(first_sentence("One thing. Two thing."), "One thing.");
+        assert_eq!(first_sentence("Lead clause; detail follows."), "Lead clause");
+        assert_eq!(
+            first_sentence("Sessions end only for reasons: (a) exit, (b) budget."),
+            "Sessions end only for reasons"
+        );
+        // No terminator → whole string (trimmed).
+        assert_eq!(first_sentence("  just one clause  "), "just one clause");
+        // A terminator not followed by a space does not split (e.g. decimals).
+        assert_eq!(first_sentence("Cap is 3.5 units total."), "Cap is 3.5 units total.");
+    }
+
+    #[test]
+    fn first_sentence_ignores_terminators_inside_code_spans() {
+        // The ": " inside `error_type: fatal` must NOT split; the real split is
+        // the later "; ".
+        assert_eq!(
+            first_sentence("`error_type: fatal` triggers session abort; recoverable types do not."),
+            "`error_type: fatal` triggers session abort"
+        );
+        // A code span with no outside terminator returns the whole statement.
+        assert_eq!(
+            first_sentence("`a: b` and `c: d` only"),
+            "`a: b` and `c: d` only"
+        );
+    }
+
+    #[test]
+    fn extract_rule_glossary_covers_rules_and_rights_only() {
+        let text = "\
+| ID | Rule | Source | Enforcement | Status |\n\
+| P-1.1 | Every tool call matches a declared capability; no overrides. | x | y | ENFORCED |\n\
+| Ri-0.3 | Every rejection names the rule ID. Always. | x | y | ENFORCED |\n\
+| I-6 | Not a row id we gloss | x | y | ENFORCED |\n\
+| R+9 | retired marker, ignored | x | y | ENFORCED |\n";
+        let g = extract_rule_glossary(text);
+        assert_eq!(g.get("P-1.1").map(String::as_str), Some("Every tool call matches a declared capability"));
+        assert_eq!(g.get("Ri-0.3").map(String::as_str), Some("Every rejection names the rule ID."));
+        // Only P-* / Ri-* clause rows are glossed; invariants and retired markers are not.
+        assert!(!g.contains_key("I-6"));
+        assert!(!g.contains_key("R+9"));
+    }
+
     fn init_default_constitution() {
         initialize_constitution(&GatewayConfig::default())
             .expect("default constitution config should initialize");
