@@ -369,7 +369,7 @@ revision.promote`.
 | P-9.4 | The alias registry is the sole source of truth for the "active" revision. | ARCHITECTURE.md | `agent_aliases` table | ENFORCED |
 | P-9.5 | Candidate revisions are runnable via explicit `agent_ref` without promotion. | ARCHITECTURE.md | session binding | ENFORCED |
 | P-9.6 | Revision statuses (`candidate`, `ready`, `rejected`, `archived`) bound what can promote. | ARCHITECTURE.md | `agent_revisions.status` | ENFORCED |
-| P-9.7 | Eval gating: if required, revision mismatch rejects promotion. | ARCHITECTURE.md | `agent_revision_promote` | ENFORCED |
+| P-9.7 | Eval gating — if required, a revision mismatch rejects promotion. | ARCHITECTURE.md | `agent_revision_promote` | ENFORCED |
 | P-9.8 | `SKILL.md` is parsed at install; capabilities, limits, and execution mode extracted. | agent-capabilities.md | skill parser | ENFORCED |
 | P-9.9 | High-risk capabilities trigger approval gate on promotion. | spec-install-pipeline-hardening.md | `agent_revision.rs::promote` | ENFORCED |
 | P-9.10 | External Python imports are detected at install. | spec-install-pipeline-hardening.md §3.3 | `install_contract.rs::detect_external_python_imports` | ENFORCED |

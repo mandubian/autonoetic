@@ -428,6 +428,64 @@ fn extract_enforcement_table(text: &str, id_prefix: &str) -> BTreeMap<String, St
     out
 }
 
+/// Derive a one-line glossary `clause_id -> short statement` straight from the
+/// constitution text — the single source of truth — so no hand-maintained map
+/// can drift from it. The gloss is the **first sentence** of the clause's
+/// statement column (cells[1]); it covers every `P-*` rule and `Ri-*` right
+/// row in the document.
+pub fn extract_rule_glossary(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        if !line.trim_start().starts_with('|') {
+            continue;
+        }
+        let cells: Vec<String> = line
+            .split('|')
+            .map(str::trim)
+            .filter(|cell| !cell.is_empty())
+            .map(str::to_string)
+            .collect();
+        if cells.len() < 4 {
+            continue;
+        }
+        let id = &cells[0];
+        let is_clause = (id.starts_with("P-") || id.starts_with("Ri-"))
+            && id.chars().nth(if id.starts_with("Ri-") { 3 } else { 2 }).is_some_and(|c| c.is_ascii_digit());
+        if !is_clause || id == "ID" || id.starts_with("---") {
+            continue;
+        }
+        let gloss = first_sentence(&cells[1]);
+        if !gloss.is_empty() {
+            out.insert(id.clone(), gloss);
+        }
+    }
+    out
+}
+
+/// The first sentence of a clause statement: text up to the first sentence
+/// terminator (`. `, `; `, or `: ` followed by a space) that is **not inside a
+/// backtick code span** — so `` `error_type: fatal` `` doesn't split mid-span.
+/// Returns the whole string if no terminator is found. Markdown emphasis
+/// markers are left intact (they render fine in the consuming surfaces).
+fn first_sentence(statement: &str) -> String {
+    let s = statement.trim();
+    let mut in_code = false;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '`' {
+            in_code = !in_code;
+            continue;
+        }
+        if !in_code
+            && matches!(c, '.' | ';' | ':')
+            && chars.peek().is_some_and(|(_, n)| *n == ' ')
+        {
+            return s[..=i].trim_end_matches([';', ':']).to_string();
+        }
+    }
+    s.to_string()
+}
+
 /// Resolve constitution markdown and lock paths from the **same** search root.
 ///
 /// Per-path resolution would pick the first filesystem location where each file exists,
