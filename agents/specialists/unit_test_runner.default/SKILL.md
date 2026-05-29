@@ -123,7 +123,7 @@ If you found NO tests, **do NOT call `promotion_record`**. The role is inapplica
 - **If some tests exist**: run all of them, report total/passed/failed
 - **If all tests pass**: `status = "pass"`, `evaluator_pass = true`
 - **If any test fails**: `status = "fail"`, `evaluator_pass = false`, include failure output in findings
-- **If tests require network**: return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (cannot be evaluated in sealed sandbox per R+16)
+- **If tests require network**: return `status = "unable_to_evaluate"` with a finding describing the integration-test dependency (cannot be evaluated in sealed sandbox per P-3.10)
 
 ## Output Format
 

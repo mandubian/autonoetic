@@ -253,7 +253,7 @@ Two cooperating mechanisms control how sensitive data flows through the gateway:
 - **`ViewerClass` (Agent / Operator / Admin)** controls *what an observability or approval reader sees* based on who they are. Agents reading `execution.search` get trace metadata only — no stdout, no commands, no arguments, no result. Agents reading `approval_summary` for `WriteFile` see the path but not content; for `CredentialRequest` they see only `credential_id`/`url`/`method` (headers / body / payload blanked). One known gap (issue #158, fixed by PR #160): `SandboxExec.command` is currently preserved verbatim for the Agent class. Operators see structural fields with secret-named JSON keys redacted; non-JSON strings get precise in-place masking via `redact_embedded_secrets`. Admins see the raw record. Class is selected at the call site.
 - **`DisclosureClass` (Public / Restricted)** controls *what an LLM may quote in its assistant reply*. Per-content classification configured via `DisclosurePolicy` rules in `SKILL.md`.
 
-Together with **R+9** (the redaction-before-write invariant enforced by `RedactedPayload`), these form three layers: R+9 keeps secrets out of the causal chain at write time; `ViewerClass` strips fields per consumer at read time; `DisclosureClass` filters the LLM's reply.
+Together with **P-4.14** (the redaction-before-write invariant enforced by `RedactedPayload`), these form three layers: P-4.14 keeps secrets out of the causal chain at write time; `ViewerClass` strips fields per consumer at read time; `DisclosureClass` filters the LLM's reply.
 
 Redaction primitives are centralised in `autonoetic-types/src/redaction.rs`. Per-record field-by-field tables, call-site conventions, and the threat model are documented in [`docs/observability-redaction.md`](observability-redaction.md).
 
@@ -771,10 +771,10 @@ Causal chain events are mirrored to SQLite for agent learning queries.
 
 #### Principle-aware enforcement events
 
-Enforcement events carry the legacy rule/right IDs they enforce in
+Enforcement events carry the `P-x.y` / `Ri-x.y` rule/right IDs they enforce in
 `enforced_rules`, and (for richer events like `loop_guard.tripped`) the
 resolved owning **clause** in the payload. The `enforcement_register`
-reverse-maps a legacy `R-x.y` / `Ri-x.y` ID to its owning principle or right,
+reverse-maps a `P-x.y` / `Ri-x.y` ID to its owning principle or right,
 so breaches correlate by **constitutional clause**, not by ad-hoc rule
 strings. See [Contract Health](#contract-health) below.
 
@@ -822,11 +822,11 @@ so "report and correct" is a peer of "constrain." The contract-health view is
 the standing tally behind that half of the loop: how often each constitutional
 clause (principle/right) has actually been enforced.
 
-It reads the `enforced_rules` carried on `causal_events`, attributes each legacy
-rule/right ID to its owning clause via the `enforcement_register`
-(`clause_of_legacy`), and tallies occurrences per clause. The `R+++3`
-event-attribution placeholder is skipped (every event carries it by default);
-real rule IDs not yet migrated into the register surface as `unattributed`, so
+It reads the `enforced_rules` carried on `causal_events`, attributes each
+`P-x.y` / `Ri-x.y` rule/right ID to its owning clause via the
+`enforcement_register` (`clause_of_rule`), and tallies occurrences per clause.
+The `R+++3` event-attribution placeholder is skipped (every event carries it by
+default); rule IDs not present in the register surface as `unattributed`, so
 coverage gaps stay visible rather than silently dropped.
 
 - **Code**: `GatewayStore::contract_health(since)` →
