@@ -1,10 +1,11 @@
 //! Session-scoped result cache for pure read tools (issue #289).
 //!
-//! Three read tools re-execute on every call even though their result is
+//! Several read tools re-execute on every call even though their result is
 //! stable within a session:
 //!
-//! - `content_read` — content-addressed (`sha256:` handle → identical
-//!   bytes), so the result never changes for a given handle.
+//! - `resolve` — content reads are content-addressed (`sha256:` handle →
+//!   identical bytes) so they cache stably; artifact reads cache under
+//!   `ArtifactMetadata` (invalidated by `artifact_build`).
 //! - `agent_inspect` — agent existence + active metadata; changes only
 //!   via explicit agent-mutating tools.
 //! - `artifact_inspect` — artifact metadata; changes only via
@@ -21,7 +22,7 @@
 //!
 //! ## Safety choices
 //!
-//! - **Keyed by exact `session_id`, not root.** `content_read` honours
+//! - **Keyed by exact `session_id`, not root.** `resolve` content reads honour
 //!   per-session visibility; caching a result under the exact session
 //!   that produced it means a sibling session can never be served another
 //!   session's private content from the cache.
@@ -30,7 +31,7 @@
 //!   the caller, so caching is transparent to those invariants.
 //! - **Invalidation is coarse but obviously correct.** Agent-mutating and
 //!   artifact-building tools clear the corresponding tag class across all
-//!   session caches. `content_read` entries are never invalidated.
+//!   session caches. Content (CacheStable) entries are never invalidated; artifact entries clear on artifact_build.
 //! - **Bounded + size-guarded.** Per-session LRU of `max_entries`
 //!   (default 128); results larger than `max_value_bytes` (default 1 MiB)
 //!   are not stored, so the cache can't balloon memory.
@@ -61,20 +62,47 @@ pub enum CacheTag {
 /// tag, meaning never invalidated), or not cacheable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadCachePolicy {
-    /// Cache forever within the session (content-addressed; e.g. `content_read`).
+    /// Cache forever within the session (content-addressed; e.g. a `resolve` content read).
     CacheStable,
     /// Cache, but invalidate when the given tag is cleared.
     CacheUnderTag(CacheTag),
 }
 
 /// Returns the caching policy for a read tool, or `None` if the tool is
-/// not a cacheable pure read.
-pub fn read_cache_policy(tool_name: &str) -> Option<ReadCachePolicy> {
+/// not a cacheable pure read. Takes `arguments_json` because `resolve` is
+/// polymorphic — its caching depends on the handle being resolved.
+pub fn read_cache_policy(tool_name: &str, arguments_json: &str) -> Option<ReadCachePolicy> {
     match tool_name {
-        "content_read" => Some(ReadCachePolicy::CacheStable),
         "agent_inspect" => Some(ReadCachePolicy::CacheUnderTag(CacheTag::AgentExistence)),
         "artifact_inspect" => Some(ReadCachePolicy::CacheUnderTag(CacheTag::ArtifactMetadata)),
+        // `resolve` reads either an artifact (`art_`/`ar.` — invalidated by
+        // artifact_build, like artifact_inspect) or content (content-addressed,
+        // stable). Classify by the `ref` shape without resolving it.
+        "resolve" => Some(resolve_cache_policy(arguments_json)),
         _ => None,
+    }
+}
+
+/// Cache policy for a `resolve` call, derived from the `ref` it targets.
+/// Artifact handles (`art_`/`ar.`) cache under [`CacheTag::ArtifactMetadata`]
+/// (invalidated by `artifact_build`, matching `artifact_inspect`); content
+/// handles are content-addressed and cache stably.
+fn resolve_cache_policy(arguments_json: &str) -> ReadCachePolicy {
+    let is_artifact = serde_json::from_str::<serde_json::Value>(arguments_json)
+        .ok()
+        .and_then(|v| {
+            v.get("ref")
+                .and_then(|r| r.as_str())
+                .map(|s| {
+                    let s = s.trim();
+                    s.starts_with("art_") || s.starts_with("ar.")
+                })
+        })
+        .unwrap_or(false);
+    if is_artifact {
+        ReadCachePolicy::CacheUnderTag(CacheTag::ArtifactMetadata)
+    } else {
+        ReadCachePolicy::CacheStable
     }
 }
 
@@ -225,7 +253,7 @@ impl SessionReadCacheRegistry {
     /// Look up a cached result for `(session_id, tool_name, arguments)`.
     /// Returns `None` on miss or if the tool is not cacheable.
     pub fn get(&self, session_id: &str, tool_name: &str, arguments_json: &str) -> Option<String> {
-        read_cache_policy(tool_name)?;
+        read_cache_policy(tool_name, arguments_json)?;
         let key = cache_key(tool_name, arguments_json);
         let mut guard = self.inner.lock().ok()?;
         guard.get_mut(session_id)?.get(&key)
@@ -234,7 +262,7 @@ impl SessionReadCacheRegistry {
     /// Store a result if the tool is cacheable and the value fits the size
     /// guard. No-op otherwise.
     pub fn put(&self, session_id: &str, tool_name: &str, arguments_json: &str, value: &str) {
-        let Some(policy) = read_cache_policy(tool_name) else {
+        let Some(policy) = read_cache_policy(tool_name, arguments_json) else {
             return;
         };
         let tag = match policy {
@@ -282,20 +310,35 @@ mod tests {
 
     #[test]
     fn policy_table_matches_issue_289() {
+        // resolve is polymorphic by ref shape.
         assert_eq!(
-            read_cache_policy("content_read"),
+            read_cache_policy("resolve", r#"{"ref":"main.py"}"#),
+            Some(ReadCachePolicy::CacheStable),
+            "content ref → stable"
+        );
+        assert_eq!(
+            read_cache_policy("resolve", r#"{"ref":"cnt_abcd1234"}"#),
             Some(ReadCachePolicy::CacheStable)
         );
         assert_eq!(
-            read_cache_policy("agent_inspect"),
+            read_cache_policy("resolve", r#"{"ref":"ar.aabb11223344","include":"files"}"#),
+            Some(ReadCachePolicy::CacheUnderTag(CacheTag::ArtifactMetadata)),
+            "artifact ref → invalidated by artifact_build"
+        );
+        assert_eq!(
+            read_cache_policy("resolve", r#"{"ref":"art_aabb1234"}"#),
+            Some(ReadCachePolicy::CacheUnderTag(CacheTag::ArtifactMetadata))
+        );
+        assert_eq!(
+            read_cache_policy("agent_inspect", "{}"),
             Some(ReadCachePolicy::CacheUnderTag(CacheTag::AgentExistence))
         );
         assert_eq!(
-            read_cache_policy("artifact_inspect"),
+            read_cache_policy("artifact_inspect", "{}"),
             Some(ReadCachePolicy::CacheUnderTag(CacheTag::ArtifactMetadata))
         );
-        assert_eq!(read_cache_policy("sandbox_exec"), None);
-        assert_eq!(read_cache_policy("agent_spawn"), None);
+        assert_eq!(read_cache_policy("sandbox_exec", "{}"), None);
+        assert_eq!(read_cache_policy("agent_spawn", "{}"), None);
     }
 
     #[test]
@@ -313,7 +356,7 @@ mod tests {
             invalidation_tag_for("artifact_build"),
             Some(CacheTag::ArtifactMetadata)
         );
-        assert_eq!(invalidation_tag_for("content_read"), None);
+        assert_eq!(invalidation_tag_for("resolve"), None);
         // `agent_install` is NOT a real tool (only an approval-action kind),
         // so it must not be in the invalidation set.
         assert_eq!(invalidation_tag_for("agent_install"), None);
@@ -324,18 +367,18 @@ mod tests {
     #[test]
     fn hit_returns_cached_value() {
         let reg = SessionReadCacheRegistry::default();
-        assert!(reg.get(S, "content_read", r#"{"name":"f"}"#).is_none());
-        reg.put(S, "content_read", r#"{"name":"f"}"#, "BYTES");
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"f"}"#).as_deref(), Some("BYTES"));
+        assert!(reg.get(S, "resolve", r#"{"name":"f"}"#).is_none());
+        reg.put(S, "resolve", r#"{"name":"f"}"#, "BYTES");
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"f"}"#).as_deref(), Some("BYTES"));
     }
 
     #[test]
     fn intent_field_is_ignored_in_key() {
         let reg = SessionReadCacheRegistry::default();
-        reg.put(S, "content_read", r#"{"name":"f","intent":"first"}"#, "BYTES");
+        reg.put(S, "resolve", r#"{"name":"f","intent":"first"}"#, "BYTES");
         // Different intent, same logical args → hit.
         assert_eq!(
-            reg.get(S, "content_read", r#"{"name":"f","intent":"second"}"#).as_deref(),
+            reg.get(S, "resolve", r#"{"name":"f","intent":"second"}"#).as_deref(),
             Some("BYTES")
         );
     }
@@ -343,18 +386,18 @@ mod tests {
     #[test]
     fn distinct_args_do_not_collide() {
         let reg = SessionReadCacheRegistry::default();
-        reg.put(S, "content_read", r#"{"name":"a"}"#, "AAA");
-        reg.put(S, "content_read", r#"{"name":"b"}"#, "BBB");
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"a"}"#).as_deref(), Some("AAA"));
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"b"}"#).as_deref(), Some("BBB"));
+        reg.put(S, "resolve", r#"{"name":"a"}"#, "AAA");
+        reg.put(S, "resolve", r#"{"name":"b"}"#, "BBB");
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"a"}"#).as_deref(), Some("AAA"));
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"b"}"#).as_deref(), Some("BBB"));
     }
 
     #[test]
     fn sessions_are_isolated() {
         let reg = SessionReadCacheRegistry::default();
-        reg.put("sess-A", "content_read", r#"{"name":"f"}"#, "A_PRIVATE");
+        reg.put("sess-A", "resolve", r#"{"name":"f"}"#, "A_PRIVATE");
         // A sibling session must NOT be served A's cached content.
-        assert!(reg.get("sess-B", "content_read", r#"{"name":"f"}"#).is_none());
+        assert!(reg.get("sess-B", "resolve", r#"{"name":"f"}"#).is_none());
     }
 
     #[test]
@@ -368,15 +411,15 @@ mod tests {
     #[test]
     fn agent_existence_invalidation_clears_only_that_tag() {
         let reg = SessionReadCacheRegistry::default();
-        reg.put(S, "content_read", r#"{"name":"f"}"#, "BYTES");
+        reg.put(S, "resolve", r#"{"name":"f"}"#, "BYTES");
         reg.put(S, "agent_inspect", r#"{"agent_id":"x"}"#, r#"{"exists":false}"#);
         reg.put(S, "artifact_inspect", r#"{"artifact_ref":"a"}"#, r#"{"files":[]}"#);
 
         reg.invalidate_tag_all_sessions(CacheTag::AgentExistence);
 
-        // agent_inspect cleared; content_read + artifact_inspect untouched.
+        // agent_inspect cleared; resolve(content) + artifact_inspect untouched.
         assert!(reg.get(S, "agent_inspect", r#"{"agent_id":"x"}"#).is_none());
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"f"}"#).as_deref(), Some("BYTES"));
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"f"}"#).as_deref(), Some("BYTES"));
         assert!(reg.get(S, "artifact_inspect", r#"{"artifact_ref":"a"}"#).is_some());
     }
 
@@ -395,13 +438,13 @@ mod tests {
     fn lru_eviction_bounds_entries() {
         let reg = SessionReadCacheRegistry::new(128, DEFAULT_MAX_VALUE_BYTES);
         for i in 0..200 {
-            reg.put(S, "content_read", &format!(r#"{{"name":"f{i}"}}"#), &format!("v{i}"));
+            reg.put(S, "resolve", &format!(r#"{{"name":"f{i}"}}"#), &format!("v{i}"));
         }
         assert_eq!(reg.entry_count(S), 128, "cache must be bounded to max_entries");
         // The oldest (f0..f71) evicted; the newest 128 (f72..f199) retained.
-        assert!(reg.get(S, "content_read", r#"{"name":"f0"}"#).is_none());
+        assert!(reg.get(S, "resolve", r#"{"name":"f0"}"#).is_none());
         assert_eq!(
-            reg.get(S, "content_read", r#"{"name":"f199"}"#).as_deref(),
+            reg.get(S, "resolve", r#"{"name":"f199"}"#).as_deref(),
             Some("v199")
         );
     }
@@ -409,27 +452,27 @@ mod tests {
     #[test]
     fn lru_access_protects_recently_used() {
         let reg = SessionReadCacheRegistry::new(3, DEFAULT_MAX_VALUE_BYTES);
-        reg.put(S, "content_read", r#"{"name":"a"}"#, "A");
-        reg.put(S, "content_read", r#"{"name":"b"}"#, "B");
-        reg.put(S, "content_read", r#"{"name":"c"}"#, "C");
+        reg.put(S, "resolve", r#"{"name":"a"}"#, "A");
+        reg.put(S, "resolve", r#"{"name":"b"}"#, "B");
+        reg.put(S, "resolve", r#"{"name":"c"}"#, "C");
         // Touch "a" so it is most-recently-used.
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"a"}"#).as_deref(), Some("A"));
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"a"}"#).as_deref(), Some("A"));
         // Insert "d" → should evict "b" (the LRU), not "a".
-        reg.put(S, "content_read", r#"{"name":"d"}"#, "D");
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"a"}"#).as_deref(), Some("A"));
-        assert!(reg.get(S, "content_read", r#"{"name":"b"}"#).is_none());
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"d"}"#).as_deref(), Some("D"));
+        reg.put(S, "resolve", r#"{"name":"d"}"#, "D");
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"a"}"#).as_deref(), Some("A"));
+        assert!(reg.get(S, "resolve", r#"{"name":"b"}"#).is_none());
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"d"}"#).as_deref(), Some("D"));
     }
 
     #[test]
     fn size_guard_skips_large_values() {
         let reg = SessionReadCacheRegistry::new(128, 1024);
         let big = "x".repeat(2048);
-        reg.put(S, "content_read", r#"{"name":"big"}"#, &big);
-        assert!(reg.get(S, "content_read", r#"{"name":"big"}"#).is_none());
+        reg.put(S, "resolve", r#"{"name":"big"}"#, &big);
+        assert!(reg.get(S, "resolve", r#"{"name":"big"}"#).is_none());
         assert_eq!(reg.entry_count(S), 0, "large value must not be stored");
         // A small value alongside still caches fine.
-        reg.put(S, "content_read", r#"{"name":"small"}"#, "ok");
-        assert_eq!(reg.get(S, "content_read", r#"{"name":"small"}"#).as_deref(), Some("ok"));
+        reg.put(S, "resolve", r#"{"name":"small"}"#, "ok");
+        assert_eq!(reg.get(S, "resolve", r#"{"name":"small"}"#).as_deref(), Some("ok"));
     }
 }

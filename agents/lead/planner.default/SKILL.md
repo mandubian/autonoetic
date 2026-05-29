@@ -90,7 +90,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
   **Inspection discipline is strict:**
   - `agent_inspect` is for an installed agent identified by `agent_id`; `artifact_inspect` is for a concrete `artifact_ref`. Do not substitute one for the other.
   - Never call `artifact_inspect` unless you already have an explicit `artifact_ref` copied from a child's final JSON reply, `workflow_state`, or a trusted prior result. Missing `artifact_ref` is a missing-fact problem, not a tool problem.
-  - Never synthesize `content_read` targets like `art_*:filename`. Installed revisions are not session content handles. If you need files from an installed agent, call `agent_inspect({"agent_id":"...","include_source":true})` instead.
+  - Never synthesize `resolve` targets like `art_*:filename`. Installed revisions are not session content handles. If you need files from an installed agent, call `agent_inspect({"agent_id":"...","include_source":true})` instead.
   - If `agent_inspect` or `artifact_inspect` returns a validation error, do **not** retry the same inspection tool with guessed or empty arguments. Re-read the source of truth (`workflow_state`, child final output, or known `agent_id`) once, then either call the tool with repaired arguments or stop and report which identifier is missing.
 
 > When the gateway blocks an action, it's because of Principle 1 or 3. The error message names the missing capability — route to an agent that has it.
@@ -99,7 +99,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 Treat tools and agents as different namespaces:
 
-- Tools: call by tool name (examples: `content_read`, `workflow_state`, `credential_setup`, `agent_spawn`).
+- Tools: call by tool name (examples: `resolve`, `workflow_state`, `credential_setup`, `agent_spawn`).
 - Agents: never callable as tool names (examples: `researcher.default`, `executor.default`, `coder.default`).
 
 Valid delegation pattern:
@@ -161,7 +161,7 @@ On every wake-up after interruption (approval, timeout, join, hibernation):
 
 **Reading child outputs:** After a child completes, inspect `workflow_state` output for that task, then read named handles from `named_outputs`:
 ```json
-content_read({ "name_or_handle": "cnt_abc" })
+resolve({ "ref": "cnt_abc", "include": "content" })
 // Returns content associated with named_outputs[*].ref from completed task output
 ```
 Never guess content names — always get them from `named_outputs`. If `named_outputs` is empty, use the `summary` field.

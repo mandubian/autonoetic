@@ -11,8 +11,8 @@
 //! - everything else → the content store.
 //!
 //! The agent's decision collapses to: **run it → `artifact_exec`; see it →
-//! `resolve`.** `artifact_inspect` / `content_read` remain as the specific
-//! verbs `resolve` delegates to.
+//! `resolve`.** `resolve` is the sole read door — there is no separate
+//! `content_read`; `artifact_inspect` remains for structural artifact review.
 
 use std::path::Path;
 
@@ -142,8 +142,8 @@ impl ResolveTool {
             .to_error_response());
         };
 
-        // `include=content` on an artifact reads a single file (delegates to
-        // the same `ar.<ref>:<file>` path content_read uses).
+        // `include=content` on an artifact reads a single file via the
+        // `ar.<ref>:<file>` content-store path.
         if include == "content" {
             let Some(file) = file else {
                 return Ok(ToolError::validation(
@@ -260,11 +260,7 @@ impl ResolveTool {
                     Ok(json!({ "ok": true, "kind": "content", "ref": reference, "content": content })
                         .to_string())
                 }
-                Err(e) => Ok(ToolError::not_found(
-                    format!("content '{reference}' in session '{sid}': {e}"),
-                    None::<String>,
-                )
-                .to_error_response()),
+                Err(e) => Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string())),
             };
         }
 
@@ -278,11 +274,49 @@ impl ResolveTool {
                 "alias": crate::runtime::content_store::ContentStore::get_short_alias(&handle),
             })
             .to_string()),
-            Err(e) => Ok(ToolError::not_found(
-                format!("content '{reference}' in session '{sid}': {e}"),
-                Some("Pass include=content to read it, or check the handle."),
-            )
-            .to_error_response()),
+            Err(e) => Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string())),
         }
+    }
+
+    /// Build a content not-found response, preserving the helpful hints the
+    /// former `content_read` surfaced: a skills-path repair hint, or — when
+    /// the agent likely guessed a name — the list of artifacts actually
+    /// available in the session (anti-thrash, #312).
+    fn content_not_found(
+        &self,
+        gw_dir: &Path,
+        store: &crate::runtime::content_store::ContentStore,
+        sid: &str,
+        reference: &str,
+        err: &str,
+    ) -> String {
+        if let Some(hint) =
+            crate::runtime::tools::content::skill_path_repair_hint(gw_dir, reference)
+        {
+            return ToolError::not_found(
+                format!("content '{reference}' not found in session '{sid}': {err}"),
+                Some(hint),
+            )
+            .to_error_response();
+        }
+        if !reference.starts_with("sha256:") {
+            let hints = crate::runtime::tools::content::find_available_artifacts(store, sid, reference);
+            if !hints.is_empty() {
+                return json!({
+                    "ok": false,
+                    "error_type": "resource",
+                    "error": "content_not_found",
+                    "message": format!("content '{reference}' not found in session '{sid}'"),
+                    "repair_hint": "Use workflow.wait/workflow.state to get a stable output ref from a completed child, then resolve that.",
+                    "available_artifacts": hints,
+                })
+                .to_string();
+            }
+        }
+        ToolError::not_found(
+            format!("content '{reference}' not found in session '{sid}': {err}"),
+            None::<String>,
+        )
+        .to_error_response()
     }
 }

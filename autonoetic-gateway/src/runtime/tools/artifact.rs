@@ -138,7 +138,7 @@ impl NativeTool for ArtifactBuildTool {
                     "inputs": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. Use `ar.<ref>:<filename>` only with content_read, not here."
+                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. Use `ar.<ref>:<filename>` only with resolve, not here."
                     },
                     "entrypoints": {
                         "type": "array",

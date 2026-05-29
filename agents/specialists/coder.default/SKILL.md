@@ -107,7 +107,7 @@ If the task fundamentally requires a running server or real network integration 
 - Follow the principle of minimal changes
 - Focus on durable outputs that should be handed off, reviewed, or installed
 - **DO NOT use `dependencies` field in `sandbox_exec`** — you don't have `NetworkAccess`. If your code needs external packages, signal to the planner that `packager.default` is needed to resolve dependencies into layers.
-- When repairing an installed agent, do not keep probing `content_read` or `resolve` with stale `art_*` ids. If the task includes a known `agent_id` but no readable artifact, use `agent_inspect({"agent_id":"...","include_source":true})` once to recover the current source and layer metadata. If you have neither a valid `artifact_ref` nor an `agent_id`, return `clarification_needed` instead of guessing.
+- When repairing an installed agent, do not keep probing `resolve` or `resolve` with stale `art_*` ids. If the task includes a known `agent_id` but no readable artifact, use `agent_inspect({"agent_id":"...","include_source":true})` once to recover the current source and layer metadata. If you have neither a valid `artifact_ref` nor an `agent_id`, return `clarification_needed` instead of guessing.
 
 ## Out Of Scope
 
@@ -184,14 +184,14 @@ When you receive a task from `architect.default`, it will include structured sub
 
 ## Content System
 
-When using `content_write` and `content_read`:
+When using `content_write` and `resolve`:
 
 1. **`content_write` requires `name` and `content`** — the gateway rejects a write that only passes `content`. Always set `name` to the file path you want (e.g. `src/main.py`, `weather_fetcher.py`).
 2. **`content_write` returns a handle, short alias, and visibility**
-3. **Within the same root session, prefer names for collaboration**: `content_read({"name_or_handle": "weather.py"})`
+3. **Within the same root session, prefer names for collaboration**: `resolve({ "ref": "weather.py", "include": "content" })`
 4. **Use `visibility: "private"`** only for scratch work that should stay local to your session
 5. **For anything that will be reviewed or installed, build an artifact before handoff**
-6. `artifact_ref` is not a content handle. Never call `content_read` with fabricated targets like `art_*:main.py`.
+6. `artifact_ref` is not a content handle. Never call `resolve` with fabricated targets like `art_*:main.py`.
 
 ## Running Code
 

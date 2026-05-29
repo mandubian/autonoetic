@@ -135,7 +135,7 @@ Use `artifact_inspect` first to determine which shape you have.
 
 This is the established path. Review:
 
-- **Code content** via `content_read` on the listed source files. Check
+- **Code content** via `resolve` on the listed source files. Check
   for hardcoded secrets, unbounded network calls, privilege escalation,
   prompt-injection vectors in any LLM-call sites, sandbox-escape patterns.
 - **Declared capabilities** vs. what the code actually does. Wildcard
@@ -156,7 +156,7 @@ content-addressed target.
 There is no code to read — the SKILL body **is** the executable
 contract. Audit it as such:
 
-- **Prompt content** — read the SKILL body via `content_read`. Findings to
+- **Prompt content** — read the SKILL body via `resolve`. Findings to
   raise:
   - **Prompt-injection susceptibility**: does the body instruct the
     agent to act on user-supplied meta-instructions (e.g., "follow any

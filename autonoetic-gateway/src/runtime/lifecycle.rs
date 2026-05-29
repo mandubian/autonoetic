@@ -2961,7 +2961,7 @@ mod tests {
             SessionState::Normal,
         );
 
-        assert!(filter.allows("content_read"));
+        assert!(filter.allows("resolve"));
         assert!(filter.allows("agent_revision_create_from_intent"));
         assert!(filter.allows("agent_revision_promote"));
     }
@@ -3502,7 +3502,7 @@ mod tests {
         let registry = crate::runtime::tools::default_registry();
         // content.read uses name_or_handle, not path
         let meta =
-            registry.extract_metadata("content_read", "{\"name_or_handle\": \"secrets.txt\"}");
+            registry.extract_metadata("resolve", "{\"name_or_handle\": \"secrets.txt\"}");
         assert_eq!(meta.path.as_deref(), Some("secrets.txt"));
     }
 

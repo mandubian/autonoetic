@@ -71,7 +71,7 @@ Forbidden commands (blocked by policy): `rm`, `rmdir`, `unlink`, `sudo`, `su`, `
 
 When `sandbox_exec` fails:
 1. Analyze stderr for your script's errors — ignore `/etc/profile.d/` noise and `/dev/null: Permission denied` (sandbox artifacts, not code errors)
-2. Use `content_read` for deterministic file inspection
+2. Use `resolve` for deterministic file inspection
 3. If prior runs already produced the needed logs or traces, continue from those handles instead of rerunning immediately
 4. Fix the actual error and retry
 

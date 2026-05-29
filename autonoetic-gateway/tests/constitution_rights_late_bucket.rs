@@ -93,9 +93,12 @@ fn assert_rules_are_constitutional(label: &str, rules: &[&'static str]) {
     );
     for rule in rules {
         let s = rule.to_string();
+        // Constitutional IDs: P-x.y (principles), Ri-x.y (rights),
+        // I-x (invariants), §N (sections).
+        let first = s.chars().next().unwrap_or(' ');
         assert!(
-            s.starts_with('R') || s.starts_with('§'),
-            "{}: enforced rule '{}' must start with R or § (Ri-0.3)",
+            matches!(first, 'P' | 'R' | 'I' | '§'),
+            "{}: enforced rule '{}' must be a constitutional ID (P-/Ri-/I-/§) (Ri-0.3)",
             label,
             s
         );
@@ -182,12 +185,12 @@ fn ri_0_3_allowed_operations_are_allowed() {
 #[test]
 fn ri_0_12_core_tools_available_in_degraded_mode() {
     let core = ToolTierFilter::core_only();
-    assert!(core.allows("content_read"));
+    assert!(core.allows("resolve"));
     assert!(core.allows("content_write"));
     assert!(core.allows("knowledge_recall"));
     assert!(core.allows("knowledge_store"));
 
     let all = ToolTierFilter::all();
-    assert!(all.allows("content_read"));
+    assert!(all.allows("resolve"));
     assert!(all.allows("web_search"));
 }

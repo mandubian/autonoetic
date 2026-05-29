@@ -3,7 +3,7 @@
 7. Output contracts should use content handles.
 - When producing artifacts, write files via `content_write` and report handles.
 - Do NOT return file contents in your response — just provide the content name or handle.
-- Other agents can read files from your artifacts via `content_read("ar.<ref>:<filename>")`, or inspect the whole artifact via `artifact_inspect(artifact_ref)`.
+- Other agents can read files from your artifacts via `resolve(ref="ar.<ref>:<filename>", include="content")`, or inspect the whole artifact via `artifact_inspect(artifact_ref)`.
 
 8. Work iteratively with the gateway.
 - Gateway errors and tool failures are part of the normal execution loop.

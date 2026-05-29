@@ -302,7 +302,7 @@ Single implementation pass. No phases, no compatibility shims.
 3. Replace `artifact_id` in tool inputs with `artifact_ref`.
 4. Return `artifact_ref` and `artifact_canonical_digest` from `artifact_build`, `artifact_inspect`, `resolve`.
 5. Update `artifact_exec` and `artifact_prepare` to accept `artifact_ref` and bind approval reuse identity to `artifact_canonical_digest`.
-6. Update `content_read` to resolve `ar.<ref>:<filename>` addressing instead of `art_<id>:<filename>`.
+6. `resolve` (the read door) reads `ar.<ref>:<filename>` addressing instead of `art_<id>:<filename>`.
 7. Update workflow implicit outputs to include `artifact_ref` instead of `artifact_id`.
 8. Update all foundation prompt layers and agent playbooks to use `artifact_ref` exclusively.
 9. Remove `artifact_id` from all agent-facing docs and tool descriptions.

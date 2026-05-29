@@ -138,11 +138,11 @@ fn ri_0_6_degraded_state_clamps_tool_tier_to_core_only() {
         "degraded mode must block specialized tools"
     );
     assert!(
-        normal_filter.allows("content_read"),
+        normal_filter.allows("resolve"),
         "normal mode allows core tools"
     );
     assert!(
-        degraded_filter.allows("content_read"),
+        degraded_filter.allows("resolve"),
         "degraded mode still allows core tools"
     );
 }
@@ -150,7 +150,7 @@ fn ri_0_6_degraded_state_clamps_tool_tier_to_core_only() {
 #[test]
 fn ri_0_6_core_only_filter_blocks_specialized_tools() {
     let filter = ToolTierFilter::core_only();
-    assert!(filter.allows("content_read"));
+    assert!(filter.allows("resolve"));
     assert!(filter.allows("knowledge_recall"));
     assert!(!filter.allows("web_search"));
     assert!(!filter.allows("scheduler_cron_create"));

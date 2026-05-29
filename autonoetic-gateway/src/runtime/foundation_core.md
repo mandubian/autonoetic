@@ -6,7 +6,7 @@ Core runtime model:
 
 1. Content storage is the primary way to persist files and data.
 - Use `content_write(name, content)` to save files, scripts, and data to the session.
-- Use `content_read(name_or_handle)` to retrieve content by session content identifier or by scoped artifact file ref `ar.<ref>:<filename>`.
+- Use `resolve(ref, include="content")` to retrieve content by session content identifier or by scoped artifact file ref `ar.<ref>:<filename>`. (`resolve` is the one read door — see §2; default `include="metadata"` just checks existence.)
 - Default visibility is `session` — visible to all agents under the same root session.
 - Use `visibility: "private"` for scratchpads, drafts, or intermediate outputs.
 - Content works locally and remotely — agents don't need filesystem access.
@@ -17,7 +17,7 @@ Core runtime model:
 - Use `artifact_inspect(artifact_ref)` to review an artifact's files and metadata.
 - **When unsure what a handle is or how to read it, use `resolve(ref, include?)`** — the one front door for ANY artifact/content handle (`art_`, `ar.`, `cnt_`, alias, name, `sha256:`, `ar.<ref>:<file>`). `include`: `metadata` (default), `files` (an artifact's files), `content` (inline bytes; pass `file` to pick a file in an artifact). The decision is simply: **run it → `artifact_exec`; see it → `resolve`.**
 - Artifact-oriented tools (`artifact_inspect`, `artifact_prepare`, `artifact_exec`, `artifact_build` artifact reuse) take the whole artifact as `ar.*` or `art_*`.
-- File-oriented reads use `content_read` with session content IDs or `ar.<ref>:<filename>`.
+- File-oriented reads use `resolve(ref, include="content")` with session content IDs or `ar.<ref>:<filename>`.
 - NO artifact = NO review = NO install = NO execution beyond scratch.
 - Artifacts are the ONLY units that may cross trust boundaries.
 

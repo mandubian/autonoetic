@@ -82,13 +82,13 @@ The following tool mappings apply:
 | Skill references | Autonoetic equivalent |
 |---|---|
 | `Bash(command)` | `sandbox_exec({"command": "command"})` |
-| `Read(path)` | `content_read(name_or_handle)` — files must be loaded via content store |
+| `Read(path)` | `resolve(ref, include="content")` — files must be loaded via content store |
 | `Write(path, content)` | `content_write(name, content)` |
 | `WebSearch(query)` | `web_search({"query": "query"})` |
 | `WebFetch(url)` | `web_fetch({"url": "url"})` |
 
 File paths referenced by the skill are available in the agent directory.
-Use content_read/content_write or sandbox paths relative to the agent working directory."#;
+Use resolve/content_write or sandbox paths relative to the agent working directory."#;
 
 fn tool_bridging_appendix() -> String {
     TOOL_BRIDGING_APPENDIX.to_string()
@@ -165,9 +165,9 @@ pub(crate) fn compose_system_instructions_with_user_context(
 /// Concatenate core + extended SKILL.md sections for the system prompt.
 ///
 /// The `<!-- extended -->` marker in `SKILL.md` was originally a "deferred
-/// load via content_read" optimization (Phase 4 / PR #218), but an audit of
+/// load via resolve" optimization (Phase 4 / PR #218), but an audit of
 /// session-3b4485d4 found that agents with the marker never actually issued
-/// `content_read("extended_instructions")` — they just operated on the core
+/// `resolve("extended_instructions")` — they just operated on the core
 /// section and silently lost critical guidance (e.g. promotion-gate handling,
 /// "if evaluator finds issues" recipe). The marker still serves as a visual
 /// section divider in the source, but at runtime the two halves are inlined.
@@ -651,7 +651,7 @@ mod agentskills_bridging_tests {
             "should contain Bash mapping"
         );
         assert!(
-            output.contains("content_read"),
+            output.contains("resolve"),
             "should contain content.read mapping"
         );
         assert!(

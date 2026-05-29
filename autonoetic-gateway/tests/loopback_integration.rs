@@ -64,7 +64,7 @@ async fn test_loopback_content_audit_and_negatives() {
                 "model": "gpt-4o",
                 "choices": [{
                     "index": 0,
-                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_2", "type": "function", "function": { "name": "content_read", "arguments": "{\"name_or_handle\":\"secret.txt\"}" } }] },
+                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_2", "type": "function", "function": { "name": "resolve", "arguments": "{\"ref\":\"secret.txt\",\"include\":\"content\"}" } }] },
                     "finish_reason": "tool_calls"
                 }],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -90,7 +90,7 @@ async fn test_loopback_content_audit_and_negatives() {
                 "model": "gpt-4o",
                 "choices": [{
                     "index": 0,
-                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_3", "type": "function", "function": { "name": "content_read", "arguments": "{\"name_or_handle\":\"missing.txt\"}" } }] },
+                    "message": { "role": "assistant", "tool_calls": [{ "id": "call_3", "type": "function", "function": { "name": "resolve", "arguments": "{\"ref\":\"missing.txt\",\"include\":\"content\"}" } }] },
                     "finish_reason": "tool_calls"
                 }],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -286,7 +286,7 @@ async fn test_loopback_content_audit_and_negatives() {
                 if value["action"].as_str() == Some("requested") {
                     if value["payload"]["tool_name"].as_str() == Some("content_write") {
                         agent_content_writes += 1;
-                    } else if value["payload"]["tool_name"].as_str() == Some("content_read") {
+                    } else if value["payload"]["tool_name"].as_str() == Some("resolve") {
                         agent_content_reads += 1;
                     }
                 } else if value["category"].as_str() == Some("session")

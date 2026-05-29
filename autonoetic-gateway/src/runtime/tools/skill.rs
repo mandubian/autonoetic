@@ -832,7 +832,7 @@ impl NativeTool for SkillNormalizeTool {
                 "already_normalized": true,
                 "session_content": session_content,
                 "discovery_record_registered": discovery_record_registered,
-                "message": "Content already contains autonoetic.onboarding steps; file written as-is. Use content_read with session_content.normalized_name, or credential_setup with skill_url=skill_path.",
+                "message": "Content already contains autonoetic.onboarding steps; file written as-is. Use resolve with session_content.normalized_name, or credential_setup with skill_url=skill_path.",
             })
             .to_string());
         }
@@ -926,9 +926,9 @@ impl NativeTool for SkillNormalizeTool {
             "discovery_record_registered": discovery_record_registered,
             "agent_creation_candidate": agent_candidate,
             "message": if agent_candidate {
-                "Wrote Autonoetic SKILL.md with multiple API operations. Use content_read with session_content.normalized_name, or credential_setup with skill_url for onboarding. Consider spawning coder.default to build a reusable script agent for this service."
+                "Wrote Autonoetic SKILL.md with multiple API operations. Use resolve with session_content.normalized_name, or credential_setup with skill_url for onboarding. Consider spawning coder.default to build a reusable script agent for this service."
             } else {
-                "Wrote Autonoetic SKILL.md; use content_read with session_content.normalized_name, or credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment."
+                "Wrote Autonoetic SKILL.md; use resolve with session_content.normalized_name, or credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment."
             },
         })
         .to_string())

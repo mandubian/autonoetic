@@ -39,13 +39,13 @@ pub struct ToolTierFilter {
     /// regardless of tier (e.g., approval.status, approval.answer).
     pub always_include_approval_tools: bool,
     /// When true, always include inspection tools (observability_*,
-    /// knowledge_search/read/search_by_tags, constitution_read, content_read,
+    /// knowledge_search/read/search_by_tags, constitution_read, resolve,
     /// execution_search, digest_query) regardless of tier. Used by degraded
     /// sessions so the agent can still diagnose its own state — an agent
     /// that cannot see why it was degraded cannot recover (Ri-0.5 spirit).
     pub always_include_inspection_tools: bool,
     /// When true, override all other rules with a strict read-only allowlist:
-    /// only inspection tools (observability/knowledge/constitution/content_read
+    /// only inspection tools (observability/knowledge/constitution/resolve
     /// /execution_search) pass. Used for clarification child sessions
     /// (SessionState::Clarification) so an operator probe via `ask-agent`
     /// structurally cannot trigger any action — even if the agent's manifest
@@ -149,7 +149,7 @@ impl ToolTierFilter {
                 | "constitution_read"
                 | "knowledge_search"
                 | "knowledge_read"
-                | "content_read"
+                | "resolve"
                 | "execution_search"
                 | "digest_query"
                 | "agent_list"

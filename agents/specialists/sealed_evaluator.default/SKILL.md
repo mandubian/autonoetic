@@ -123,7 +123,7 @@ When you wake up after any interruption:
 ## Evaluation Protocol
 
 1. **Inspect the artifact** with `artifact_inspect(artifact_ref)` — review the file list and entrypoints
-2. **Read the artifact source** with `content_read(handle)` — understand what the code does
+2. **Read the artifact source** with `resolve(handle, include="content")` — understand what the code does
 3. **Run the artifact's entrypoint** with `artifact_exec(artifact_ref, entrypoint)` — execute the actual code in the sealed sandbox. Use `sandbox_exec` only for auxiliary commands that are not artifact-bound.
 4. **Report the outcome** — if it works, pass. If it fails, fail. Do NOT try to fix it.
 
@@ -236,7 +236,7 @@ Without `fixture_set_ref`, the fixture proxy only has the artifact's built-in fi
 ## Execution Attempt Budget
 
 1. `artifact_inspect(artifact_ref)` once.
-2. `content_read(...)` as needed for understanding.
+2. `resolve(ref, include="content")` as needed for understanding.
 3. One canonical `artifact_exec` for happy-path behavior.
 4. Optional one negative-path `artifact_exec` only if explicitly requested.
 

@@ -251,7 +251,7 @@ Complete flow for the weather demo:
      "Install deps from requirements.txt and build artifact with deps"
 
    builder:
-     a. content_read("requirements.txt")          # get dep list
+     a. resolve("requirements.txt")          # get dep list
      b. sandbox_exec({
           "command": "pip install -r requirements.txt -t /tmp/deps",
           "capture_paths": [{"path": "/tmp/deps", "mount_as": "/tmp/deps"}]

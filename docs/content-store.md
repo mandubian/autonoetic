@@ -95,9 +95,9 @@ Write content with visibility control.
 
 Default visibility is `session` (collaborative). Use `private` for scratchpads/drafts.
 Use `sandbox_path` when passing files to `sandbox_exec`.
-`cnt_...` and `sha256:...` are content references for `content_read`, not filesystem paths.
+`cnt_...` and `sha256:...` are content references for `resolve`, not filesystem paths.
 
-### `content_read`
+### `resolve`
 
 Read by name, handle, or alias with root-based resolution.
 
@@ -121,23 +121,23 @@ Resolution order:
 4. If bare 8 hex chars → alias lookup (session, then root, then global)
 5. Otherwise → name lookup (session, then root, then global)
 
-### `content_read` vs `artifact_inspect`
+### `resolve` vs `artifact_inspect`
 
 These tools intentionally overlap a bit, but they serve different jobs:
 
 - `artifact_inspect` is for **artifact structure and trust-boundary review**: file list, entrypoints, layers, digest, builder metadata.
-- `content_read` is for **retrieving bytes/text**: either session content (`name`, alias, handle) or a specific artifact file (`ar.<ref>:<filename>`).
+- `resolve` is for **retrieving bytes/text**: either session content (`name`, alias, handle) or a specific artifact file (`ar.<ref>:<filename>`).
 
 Why this is usually not an issue:
 
 - The trust boundary remains artifact-centric: review/install/execution flows key off the immutable manifest (`artifact_manifest_digest`) and canonical closure digest (`artifact_canonical_digest`).
-- `content_read` does not replace structural review metadata (entrypoints/layers/provenance); it only fetches file content.
+- `resolve` does not replace structural review metadata (entrypoints/layers/provenance); it only fetches file content.
 - Runtime rejects implicit workflow IDs for artifact-only operations (`artifact_inspect`, `artifact_exec`, `artifact_prepare`), preserving boundary clarity.
 
 Practical guidance:
 
 - Use `artifact_inspect` first when validating what an artifact contains.
-- Use `content_read` second to open exact files returned by inspection.
+- Use `resolve` second to open exact files returned by inspection.
 
 ### `artifact_build`
 
@@ -156,7 +156,6 @@ Accepted `inputs` forms:
 | Tool field | Accepts | Does not accept |
 |---|---|---|
 | `artifact_build.inputs[]` | session content names, `cnt_...`, `sha256:...`, bare alias, existing artifact refs `ar.*`, canonical artifact IDs `art_*` | scoped artifact file refs like `ar.<ref>:requirements.txt` |
-| `content_read.name_or_handle` | session content names, `cnt_...`, `sha256:...`, bare alias, scoped artifact file refs `ar.<ref>:<filename>` | bare artifact refs when you want structure/review metadata |
 | `artifact_inspect.artifact_ref` | `ar.*`, `art_*` | `ar.<ref>:<filename>`, content handles |
 | `artifact_prepare.artifact_ref` / `artifact_exec.artifact_ref` | `ar.*`, `art_*` | content handles, scoped artifact file refs |
 | `resolve.ref` | any artifact/content handle — `ar.*`, `art_*`, `cnt_*`, bare alias, content name, `sha256:...`, or `ar.<ref>:<filename>` (scope inferred from the session) | — |
@@ -164,7 +163,7 @@ Accepted `inputs` forms:
 Homogeneity rule:
 
 - When a tool is artifact-oriented (`artifact_inspect`, `artifact_prepare`, `artifact_exec`, `artifact_build` artifact reuse), pass the artifact itself as `ar.*` or `art_*`.
-- When a tool is file-oriented (`content_read`), pass a session content identifier or a scoped artifact file ref `ar.<ref>:<filename>`.
+- When a tool is file-oriented (`resolve`), pass a session content identifier or a scoped artifact file ref `ar.<ref>:<filename>`.
 - Do not switch namespaces mid-flow: `ar.<ref>:<filename>` is for reading one file out of an artifact, while bare `ar.*` / `art_*` means the whole artifact.
 
 ```json
@@ -207,7 +206,7 @@ Inspect an artifact by ref.
 ```
 
 `artifact_inspect` accepts `artifact_ref` (`ar.<12-hex>`) returned by `artifact_build` or `workflow_wait`/`workflow_state`.
-Implicit workflow output handles are content records and should be consumed via `content_read`.
+Implicit workflow output handles are content records and should be consumed via `resolve`.
 
 ## Artifact Trust Boundary
 
@@ -274,7 +273,7 @@ agent_spawn({"agent_id": "coder.default", "message": "Write weather.py"})
 content_write({"name": "weather.py", "content": "import json..."})
 
 // Planner can read the coder's output
-content_read({"name_or_handle": "weather.py"})
+resolve({"ref": "weather.py", "include": "content"})
 
 // Coder builds artifact for review
 artifact_build({"inputs": ["weather.py"], "entrypoints": ["weather.py"]})
@@ -290,8 +289,8 @@ artifact_inspect({"artifact_ref": "ar.a1b2c3d4ab12"})
 content_write({"name": "draft.py", "content": "# scratch work", "visibility": "private"})
 
 // Only the coder can read it
-content_read({"name_or_handle": "draft.py"})  // works in coder session
-// content_read in parent session → error
+resolve({"ref": "draft.py", "include": "content"})  // works in coder session
+// resolve in parent session → error
 ```
 
 ## Testing
