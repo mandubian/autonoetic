@@ -155,7 +155,7 @@ pub(crate) fn find_available_artifacts(
 
     hints.push(serde_json::json!({
         "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with named_outputs and artifacts[].artifact_ref.",
-        "example": "Call workflow.state first, then read completed_tasks[].output via content.read using named_outputs[*].ref or ar.<ref>:<filename>."
+        "example": "Call workflow.state first, then read completed_tasks[].output: resolve(ref=named_outputs[*].ref) for content, or resolve(ref=artifacts[].artifact_ref, include=\"content\", file=<name>) for an artifact file."
     }));
 
     hints
@@ -192,25 +192,16 @@ pub(crate) fn skill_path_repair_hint(gateway_dir: &Path, input: &str) -> Option<
     None
 }
 
-pub(crate) fn try_read_artifact_ref_file(
+/// Read a single named file out of an artifact, addressed by its agent-facing
+/// ref (`ar.…` or canonical `art_…`) plus the file name. The file selector is
+/// a separate argument — there is no `ar.<ref>:<file>` packing.
+pub(crate) fn read_artifact_file(
     gw_dir: &Path,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    name_or_handle: &str,
+    ref_id: &str,
+    filename: &str,
     session_id: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    // Format: ar.<ref_id>:<filename>
-    if !name_or_handle.starts_with("ar.") {
-        return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!("not an artifact ref")).into());
-    }
-
-    let Some(colon_idx) = name_or_handle.find(':') else {
-        return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
-            "artifact ref must be in format `ar.<ref>:<filename>` (colon separator required)"
-        )).into());
-    };
-    let ref_id = &name_or_handle[..colon_idx];
-    let filename = &name_or_handle[colon_idx + 1..];
-
     let gs = gateway_store
         .ok_or_else(|| anyhow::anyhow!("GatewayStore required to resolve artifact refs"))?;
 

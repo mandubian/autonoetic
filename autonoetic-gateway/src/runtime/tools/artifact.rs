@@ -138,7 +138,7 @@ impl NativeTool for ArtifactBuildTool {
                     "inputs": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. Use `ar.<ref>:<filename>` only with resolve, not here."
+                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. Pass whole artifacts only — to pull in a single file, read it with resolve(ref, include=\"content\", file=…) and write it to content first."
                     },
                     "entrypoints": {
                         "type": "array",
@@ -349,8 +349,10 @@ impl NativeTool for ArtifactBuildTool {
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
                 "alias": f.alias,
-                "content_read_ref": artifact_ref.as_ref().map(|r| format!("{}:{}", r, f.name)),
             })).collect::<Vec<_>>(),
+            "read_file": artifact_ref.as_ref().map(|r| format!(
+                "resolve(ref=\"{}\", include=\"content\", file=<name>)", r
+            )),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
             "reused": bundle.reused,
@@ -541,8 +543,10 @@ impl NativeTool for ArtifactInspectTool {
             "files": bundle.files.iter().map(|f| serde_json::json!({
                 "name": f.name,
                 "alias": f.alias,
-                "content_read_ref": format!("{}:{}", args.artifact_ref, f.name),
             })).collect::<Vec<_>>(),
+            "read_file": format!(
+                "resolve(ref=\"{}\", include=\"content\", file=<name>)", args.artifact_ref
+            ),
             "layers": bundle.layers.iter().map(|l| serde_json::json!({
                 "layer_id": l.layer_id,
                 "name": l.name,
