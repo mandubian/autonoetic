@@ -18,7 +18,7 @@ Main concerns: (1) the on-disk format diverged from §3.3 (flat fields instead o
 
 **The pivot is correct.** Sealed-network sandbox was getting expensive: fixture loader + HTTP proxy + bubblewrap netns + nftables transparent redirect + HTTPS MITM via gateway CA. That stack delivers a real enforcement property but only for artifacts that genuinely need dynamic execution to evaluate. For most agents (HTTP wrappers, single-endpoint clients, pure-skill bundles), static review + competent reviewer + operator who reads the code suffices. The federation plan keeps the sealed track as an operator-invokable diagnostic and centres evaluation on cheaper, more flexible roles. Less infrastructure for the common case; more honest about what each tool is for.
 
-**Operator-as-conductor is constitutional, not a cop-out.** "All promotions escalate to the operator" admits what the gateway cannot do (judge artifact intent autonomously) while keeping what it can do mechanical (verdict aggregation, distinct-identity enforcement, policy application). §14 dumbness preserved; the operator is the human-authoritative arbiter; agents inform the decision but do not make it.
+**Operator-as-conductor is constitutional, not a cop-out.** "All promotions escalate to the operator" admits what the gateway cannot do (judge artifact intent autonomously) while keeping what it can do mechanical (verdict aggregation, distinct-identity enforcement, policy application). §14 Lawful-Executor preserved; the operator is the human-authoritative arbiter; agents inform the decision but do not make it.
 
 **The §11 audit is excellent.** It found real things the original sketch missed: the existing `required_eval_run_id` mechanism (§11.1), the `Evaluation` capability vs `sandbox_network: sealed` conflict (§11.2), the `artifact_exec` asymmetry (§11.3), the workflow_state reuse-guard hard-coding (§11.5), the on-disk format change cost (§11.7), the test migration cost (§11.6). This is the kind of pre-flight that distinguishes a plan-as-document from a plan-as-marketing.
 
@@ -70,7 +70,7 @@ The plan §3.2 introduces `FullJury / OperatorApproved / Rejected` modes. None o
 
 - A planner that does the right thing (spawn federation, accumulate, escalate) works correctly **by convention**.
 - A planner that does the wrong thing (skip federation, fake an evaluator pass via a compromised agent) escapes through the unchanged gate.
-- The §11.4 acknowledgement that R++9 determinism still holds is technically true ("gateway decision is `threshold_check(verdicts, policy)`") but only if the policy is enforced — which currently it isn't.
+- The §11.4 acknowledgement that I-10 determinism still holds is technically true ("gateway decision is `threshold_check(verdicts, policy)`") but only if the policy is enforced — which currently it isn't.
 
 To honour the plan's R-2.xx ("operator as final arbiter"), the gate must mechanically *require* operator approval for federation-based promotions, the way it currently mechanically requires `evaluator_pass`. The shape that fits cleanly: extend `enforce_promotion_gate` with a new branch that triggers when ANY federation-role verdict is present, requires operator approval (via the existing `RevisionPromote` approval action shape), and rejects if not approved.
 
@@ -101,19 +101,19 @@ Whether this is a net simplification depends on whether the operator-review work
 
 This is the right call — but the plan should be explicit that **operator throughput is a critical metric** for the federation model. If operators are flooded with 30 federation-review messages per agent install, the model has failed regardless of how clean the gateway-side mechanics are.
 
-### 3.6 Distinct-identity (R-2.17) under federation needs explicit spec
+### 3.6 Distinct-identity (P-2.17) under federation needs explicit spec
 
-The plan §7.1 says R-2.17 is "extended to cover the federation" but doesn't pin the rule. Options:
+The plan §7.1 says P-2.17 is "extended to cover the federation" but doesn't pin the rule. Options:
 
 - **All federation roles pairwise distinct** — strongest; expensive (need 4+ distinct evaluator agents).
 - **Each role's identity differs from the revision proposer** (current rule, applied per-role) — weakest.
 - **Each role identity differs from every other role identity AND the proposer** — middle ground.
 
-**Recommendation: middle ground.** It's strong enough to prevent any single compromised agent from passing the gate (no role can stand in for two), without requiring an absurd number of distinct evaluator agents in the ecosystem. The plan should be explicit about which rule and update R-2.17's gateway enforcement accordingly.
+**Recommendation: middle ground.** It's strong enough to prevent any single compromised agent from passing the gate (no role can stand in for two), without requiring an absurd number of distinct evaluator agents in the ecosystem. The plan should be explicit about which rule and update P-2.17's gateway enforcement accordingly.
 
 ### 3.7 §7.3's new constitutional rule needs a number
 
-"R-2.xx" is a placeholder. The plan should propose a concrete number (likely R-2.22 since R-2.21 was the last `R-2.x` allocated) and the exact text. This matters because:
+"R-2.xx" is a placeholder. The plan should propose a concrete number (likely P-2.22 since P-2.21 was the last `R-2.x` allocated) and the exact text. This matters because:
 
 - The rule will be cited in causal events (`enforced_rules` field).
 - Anyone reading the gate code needs to look up the rule by ID.
@@ -165,7 +165,7 @@ In priority order:
 
 4. **Test migration strategy decision** (§11.6 work): pick Option B (parallel coverage during transition); add federation tests alongside; deprecate old-path tests when gate-redesign lands.
 
-5. **Distinct-identity rule for federation (R-2.17 extension)**: spell out the middle-ground option in the plan, then enforce in `enforce_promotion_gate`.
+5. **Distinct-identity rule for federation (P-2.17 extension)**: spell out the middle-ground option in the plan, then enforce in `enforce_promotion_gate`.
 
 The flat-field `PromotionRecord` is acceptable as a stopgap. **Defer the verdict-map refactor** until the role count justifies it; note the deferral and the trigger explicitly in the plan.
 

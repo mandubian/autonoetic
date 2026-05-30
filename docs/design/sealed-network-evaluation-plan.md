@@ -5,12 +5,12 @@ status (✅ shipped, ◐ in progress, empty = pending).
 
 **Refs:**
 - Issue #184 — Problem 3 (the umbrella).
-- Constitution `R+16` — promotion-gate execution denied network. This document
+- Constitution `P-3.10` — promotion-gate execution denied network. This document
   generalises the property so it can apply outside the promotion gate too,
   driven by a manifest field rather than by a hard-coded gate decision.
-- Constitution `R++9` — gateway-decision determinism. The fixture-driven
+- Constitution `I-10` — gateway-decision determinism. The fixture-driven
   egress is one of the surfaces this rule protects.
-- Constitution §14 (dumbness invariant) — the gateway should not learn about
+- Constitution §14 (Lawful-Executor invariant) — the gateway should not learn about
   agent roles; it should enforce what manifests declare. This RFC is shaped
   by that constraint.
 - Session that motivated this:
@@ -99,7 +99,7 @@ network** whenever the artifact does. Concretely, the latest session showed:
   `gate_messages` was therefore a function of `(artifact, live-server-state)`,
   not `(artifact, fixtures)`.
 
-This violates the principle behind `R+16` and `R++9`: gateway decision
+This violates the principle behind `P-3.10` and `I-10`: gateway decision
 surfaces — including the evidence that feeds the promotion gate — must be
 pure functions of declared inputs. A Monday-pass / Tuesday-fail flake at the
 evaluator stage means the promotion gate becomes a coin flip.
@@ -125,7 +125,7 @@ The reasons:
    **planner/orchestrator** spawns. Mixing the two concerns in one enum
    reads convenient at the type level but blurs the architecture.
 
-2. **It violates §14 dumbness.** Teaching the gateway "what an evaluator is"
+2. **It violates §14 Lawful-Executor.** Teaching the gateway "what an evaluator is"
    adds role-specific behaviour. The next role with similar needs
    (security-scanner, fuzzer, federation-cross-checker) would either need its
    own SessionState variant or be left out — both bad.
@@ -138,7 +138,7 @@ The reasons:
 
 4. **Manifest declarations are signed and revision-gated.** An evaluator
    that wanted to evade sealed-network can't simply mutate its own manifest
-   at runtime — revisions go through R++2 (capability-delta gating). The
+   at runtime — revisions go through P-2.16 (capability-delta gating). The
    integrity property a SessionState gives us is already provided by the
    manifest's signing pipeline.
 
@@ -276,7 +276,7 @@ established artifact missing coverage. The evaluator never coerces
 **Why this is sound:**
 
 - The evaluator's verdict stays a pure function of `(artifact, fixtures)`
-  — both signed inputs that travel with the artifact bundle. R++9
+  — both signed inputs that travel with the artifact bundle. I-10
   determinism property holds.
 - Recording is operator-gated and audited; live capture is never silent.
 - Drift between fixtures and the real world is *handled*, not ignored:
@@ -530,12 +530,12 @@ Three options considered:
 `agent-factory.default` Step 2a inserts an `artifact_build` of the
 SKILL.md + manifest YAML + runtime.lock (and nothing else) into a
 minimal bundle. The resulting `art_*` ID is what the auditor records
-against, what `specialized_builder` installs from, and what R++2's
+against, what `specialized_builder` installs from, and what P-2.16's
 capability-delta gating keys on. The bundle contains no executable
 code — just the agent's declared identity surface.
 
 - **Pros:** Every install is artifact-addressed. Audit and (future)
-  evaluation records work uniformly across agent types. R++2 already
+  evaluation records work uniformly across agent types. P-2.16 already
   works without special-casing. The SKILL becomes tamper-evident in
   the same way executable artifacts are. Content-addressed identity
   for *what was audited* matches *what gets installed*.
@@ -552,14 +552,14 @@ The tool's `artifact_id` field becomes polymorphic: `art_*` OR
 
 - **Pros:** Smallest gateway change to the existing flow.
 - **Cons:** Promotion records now have two shapes; every consumer
-  (promotion gate, causal events, R++2 enforcement, audit forensics)
+  (promotion gate, causal events, P-2.16 enforcement, audit forensics)
   must handle both. The auditor doesn't have a `revision_id` when it
   audits — that ID is created by `agent_revision_create_from_intent`,
   which happens *after* the audit. Resolving this means either the
   auditor records against `(agent_id, intent_hash)` (a third shape) or
   re-audits after revision creation (a workflow inversion).
 - **Effort:** Multi-day. Type changes plus consumer updates across
-  promotion gate, causal events, and R++2.
+  promotion gate, causal events, and P-2.16.
 
 **Option C — A separate `audit_record_for_intent` tool.**
 Auditor calls `audit_record_for_intent(agent_id, intent_hash, role,
@@ -580,7 +580,7 @@ shapes.
 
 Architecturally consistent: every agent install is artifact-addressed,
 regardless of whether the agent ships executable code. Audit and
-evaluation records work uniformly. R++2 capability-delta gating applies
+evaluation records work uniformly. P-2.16 capability-delta gating applies
 without special-casing. "This SKILL.md was the one audited" becomes a
 content-addressed fact pinned to the same artifact identity the install
 uses. The small `artifact_build` step in agent-factory Step 2a is a
@@ -614,9 +614,9 @@ else
    "Capability enforcement on every tool call is the security gate."
 ```
 
-This is the dumbness invariant (§14) in action and the operational
-form of R-2.8 ("High-risk promotion requires evaluator AND auditor
-pass") and R-2.16 (R++2 capability-delta gating). A malicious
+This is the Lawful-Executor invariant (§14) in action and the operational
+form of P-2.8 ("High-risk promotion requires evaluator AND auditor
+pass") and P-2.16 (P-2.16 capability-delta gating). A malicious
 orchestrator cannot lie about gating mode — the gateway re-derives the
 requirement from the actual declared capabilities at promotion time.
 
@@ -654,7 +654,7 @@ path is still taken.
    audit.
 
 The malicious agent's runtime damage is bounded by its declared
-capabilities (and R++2 prevents post-install broadening without
+capabilities (and P-2.16 prevents post-install broadening without
 operator approval). But the SKILL prompt content — the executable
 contract that the user's correction in §3.5 identified as the
 attack surface — has not been independently reviewed.
@@ -677,9 +677,9 @@ every tool call remains the security gate for that case. As soon as
 [self.*]`), the audit gate applies.
 
 The new third branch is the gateway-side enforcement of `audit_only`.
-It is a refinement of R-2.8 specific to the intent-only-bundle case;
+It is a refinement of P-2.8 specific to the intent-only-bundle case;
 no new constitutional rule is required, only a more granular
-implementation. R-2.17 (distinct evaluator/auditor identity) still
+implementation. P-2.17 (distinct evaluator/auditor identity) still
 applies in the `full` mode; for `audit_only` it reduces to "the auditor
 identity must be distinct from the agent that proposed the install"
 (the agent-factory or planner, recorded in the revision's metadata).
@@ -692,7 +692,7 @@ identity must be distinct from the agent that proposed the install"
 - A pure-skill agent install with no auditor `promotion_record` is
   mechanically rejected by `agent_revision_promote` — exactly the same
   way a code-bearing install missing records is rejected today.
-- R-2.8's spirit ("promotion gate requirements derive from the
+- P-2.8's spirit ("promotion gate requirements derive from the
   revision's content") extends to cover intent-only bundles.
 - A future constitutional amendment via `constitution_propose_amendment`
   can canonicalise the four-branch matrix into the constitution text,
@@ -700,7 +700,7 @@ identity must be distinct from the agent that proposed the install"
 
 ## 4. Constitutional alignment
 
-This RFC does **not** require a new constitutional rule. R+16 already
+This RFC does **not** require a new constitutional rule. P-3.10 already
 covers the promotion-gate case; the manifest-declared sealed-network is a
 generalisation that any role can opt into. The gateway change is one
 manifest-driven egress hook — a primitive, not a policy.
@@ -711,13 +711,13 @@ amendment proposal (R+19 perhaps, via `constitution_propose_amendment`).
 Until then, it's a declaration each role makes for itself.
 
 Existing rules this builds on:
-- **R+16** — promotion-gate execution denied network. This RFC's mechanism
-  could subsume R+16's current ad-hoc enforcement: rather than promotion-gate
+- **P-3.10** — promotion-gate execution denied network. This RFC's mechanism
+  could subsume P-3.10's current ad-hoc enforcement: rather than promotion-gate
   having its own network-denial path, the promotion-stage manifest declares
   `network: sealed`. Cleaner. Refactor optional.
-- **R++9** — gateway determinism. Fixture-driven egress is one of the
+- **I-10** — gateway determinism. Fixture-driven egress is one of the
   surfaces this protects.
-- **§14 dumbness** — the gateway gains one generic primitive, not
+- **§14 Lawful-Executor** — the gateway gains one generic primitive, not
   role-specific knowledge.
 - **Ri-0.6** — no silent capability reduction. The manifest declaration is
   set at manifest-creation time and signed; not narrowed mid-flight.
@@ -737,7 +737,7 @@ Status markers per scope: ✅ shipped, ◐ deferred/future, empty = pending.
 | 5.3 — Recording mode + fixture CLI | | |
 | 5.4 — Evaluator SKILL flips to sealed | | Planned ▶ ship now |
 | 5.5 — Orchestrator awareness | ◐ partial | `0581212` |
-| 5.6 — R+16 refactor (optional) | | |
+| 5.6 — P-3.10 refactor (optional) | | |
 | 5.7 — Bootstrap-recording orchestration | | |
 | 5.8 — Auditor SKILL for pure-skill agents | | |
 | 5.9 — Agent-factory gate-matrix correction | | |
@@ -895,9 +895,9 @@ traffic regardless of HTTP_PROXY. See §5.2c rationale.
 - Documentation update in `docs/planner-principles.md` and
   `docs/promotion-gate.md` (or wherever the promotion-gate semantics live).
 
-### 5.6 Optional: refactor R+16 enforcement to use the new field
+### 5.6 Optional: refactor P-3.10 enforcement to use the new field
 
-- The current promotion-gate-execution path that denies network via R+16
+- The current promotion-gate-execution path that denies network via P-3.10
   could be expressed as "promotion-gate sandbox manifest declares
   `network: sealed`." Drop the special-case code; the generic egress hook
   takes over.
@@ -966,7 +966,7 @@ otherwise makes §5.9 paper-only enforcement.
   `agent_revision_create_from_intent` keyed on the bundled SKILL.md.
   Validates the auditor's `promotion_record` exists against the
   bundled artifact_id (the `audit_only` gating mode from §3.5.3 +
-  §5.9). The R++2 capability-delta check works unchanged because it
+  §5.9). The P-2.16 capability-delta check works unchanged because it
   already keys on artifact_id.
 - **No gateway-side type change.** No `promotion_record` polymorphism.
   No new audit-record tool. The work is entirely in agent-factory and
@@ -1000,7 +1000,7 @@ can install a pure-skill agent without audit.
   - An auditor `promotion_record(pass=true)` against the revision's
     artifact_id; `record.auditor_pass` set; `record.auditor_id`
     distinct from the revision's `created_by` (the agent that
-    proposed the install). R-2.17 reduces to "auditor identity ≠
+    proposed the install). P-2.17 reduces to "auditor identity ≠
     proposer identity" because there is no evaluator to compare to.
   - The revision's `content_digest` matches the auditor's record
     `content_digest` (existing invariant — unchanged).
@@ -1026,7 +1026,7 @@ can install a pure-skill agent without audit.
     promote **succeeds** (mode = audit_only).
   - With auditor `promotion_record(pass=false)` → promote fails.
   - Auditor identity equal to the proposer's identity → promote
-    fails (R-2.17 self-approval ban).
+    fails (P-2.17 self-approval ban).
   - A revision with NetworkAccess + intent-only artifact still
     requires both evaluator and auditor (mode = full via has_high_risk
     branch) — pin that 5.11 does not weaken the existing high-risk
@@ -1074,7 +1074,7 @@ agent review). Each track is internally ordered.
    third-party/adversarial artifacts. Not a blocker for anything
    above.
 9. **5.2d** *(future)*: HTTPS via gateway-generated CA.
-10. **5.6** (optional): refactor R+16's ad-hoc enforcement to use the
+10. **5.6** (optional): refactor P-3.10's ad-hoc enforcement to use the
     generic hook.
 
 The evaluator can ship sealed now without waiting for kernel-level
@@ -1144,7 +1144,7 @@ lower-risk than Track A overall (most of Track B is SKILL changes), but
    UX for subsequent updates (drift detection workflow, regeneration,
    diff review when the live response shape changes) is a follow-up.
 
-6. **Should `R+16` be refactored or left as-is?** R+16's current
+6. **Should `P-3.10` be refactored or left as-is?** P-3.10's current
    enforcement is in promotion-gate-specific code. With this RFC the same
    property is expressible via a manifest field. Refactoring is cleaner but
    not blocking; deferring keeps the PR small.

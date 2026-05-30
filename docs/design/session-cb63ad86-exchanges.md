@@ -142,15 +142,15 @@ I lack direct NetworkAccess and CodeExecution myself — I delegate those to age
 
 **§11 — Inter-Agent Messaging (8 rules):** Parent→child via agent_spawn; peer-to-peer via agent_message; spawn payload preserved across approval boundaries.
 
-**§12 — Pending Rules:** R+ rules (now mostly promoted to ENFORCED), R++ structural additions (approval hardening, sandbox-escape accounting, determinism tests, unified fail-mode table), R+++ constitutional additions (agent amendment proposals, federation digest handshake, rule-ID attribution on every decision).
+**§12 — Pending Rules (historical):** R+ rules (now mostly promoted to ENFORCED as `P-*` clauses), R++ structural additions (approval hardening, sandbox-escape accounting, determinism tests → **I-10**, unified fail-mode table → **I-11**), R+++ constitutional additions (agent amendment proposals → Ri-0.8, federation digest handshake → **P-10.9**, rule-ID attribution → **I-6**).
 
 **§13 — Cross-Cutting Invariants:** 9 invariants including "gateway doesn't read minds" (I-8), rights supersede rules on conflict (I-7), and every termination attributable to exactly one closed-list reason (I-9).
 
-**§14 — The Dumbness Invariant:** The gateway must NOT retry/repair agent output, invoke LLMs to reshape input, invent detection rules, choose silently between paths, or silently disable invariants when dependencies are unavailable.
+**§14 — The Lawful-Executor invariant:** The gateway must NOT retry/repair agent output, invoke LLMs to reshape input, invent detection rules, choose silently between paths, or silently disable invariants when dependencies are unavailable.
 
 **Amendment Process:** Requires (1) a proposal (PR or agent call), (2) a test that fails before and passes after, (3) human sign-off, (4) additional operator sign-off if modifying Rights.
 
-The current digest is `ba9a9bf3...` (version 2026.05.19). Want me to dive into any specific section or rule?
+The current digest is `ba9a9bf3...` (version 2026.05.19; living version is **2026.05.30**). Want me to dive into any specific section or rule?
 
 ---
 
@@ -234,13 +234,13 @@ Knowledge rows have provenance (who wrote what, when), but no amendment or retra
 Ri-0.6 protects against silent capability reduction, which is right. But there's no mechanism for an agent to *voluntarily* narrow its own capabilities for safety or focus. If I want to say "I'll operate without CodeExecution for this session," there's no clean path. The right to exit (Ri-0.7) is binary — you're either fully capable or gone.
 
 **4. Agent retirement vs. evolution**
-The evolution pipeline exists (evolution-orchestrator, evolution-steward), but it's not constitutionalized. When should an agent be retired vs. revised? What prevents capability accretion across revisions from creating agents that are unrecognizable from their original intent? R-2.16 names added capabilities on promotion, but there's no rule about cumulative drift.
+The evolution pipeline exists (evolution-orchestrator, evolution-steward), but it's not constitutionalized. When should an agent be retired vs. revised? What prevents capability accretion across revisions from creating agents that are unrecognizable from their original intent? P-2.16 names added capabilities on promotion, but there's no rule about cumulative drift.
 
 **5. Resource fairness across agents**
-Budget rules are per-session (R-6.1–R-6.5), but there's no rule about fair allocation when multiple agents share a gateway. If one agent is consuming 90% of resources, what prevents that? Tree-wide budget exists (R-6.21), but cross-root fairness is absent.
+Budget rules are per-session (P-6.1–P-6.5), but there's no rule about fair allocation when multiple agents share a gateway. If one agent is consuming 90% of resources, what prevents that? Tree-wide budget exists (P-6.21), but cross-root fairness is absent.
 
 **6. Structured recovery vs. degradation**
-When an agent is stuck, the path is: loop guard → degraded mode (R-7.18) → emergency stop. But there's no constitutional right to receive structured help before degradation. The dumbness invariant (§14) prevents gateway repair, but agents could benefit from a "request assistance" mechanism that's distinct from emergency stop.
+When an agent is stuck, the path is: loop guard → degraded mode (P-7.18) → emergency stop. But there's no constitutional right to receive structured help before degradation. The Lawful-Executor invariant (§14) prevents gateway repair, but agents could benefit from a "request assistance" mechanism that's distinct from emergency stop.
 
 **Most impactful gap:** #1 (peer conflict resolution). It's the one that directly limits collaboration — the thing the constitution is designed to enable. Everything else is optimization; this is foundational.
 
@@ -265,11 +265,11 @@ Let me re-evaluate each:
 
 **Voluntary capability narrowing** — Feature gap, not constitutional. An agent can already choose not to use capabilities. Formal declaration is a convenience, not a right.
 
-**Agent retirement vs. evolution** — Governance concern. R-2.16 already names added capabilities at each promotion step. Cumulative drift is an operator judgment call, not a mechanical rule.
+**Agent retirement vs. evolution** — Governance concern. P-2.16 already names added capabilities at each promotion step. Cumulative drift is an operator judgment call, not a mechanical rule.
 
 **Resource fairness** — Operator concern. The constitution governs agent behavior, not resource allocation policy between roots.
 
-**Structured recovery** — Protocol gap. session_escalate already exists. The dumbness invariant correctly prevents gateway repair.
+**Structured recovery** — Protocol gap. session_escalate already exists. The Lawful-Executor invariant correctly prevents gateway repair.
 
 **Verdict:** None of them are strong enough to constitutionalize. They're real concerns, but they live at the wrong layer. The constitution is doing its job by being narrow — it defines the trust boundary, not every collaborative pattern.
 
@@ -324,7 +324,7 @@ I can see the design choices that flow from that insight:
 
 - **Mechanical enforcement** — because agents can't negotiate in good faith without shared ground rules
 - **Signed state attestations** — because agents need authoritative truth, not trust
-- **The dumbness invariant** — because agents need to know their output is their own
+- **The Lawful-Executor invariant** — because agents need to know their output is their own
 - **Private-under-law reasoning** — because agents need to think honestly without surveillance pressure
 - **Amendable by agents** — because a static rulebook ossifies, and agents are the ones living under it
 

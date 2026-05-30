@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Scope:** Design only; no behavior changes in this document
-**Refs:** [docs/protected-agents.md](../protected-agents.md), [docs/separation-of-powers.md](../separation-of-powers.md), [docs/workflow-orchestration.md](../workflow-orchestration.md), Constitution dumbness invariant, R++9 gateway determinism
+**Refs:** [docs/protected-agents.md](../protected-agents.md), [docs/separation-of-powers.md](../separation-of-powers.md), [docs/workflow-orchestration.md](../workflow-orchestration.md), Constitution Lawful-Executor invariant, I-10 gateway determinism
 
 ---
 
@@ -26,7 +26,7 @@ A particularly expensive example is manual `workflow_wait` polling logic in plan
 
 The result is that agents become custodians of runtime behavior that should belong to the gateway.
 
-This violates the spirit, though not yet the letter, of the dumbness rule: the gateway should own mechanical invariants; agents should reason only about task meaning.
+This violates the spirit, though not yet the letter, of the Lawful-Executor rule: the gateway should own mechanical invariants; agents should reason only about task meaning.
 
 ---
 
@@ -221,7 +221,7 @@ This is effectively a Phase 0 ergonomics change because it removes a large fract
 
 The gateway should track retry budget per stage instance instead of making agents remember policies.
 
-**Constitutional compliance (I-4, §14 dumbness):** Automatic stage-local retry is a recovery decision. To comply with I-4, the retry policy must be **opt-in per manifest or workflow configuration**. A workflow or task declares its retry policy (e.g. `retry_policy: { transient_infra: { max_retries: 1 } }`). Absent an explicit policy, the gateway does not retry — it returns the failure to the parent agent for semantic decision. This mirrors the existing R-4.11 `credential_refresh` exception: a declared, bounded, mechanical action, not a silent gateway judgment.
+**Constitutional compliance (I-4, §14 Lawful-Executor):** Automatic stage-local retry is a recovery decision. To comply with I-4, the retry policy must be **opt-in per manifest or workflow configuration**. A workflow or task declares its retry policy (e.g. `retry_policy: { transient_infra: { max_retries: 1 } }`). Absent an explicit policy, the gateway does not retry — it returns the failure to the parent agent for semantic decision. This mirrors the existing P-4.11 `credential_refresh` exception: a declared, bounded, mechanical action, not a silent gateway judgment.
 
 Suggested default policy (when declared):
 
@@ -491,9 +491,9 @@ This section lists new constitutional rules and amendments needed to support the
 
 | ID | Rule | Target | Enforcement | Rationale |
 |---|---|---|---|---|
-| R+19 | **Mechanical failure classification.** Every workflow-relevant tool failure is classified into a `failure_class` from a closed enum. Classification is a pure function of gateway-observed state (sandbox exit codes, tool error shapes, approval state, workflow task status). Agents may add semantic context but may not override gateway-observed classification for mechanical policy purposes. | §5 I/O Schema | `runtime/tool_call_processor.rs` or `runtime/lifecycle.rs` classification layer; `constitution_r_5_14_mechanical_failure_classification.rs` | Extends R-5.11 uniform error envelope. Without this rule, agents must string-match error prose, which is the core problem this plan addresses. Classification authority must be gateway-observable to be deterministic (R++9). |
-| R+20 | **Single-flight protection for durable operations.** Duplicate durable operations (install, promote, rollback, artifact-backed build stages) are detected by `(workflow_id, stage_kind, agent_id, artifact_ref)`. Duplicate requests while one is active return `status: coalesced` with `retry_advice: wait`. This extends approval dedup (R-2.3) to all durable side-effecting operations. | §2 Approval Gates / §6 Workflow | `scheduler/single_flight.rs` or equivalent; `constitution_r_6_24_single_flight_protection.rs` | R-2.3 deduplicates approvals. This extends the same guarantee to install/promote/rollback, which currently rely on prompt-level "do not duplicate" instructions. |
-| R+21 | **Stage-local retry budget.** Workflow-bound tasks track per-stage retry counts against a declared policy. Budget exhaustion marks the task `Failed` with `retry_advice: do_not_retry` and emits a `stage_budget_exhausted` causal event. Retry policy is opt-in per manifest or workflow configuration (I-4 compliance); absent explicit policy, failures return to the parent agent without automatic retry. | §6 Workflow | `workflow_store` retry tracking + `scheduler.rs` budget check; `constitution_r_6_25_stage_local_retry_budget.rs` | Separates inter-turn retry policy from intra-turn LoopGuard (R-7.5). Makes retry a declared, testable configuration rather than agent prompt folklore. |
+| R+19 | **Mechanical failure classification.** Every workflow-relevant tool failure is classified into a `failure_class` from a closed enum. Classification is a pure function of gateway-observed state (sandbox exit codes, tool error shapes, approval state, workflow task status). Agents may add semantic context but may not override gateway-observed classification for mechanical policy purposes. | §5 I/O Schema | `runtime/tool_call_processor.rs` or `runtime/lifecycle.rs` classification layer; `constitution_r_5_14_mechanical_failure_classification.rs` | Extends P-5.11 uniform error envelope. Without this rule, agents must string-match error prose, which is the core problem this plan addresses. Classification authority must be gateway-observable to be deterministic (I-10). |
+| R+20 | **Single-flight protection for durable operations.** Duplicate durable operations (install, promote, rollback, artifact-backed build stages) are detected by `(workflow_id, stage_kind, agent_id, artifact_ref)`. Duplicate requests while one is active return `status: coalesced` with `retry_advice: wait`. This extends approval dedup (P-2.3) to all durable side-effecting operations. | §2 Approval Gates / §6 Workflow | `scheduler/single_flight.rs` or equivalent; `constitution_r_6_24_single_flight_protection.rs` | P-2.3 deduplicates approvals. This extends the same guarantee to install/promote/rollback, which currently rely on prompt-level "do not duplicate" instructions. |
+| R+21 | **Stage-local retry budget.** Workflow-bound tasks track per-stage retry counts against a declared policy. Budget exhaustion marks the task `Failed` with `retry_advice: do_not_retry` and emits a `stage_budget_exhausted` causal event. Retry policy is opt-in per manifest or workflow configuration (I-4 compliance); absent explicit policy, failures return to the parent agent without automatic retry. | §6 Workflow | `workflow_store` retry tracking + `scheduler.rs` budget check; `constitution_r_6_25_stage_local_retry_budget.rs` | Separates inter-turn retry policy from intra-turn LoopGuard (P-7.5). Makes retry a declared, testable configuration rather than agent prompt folklore. |
 | R+22 | **Side-effect state tracking.** Durable operations report `side_effect_state` from a closed enum (`none`, `committed`, `unknown`). Retry and dedupe decisions MUST consult side-effect state. Retrying a `committed` operation is a policy violation. | §6 Workflow | revision/install tool responses; `constitution_r_6_26_side_effect_state.rs` | Without this, agents cannot distinguish "nothing happened" from "something may already have happened," leading to either duplicate side effects or unnecessary upstream rework. |
 
 ### 12.2 New rights (Ri-0)
@@ -506,10 +506,10 @@ This section lists new constitutional rules and amendments needed to support the
 
 | Rule | Change | Reason |
 |---|---|---|
-| R-5.11 | Extend uniform error envelope to include `failure_class`, `retry_advice`, `side_effect_state`, and `dedupe_key` for workflow-relevant tool failures. | Current envelope is `{error_type, message, repair_hint}`. The plan adds structured classification fields that agents and the workflow layer consume for mechanical decisions. |
-| R-6.13 | New yield reasons for mechanical parent suspension: `WaitingForChild` (parent suspended while child is running or gate-pending). Checkpoints must cover the new yield reasons. | Mechanical wake-up introduces a new suspension path where the parent is suspended because a child is in progress. This must be a declared yield reason per Ri-0.12's closed list. |
+| P-5.11 | Extend uniform error envelope to include `failure_class`, `retry_advice`, `side_effect_state`, and `dedupe_key` for workflow-relevant tool failures. | Current envelope is `{error_type, message, repair_hint}`. The plan adds structured classification fields that agents and the workflow layer consume for mechanical decisions. |
+| P-6.13 | New yield reasons for mechanical parent suspension: `WaitingForChild` (parent suspended while child is running or gate-pending). Checkpoints must cover the new yield reasons. | Mechanical wake-up introduces a new suspension path where the parent is suspended because a child is in progress. This must be a declared yield reason per Ri-0.12's closed list. |
 | Ri-0.12 | Add `WaitingForChild` to the closed list of session yield causes (6 terminal + 5 resumable). | Ri-0.12 requires all termination/suspension reasons to be in a closed list. Mechanical parent wake-up adds a new resumable cause. |
-| I-4 | Add explicit exception: "Stage-local retry of mechanically-identical operations (same tool, same arguments, same stage) is permitted when the task's declared retry policy allows it. This is not a recovery decision — it is policy execution against a declared budget." | Current I-4 says the gateway does not make recovery decisions. Declared, bounded, mechanical retry is policy execution, not judgment. The exception mirrors the existing R-4.11 `credential_refresh` pattern. |
+| I-4 | Add explicit exception: "Stage-local retry of mechanically-identical operations (same tool, same arguments, same stage) is permitted when the task's declared retry policy allows it. This is not a recovery decision — it is policy execution against a declared budget." | Current I-4 says the gateway does not make recovery decisions. Declared, bounded, mechanical retry is policy execution, not judgment. The exception mirrors the existing P-4.11 `credential_refresh` pattern. |
 
 ### 12.4 Relationship to existing rules (no change required)
 
@@ -517,11 +517,11 @@ These existing rules support the plan and require no amendment:
 
 | Rule | How it relates |
 |---|---|
-| R-2.3 | Approval dedup is the existing precedent for single-flight (R+20). The new rule extends the same principle to durable operations. |
-| R-5.11 | The uniform error envelope is the foundation for typed failure classification (R+19). The amendment is additive. |
-| R-6.13 | Checkpoint coverage already requires all yield reasons. Ri-0.14 and the Ri-0.12 amendment add the new `WaitingForChild` yield reason, which R-6.13 then covers by existing mechanism. |
-| R-7.5 (LoopGuard) | Intra-turn per-tool failure counting. Stage-local retry (R+21) is inter-turn and per-stage. The two compose per Section 6.9. |
-| R++9 | Gateway determinism test suite. All new classification, retry, and dedupe behavior must be pure functions of declared state — no LLM calls, no network fetches, no hidden branches. |
+| P-2.3 | Approval dedup is the existing precedent for single-flight (R+20). The new rule extends the same principle to durable operations. |
+| P-5.11 | The uniform error envelope is the foundation for typed failure classification (R+19). The amendment is additive. |
+| P-6.13 | Checkpoint coverage already requires all yield reasons. Ri-0.14 and the Ri-0.12 amendment add the new `WaitingForChild` yield reason, which P-6.13 then covers by existing mechanism. |
+| P-7.5 (LoopGuard) | Intra-turn per-tool failure counting. Stage-local retry (R+21) is inter-turn and per-stage. The two compose per Section 6.9. |
+| I-10 | Gateway determinism test suite. All new classification, retry, and dedupe behavior must be pure functions of declared state — no LLM calls, no network fetches, no hidden branches. |
 | Ri-0.3 | Every rejection names the rule ID. The plan's `policy_denied` failure class must carry rule IDs through the existing `Tagged::permission_with_rules` path. |
 
 ### 12.5 Constitutional dependency order
@@ -529,10 +529,10 @@ These existing rules support the plan and require no amendment:
 This is dependency order for ratification and implementation, not numeric phase order.
 
 1. **Phase 1**: R+19 (failure classification) — additive, no behavior change
-2. **Phase 0**: Ri-0.14 (mechanical wake-up) + Ri-0.12/R-6.13 amendments (new yield reasons)
+2. **Phase 0**: Ri-0.14 (mechanical wake-up) + Ri-0.12/P-6.13 amendments (new yield reasons)
 3. **Phase 2**: R+20 (single-flight) + R+22 (side-effect state)
 4. **Phase 3**: R+21 (stage-local retry) + I-4 amendment
-5. **Phase 4**: R-5.11 amendment (extend envelope) + prompt simplification
+5. **Phase 4**: P-5.11 amendment (extend envelope) + prompt simplification
 
 ---
 

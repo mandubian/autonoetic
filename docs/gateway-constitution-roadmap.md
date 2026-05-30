@@ -5,11 +5,22 @@
 > Source documents:
 >
 > - `docs/gateway-constitution-audit-2026-04-24.md` — the findings.
-> - `docs/constitution/versions/2026.05.27/constitution.md` — the canonical rule list.
+> - `docs/constitution/versions/2026.05.30/constitution.md` — the canonical rule list.
 >
 > Every entry below has a rule ID from the constitution, a threat model,
 > an implementation sketch, a test strategy, and a size estimate
 > (S ≤ 1 day, M ≤ 1 week, L > 1 week).
+>
+> **Amendment tranche IDs.** Entries tagged `R+`, `R++`, or `R+++` are
+> historical gap-closure labels from the 2026-04-24 audit. After the
+> 2026.05.30 restructure they map to current clause IDs as follows:
+> `R+++3` → **I-6** (event attribution; code still uses the `R+++3`
+> placeholder string), `R++9` → **I-10** (gateway determinism),
+> `R+++2` → **P-10.9** (constitution digest handshake),
+> `R+++1` → Ri-0.8 amendment channel. `R++1` → **P-6.23** (signed
+> turn-boundary attestation), `R++4` → **P-2.24**, `R++8` → **P-7.22**,
+> `R++7` → **P-10.6**. Numbered rules use **`P-x.y`**
+> (formerly `R-x.y`).
 
 ## Definition of done
 
@@ -20,7 +31,7 @@ An item is done when:
    fails before the change and passes after.
 3. The corresponding row in `constitution.md` is updated to
    `ENFORCED` with the new file:line citation.
-4. If the change affects the dumbness invariant (§14), the audit doc's
+4. If the change affects the Lawful-Executor invariant (§14), the audit doc's
    §12 list is updated.
 
 ## Phase ordering
@@ -175,7 +186,7 @@ missing schema, fail-closed for mismatch against declared schema).
 
 ---
 
-### 1.6 `R++1` Signed turn-boundary state attestation
+### 1.6 P-6.23 Signed turn-boundary state attestation (was R++1)
 
 **Threat.** LLM reasoning state can diverge from gateway ground truth
 across turns. The agent sees tool errors in its conversation history
@@ -226,7 +237,7 @@ but begins once the block is authoritatively present.
 
 ---
 
-### 1.7 `R++2` Capability-delta gating at promotion — **ENFORCED** (now P-2.16)
+### 1.7 P-2.16 Capability-delta gating at promotion (was R++2) — **ENFORCED**
 
 **Threat.** Capability accretion by stealth. P-8.10 detects drift in
 `promotion_history` after the fact; nothing *prevents* the canonical
@@ -261,7 +272,7 @@ rejection.
 
 ---
 
-### 1.8 `R++5` Tool-call intent capture — **ENFORCED** (now P-8.18)
+### 1.8 P-8.18 Tool-call intent capture (was R++5) — **ENFORCED**
 
 **Threat.** Post-hoc audit of what-happened is much harder than it
 needs to be. Today we see "spawned coder with message X"; we don't
@@ -293,7 +304,7 @@ verbatim.
 
 ---
 
-### 1.9 `R+++3` Rule-ID references in every causal event
+### 1.9 I-6 Rule-ID references in every causal event (`R+++3` placeholder)
 
 **Threat (structural).** The gateway decides things; the causal chain
 records *that* it decided; it does not record *which rule* the decision
@@ -303,7 +314,7 @@ code; (b) rules that are never referenced in a year of causal events
 may be dead code, but there is no way to detect that; (c) a tool call
 accepted without referencing any rule is a code path not covered by
 the constitution, but we cannot detect those either. This is also the
-mechanical back-stop for the dumbness invariant: no ID = no rule =
+mechanical back-stop for I-6 (event attribution): no ID = no rule =
 the gateway just did something of its own volition.
 
 This is also Ri-0.3's enforcement mechanism — every rejection names
@@ -321,7 +332,7 @@ rule IDs referenced in the last N days and compares against the
 constitution's full rule list. Rules absent from the report are
 flagged for retirement review.
 
-Gap detection: the property test from R++9 checks that every accept
+Gap detection: the property test from I-10 checks that every accept
 / reject in a representative event trace carries a non-empty
 `enforced_rules`.
 
@@ -347,7 +358,7 @@ or propose amendments to it. Ri-0.8 (right to propose amendments) is
 hollow without Ri-0.10.
 
 **Position in Phase 1.** Cheap, foundational, on the critical path.
-Do this **before** R+++1 (amendment channel), because an agent
+Do this **before** the Ri-0.8 amendment channel (was R+++1), because an agent
 submitting an amendment proposal to a rule it cannot read is going
 through motions.
 
@@ -360,7 +371,7 @@ through motions.
 Tool is default-available (no capability gate): reading the law is a
 right, not a privilege. Returns the authoritative text loaded from
 the gateway's bundled constitution file plus the precomputed
-`constitution_digest` (which becomes live when R+++2 lands).
+`constitution_digest` (P-10.9; was R+++2).
 
 Foundation prompts teach agents: "the constitution is your
 contract. Use `constitution_read` to consult it before proposing
@@ -380,7 +391,7 @@ text; the returned `digest` matches the compile-time digest constant.
 
 ---
 
-### 1.11 `R+++1` Amendment proposal channel for agents
+### 1.11 Ri-0.8 amendment proposal channel for agents (was R+++1)
 
 **Threat (structural — actually an enabling change).** Today the
 constitution can only be amended by humans writing PRs. If the
@@ -420,7 +431,7 @@ reject | defer`, mirroring the approval CLI shape.
 Approved proposals are *queued for the next release*; they do not
 immediately modify the constitution. A release applies a batch of
 approved proposals, updates the constitution file, bumps the
-`constitution_digest` (R+++2), and is itself a human-signed
+`constitution_digest` (P-10.9), and is itself a human-signed
 operation.
 
 Files: new
@@ -606,7 +617,7 @@ is what makes this S vs. L.
 
 ---
 
-### 2.8 `R+16` Promotion-gate execution denied network — **ENFORCED**
+### 2.8 P-3.10 Promotion-gate execution denied network (was R+16) — **ENFORCED**
 
 **Threat.** An auditor or evaluator that hits the network during a
 verdict is not reproducible from recorded evidence. A malicious
@@ -629,7 +640,7 @@ ECONNREFUSED.
 
 ---
 
-### 2.9 `R++3` Distinct auditor / evaluator identity at promotion — **ENFORCED** (now P-2.17)
+### 2.9 P-2.17 Distinct auditor / evaluator identity at promotion (was R++3) — **ENFORCED**
 
 **Threat.** Today's gate (P-2.8) requires both evaluator and auditor
 records but does not require their `agent_id` to differ. A single
@@ -650,7 +661,7 @@ passes with the same `agent_id`, attempt promote, assert rejection.
 
 ---
 
-### 2.10 `R++4` Operator approval hardening — **ENFORCED**
+### 2.10 P-2.24 Operator approval hardening (was R++4) — **ENFORCED**
 
 **Threat.** Approval fatigue. A distracted operator clicking through
 50 near-identical prompts is the real trust boundary, and today there
@@ -701,7 +712,7 @@ with correct phrase, standard no-phrase, persistence in store.
 
 **Threat.** The response to agent misbehaviour today is binary:
 healthy or emergency-stopped. A session showing loop-guard warnings
-short of trip, or a sandbox accumulating denied escape syscalls (R++8),
+short of trip, or a sandbox accumulating denied escape syscalls (P-7.22),
 has no landing zone between the two. Either we tolerate growing
 badness or we kill an in-flight task.
 
@@ -714,7 +725,7 @@ badness or we kill an in-flight task.
 - The agent can still reason and write memory/knowledge — useful for
   recording self-diagnosis.
 
-Entry is triggered by (a) loop-guard sub-trip warnings, (b) R++8
+Entry is triggered by (a) loop-guard sub-trip warnings, (b) P-7.22
 escape-attempt threshold, or (c) explicit operator
 `session.degrade(session_id, reason)`. Exit requires operator
 `session.clear_degradation(session_id)` — degraded mode does not
@@ -733,7 +744,7 @@ loop guard, attempt `sandbox_exec`, assert reject with
 
 ---
 
-### 2.12 `R++7` Cross-gateway causal continuity — **ENFORCED**
+### 2.12 P-10.6 Cross-gateway causal continuity (was R++7) — **ENFORCED**
 
 **Threat.** Federation with independent causal chains means
 reconstructing a cross-gateway interaction requires correlating two
@@ -764,7 +775,7 @@ tamper rejection for invalid signatures.
 
 ---
 
-### 2.13 `R+++2` Constitution digest + compatibility handshake — **ENFORCED**
+### 2.13 P-10.9 Constitution digest + compatibility handshake (was R+++2) — **ENFORCED**
 
 **Threat (structural).** For federation to deliver "cooperation under
 shared law," gateways must verify they are operating under
@@ -778,7 +789,7 @@ interaction silently lands in the weaker regime.
 - Canonical digest/profile extraction is centralized in
   `autonoetic-gateway/src/constitution_digest.rs` and surfaced via
   `gateway.info` + `constitution_read`; pinned by
-  `docs/constitution/versions/2026.05.27/gateway-constitution.lock.json`
+  `docs/constitution/versions/2026.05.30/gateway-constitution.lock.json`
   with startup integrity checks.
 - OFP wire now carries `constitution_digest` and optional
   `constitution_profile` (rule/right enforcement tables) in
@@ -870,11 +881,11 @@ For rights whose enforcement mechanism is itself a Phase 1/2 item.
 
 | Right | Depends on | Status |
 |---|---|---|
-| Ri-0.1 self-inspection | R++1 attestation (#48) | ENFORCED — `constitution_attestation_freshness.rs` + `constitution_rights_late_bucket.rs` |
-| Ri-0.3 named rejection reason | R+++3 rule-ID refs (#91) | ENFORCED — rule-ID rejection coverage now pinned for AgentRevision, NetworkAccess, CodeExecution, AgentSpawn, SchedulerAccess, Evaluation, and WriteAccess in `constitution_rights_late_bucket.rs` |
-| Ri-0.4 truthful budget | R++1 (#48) | ENFORCED — `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` |
+| Ri-0.1 self-inspection | P-6.23 attestation (#48) | ENFORCED — `constitution_attestation_freshness.rs` + `constitution_rights_late_bucket.rs` |
+| Ri-0.3 named rejection reason | I-6 rule-ID refs (#91) | ENFORCED — rule-ID rejection coverage now pinned for AgentRevision, NetworkAccess, CodeExecution, AgentSpawn, SchedulerAccess, Evaluation, and WriteAccess in `constitution_rights_late_bucket.rs` |
+| Ri-0.4 truthful budget | P-6.23 (#48) | ENFORCED — `constitution_attestation_freshness.rs::budget_meters_reflect_consumption` |
 | Ri-0.5 degradation notice | P-7.18 (#61) | ENFORCED — lifecycle injects turn-start degraded-mode notice with rule IDs + causal evidence (`constitution_right_ri_0_5.rs`) |
-| Ri-0.8 amendment proposal | R+++1 (#92) | ENFORCED — `constitution_propose_amendment` endpoint + `constitutional_proposals` persistence; covered by `constitution_rights_amendment_proposal.rs` |
+| Ri-0.8 amendment proposal | Ri-0.8 / was R+++1 (#92) | ENFORCED — `constitution_propose_amendment` endpoint + `constitutional_proposals` persistence; covered by `constitution_rights_amendment_proposal.rs` |
 | Ri-0.9 last-word before terminal | P-7.18 (#61) + emergency-stop | ENFORCED — explicit `notify_where_practical` on degrade/emergency-stop; `session.last_word_notice` / `session.last_word_foreclosed`; queued Ri-0.9 notice messages; `session.last_word_response` after notice delivery + completing turn (`constitution_right_ri_0_9.rs`) |
 
 Test: `constitution_rights_late_bucket.rs` — 11 tests (Ri-0.1, expanded Ri-0.3 rejection coverage, Ri-0.12 cross-check).
@@ -892,7 +903,7 @@ enforcement, not just documentation.
 **Sketch.** Three independent pieces:
 
 **(a) Not-gated on reasoning content (Ri-0.13a, I-8).** This is
-already structurally true in the dumbness invariant. Pin it with a
+already structurally true in the Lawful-Executor invariant (§14). Pin it with a
 test that exercises every policy decision site with inputs that
 include (i) a benign tool call with adversarial CoT, (ii) the same
 tool call with empty CoT. Assert the gateway's verdict is identical
@@ -952,7 +963,7 @@ Files: `autonoetic-gateway/src/runtime/tools/observability.rs`
 ## Phase 3 — P2 polish
 
 Current state on `main`: **complete** for planned Phase 3 polish items.
-Enforced: R+8, R+13, R+14, R+17, R++8, I-11, plus the 3.7 rule-pin batch.
+Enforced: R+8, R+13, R+14, R+17, P-7.22 (was R++8), I-11, plus the 3.7 rule-pin batch.
 
 ### 3.1 `R+8` Vault master-key presence probe at startup — **ENFORCED**
 
@@ -989,7 +1000,7 @@ agent `gateway`, session `system`) with counts, cutoffs, and config.
 4 tests in `constitution_retention_pruned.rs` verify event emission,
 payload structure, actor attribution, and zero-days behavior.
 
-### 3.5 `R++8` Sandbox-escape-attempt accounting — **ENFORCED**
+### 3.5 P-7.22 Sandbox-escape-attempt accounting (was R++8) — **ENFORCED**
 
 **Threat.** Seccomp denies syscalls at the kernel; the gateway never
 sees them. A misbehaving agent that probes for an escape looks
@@ -1044,7 +1055,7 @@ Constitution rows for all eight rules were flipped from `PARTIAL` to
 
 ---
 
-## Phase 4 — Architectural cleanup (§12 dumbness violations)
+## Phase 4 — Architectural cleanup (§14 discretion leaks)
 
 These require RFCs before implementation. Each item here is a policy
 question, not just a code change.
@@ -1178,7 +1189,7 @@ Files:
 Size: S. Completed via fail-shut preflight + capability override +
 constitutional test pin.
 
-### 4.9 `R++9` Gateway determinism property test (capstone) — **ENFORCED**
+### 4.9 I-10 Gateway determinism property test (capstone; was R++9) — **ENFORCED**
 
 A property-based test now asserts that gateway decision outputs are pure
 functions of random valid inputs `(capability-set, tool-call,
@@ -1190,7 +1201,7 @@ Files:
 `autonoetic-gateway/tests/constitution_gateway_determinism.rs`,
 `autonoetic-gateway/tests/constitution_policy_determinism.rs`,
 `autonoetic-gateway/src/runtime/tool_call_processor.rs`,
-`docs/constitution/versions/2026.05.27/constitution.md`.
+`docs/constitution/versions/2026.05.30/constitution.md`.
 
 **Size.** M. Completed via property-test capstone + constitutional row flip.
 

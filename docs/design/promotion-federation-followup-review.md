@@ -21,7 +21,7 @@
 
 ## TL;DR
 
-Most of the recommended next-session work from the previous review (`96fd2de`) shipped cleanly. The core promotion-unification mechanic — FullJury gate, EscalationMessage, federation.escalate tool — is land and mechanically enforced. R-2.17 under federation correctly implements the middle-ground I recommended. Phase 2 recording-mode redaction policy is actually *better* than my §4.3 concern asked for. Phase 4 Tier 1 reuses the same EscalationMessage channel cleanly.
+Most of the recommended next-session work from the previous review (`96fd2de`) shipped cleanly. The core promotion-unification mechanic — FullJury gate, EscalationMessage, federation.escalate tool — is land and mechanically enforced. P-2.17 under federation correctly implements the middle-ground I recommended. Phase 2 recording-mode redaction policy is actually *better* than my §4.3 concern asked for. Phase 4 Tier 1 reuses the same EscalationMessage channel cleanly.
 
 Ten forgotten or imperfect points remain. The highest-impact one is **operator-throughput safeguards (#5 below)** — this was flagged as the single biggest risk in the previous review's closing section and is still unaddressed. Everything else is incremental polish, with one item (#3, post-promotion `artifact_id` empty) leaning toward a minor design bug.
 
@@ -33,7 +33,7 @@ Ten forgotten or imperfect points remain. The highest-impact one is **operator-t
 
 - **FullJury mechanically enforces operator approval.** `autonoetic-gateway/src/runtime/tools/agent_revision.rs:1941-2167`. The gate checks `promo_store.has_federation_roles(artifact_id)` (`promotion_store.rs:266-276`) and **requires** an approved `EscalationMessage` via `gateway_store.find_escalation(artifact_id, revision_id, EscalationStatus::Approved)` (`agent_revision.rs:2155-2167`). Not advisory; not bypassable from a compromised planner that does `revision.promote` directly.
 
-- **R-2.17 distinct-identity is middle-ground as recommended.** `agent_revision.rs:2135-2152`. Each federation role's `agent_id` must differ from `rev.created_by_id` AND from every other federation role's `agent_id`. The error message cites R-2.17 directly.
+- **P-2.17 distinct-identity is middle-ground as recommended.** `agent_revision.rs:2135-2152`. Each federation role's `agent_id` must differ from `rev.created_by_id` AND from every other federation role's `agent_id`. The error message cites P-2.17 directly.
 
 - **`required_eval_run_id` legacy path preserved.** `agent_revision.rs:2179-2183`. Both gates can be active in parallel; no removal needed. This matches §11.1 of the original audit and my §3.2 recommendation.
 
@@ -68,14 +68,14 @@ The `redact_fixture` function (`sealed_network.rs:288-344`) returns the list of 
 
 ## Forgotten or imperfect points
 
-### 1. R-2.22 not formally cited in code (previous review §3.7)
+### 1. P-2.22 not formally cited in code (previous review §3.7)
 
 **Severity:** Documentation gap / forensic ambiguity.
-**File:line:** `agent_revision.rs:2051` emits `enforced_rules: ["R-2.8", "R-2.17"]` for the FullJury event.
+**File:line:** `agent_revision.rs:2051` emits `enforced_rules: ["P-2.8", "P-2.17"]` for the FullJury event.
 
-The previous review §3.7 specifically asked for a concrete rule number for "operator as final arbiter" instead of the placeholder `R-2.xx`. The mechanic shipped; the rule citation didn't. Anyone reading the causal chain to find federation promotions sees `R-2.8` (high-risk promotion requires eval+audit) and may not realise FullJury is a separate, stronger requirement.
+The previous review §3.7 specifically asked for a concrete rule number for "operator as final arbiter" instead of the placeholder `R-2.xx`. The mechanic shipped; the rule citation didn't. Anyone reading the causal chain to find federation promotions sees `P-2.8` (high-risk promotion requires eval+audit) and may not realise FullJury is a separate, stronger requirement.
 
-**Fix:** allocate `R-2.22` (next free in R-2.x) with explicit text covering "operator approval is required when any federation-role verdict is present"; add to `enforced_rules` at the FullJury emission site; submit constitutional amendment via `constitution_propose_amendment` per R+++1.
+**Fix:** allocate `P-2.22` (next free in P-2.x) with explicit text covering "operator approval is required when any federation-role verdict is present"; add to `enforced_rules` at the FullJury emission site; submit constitutional amendment via `constitution_propose_amendment` per Ri-0.8 amendment channel.
 
 ### 2. `EscalationType` enum not shipped (plan §4.3)
 
@@ -140,7 +140,7 @@ This is not a regression of an existing feature; it's a category of feature that
 
 Clarification-child-session machinery (#172) exists. The federation escalation flow does not wire it. An operator reading an escalation sees the synthesised verdict and the role findings but cannot ask "static_evaluator, why did you flag this URL pattern?" without manually spawning a new session.
 
-**Fix:** the admin route for viewing an escalation exposes a `ask_role(escalation_id, role, question)` action that spawns a clarification child session of the recorded role with the question. The role's answer threads onto the escalation via `gate_messages` (the enrichment thread already exists from R-2.19).
+**Fix:** the admin route for viewing an escalation exposes a `ask_role(escalation_id, role, question)` action that spawns a clarification child session of the recorded role with the question. The role's answer threads onto the escalation via `gate_messages` (the enrichment thread already exists from P-2.19).
 
 ### 7. Negative-path test for "planner skips federation entirely" is missing
 
@@ -201,7 +201,7 @@ Ordered by impact / risk:
 
 1. **Operator-throughput safeguards** (#5). Biggest operational risk. Without this, the federation model fails at scale regardless of how clean the mechanics are.
 
-2. **R-2.22 formally cited** (#1). Small change, removes forensic ambiguity, lets the constitutional amendment process catch up.
+2. **P-2.22 formally cited** (#1). Small change, removes forensic ambiguity, lets the constitutional amendment process catch up.
 
 3. **Negative-path tests** (#7). Pins the mechanical guarantee against regression. A few hours of test-writing.
 

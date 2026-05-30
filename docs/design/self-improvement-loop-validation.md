@@ -193,7 +193,7 @@ Same as §4, with two extra steps before validate:
 4. Set `improve.allow_capability_changes = true` in the gateway
    config. Re-run `autonoetic improve`. The A/B replay should accept
    the comparison and coerce the holdout up.
-5. Approve, deploy, monitor as in §4. The existing R++2 constitutional
+5. Approve, deploy, monitor as in §4. The existing P-2.16 constitutional
    gate also fires at promote time as a second defender.
 6. Fill in the row in §8.3.
 

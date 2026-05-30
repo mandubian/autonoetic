@@ -1,7 +1,7 @@
 # Promotion Federation — Design Plan
 
 **Status:** Draft
-**Refs:** Issue #185 (sealed-network), Issue #186 (evaluator spawn loop), Constitution §14 (dumbness invariant), R+16 (promotion-gate network denial), R++9 (gateway determinism), R-2.17 (self-approval ban)
+**Refs:** Issue #185 (sealed-network), Issue #186 (evaluator spawn loop), Constitution §14 (Lawful-Executor invariant), P-3.10 (promotion-gate network denial), I-10 (gateway determinism), P-2.17 (self-approval ban)
 
 ---
 
@@ -315,12 +315,12 @@ Same as current evaluator but:
 
 | Principle | Effect |
 |---|---|
-| §14 (dumbness invariant) | Gateway doesn't know about evaluation roles. It reads verdicts and applies declared policy mechanically. |
-| R+16 (network denial) | Sealed evaluator still runs without live network. Static evaluator/test runner have no network. R+16 vacuously satisfied for non-execution roles. |
-| R++9 (determinism) | Gateway decision is `threshold_check(verdicts, policy)` — pure function of recorded state. Verdicts come from LLMs (non-deterministic), but the gateway surface is deterministic. |
-| R-2.17 (self-approval) | Each evaluator role must have a distinct identity from the revision proposer and from each other. Extended to cover the federation. |
+| §14 (Lawful-Executor invariant) | Gateway doesn't know about evaluation roles. It reads verdicts and applies declared policy mechanically. |
+| P-3.10 (network denial) | Sealed evaluator still runs without live network. Static evaluator/test runner have no network. P-3.10 vacuously satisfied for non-execution roles. |
+| I-10 (determinism) | Gateway decision is `threshold_check(verdicts, policy)` — pure function of recorded state. Verdicts come from LLMs (non-deterministic), but the gateway surface is deterministic. |
+| P-2.17 (self-approval) | Each evaluator role must have a distinct identity from the revision proposer and from each other. Extended to cover the federation. |
 
-### 7.2 R+16 clarification
+### 7.2 P-3.10 clarification
 
 Current: "Promotion-gate execution is denied network access."
 Proposed: "Promotion-gate execution, when it occurs, is denied live network access."
@@ -463,7 +463,7 @@ Under federation, new agents (`static_evaluator.default`, `unit_test_runner.defa
 | `constitution_promotion_gate_audit_only.rs` | 5 tests — AuditOnly branch, hard-code `auditor.default` |
 | `promotion_record_e2e.rs` | 1 test — full pass flow, uses `PromotionRole` variants |
 | `promotion_record_evaluator_fail.rs` | 3 tests — evaluator/auditor failure paths |
-| `constitution_promotion_distinct_identity.rs` | 2 tests — R-2.17 distinct-identity |
+| `constitution_promotion_distinct_identity.rs` | 2 tests — P-2.17 distinct-identity |
 | `promotion_required_record_integration.rs` | 2 tests — `require_promotion_record` spawn option |
 
 **Low impact (hard-code evaluator.default in helpers only):**
@@ -477,7 +477,7 @@ Under federation, new agents (`static_evaluator.default`, `unit_test_runner.defa
 
 | Test file | Reason |
 |---|---|
-| `constitution_promotion_capability_delta.rs` | Tests R++2 capability delta, no evaluator/auditor |
+| `constitution_promotion_capability_delta.rs` | Tests P-2.16 capability delta, no evaluator/auditor |
 | `protected_agents_promotion_gate_integration.rs` | Tests eval-run gate, not promotion roles |
 | `constitution_promotion_no_network.rs` | Tests sandbox isolation, not promotion roles |
 | `promotion_record_reject.rs` | Tests tool removal |

@@ -13,10 +13,10 @@
 | `web.rs`, `credential.rs`, `sandbox.rs` routed through `GateService` | **Done** |
 | `gate.add_message` / `gate.get_messages` JSON-RPC with redaction | **Done** |
 | `approvals.approve` / `approvals.reject` JSON-RPC (headless/bot clients) | **Done** |
-| Constitutional alignment (R-2.18–R-2.21, R-8.19, R+++3 `enforced_rules`) | **Done** — [#180](https://github.com/mandubian/autonoetic/issues/180) |
-| State attestation expanded to all gate kinds (R-6.23) | **Done** |
+| Constitutional alignment (P-2.18–P-2.21, P-8.19, I-6 `enforced_rules` / `R+++3` placeholder) | **Done** — [#180](https://github.com/mandubian/autonoetic/issues/180) |
+| State attestation expanded to all gate kinds (P-6.23) | **Done** |
 | Migrate remaining tools (`session.rs`, `artifact_prepare.rs`, `artifact_exec.rs`, `user_profile.rs`, `user_interaction.rs`) to `GateService` | **Pending** |
-| Agent-as-decider (R-2.20, R-2.21) | **Pending** — constitutional rules ratified, code not yet implemented |
+| Agent-as-decider (P-2.20, P-2.21) | **Pending** — constitutional rules ratified, code not yet implemented |
 
 ---
 
@@ -337,7 +337,7 @@ An earlier draft proposed creating a nested `GateKind::UserInput` on the *parent
 |---|---|---|
 | Pending gates on the parent | Two simultaneously — novel state, intricate resume choreography | One. Parent never moves. |
 | Agent reasoning trajectory | Branches: post-clarification turn may bias the post-approval action | Untouched. Clarification reasoning is in a separate causal chain. |
-| Budget attribution | Charged to the agent's main budget — surprising | Charged to the root-session tree per R-7.10, but as a distinct child line — honest. |
+| Budget attribution | Charged to the agent's main budget — surprising | Charged to the root-session tree per P-7.10, but as a distinct child line — honest. |
 | Tool safety during clarification | Agent retains full tools; operator probe could trigger side effects | Child is structurally clamped to `SessionState::Clarification` → read-only tier. |
 | Multiple operator questions | Nested UserInputs strain invariants | Each `ask-agent` is its own child. Trivially composable. |
 | Future deciders (security-reviewer agents, policy engines) | Special-cased pause/resume | Same child primitive works identically for any decider wanting to probe a requester. |
@@ -350,8 +350,8 @@ The child-session model preserves the property that gates are *pure decision ato
 - **`SessionState::Clarification`** is a new first-class session state, distinct from `Normal` and `Degraded`. It is **not** degradation — it is the declared purpose of the session from the start. Ri-0.6 (no silent capability reduction) is satisfied because the session begins in `Clarification`; capabilities are not narrowed mid-flight.
 - **Tool tier is clamped to read-only at filter time** — not by trust in the system prompt. Available native tools: `observability_*`, `knowledge_*`, `constitution_*`, `content_read`, `execution_search`. No exec, no network, no spawn, no agent revision, no scheduler.
 - **Ri-0.13 (private reasoning) applies** to the clarification child as to any agent. The reasoning hash is recorded; disclosure requires `ReasoningAudit`. The clarification *answer* (the assistant reply) is what surfaces as `gate_message`; the reasoning behind it stays private-under-law.
-- **R-7.10 root-session tree budget** applies — clarification spawns consume tokens against the parent's root-session budget. If the budget is exhausted, `ask-agent` returns an error rather than starving the parent.
-- **R-7.15 spawn-chain depth cap** applies — clarification children count as a normal spawn. Clarification children **cannot** spawn further children (their `AgentSpawn` capability is filtered out by the read-only tier).
+- **P-7.10 root-session tree budget** applies — clarification spawns consume tokens against the parent's root-session budget. If the budget is exhausted, `ask-agent` returns an error rather than starving the parent.
+- **P-7.15 spawn-chain depth cap** applies — clarification children count as a normal spawn. Clarification children **cannot** spawn further children (their `AgentSpawn` capability is filtered out by the read-only tier).
 - **Causal chain integrity**: the clarification child's causal events live in its own session; the parent's chain records only that an operator triggered an `approval.ask_agent` event with the resulting child session ID. Forensics: "what did the agent say when asked X?" → query the child session by ID stored in the gate_message sender suffix.
 
 ```mermaid
@@ -478,7 +478,7 @@ Operator asks the agent about the pending gate; the answer is captured without d
 - It **is** read-only by construction — the child's tool tier is clamped to observability/knowledge/constitution/content_read/execution_search.
 - It **is not** the parent agent's live reasoning state — the child is digest-primed, not memory-mapped.
 - It **is not** mind-reading — the child can only reason about what's in the approval JSON, the parent's digest, and its persistent memories.
-- It **is not** free — costs are charged to the parent's root-session tree budget per R-7.10.
+- It **is not** free — costs are charged to the parent's root-session tree budget per P-7.10.
 
 #### Acceptance criteria
 

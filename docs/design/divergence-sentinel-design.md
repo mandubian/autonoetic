@@ -69,12 +69,12 @@ location yields five clusters:
 | `LoopGuard::check_loop` (loops without progress) | `runtime/guard.rs:75-104` | N consecutive turns without a new tool fingerprint |
 | `LoopGuard::register_failure` (tool failure budget) | `runtime/guard.rs:127-145` | Same tool fails ≥ N times (any args) |
 | `LoopGuard::register_child_failure` (delegation budget) | `runtime/guard.rs:147-153` | ≥ N failed `workflow.wait` children |
-| `LoopGuard::is_sub_trip_warning` (80% threshold) | `runtime/guard.rs:106-125` | Approaching trip — used for R-7.18 degraded mode |
+| `LoopGuard::is_sub_trip_warning` (80% threshold) | `runtime/guard.rs:106-125` | Approaching trip — used for P-7.18 degraded mode |
 | `budget_tracker::emit_context_pressure_high_if_warranted` | `runtime/budget_tracker.rs:34-71` | Context utilization crosses `warn_at_pct` |
 
 This cluster is **the natural home for divergence detection**. Today it is
 internally LoopGuard-shaped: mechanical, per-tool, and per-turn. It already
-emits sub-trip warnings (R-7.18) — they just are not aggregated into a
+emits sub-trip warnings (P-7.18) — they just are not aggregated into a
 "session health" signal.
 
 ### Cluster B — Resource budgets
@@ -275,7 +275,8 @@ monitor and is reusable by both layers:
 - **Contract-health tally.** `GatewayStore::contract_health(since)` aggregates
   occurrences per clause over `causal_events`, surfacing IDs not yet migrated
   into the register as `unattributed` (a visible migration-coverage signal
-  rather than a silent drop). The `R+++3` event-attribution placeholder is
+  rather than a silent drop). The I-6 event-attribution invariant uses the
+  `R+++3` placeholder string in code when no specific rule applies.
   excluded.
 - **Operator surface.** `autonoetic trace contract-health [--since] [--json]`.
 

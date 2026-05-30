@@ -91,7 +91,7 @@ If signer resolution fails, startup fails.
 
 The canonical repo lock uses a repo-relative source path, for example:
 
-- `docs/constitution/versions/2026.05.27/constitution.md`
+- `docs/constitution/versions/2026.05.30/constitution.md`
 
 During bootstrap (`agent bootstrap` and gateway startup), the runtime lock is
 materialized under `.gateway` and rewritten to:

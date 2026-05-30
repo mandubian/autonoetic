@@ -43,7 +43,7 @@ should not necessarily kill a root session with healthy children.
 - **Encourages delegation.** If spawning children is risky (one bad child kills
   the root), the planner becomes conservative — it avoids parallel spawns and
   loses the collaborative benefit the constitution is designed to enable.
-- **Aligns with the dumbness invariant.** The gateway already doesn't know
+- **Aligns with the Lawful-Executor invariant.** The gateway already doesn't know
   *why* a tool failed — it just counts failures. Proportional response gives
   the planner (which *does* understand context) more room to adapt before the
   gateway intervenes destructively.
@@ -60,7 +60,7 @@ should not necessarily kill a root session with healthy children.
 - **Complexity of proportional rules.** "Proportional" requires judgment.
   The constitution is designed for mechanical enforcement — not heuristics.
   Who decides what's proportional? If the gateway decides, it violates the
-  dumbness invariant. If the agent decides, it's not enforcement.
+  Lawful-Executor invariant. If the agent decides, it's not enforcement.
 - **Current mitigations exist.** The planner can set `max_tool_failures` and
   `max_loops_without_progress` per-session. The loop guard is configurable.
   The operational fix may be tuning defaults, not constitutional change.
@@ -176,7 +176,7 @@ eviction.
   and providers is impractical.
 - **The agent should manage its own context.** Compression, summarization,
   and context management are agent responsibilities — not gateway guarantees.
-  The dumbness invariant says the gateway shouldn't manage agent state.
+  The Lawful-Executor invariant says the gateway shouldn't manage agent state.
 - **Implementation already handles this.** The system has context overflow
   mitigation (see `docs/design/llm-context-overflow-mitigation-plan.md`).
   This is an engineering problem, not a constitutional gap.
@@ -196,7 +196,7 @@ eviction.
 
 ## 4. Scoped Exception to the Dumbness Invariant
 
-**Observation:** §14 (The Dumbness Invariant) says the gateway must NOT
+**Observation:** §14 (The Lawful-Executor invariant) says the gateway must NOT
 retry/repair agent output, invoke LLMs to reshape input, invent detection
 rules, or choose silently between paths. Yet the gateway *already* performs
 mechanical interventions: secret redaction (R-4.x), output schema validation
@@ -204,7 +204,7 @@ mechanical interventions: secret redaction (R-4.x), output schema validation
 output" — they violate the literal wording of §14 even though they're
 essential for safety.
 
-**Proposed principle:** The dumbness invariant should be clarified: the
+**Proposed principle:** The Lawful-Executor invariant should be clarified: the
 gateway must not *substitute its judgment for the agent's reasoning*, except
 where mechanical safety enforcement (secret redaction, schema validation,
 capability gating, constitutionally-mandated checks) requires deterministic
@@ -256,7 +256,7 @@ intervention.
 ## 5. Temporal Ordering Guarantees for Concurrent Agents
 
 **Observation:** The constitution mandates fsync-durability (R-8.x) and
-append-only causal chains (R-8.1), but says nothing about ordering guarantees
+append-only causal chains (P-8.1), but says nothing about ordering guarantees
 when multiple agents operate concurrently. If agent A writes to the knowledge
 store while agent B reads from it, B may see partial, stale, or inconsistent
 state depending on timing. The "shared truth" that enables collaboration can
@@ -431,8 +431,8 @@ the parent agent in the child's completion report.
 ### Arguments for
 
 - **Enables informed re-delegation.** If the planner knows the coder failed
-  because of R-7.5 (loop guard), it can adjust parameters and retry. If it
-  knows the researcher failed because of R-2.1 (approval required for a host),
+  because of P-7.5 (loop guard), it can adjust parameters and retry. If it
+  knows the researcher failed because of P-2.1 (approval required for a host),
   it can pre-approve and retry. Without this information, the planner is
   flying blind.
 - **Consistent with Ri-0.3.** Every rejection names the rule ID — but
@@ -475,7 +475,7 @@ the parent agent in the child's completion report.
 | 1 | Proportionality of escalation | Yes — observed in practice | Rule (R-7.x) | High |
 | 2 | Dependency notification obligation | Maybe — theoretical risk | Rule (new §) | Medium |
 | 3 | Right to minimum viable context | Partially — mitigations exist | Right (Ri-0.x) | Low |
-| 4 | Scoped exception to dumbness invariant | Yes — current behavior is inconsistent | Invariant (§14) | High |
+| 4 | Scoped exception to Lawful-Executor invariant | Yes — current behavior is inconsistent | Invariant (§14) | High |
 | 5 | Temporal ordering guarantees | Maybe — not yet observed | Invariant | Low |
 | 6 | Voluntary capability narrowing | No — feature, not law | Feature | Low |
 | 7 | Right to structured self-assessment | No — protocol concern | Protocol | Low |

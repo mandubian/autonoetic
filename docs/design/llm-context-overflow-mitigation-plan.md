@@ -6,7 +6,7 @@
 #216, #217, #218, #219, #226. The three rollout feature flags have since
 been removed and the governor pipeline (with the capsule strategy as the
 default LLM-tier reducer) is the only enforcement path. Constitution rule
-R-6.9 was updated accordingly in version `2026.05.19`.
+P-6.9 was updated accordingly in version `2026.05.19` (living constitution: **2026.05.30**).
 
 | Phase | What | PR |
 |-------|------|----|

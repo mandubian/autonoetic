@@ -5,7 +5,7 @@ phases that can ship independently.
 
 **Refs:**
 - Tracking issue: **#186**.
-- Constitution: `R-2.1`, `R-2.18`, `R-2.19`, `R++4`, `Ri-0.1`,
+- Constitution: `P-2.1`, `P-2.18`, `P-2.19`, `P-2.24`, `Ri-0.1`,
   `Ri-0.5`.
 - `docs/design/human-gate-unification-plan.md` (gate enrichment
   threads, ask-agent clarification child sessions).
@@ -35,12 +35,12 @@ It does **not** show:
   `eval()` three times?
 
 For trivial cases the summary is enough. For non-trivial cases the
-operator is making an authority call (R-2.1, R++4) with **less
+operator is making an authority call (P-2.1, P-2.24) with **less
 information than the auditor agent had** (which read the full code
 during static review). That asymmetry is backwards: the operator has
 higher authority but sees less.
 
-This is also a consent problem: R++4 says high-risk approvals need
+This is also a consent problem: P-2.24 says high-risk approvals need
 dwell time and typed confirmation phrases. But "I confirm I want this
 to run" is meaningfully different from "I confirm I have read what
 this will do." The current flow lets the operator confirm the former
@@ -98,11 +98,11 @@ have:
 1. **Default-open code view** in every surface. Operator must see the
    code before any approve/reject control is enabled.
 2. **Mandatory dwell time on the code section** — operator can't
-   approve in < N seconds. Same mechanism as R++4 dwell-time on
+   approve in < N seconds. Same mechanism as P-2.24 dwell-time on
    high-risk approvals; tighter parameters for escalations.
 3. **Mandatory typed confirmation phrase** carrying the *code-seen*
    semantics, e.g. `"I have read the code at <artifact_ref>"`. The
-   `confirm_phrase` field on the approval action (R++4) is extended
+   `confirm_phrase` field on the approval action (P-2.24) is extended
    for escalations to include the artifact identity, so a copy/paste
    attack can't reuse a phrase from a different artifact.
 4. **Persisted code-seen marker**: the decision record carries
@@ -134,16 +134,16 @@ per environment.
 
 #### Constitutional alignment
 
-- **R-2.1** (remote access requires approval) — escalation is a
+- **P-2.1** (remote access requires approval) — escalation is a
   *stronger form* of approval. Same rule applies.
-- **R++4** (operator approval hardening: dwell time + typed
+- **P-2.24** (operator approval hardening: dwell time + typed
   confirmation for destructive classes) — escalation re-uses this
   mechanism with tighter parameters and extends the confirm-phrase
   shape.
-- **R-2.18** (unified `GateService`) — escalation already exists as
+- **P-2.18** (unified `GateService`) — escalation already exists as
   `GateKind::Escalation`. Phase 2 extends it from "agent-initiated
   escalation" to "gateway-triggered escalation on complexity."
-- **R-2.19** (gate enrichment messages on causal chain) — operator
+- **P-2.19** (gate enrichment messages on causal chain) — operator
   comments + ask-agent dialogue during review thread on the gate.
 - **Ri-0.1** (agent inspects own state). Phase 2 gives the operator
   the analogous right: inspect what they're about to approve.
@@ -180,7 +180,7 @@ per environment.
 1. **Source-code privacy.** Some artifacts may legitimately contain
    secrets (env-loading, hard-coded test fixtures). The code visible
    in the approval card runs through the same `log_redaction`
-   pipeline that gate-message content uses (R-2.19) — but redaction
+   pipeline that gate-message content uses (P-2.19) — but redaction
    may strip *exactly* the thing the operator needs to see (the
    hard-coded API URL pattern, say). Resolution: redaction policy
    per-approval is a config decision; operators can opt out of

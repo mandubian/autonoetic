@@ -4,7 +4,7 @@
 > enforcement against the architectural constitution.
 >
 > This document is **historical** — it records findings at a point in
-> time. The living rule list is `docs/constitution/versions/2026.05.27/constitution.md`; the
+> time. The living rule list is `docs/constitution/versions/2026.05.30/constitution.md`; the
 > active backlog is `docs/gateway-constitution-roadmap.md`.
 
 ## Purpose
@@ -49,7 +49,7 @@ Roughly **65% of the constitution is fully enforced**, **20% partial**,
 ## Category-by-category findings
 
 Each category lists only the rules with a non-obvious status or a gap.
-The full rule table lives in `docs/constitution/versions/2026.05.27/constitution.md`.
+The full rule table lives in `docs/constitution/versions/2026.05.30/constitution.md`.
 
 ### 1. Capability & Rights
 
@@ -248,7 +248,7 @@ enforcing declared rules. The top ones by structural significance:
 
 8. **Model routing / pricing catalog**
    (`runtime/openrouter_catalog.rs`, `runtime/llm_preset_resolver.rs`).
-   Catalog-fetch failure *silently disables* R-6.5 (session cost
+   Catalog-fetch failure *silently disables* P-6.5 (session cost
    budget). Silent failure of an invariant is the wrong default.
 
 Items 9–12 are minor and documented inline in the enforcement map.
@@ -282,9 +282,9 @@ Secondary:
 - **R+13** Approval grant TTL.
 - **R+14** Deny-by-default on unknown tool names in `can_invoke_tool`.
 - **R+15** Constant-time comparison for JSON-RPC shared-secret auth.
-- **R+16** Promotion-gate execution denied network access.
+- **R+16** Promotion-gate execution denied network access (now **P-3.10**).
 - **R+17** Retention pruning emits `retention.pruned` causal event.
-- **R+18** Canonical `docs/constitution/versions/2026.05.27/constitution.md` maintained alongside
+- **R+18** Canonical `docs/constitution/versions/2026.05.30/constitution.md` maintained alongside
   code.
 
 ## Methodology

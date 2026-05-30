@@ -218,8 +218,8 @@ Both gated by `Capability::CapsuleExport`. Registered in
 ### Policy
 
 `PolicyEngine::can_use_capsule()` in `autonoetic-gateway/src/policy.rs`:
-pattern-matches the `CapsuleExport` variant, returns `allow("R-1.1")` or
-`deny("R-1.1")`. Tool execution checks this gate before unpacking
+pattern-matches the `CapsuleExport` variant, returns `allow("P-1.1")` or
+`deny("P-1.1")`. Tool execution checks this gate before unpacking
 arguments.
 
 ### Tests

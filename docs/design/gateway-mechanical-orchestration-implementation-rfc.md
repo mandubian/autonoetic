@@ -521,7 +521,7 @@ This RFC assumes the constitutional changes proposed in the design plan and impl
 3. R+20 single-flight
 4. R+22 side-effect state tracking
 5. R+21 stage-local retry budget
-6. R-5.11 envelope extension and prompt simplification
+6. P-5.11 envelope extension and prompt simplification
 
 Implementation must be gated by constitutional acceptance where the relevant rule is not already ratified.
 
@@ -686,7 +686,7 @@ Mitigation:
 - emit dedupe key in responses and events for observability
 - add targeted regression tests before widening scope
 
-### Risk 4: Retry policy conflicts with constitutional dumbness
+### Risk 4: Retry policy conflicts with Lawful-Executor invariant
 
 Mitigation:
 
@@ -712,7 +712,7 @@ This RFC is complete when all of the following are true:
 
 Start with Slice A and Slice B.
 
-They deliver the highest reduction in prompt bloat and orchestration fragility while keeping the gateway within the dumbness boundary.
+They deliver the highest reduction in prompt bloat and orchestration fragility while keeping the gateway within the Lawful-Executor boundary.
 
 The guiding implementation rule is:
 
