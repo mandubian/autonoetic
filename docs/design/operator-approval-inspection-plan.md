@@ -9,7 +9,7 @@ phases that can ship independently.
   `Ri-0.5`.
 - `docs/design/human-gate-unification-plan.md` (gate enrichment
   threads, ask-agent clarification child sessions).
-- `docs/design/sealed-network-evaluation-plan.md` (the auditor's
+- `docs/archived/sealed-network-evaluation-plan.md` (the auditor's
   Shape-2 review covers the same code at install-time; this RFC
   covers the same code at approval-time).
 

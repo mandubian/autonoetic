@@ -1,4 +1,5 @@
-# Autonoetic: Sandbox SDK API Design (`autonoetic_sdk`)
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 This document defines the interface for the lightweight Python and Javascript `autonoetic_sdk` libraries injected into every ephemeral Sandbox created by the Autonoetic Gateway. 
 

@@ -1,4 +1,5 @@
-# Autonoetic: Core Concepts & Architecture Vision
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 CCOS was highly ambitious but grew too large and interleaved. Its reliance on the custom RTFS language made LLM integration difficult, as models perform best with ubiquitous, well-understood formats (like JSON, Markdown, and Python/JS). 
 

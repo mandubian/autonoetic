@@ -400,11 +400,11 @@ high-divergence agent over many sessions is a candidate for improvement.
 ## 11. References
 
 - `docs/design/divergence-sentinel-design.md` — sister design (in-session)
-- `docs/design/cognitive-capsule-standardization.md` — capsule format used
+- `docs/cognitive-capsule.md` — capsule format used
   for replay determinism (Phase 4 is the last piece for full replay)
-- `docs/design/sealed-network-evaluation-plan.md` — fixture replay
+- `docs/archived/sealed-network-evaluation-plan.md` — fixture replay
   infrastructure
-- `docs/design/sealed-evaluator-replay-design.md` — sealed evaluator CLI
+- `docs/archived/sealed-evaluator-replay-design.md` — sealed evaluator CLI
 - `agents/evolution/` — existing pipeline (curator, steward, factory,
   builder, orchestrator, adapter)
 - `autonoetic-gateway/src/runtime/tools/agent_revision.rs` — revision API

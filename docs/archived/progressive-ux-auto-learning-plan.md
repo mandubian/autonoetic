@@ -1,4 +1,5 @@
-# Progressive UX and Default Self-Improvement
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 ## Implementation Status
 

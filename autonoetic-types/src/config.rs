@@ -1028,7 +1028,7 @@ pub struct GatewayConfig {
     pub retention: RetentionConfig,
 
     /// Cognitive Capsule export/import settings (signing trust, size caps,
-    /// default mode). See `docs/design/cognitive-capsule-standardization.md`.
+    /// default mode). See `docs/cognitive-capsule.md`.
     #[serde(default)]
     pub capsule: CapsuleConfig,
 
@@ -1566,7 +1566,7 @@ fn default_retention_causal_events_days() -> u32 {
 /// Configuration for Cognitive Capsule export/import.
 ///
 /// Capsules are revision-pinned, optionally signed portable snapshots of
-/// agents (see `docs/design/cognitive-capsule-standardization.md`). This
+/// agents (see `docs/cognitive-capsule.md`). This
 /// section controls signing-trust, size limits, and default export mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsuleConfig {

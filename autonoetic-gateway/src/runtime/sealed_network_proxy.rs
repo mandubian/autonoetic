@@ -16,7 +16,7 @@
 //! - On CONNECT (HTTPS tunnelling): rejects with 502 + diagnostic. HTTPS
 //!   termination is a future scope — see follow-up RFC §7 open question 4.
 //!
-//! Refs: docs/design/recording-mode-design.md §2.2.
+//! Refs: docs/archived/recording-mode-design.md §2.2.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

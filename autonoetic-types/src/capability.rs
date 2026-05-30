@@ -168,7 +168,7 @@ pub enum Capability {
     /// snapshots, and (in Replay mode) session checkpoints across machines
     /// or gateways — a high-impact data-movement boundary that must be
     /// explicitly granted. Not a default. See
-    /// `docs/design/cognitive-capsule-standardization.md`.
+    /// `docs/cognitive-capsule.md`.
     CapsuleExport,
 }
 

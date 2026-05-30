@@ -1,4 +1,5 @@
-# Autonoetic: Command Line Interface (CLI)
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 The `autonoetic` CLI is the primary human-to-system interface for Autonoetic. It manages the full lifecycle of the Gateway daemon, local Agents, and external interoperability.
 

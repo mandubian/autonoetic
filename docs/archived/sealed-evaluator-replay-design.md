@@ -1,7 +1,8 @@
-# Phase 3 — Sealed Evaluator Replay From Recorded Fixtures
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 **Status:** Draft
-**Refs:** Issue #198, `docs/design/promotion-federation-plan.md` §8, `docs/design/recording-mode-design.md`, `agents/specialists/sealed_evaluator.default/SKILL.md`
+**Refs:** Issue #198, `docs/archived/promotion-federation-plan.md` §8, `docs/archived/recording-mode-design.md`, `agents/specialists/sealed_evaluator.default/SKILL.md`
 
 ---
 

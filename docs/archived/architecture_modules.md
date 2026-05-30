@@ -1,4 +1,5 @@
-# Autonoetic: Architecture & Modules Specification
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 This document defines the physical and logical boundaries, system topology, and concurrency model of the Autonoetic platform, as outlined in the core concepts.
 

@@ -17,7 +17,7 @@
 //!    ship, `Sealed` and `Recording` are otherwise dormant — declaring
 //!    them produces no runtime effect beyond this guard.)
 //!
-//! Refs: docs/design/sealed-network-evaluation-plan.md §3.1 / scope 5.1.
+//! Refs: docs/archived/sealed-network-evaluation-plan.md §3.1 / scope 5.1.
 
 mod support;
 

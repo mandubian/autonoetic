@@ -419,7 +419,7 @@ fn stage_memory_snapshot(
 ///
 /// Deterministic so that two exports of the same revision in the same
 /// mode produce the same `capsule_id` — necessary for dedup and stable
-/// provenance chains (see `docs/design/cognitive-capsule-standardization.md`).
+/// provenance chains (see `docs/cognitive-capsule.md`).
 /// Timestamp salting is intentionally avoided.
 fn compute_capsule_id(revision_id: &str, mode: CapsuleMode) -> String {
     use sha2::{Digest, Sha256};

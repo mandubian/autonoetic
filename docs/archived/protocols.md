@@ -1,4 +1,5 @@
-# Autonoetic: System Protocols
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 This document defines the core data formats and communication standards governing interactions between the fundamental architectural components of Autonoetic.
 

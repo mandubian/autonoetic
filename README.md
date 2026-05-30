@@ -51,10 +51,8 @@ Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`
 - [`docs/iteration-repair-validation-runbook.md`](docs/iteration-repair-validation-runbook.md): Iterative repair validation steps
 - [`docs/schema-enforcement-hook.md`](docs/schema-enforcement-hook.md): Schema coercion for agent.spawn payloads
 
-### Design Docs
-
-- [`docs/design/concepts.md`](docs/design/concepts.md): Philosophy, agent model, evolution model
-- [`docs/design/architecture_modules.md`](docs/design/architecture_modules.md): Gateway, sandbox, artifact store
+- [`docs/cognitive-capsule.md`](docs/cognitive-capsule.md): Portable agent capsule export/import
+- [`docs/design/README.md`](docs/design/README.md): Active design plans with open work
 - [`docs/architecture-summary.md`](docs/architecture-summary.md): What's kept vs externalized
 - [`docs/gateway-architecture-principles.md`](docs/gateway-architecture-principles.md): Gateway neutrality principles
 - [`docs/separation-of-powers.md`](docs/separation-of-powers.md): Agent vs gateway responsibilities

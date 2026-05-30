@@ -17,7 +17,7 @@
 //! deferred. This test exercises the proxy + fixture pipeline directly,
 //! which is the structural guarantee 5.2c depends on.
 //!
-//! Refs: docs/design/sealed-network-evaluation-plan.md §3.2 / scope 5.2.
+//! Refs: docs/archived/sealed-network-evaluation-plan.md §3.2 / scope 5.2.
 
 mod support;
 

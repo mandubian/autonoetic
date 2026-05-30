@@ -1,4 +1,5 @@
-# Cognitive Capsule Standardization — Phased Implementation Plan
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 **Umbrella**: [#220](https://github.com/mandubian/autonoetic/issues/220)
 **Companion design doc**: [`cognitive-capsule-standardization.md`](cognitive-capsule-standardization.md)

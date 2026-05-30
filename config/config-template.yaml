@@ -301,7 +301,7 @@ retention:
 
 # ── Cognitive Capsules ────────────────────────────────────────────────
 # Controls the agent-portability capsule export/import pipeline.
-# See docs/design/cognitive-capsule-standardization.md.
+# See docs/cognitive-capsule.md.
 # capsule:
 #   default_mode: thin                    # thin | hermetic | replay | headless
 #   auto_sign: true                       # sign exports with the gateway key

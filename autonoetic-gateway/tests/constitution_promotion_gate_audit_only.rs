@@ -18,7 +18,7 @@
 //!      through the full eval+audit gate (the `has_high_risk && artifact_id`
 //!      branch unchanged).
 //!
-//! Refs: docs/design/sealed-network-evaluation-plan.md §3.5.5 / scope 5.11.
+//! Refs: docs/archived/sealed-network-evaluation-plan.md §3.5.5 / scope 5.11.
 
 mod support;
 

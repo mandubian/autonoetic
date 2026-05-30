@@ -1,7 +1,8 @@
-# Phase 2 — Production Recording Mode
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 **Status:** Draft
-**Refs:** Issue #187, `docs/design/promotion-federation-plan.md` §2.5, `docs/design/sealed-network-evaluation-plan.md` §5.3, `docs/design/promotion-federation-plan-review.md` §4.3
+**Refs:** Issue #187, `docs/archived/promotion-federation-plan.md` §2.5, `docs/archived/sealed-network-evaluation-plan.md` §5.3, `docs/archived/promotion-federation-plan-review.md` §4.3
 
 ---
 

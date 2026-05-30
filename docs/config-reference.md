@@ -714,7 +714,7 @@ retention:
 
 ## Cognitive Capsules
 
-Controls export/import of portable agent snapshots. A Cognitive Capsule pins a specific `AgentRevisionRecord` together with its `runtime.lock`, layer references (or embedded layer content in hermetic mode), and optional memory / checkpoint snapshots. See [`docs/design/cognitive-capsule-standardization.md`](design/cognitive-capsule-standardization.md).
+Controls export/import of portable agent snapshots. A Cognitive Capsule pins a specific `AgentRevisionRecord` together with its `runtime.lock`, layer references (or embedded layer content in hermetic mode), and optional memory / checkpoint snapshots. See [`docs/cognitive-capsule.md`](cognitive-capsule.md).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

@@ -1,7 +1,7 @@
 # Phase 4 — Post-promotion Background Review
 
 **Status:** Draft
-**Refs:** Issue #199, `docs/design/promotion-federation-plan.md` §2.6, `docs/design/sealed-evaluator-replay-design.md`, `docs/design/recording-mode-design.md`
+**Refs:** Issue #199, `docs/archived/promotion-federation-plan.md` §2.6, `docs/archived/sealed-evaluator-replay-design.md`, `docs/archived/recording-mode-design.md`
 
 ---
 

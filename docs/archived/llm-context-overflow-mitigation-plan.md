@@ -1,4 +1,5 @@
-# LLM Context Overflow Mitigation Plan
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 ## Status
 

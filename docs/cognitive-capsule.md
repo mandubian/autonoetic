@@ -1,18 +1,19 @@
-# Cognitive Capsule Standardization — Design Plan
+# Cognitive Capsules
 
-**Concept origin**: `docs/design/concepts.md` (line 41)
-**Phased implementation plan**: [`cognitive-capsule-implementation-plan.md`](cognitive-capsule-implementation-plan.md)
-**Archived plan reference**: `docs/archived/plan_extended.md` Phase 13 (concepts only — code paths no longer match)
+> **Reference** — Describes the implemented capsule export/import pipeline
+> (`autonoetic-gateway/src/capsule/`, CLI `autonoetic capsule *`).
+> Historical implementation plan:
+> [`archived/cognitive-capsule-implementation-plan.md`](archived/cognitive-capsule-implementation-plan.md).
+
+**Concept origin**: [`archived/concepts.md`](archived/concepts.md) (line 41)
 
 ## Background
 
-`concepts.md` defines a **Cognitive Capsule** as:
+A **Cognitive Capsule** is:
 
 > *"A portable export that wraps the Agent bundle plus its runtime closure: `runtime.lock`, artifact references or embedded cached artifacts, and optionally the exact Gateway binary required to relaunch the same autonomous behavior somewhere else."*
 
-The existing codebase has a basic `CapsuleManifest` struct (`autonoetic-types/src/capsule.rs`) with the right bones — `CapsuleMode`, `IncludedArtifact`, `CapsuleGatewayRuntime` — but no CLI tooling, no import/export pipeline, no signature verification, and no integration with the current revision/layer/content-store architecture.
-
-Since the original plan was written, the codebase has gained:
+The pipeline is implemented on top of:
 - **Immutable agent revisions** (`AgentRevisionRecord`, `AgentRef`, `AgentAliasRecord`) with content-addressed digests and Ed25519 signatures
 - **Build layers** (`LayerStore`, `LayerManifest`, `CapturedLayer`) for dependency bundles
 - **Content-addressed artifact store** (`ArtifactBundle`, `ArtifactFileEntry`, `ArtifactHandle`)

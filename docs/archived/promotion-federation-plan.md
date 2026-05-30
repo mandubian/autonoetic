@@ -1,4 +1,7 @@
-# Promotion Federation — Design Plan
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
+
+# Promotion Federation Plan
 
 **Status:** Draft
 **Refs:** Issue #185 (sealed-network), Issue #186 (evaluator spawn loop), Constitution §14 (Lawful-Executor invariant), P-3.10 (promotion-gate network denial), I-10 (gateway determinism), P-2.17 (self-approval ban)
@@ -399,7 +402,7 @@ The clarification acknowledges that execution is optional — `StaticEvaluator` 
 
 ## 10. References
 
-- `docs/design/sealed-network-evaluation-plan.md` — Original sealed-network design (scopes 5.1-5.11)
+- `docs/archived/sealed-network-evaluation-plan.md` — Original sealed-network design (scopes 5.1-5.11)
 - `docs/ARCHITECTURE.md` — Security model, separation of powers
 - `docs/approval-system.md` — Operator approval lifecycle
 - `autonoetic-gateway/src/runtime/tools/agent_revision.rs` — Current promotion gate (lines 1920-2139)

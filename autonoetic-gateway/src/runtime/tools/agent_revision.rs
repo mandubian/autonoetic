@@ -2281,7 +2281,7 @@ impl NativeTool for AgentRevisionPromoteTool {
 
         // Promotion gate mode — derived from the revision's capabilities and
         // artifact shape, **not** from anything the orchestrator declares.
-        // See docs/design/sealed-network-evaluation-plan.md §3.5.5.
+        // See docs/archived/sealed-network-evaluation-plan.md §3.5.5.
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         enum PromotionGateMode {
             /// CodeExecution/AgentSpawn, or NetworkAccess + artifact:

@@ -1,4 +1,5 @@
-# Autonoetic: Data Models & Schemas
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 This document defines the strict, concrete data models that form the contract between the Rust Gateway, the Agent Orchestrator, the SDK, and the external ecosystem. All components MUST adhere to these schemas.
 

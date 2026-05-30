@@ -16,7 +16,7 @@
 //! accepts an optional `artifact_ref`. This test pins both, so future
 //! refactors cannot regress the pure-skill install path.
 //!
-//! Refs: docs/design/sealed-network-evaluation-plan.md §3.5.4 / scope 5.10.
+//! Refs: docs/archived/sealed-network-evaluation-plan.md §3.5.4 / scope 5.10.
 
 mod support;
 

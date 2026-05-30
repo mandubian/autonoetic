@@ -1,6 +1,7 @@
-# Follow-up Review — promotion-federation Phase 2 → 4
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
-**Status:** Second-pass review covering commits since the original review (`96fd2de`, `docs/design/promotion-federation-plan-review.md`). Written 2026-05-13.
+**Status:** Second-pass review covering commits since the original review (`96fd2de`, `docs/archived/promotion-federation-plan-review.md`). Written 2026-05-13.
 
 **Reviewed against:** plan as of 5812399; codebase at `be2b665` (latest on `main` at time of review).
 

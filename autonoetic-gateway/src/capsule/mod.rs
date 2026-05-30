@@ -1,7 +1,7 @@
 //! Cognitive Capsule export/import pipelines.
 //!
 //! A Cognitive Capsule is a portable, signed, revision-pinned snapshot of
-//! an agent — see `docs/design/cognitive-capsule-standardization.md`. The
+//! an agent — see `docs/cognitive-capsule.md`. The
 //! schema lives in `autonoetic-types/src/capsule.rs`; this module holds
 //! the gateway-side pipelines that produce and consume those archives.
 //!

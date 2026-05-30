@@ -16,7 +16,7 @@
 //! — an HTTP proxy server (scope 5.2b) and its bubblewrap integration
 //! (deferred 5.2c) — calls into this module for every request it sees.
 //!
-//! Refs: docs/design/sealed-network-evaluation-plan.md §3.2 / §3.2.1.
+//! Refs: docs/archived/sealed-network-evaluation-plan.md §3.2 / §3.2.1.
 
 use serde::{Deserialize, Serialize};
 use std::fs;

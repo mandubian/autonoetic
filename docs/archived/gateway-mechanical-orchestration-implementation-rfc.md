@@ -1,4 +1,5 @@
-# Gateway Mechanical Orchestration — Implementation RFC
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 **Status:** Implemented RFC
 **Depends on:** [../archived/gateway-mechanical-orchestration-plan.md](../archived/gateway-mechanical-orchestration-plan.md)

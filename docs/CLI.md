@@ -515,7 +515,7 @@ autonoetic trace contract-health [--since <RFC3339>] [--json]
 
 ## Capsule Commands
 
-Export, import, verify, and inspect Cognitive Capsules — portable, signed, revision-pinned agent snapshots. See [`docs/design/cognitive-capsule-standardization.md`](design/cognitive-capsule-standardization.md).
+Export, import, verify, and inspect Cognitive Capsules — portable, signed, revision-pinned agent snapshots. See [`docs/cognitive-capsule.md`](cognitive-capsule.md).
 
 Agent-initiated callers can use the equivalent `capsule.export` / `capsule.import` tools, gated by the `CapsuleExport` capability.
 

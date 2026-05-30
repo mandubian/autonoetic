@@ -1,3 +1,6 @@
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
+
 # Sealed-Network Sandbox — Design Plan
 
 **Status:** Implementation tracking doc. See §5 for acceptance criteria

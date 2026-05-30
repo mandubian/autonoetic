@@ -1,4 +1,5 @@
-# Multi-Credential Per Service — Design
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
 > Status: **Implemented (2026-05-23)**.
 > No backward compatibility preserved — all changes are breaking.

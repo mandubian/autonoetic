@@ -1,6 +1,7 @@
-# Review — promotion-federation-plan.md
+> **ARCHIVED** — Historical design or implementation record. Not current source-of-truth. See [`docs/README.md`](../README.md) for live references.
+>
 
-**Status:** Independent review of `docs/design/promotion-federation-plan.md` after Phase 1.A–E shipped (commits 3a06f00 → 82d0670). Written 2026-05-13. Not authoritative — a second pair of eyes on the plan and its execution to date.
+**Status:** Independent review of `docs/archived/promotion-federation-plan.md` after Phase 1.A–E shipped (commits 3a06f00 → 82d0670). Written 2026-05-13. Not authoritative — a second pair of eyes on the plan and its execution to date.
 
 **Reviewed against:** plan as of 5812399; codebase as of 82d0670.
 
