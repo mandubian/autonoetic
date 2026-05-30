@@ -4,7 +4,7 @@
 //! (sandbox_exec, web_*, agent_spawn, agent_revision_*, scheduler_*,
 //! credential_*) but **keeps** the inspection allowlist
 //! (observability_*, knowledge_search/read/search_by_tags, constitution_read,
-//! content_read, execution_search, digest_query) so the agent can
+//! resolve, execution_search, digest_query) so the agent can
 //! diagnose its own state and report on it.
 //!
 //! Rationale: degraded mode without inspection is a Ri-0.5 spirit
@@ -144,7 +144,7 @@ fn degraded_filter_allows_inspection_tools_for_self_diagnosis() {
         "constitution_read",
         "knowledge_search",
         "knowledge_read",
-        "content_read",
+        "resolve",
         "execution_search",
         "digest_query",
     ] {

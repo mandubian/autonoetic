@@ -796,7 +796,7 @@ pub fn format_tool_digest_result(tool_name: &str, result_json: &str) -> String {
             }
             s
         }
-        "content_write" | "content_read" => {
+        "content_write" | "resolve" => {
             let name = as_str(&v, "name")
                 .or_else(|| as_str(&v, "ref"))
                 .or_else(|| as_str(&v, "sandbox_path"))

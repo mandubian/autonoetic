@@ -206,9 +206,9 @@ The body contains natural language instructions for the agent. Key sections typi
 If the SKILL.md body contains `<!-- extended -->` on its own line, the parser splits the body into two parts:
 
 - **Core instructions**: everything before the marker — always injected into the system prompt
-- **Extended instructions**: everything after the marker — stored in the content store, available on-demand via `content_read({"name_or_handle": "extended_instructions"})`
+- **Extended instructions**: everything after the marker — stored in the content store, available on-demand via `resolve({"ref": "extended_instructions", "include": "content"})`
 
-The system prompt automatically gets a hint: *"Extended instructions are available via content_read"*. The agent decides whether to fetch them.
+The system prompt automatically gets a hint: *"Extended instructions are available via resolve"*. The agent decides whether to fetch them.
 
 This is useful for deferring verbose reference tables, edge-case workflows, and seldom-used protocols. Example from `planner.default/SKILL.md`:
 
@@ -264,7 +264,7 @@ Capabilities fall into three categories:
 
 | Capability | Gates These Tools |
 |------------|------------------|
-| `ReadAccess` | `content_read`, `artifact_inspect`, `memory.read`, `knowledge_recall`, `knowledge_search` |
+| `ReadAccess` | `resolve`, `artifact_inspect`, `memory.read`, `knowledge_recall`, `knowledge_search` |
 | `WriteAccess` | `content_write`, `artifact_build`, `memory.write`, `knowledge_store` |
 
 **Privilege capabilities gate boundary-crossing operations:**
@@ -316,7 +316,6 @@ For files and data within a session:
 | Tool | Signature | Description |
 |------|-----------|-------------|
 | `content_write` | `(name: string, content: string, visibility?: string) → handle` | Write content with visibility (private/session/global). Default: session |
-| `content_read` | `(name_or_handle: string) → content` | Read by name or handle with root-based resolution |
 
 ### Artifact Tools (Trust Boundary)
 
@@ -469,7 +468,7 @@ For resolving credentials + approval in a single pass before execution. Eliminat
 
 Artifact ref constraints:
 - `artifact_prepare`, `artifact_exec`, and `artifact_inspect` require an explicit `artifact_ref` (`ar.<12-hex>`) returned by `artifact_build` or `workflow_wait`/`workflow_state`.
-- Implicit workflow outputs contain `implicit_artifact_id` and a `named_outputs` map. Use `content_read` on the implicit handle and then select `content.artifacts[*].artifact_ref`.
+- Implicit workflow outputs contain `implicit_artifact_id` and a `named_outputs` map. Use `resolve` on the implicit handle and then select `content.artifacts[*].artifact_ref`.
 
 Credential reference constraints:
 - `credential_id` references used by artifact/sandbox credential injection must be canonical IDs from credential tools (`cred_...`).

@@ -105,7 +105,7 @@ The core gateway library. Handles all server, runtime, and execution logic.
 | `tools/resolve.rs` | `resolve` (one front door for any artifact/content handle) |
 | `tools/artifact_prepare.rs` | `artifact_prepare` |
 | `tools/artifact_exec.rs` | `artifact_exec` |
-| `tools/content.rs` | `content_write`, `content_read` |
+| `tools/content.rs` | `content_write` |
 | `tools/promotion.rs` | `promotion_record`, `promotion_query` |
 | `tools/session.rs` | `session_escalate` |
 | `tools/execution.rs` | `execution_search` |

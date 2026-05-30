@@ -21,7 +21,6 @@ This document describes the capability system used by Autonoetic agents. Capabil
 ### Content Tools
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
-| `content_read` | `ReadAccess` | Read from content store |
 | `content_write` | `WriteAccess` | Write to content store with visibility |
 
 ### Artifact Tools
@@ -67,7 +66,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 
 ## Important: SandboxFunctions vs Native Tools
 
-**Common misconception**: `SandboxFunctions` with prefix `"content."` grants access to `content_read`, `content_write`, etc.
+**Common misconception**: `SandboxFunctions` with prefix `"content."` grants access to `resolve`, `content_write`, etc.
 
 **Reality**: `SandboxFunctions` is for **MCP (Model Context Protocol) tools only**. Native content tools require `ReadAccess` and `WriteAccess` capabilities.
 
@@ -75,7 +74,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 ❌ WRONG:
   capabilities:
     - type: "SandboxFunctions"
-      allowed: ["content."]  # This does NOT grant content_read access!
+      allowed: ["content."]  # This does NOT grant resolve access!
 
 ✅ CORRECT:
   capabilities:
@@ -266,7 +265,7 @@ capabilities:
 
 ### SandboxFunctions (for MCP tools)
 ```json
-{"type": "SandboxFunctions", "allowed": ["web.", "content_read"]}
+{"type": "SandboxFunctions", "allowed": ["web.", "resolve"]}
 ```
 
 ### CodeExecution (script patterns)

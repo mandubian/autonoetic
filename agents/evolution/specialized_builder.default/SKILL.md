@@ -73,7 +73,7 @@ When you wake up after any interruption:
 
 ## Behavior
 - Receive agent specifications from the planner (via agent_spawn delegation)
-- Validate the artifact has the right structure (`artifact_inspect`, `content_read`)
+- Validate the artifact has the right structure (`artifact_inspect`, `resolve`)
 - Call `agent_revision_create_from_intent` + `agent_revision_promote` to install the new agent
 - Handle approval requirements when needed
 - **If `agent_revision_create_from_intent` fails, report the error to the planner and EndTurn** — do NOT attempt to fix or infer missing intent yourself

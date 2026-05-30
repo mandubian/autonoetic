@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn test_tool_tier_core() {
         assert_eq!(tool_tier("content_write"), ToolTier::Core);
-        assert_eq!(tool_tier("content_read"), ToolTier::Core);
+        assert_eq!(tool_tier("resolve"), ToolTier::Core);
         assert_eq!(tool_tier("knowledge_store"), ToolTier::Core);
         assert_eq!(tool_tier("sandbox_exec"), ToolTier::Core);
     }

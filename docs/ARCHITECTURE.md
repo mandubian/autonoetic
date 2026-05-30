@@ -155,7 +155,7 @@ Gateway: 1. Compute SHA-256 hash
          3. Update session manifest: {"main.py": "sha256:abc123"}
          4. Return handle to agent
 
-Agent: content_read("main.py")
+Agent: resolve("main.py")
   ↓
 Gateway: 1. Resolve name → handle from session manifest
          2. Fetch blob from content store
@@ -173,7 +173,7 @@ Gateway: 1. Resolve name → handle from session manifest
    - Artifact metadata from SKILL.md frontmatter
    - Structured artifact added to spawn response
 5. Planner receives artifacts in spawn response
-6. Specialized_builder reads artifacts via content_read()
+6. Specialized_builder reads artifacts via resolve()
 ```
 
 ### Build Layer Flow
@@ -393,7 +393,7 @@ Agent-local files for per-tick determinism:
 └── skills/          # Installed skills
 ```
 
-**Tools:** `content_write`, `content_read`, `artifact_build`, `artifact_inspect`
+**Tools:** `content_write`, `resolve`, `artifact_build`, `artifact_inspect`
 
 Content uses root-session visibility. Default is `session` (collaborative within root). Use `visibility: "private"` for scratch work. Artifacts are the mandatory boundary for review/install/execution.
 
@@ -881,16 +881,16 @@ A per-session, in-memory result cache for **pure read tools** memoizes determini
 
 | Tool | Policy | Invalidated by |
 |---|---|---|
-| `content_read` | Cache forever in-session (content-addressed) | never |
+| `resolve` | Cache forever in-session (content-addressed) | never |
 | `agent_inspect` | Cache | `skill_install`, `agent_revision_create`, `agent_revision_create_from_intent`, `agent_revision_promote`, `agent_revision_rollback` |
 | `artifact_inspect` | Cache | `artifact_build` |
 
 Properties:
 
-- **Keyed by exact session id**, not root — a cached `content_read` result is never served to a sibling session, preserving per-session content visibility.
+- **Keyed by exact session id**, not root — a cached `resolve` result is never served to a sibling session, preserving per-session content visibility.
 - **Wraps only the raw `registry.execute` output**; disclosure registration and secret redaction still run on every hit, so caching is transparent to those invariants.
 - **Bounded + size-guarded**: per-session LRU of 128 entries; results over 1 MiB are never stored.
-- **Invalidation is coarse but correct**: a mutating tool clears the affected tag class (`AgentExistence` / `ArtifactMetadata`) across *all* session caches, so a child session's promote invalidates the parent's `agent_inspect` cache. `content_read` is never invalidated.
+- **Invalidation is coarse but correct**: a mutating tool clears the affected tag class (`AgentExistence` / `ArtifactMetadata`) across *all* session caches, so a child session's promote invalidates the parent's `agent_inspect` cache. `resolve` is never invalidated.
 - **Audited**: a cache hit emits a `tool_call.cache_hit` causal event (and the normal execution trace still records), so the causal chain shows every logical tool call.
 
 Grounding: extends the determinism-skip principle of P-2.6 / P-2.7 (approved-execution caching) to pure reads, where the safety argument is stronger — there is no side effect to skip.

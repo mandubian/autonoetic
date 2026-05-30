@@ -326,11 +326,11 @@ Important: Every significant workflow transition emits a causal chain entry (`wo
 
 **Fix**: Corrected the deduplication logic to use `insert()` directly, which returns `true` for newly inserted events. Also improved workflow change detection to reset the bootstrap flag when a workflow is created mid-session.
 
-### Bug 4: Short alias used as full handle prevented content_read from working
+### Bug 4: Short alias used as full handle prevented resolve from working
 
-**Problem**: When `content_write` returns an alias (e.g., `"8b40c8e1"`), the LLM sometimes mistakenly treats it as a full SHA-256 handle by prepending `sha256:`, resulting in `content_read("sha256:8b40c8e1")`. The lookup logic treated this as a full handle lookup (expecting 64 hex chars) rather than an alias lookup (8 chars), causing "Content not found" errors.
+**Problem**: When `content_write` returns an alias (e.g., `"8b40c8e1"`), the LLM sometimes mistakenly treats it as a full SHA-256 handle by prepending `sha256:`, resulting in `resolve("sha256:8b40c8e1")`. The lookup logic treated this as a full handle lookup (expecting 64 hex chars) rather than an alias lookup (8 chars), causing "Content not found" errors.
 
-**Fix**: Enhanced `ContentStore::read_by_name_or_handle` to detect the pattern `sha256:SHORT_ALIAS` (exactly 8 hex chars after the prefix) and redirect it to alias lookup. This makes content_read more resilient to LLM misinterpretations of the alias value.
+**Fix**: Enhanced `ContentStore::read_by_name_or_handle` to detect the pattern `sha256:SHORT_ALIAS` (exactly 8 hex chars after the prefix) and redirect it to alias lookup. This makes resolve more resilient to LLM misinterpretations of the alias value.
 
 ## Files
 

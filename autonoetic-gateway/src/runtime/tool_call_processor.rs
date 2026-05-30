@@ -437,7 +437,7 @@ impl<'a> ToolCallProcessor<'a> {
             return;
         }
 
-        if read_cache_policy(tool_name).is_some() {
+        if read_cache_policy(tool_name, arguments_json).is_some() {
             store
                 .session_read_cache
                 .put(session_id, tool_name, arguments_json, result);
@@ -1453,15 +1453,15 @@ mod tests {
 
     // ── #289 session read-cache wiring ──────────────────────────────────
 
-    /// A fake `content_read` that returns `{"ok":true,...}` and counts
+    /// A fake `resolve` that returns `{"ok":true,...}` and counts
     /// real executions, so a cache hit is observable as "counter did not
     /// increment".
-    struct FakeContentRead {
+    struct FakeResolve {
         calls: Arc<AtomicUsize>,
     }
-    impl NativeTool for FakeContentRead {
+    impl NativeTool for FakeResolve {
         fn name(&self) -> &'static str {
-            "content_read"
+            "resolve"
         }
         fn definition(&self) -> ToolDefinition {
             ToolDefinition {
@@ -1570,7 +1570,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn read_cache_serves_repeat_content_read_without_re_executing() {
+    async fn read_cache_serves_repeat_resolve_without_re_executing() {
         let temp = tempdir().unwrap();
         let gw_dir = temp.path().join("gateway");
         std::fs::create_dir_all(&gw_dir).unwrap();
@@ -1582,7 +1582,7 @@ mod tests {
         let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
         let mut registry = NativeToolRegistry::new();
         let calls = Arc::new(AtomicUsize::new(0));
-        registry.register(Box::new(FakeContentRead {
+        registry.register(Box::new(FakeResolve {
             calls: Arc::clone(&calls),
         }));
         let mut disclosure_state = DisclosureState::default();
@@ -1602,12 +1602,12 @@ mod tests {
         let args = r#"{"name":"f"}"#;
         // First call executes for real.
         let (_ok1, r1) = processor
-            .process_tool_calls(&[call("tc1", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer())
+            .process_tool_calls(&[call("tc1", "resolve", args)], temp.path(), None, &mut SessionTracer::test_tracer())
             .await
             .unwrap();
         // Second identical call must be served from cache (no re-exec).
         let (_ok2, r2) = processor
-            .process_tool_calls(&[call("tc2", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer())
+            .process_tool_calls(&[call("tc2", "resolve", args)], temp.path(), None, &mut SessionTracer::test_tracer())
             .await
             .unwrap();
 
@@ -1679,7 +1679,7 @@ mod tests {
         let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
         let mut registry = NativeToolRegistry::new();
         let calls = Arc::new(AtomicUsize::new(0));
-        registry.register(Box::new(FakeContentRead {
+        registry.register(Box::new(FakeResolve {
             calls: Arc::clone(&calls),
         }));
         let mut disclosure_state = DisclosureState::default();
@@ -1697,8 +1697,8 @@ mod tests {
         .with_session_context(Some("no-store".to_string()), Some("t1".to_string()));
 
         let args = r#"{"name":"f"}"#;
-        processor.process_tool_calls(&[call("c1", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
-        processor.process_tool_calls(&[call("c2", "content_read", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        processor.process_tool_calls(&[call("c1", "resolve", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
+        processor.process_tool_calls(&[call("c2", "resolve", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2, "no cache without a gateway store");
     }
 }

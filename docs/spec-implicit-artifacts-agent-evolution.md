@@ -200,15 +200,15 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 }
 ```
 
-#### Via content_read
+#### Via resolve
 
 ```json
-content_read({
+resolve({
   "name_or_handle": "impl_task-94c19ac6"
 })
 ```
 
-> Note: `artifact_inspect` requires an `artifact_ref` (`ar.<12-hex>`) from a built artifact bundle. Implicit workflow outputs are content records, not executable bundles — use `content_read` with the `implicit_artifact_id`.
+> Note: `artifact_inspect` requires an `artifact_ref` (`ar.<12-hex>`) from a built artifact bundle. Implicit workflow outputs are content records, not executable bundles — use `resolve` with the `implicit_artifact_id`.
 
 ### 4.5 Configuration
 
@@ -226,13 +226,13 @@ implicit_artifacts:
 
 ### 4.6 Enhanced Error Messages
 
-When `content_read` fails for a name that looks like a guessed name:
+When `resolve` fails for a name that looks like a guessed name:
 
 ```json
 {
   "error_type": "resource",
   "message": "Content 'weather_result' not found",
-  "hint": "Use workflow_wait or workflow_state to get stable output handles from completed child tasks, then use content_read with the implicit_artifact_id from the output field.",
+  "hint": "Use workflow_wait or workflow_state to get stable output handles from completed child tasks, then use resolve with the implicit_artifact_id from the output field.",
   "available_artifacts": [
     {"implicit_artifact_id": "impl_task-94c19ac6", "from": "researcher.default", "summary": "Fetched weather..."},
     {"implicit_artifact_id": "impl_task-fb261586", "from": "architect.default", "summary": "Design document..."}
@@ -307,15 +307,15 @@ Task completes → Gateway creates impl_{task_id} → Available to parent sessio
 }
 ```
 
-#### Via content_read
+#### Via resolve
 
 ```json
-content_read({
+resolve({
   "name_or_handle": "impl_task-94c19ac6"
 })
 ```
 
-> Note: `artifact_inspect` requires an `artifact_ref` (`ar.<12-hex>`) from a built artifact bundle. Implicit workflow outputs are content records, not executable bundles — use `content_read` with the `implicit_artifact_id`.
+> Note: `artifact_inspect` requires an `artifact_ref` (`ar.<12-hex>`) from a built artifact bundle. Implicit workflow outputs are content records, not executable bundles — use `resolve` with the `implicit_artifact_id`.
 
 ### 3.5 Configuration
 
@@ -333,7 +333,7 @@ implicit_artifacts:
 
 ### 3.6 Enhanced Error Messages
 
-When `content_read` fails for a name that looks like a guessed name:
+When `resolve` fails for a name that looks like a guessed name:
 
 ```json
 {
@@ -415,7 +415,7 @@ session_escalate({
   "context": "workflow_wait returned task-94c19ac6 completed but I don't see an output_artifact field",
   "target": "reasoning_llm",
   "suggested_actions": [
-    "Try content_read with task ID",
+    "Try resolve with task ID",
     "Ask user for clarification",
     "Check if output is in a different field"
   ]
@@ -423,7 +423,7 @@ session_escalate({
 
 // Gateway responds:
 {
-  "analysis": "The workflow_wait response structure includes an 'output' object with 'implicit_artifact_id'. Use: content_read({'name_or_handle': 'impl_task-94c19ac6'})",
+  "analysis": "The workflow_wait response structure includes an 'output' object with 'implicit_artifact_id'. Use: resolve({'name_or_handle': 'impl_task-94c19ac6'})",
   "confidence": "high",
   "alternative": "If that fails, the task output may be in the workflow.events for this task."
 }
@@ -752,7 +752,7 @@ Every evolved agent tracks its lineage:
 |-----------|--------|
 | Task completion | Create implicit artifact |
 | workflow_wait | Include output artifact in response |
-| content_read | Enhanced error messages with hints |
+| resolve | Enhanced error messages with hints |
 | Tool registry | Add session_escalate tool |
 | Agent loader | Support base inheritance, hooks, injections |
 | Session metadata | Track escalation count |
@@ -818,7 +818,7 @@ evolution:
 
 1. Implement implicit artifact creation on task completion
 2. Update workflow_wait to include artifact reference
-3. Add enhanced error messages to content_read
+3. Add enhanced error messages to resolve
 4. Update planner SKILL.md to use artifact IDs
 
 ### Phase 2: Escalation (Week 2-3)
@@ -872,7 +872,7 @@ planner spawns researcher (async)
 planner spawns architect (async)
 planner calls workflow_wait
   → returns: {"status": "completed", "task_id": "task-94c19ac6"}
-planner tries content_read("weather_result")
+planner tries resolve("weather_result")
   → FAIL: not found
 planner guesses another name, fails again
 planner proceeds with missing data
@@ -896,7 +896,7 @@ planner calls workflow_wait
        }
      }
 planner uses implicit_artifact_id from response
-planner calls content_read("impl_task-94c19ac6")
+planner calls resolve("impl_task-94c19ac6")
   → SUCCESS
 planner has all data needed
   → High quality output

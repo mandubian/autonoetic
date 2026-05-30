@@ -718,7 +718,7 @@ mod tests {
         guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);
         assert!(guard.check_loop().is_ok());
 
-        guard.register_progress("content_read", r#"{"name":"file.txt"}"#);
+        guard.register_progress("resolve", r#"{"name":"file.txt"}"#);
         assert!(guard.check_loop().is_ok());
 
         guard.register_progress("web_search", r#"{"query":"Paris weather"}"#);

@@ -1166,7 +1166,7 @@ The 38 registered native tools include specialized tools (eval, revision, promot
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolTier {
-    /// Always sent: content_write, content_read, sandbox_exec, knowledge_store/recall/search/search_by_tags
+    /// Always sent: content_write, resolve, sandbox_exec, knowledge_store/recall/search/search_by_tags
     Core,
     /// Sent when agent is in a workflow or delegates: agent_spawn, workflow_wait, workflow_state
     Workflow,
@@ -1310,7 +1310,7 @@ MVP: ship observability (`PromptBudgetBreakdown`) + tool tiering (~200 lines). T
 | **Tool access** | `allowed-tools` is advisory — the host decides enforcement | `capabilities` are enforced by the gateway policy engine |
 | **Execution model** | LLM reads instructions, uses host's tools freely | Sandboxed execution, capability-gated tools, approval gates |
 | **Trust model** | Implicit trust (single user, local environment) | Multi-user ACLs, approval gates, disclosure policies |
-| **File access** | Direct filesystem | Content store (`content_write`/`content_read`), sandboxed mounts |
+| **File access** | Direct filesystem | Content store (`content_write`/`resolve`), sandboxed mounts |
 | **Networking** | Assumed available | `NetworkAccess` capability, approval-gated |
 | **Resources** | `scripts/`, `references/`, `assets/` loaded on demand | Agent directory files mounted in sandbox |
 | **Progressive disclosure** | 3 tiers: metadata (~100 tokens) → instructions (<5000 tokens) → resources (on demand) | All instructions loaded at agent wake |
@@ -1403,7 +1403,7 @@ fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
 
 #### Tool name bridging
 
-External skills reference tools by names defined in their host environment (e.g., `Bash`, `Read`, `WebSearch` for Claude Code). Autonoetic uses different names (`sandbox_exec`, `content_read`, `web_search`). The adapter injects a short **tool name mapping** into the agent's instructions:
+External skills reference tools by names defined in their host environment (e.g., `Bash`, `Read`, `WebSearch` for Claude Code). Autonoetic uses different names (`sandbox_exec`, `resolve`, `web_search`). The adapter injects a short **tool name mapping** into the agent's instructions:
 
 ```markdown
 ---
@@ -1415,13 +1415,13 @@ The following tool mappings apply:
 | Skill references | Autonoetic equivalent |
 |---|---|
 | `Bash(command)` | `sandbox_exec(command)` |
-| `Read(path)` | `content_read(name_or_handle)` — files must be loaded via content store |
+| `Read(path)` | `resolve(name_or_handle)` — files must be loaded via content store |
 | `Write(path, content)` | `content_write(name, content)` |
 | `WebSearch(query)` | `web_search(query)` |
 | `WebFetch(url)` | `web_fetch(url)` |
 
 File paths referenced by the skill are mounted in the sandbox at `/workspace/`.
-Use `content_read` for any file the skill's instructions reference.
+Use `resolve` for any file the skill's instructions reference.
 ```
 
 This mapping is appended to the agent's system prompt. The LLM handles the translation naturally — it reads "use `Bash(git log)`" in the skill instructions and translates it to `sandbox_exec({"command": "git log"})` based on the mapping table. Token cost: ~200 tokens.
@@ -1431,7 +1431,7 @@ This mapping is appended to the agent's system prompt. The LLM handles the trans
 Agent Skills may include `scripts/`, `references/`, `assets/` directories. The adapter:
 
 1. Copies these directories into the agent's directory under `imported/`
-2. Registers them as content store entries (so they're accessible via `content_read`)
+2. Registers them as content store entries (so they're accessible via `resolve`)
 3. Mounts them into the sandbox at their expected paths
 
 ```rust

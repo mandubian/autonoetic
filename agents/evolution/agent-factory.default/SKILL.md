@@ -237,7 +237,7 @@ Call `agent_spawn` with `agent_id="coder.default"`, `async=true`, passing the im
 On resume after coder completes (the child state arrives in your turn-start context; call `workflow_state` once if you need the full reuse_guards):
 1. Read the completed task's `output` (from the wake-up context or `workflow_state`).
 2. From `output.named_outputs`, inspect dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
-3. Use `content_read` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload only when the named outputs don't already tell you what you need.
+3. Use `resolve` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload only when the named outputs don't already tell you what you need.
 4. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
 
 ### Step 3: Packager (if dependency files found)

@@ -10,7 +10,6 @@ use std::path::Path;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(ContentWriteTool));
-    registry.register(Box::new(ContentReadTool));
 }
 
 pub struct ContentWriteTool;
@@ -147,158 +146,7 @@ impl NativeTool for ContentWriteTool {
     }
 }
 
-pub struct ContentReadTool;
-
-impl NativeTool for ContentReadTool {
-    fn name(&self) -> &'static str {
-        "content_read"
-    }
-
-    fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name().to_string(),
-            description: "Read content from the session's content store. Prefer `name`, 8-char `alias`, or `cnt_<alias>` ref from content.write. Also supports `ar.<ref>:<filename>` to read a specific file from an artifact by its scoped ref. Full `sha256:...` digest still works. Gateway-local skill files such as `skills/<service>/SKILL.md` are for `credential_setup(skill_url=...)`, not `content_read`.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name_or_handle": {
-                        "type": "string",
-                        "description": "Content-store name (e.g. 'main.py' or a session-stored 'skill.md'), 8-hex alias, cnt_<alias> ref, ar.<ref>:<filename>, or sha256 digest — not a sandbox path or gateway skills/ path"
-                    }
-                },
-                "required": ["name_or_handle"],
-                "additionalProperties": false
-            }),
-        }
-    }
-
-    fn execute(
-        &self,
-        _manifest: &AgentManifest,
-        _policy: &PolicyEngine,
-        _agent_dir: &Path,
-        gateway_dir: Option<&Path>,
-        arguments_json: &str,
-        _session_id: Option<&str>,
-        _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
-        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
-    ) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            name_or_handle: String,
-        }
-        let args: Args = serde_json::from_str(arguments_json)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
-
-        anyhow::ensure!(
-            !args.name_or_handle.trim().is_empty(),
-            "name_or_handle must not be empty"
-        );
-
-        let Some(gw_dir) = gateway_dir else {
-            return Ok(ToolError::resource("Content store requires gateway directory to be configured", None::<String>).to_error_response());
-        };
-
-        let sid = _session_id.unwrap_or(&_manifest.agent.id);
-        let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
-
-        let input = args.name_or_handle.trim();
-
-        let content = if input.starts_with("ar.") {
-            let sid = _session_id.unwrap_or(&_manifest.agent.id);
-            match try_read_artifact_ref_file(gw_dir, gateway_store.as_deref(), input, sid) {
-                Ok(c) => c,
-                Err(e) => {
-                    let msg = e.to_string();
-                    let lower = msg.to_ascii_lowercase();
-                    if lower.contains("not an artifact ref") || lower.contains("colon separator") {
-                        return Ok(ToolError::validation(
-                            &msg,
-                            Some("Artifact refs must use format `ar.<ref>:<filename>`."),
-                        ).to_error_response());
-                    }
-                    if lower.contains("gatewaystore required") {
-                        return Ok(ToolError::resource(
-                            &msg,
-                            None::<String>,
-                        ).to_error_response());
-                    }
-                    return Ok(ToolError::not_found(
-                        format!(
-                            "Content '{}' in session '{}'",
-                            input, sid
-                        ),
-                        Some("Use `artifact_inspect` with the artifact_ref to verify the file list."),
-                    ).to_error_response());
-                }
-            }
-        } else {
-            match store.read_by_name_or_handle(sid, input) {
-                Ok(c) => c,
-                Err(e) => {
-                    if let Some(repair_hint) = skill_path_repair_hint(gw_dir, input) {
-                        return Ok(ToolError::not_found(
-                            format!("Content '{}' not found in session '{}': {}", input, sid, e),
-                            Some(repair_hint),
-                        ).to_error_response());
-                    }
-
-                    let looks_like_guessed_name = !input.starts_with("sha256:");
-
-                    if looks_like_guessed_name {
-                        let hints = find_available_artifacts(&store, sid, input);
-
-                        if !hints.is_empty() {
-                            return Ok(serde_json::json!({
-                                "ok": false,
-                                "error_type": "resource",
-                                "repair_hint": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks, then use content.read with the artifact_id from the output field.",
-                                "error": "content_not_found",
-                                "message": format!("Content '{}' not found in session '{}'", input, sid),
-                                "available_artifacts": hints
-                            }).to_string());
-                        }
-                    }
-
-                    return Ok(ToolError::not_found(
-                        format!("Content '{}' not found in session '{}': {}", input, sid, e),
-                        None::<String>,
-                    ).to_error_response());
-                }
-            }
-        };
-
-        let content_str = String::from_utf8(content)
-            .map_err(|e| anyhow::anyhow!("Content is not valid UTF-8: {}", e))?;
-
-        serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "content": content_str,
-        }))
-        .map_err(Into::into)
-    }
-
-    fn extract_metadata(&self, arguments_json: &str) -> ToolMetadata {
-        let mut meta = ToolMetadata::default();
-        if let Ok(parsed_args) = serde_json::from_str::<serde_json::Value>(arguments_json) {
-            if let Some(name) = parsed_args.get("name_or_handle").and_then(|v| v.as_str()) {
-                meta.path = Some(name.to_string());
-            }
-        }
-        meta
-    }
-}
-
-fn find_available_artifacts(
+pub(crate) fn find_available_artifacts(
     _store: &crate::runtime::content_store::ContentStore,
     _session_id: &str,
     _requested_name: &str,
@@ -307,13 +155,13 @@ fn find_available_artifacts(
 
     hints.push(serde_json::json!({
         "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with named_outputs and artifacts[].artifact_ref.",
-        "example": "Call workflow.state first, then read completed_tasks[].output via content.read using named_outputs[*].ref or ar.<ref>:<filename>."
+        "example": "Call workflow.state first, then read completed_tasks[].output: resolve(ref=named_outputs[*].ref) for content, or resolve(ref=artifacts[].artifact_ref, include=\"content\", file=<name>) for an artifact file."
     }));
 
     hints
 }
 
-fn skill_path_repair_hint(gateway_dir: &Path, input: &str) -> Option<String> {
+pub(crate) fn skill_path_repair_hint(gateway_dir: &Path, input: &str) -> Option<String> {
     let trimmed = input.trim();
     let normalized = trimmed.trim_start_matches("./");
     let looks_like_skill_path = normalized.starts_with("skills/") || trimmed.ends_with("/SKILL.md");
@@ -330,39 +178,30 @@ fn skill_path_repair_hint(gateway_dir: &Path, input: &str) -> Option<String> {
             " If you mean a gateway skill file, use `credential_setup` with `skill_url: \"skills/<service>/SKILL.md\"`.".to_string()
         };
         return Some(format!(
-            "content_read only reads session content names/handles, not gateway-local skill files.{} If the skill was fetched into the session, read the stored content name or handle instead.",
+            "resolve only reads session content names/handles, not gateway-local skill files.{} If the skill was fetched into the session, read the stored content name or handle instead.",
             suffix
         ));
     }
 
     if trimmed == "SKILL.md" {
         return Some(
-            "content_read only reads session content names/handles, not gateway-local skill files. If you mean a gateway skill file, use `credential_setup` with `skill_url: \"skills/<service>/SKILL.md\"`. If the skill was fetched into the session, read the stored content name or handle instead.".to_string(),
+            "resolve only reads session content names/handles, not gateway-local skill files. If you mean a gateway skill file, use `credential_setup` with `skill_url: \"skills/<service>/SKILL.md\"`. If the skill was fetched into the session, read the stored content name or handle instead.".to_string(),
         );
     }
 
     None
 }
 
-pub(crate) fn try_read_artifact_ref_file(
+/// Read a single named file out of an artifact, addressed by its agent-facing
+/// ref (`ar.…` or canonical `art_…`) plus the file name. The file selector is
+/// a separate argument — there is no `ar.<ref>:<file>` packing.
+pub(crate) fn read_artifact_file(
     gw_dir: &Path,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    name_or_handle: &str,
+    ref_id: &str,
+    filename: &str,
     session_id: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    // Format: ar.<ref_id>:<filename>
-    if !name_or_handle.starts_with("ar.") {
-        return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!("not an artifact ref")).into());
-    }
-
-    let Some(colon_idx) = name_or_handle.find(':') else {
-        return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(
-            "artifact ref must be in format `ar.<ref>:<filename>` (colon separator required)"
-        )).into());
-    };
-    let ref_id = &name_or_handle[..colon_idx];
-    let filename = &name_or_handle[colon_idx + 1..];
-
     let gs = gateway_store
         .ok_or_else(|| anyhow::anyhow!("GatewayStore required to resolve artifact refs"))?;
 

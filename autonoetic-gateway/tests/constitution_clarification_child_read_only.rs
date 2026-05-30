@@ -136,7 +136,7 @@ fn clarification_filter_allows_inspection_tools() {
         "constitution_read",
         "knowledge_search",
         "knowledge_read",
-        "content_read",
+        "resolve",
         "execution_search",
         "digest_query",
     ];

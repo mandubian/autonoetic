@@ -105,12 +105,12 @@ fn test_content_read_skill_path_not_found_has_targeted_repair_hint() -> anyhow::
     let policy = PolicyEngine::new(manifest.clone());
 
     let result = registry.execute(
-        "content_read",
+        "resolve",
         &manifest,
         &policy,
         temp.path(),
         Some(&gateway_dir),
-        &json!({"name_or_handle": "skills/moltbook/SKILL.md"}).to_string(),
+        &json!({"ref": "skills/moltbook/SKILL.md", "include": "content"}).to_string(),
         Some("session-1"),
         None,
         None,
@@ -330,7 +330,8 @@ fn test_loop_guard_permission_errors_skip_budget() {
 fn test_loop_guard_validation_errors_count_normally() {
     let mut guard = LoopGuard::new(100);
 
-    for _ in 0..5 {
+    // max_tool_failures default is 8 — validation errors count as normal failures.
+    for _ in 0..8 {
         guard.register_failure(
             "web_fetch",
             r#"{"url":"https://bad.com"}"#,
@@ -345,13 +346,16 @@ fn test_loop_guard_validation_errors_count_normally() {
 fn test_loop_guard_mixed_errors_permission_skipped() {
     let mut guard = LoopGuard::new(100);
 
-    for _ in 0..4 {
+    // Permission errors are skipped; only the 7 validation failures count
+    // (below the max_tool_failures=8 budget).
+    for _ in 0..7 {
         guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Validation));
         guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Permission));
     }
 
     assert!(guard.check_loop().is_ok());
 
+    // The 8th validation failure trips the budget.
     guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Validation));
     assert!(guard.check_loop().is_err());
 }
@@ -360,7 +364,8 @@ fn test_loop_guard_mixed_errors_permission_skipped() {
 fn test_loop_guard_unknown_error_type_counts_as_failure() {
     let mut guard = LoopGuard::new(100);
 
-    for _ in 0..5 {
+    // Unknown (None) error type counts as a normal failure against the budget (8).
+    for _ in 0..8 {
         guard.register_failure("sandbox_exec", "{}", None);
     }
 

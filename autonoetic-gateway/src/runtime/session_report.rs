@@ -955,7 +955,7 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
             "wrote {}",
             extract_field_str(parsed, &["name", "sandbox_path", "handle"]).unwrap_or("content")
         ),
-        "content_read" => {
+        "resolve" => {
             if let Some(len) = parsed
                 .and_then(|v| v.get("content"))
                 .and_then(|x| x.as_str())
