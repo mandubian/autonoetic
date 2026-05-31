@@ -243,6 +243,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "walkdir",
  "zstd",
 ]
 

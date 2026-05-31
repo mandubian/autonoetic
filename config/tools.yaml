@@ -67,6 +67,10 @@ rules:
   - prefix: scheduler_
   - prefix: planframe_
     tier: workflow
+  - prefix: workbench_
+    tier: workflow
+  - prefix: artifact_project
+    tier: workflow
 
   # Specialized tier: expensive or role-specific operations.
   - prefix: web_

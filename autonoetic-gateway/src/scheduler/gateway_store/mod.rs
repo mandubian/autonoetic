@@ -29,6 +29,7 @@ mod user_interactions;
 mod user_profiles;
 mod util;
 mod workflow;
+mod workbenches;
 
 use anyhow::Result;
 use autonoetic_types::notification::NotificationStatus;
@@ -410,6 +411,79 @@ impl GatewayStore {
     ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
         let conn = self.conn.lock().unwrap();
         plan_frames::list_plan_revisions(&conn, plan_id)
+    }
+
+    // -------------------------------------------------------------------------
+    // Workbenches
+    // -------------------------------------------------------------------------
+
+    pub fn save_workbench(&self, wb: &autonoetic_types::workbench::WorkbenchProjection) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::save_workbench(&conn, wb)
+    }
+
+    pub fn load_workbench(
+        &self,
+        workbench_id: &str,
+    ) -> Result<Option<autonoetic_types::workbench::WorkbenchProjection>> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::load_workbench(&conn, workbench_id)
+    }
+
+    pub fn load_active_workbench_for_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<autonoetic_types::workbench::WorkbenchProjection>> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::load_active_workbench_for_workflow(&conn, workflow_id)
+    }
+
+    pub fn list_workbenches_for_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Vec<autonoetic_types::workbench::WorkbenchProjection>> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::list_workbenches_for_workflow(&conn, workflow_id)
+    }
+
+    pub fn update_workbench_status(
+        &self,
+        workbench_id: &str,
+        status: autonoetic_types::workbench::WorkbenchStatus,
+        timestamp: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::update_workbench_status(&conn, workbench_id, status, timestamp)
+    }
+
+    pub fn update_workbench_last_checkpoint(
+        &self,
+        workbench_id: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::update_workbench_last_checkpoint(&conn, workbench_id, timestamp)
+    }
+
+    pub fn save_checkpoint(&self, cp: &autonoetic_types::workbench::WorkbenchCheckpoint) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::save_checkpoint(&conn, cp)
+    }
+
+    pub fn load_checkpoint(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Option<autonoetic_types::workbench::WorkbenchCheckpoint>> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::load_checkpoint(&conn, checkpoint_id)
+    }
+
+    pub fn list_checkpoints_for_workbench(
+        &self,
+        workbench_id: &str,
+    ) -> Result<Vec<autonoetic_types::workbench::WorkbenchCheckpoint>> {
+        let conn = self.conn.lock().unwrap();
+        workbenches::list_checkpoints_for_workbench(&conn, workbench_id)
     }
 }
 
