@@ -192,6 +192,7 @@ fn planframe_propose_creates_workflow_and_plan() {
     assert_eq!(plan.status.as_str(), "awaiting_approval");
     assert_eq!(plan.validation_policy.entries.len(), 2);
     assert_eq!(plan.root_session_id, root_session_id);
+    assert_eq!(plan.parent_version, None);
 
     let wf_id = store.resolve_workflow_id(root_session_id).unwrap().unwrap();
     let wf = autonoetic_gateway::scheduler::workflow_store::load_workflow_run(
@@ -203,6 +204,7 @@ fn planframe_propose_creates_workflow_and_plan() {
     .unwrap();
     assert!(wf.active_plan_ref.is_some());
     assert_eq!(wf.active_plan_ref.as_ref().unwrap().plan_id, plan_id);
+    assert_eq!(wf.active_plan_ref.as_ref().unwrap().version, 1);
 }
 
 #[test]
@@ -265,6 +267,7 @@ fn planframe_get_returns_proposed_plan() {
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["plan"]["plan_id"], plan_id);
+    assert_eq!(parsed["plan"]["version"], 1);
 }
 
 #[test]
@@ -338,7 +341,7 @@ fn planframe_approve_transitions_status() {
 }
 
 #[test]
-fn planframe_amend_increments_version() {
+fn planframe_amend_creates_new_revision() {
     let dir = tempdir().unwrap();
     let config = make_config(dir.path());
     let registry = default_registry();
@@ -408,10 +411,12 @@ fn planframe_amend_increments_version() {
             Some(&gateway_dir),
             &serde_json::to_string(&json!({
                 "plan_id": plan_id,
-                "step_updates": [
-                    { "step_id": "step-1", "status": "in_progress" }
+                "steps": [
+                    { "step_id": "step-1", "title": "First step (updated)" },
+                    { "step_id": "step-2", "title": "Second step" },
+                    { "step_id": "step-3", "title": "Third step (new)" }
                 ],
-                "reason": "Started"
+                "reason": "Added third step after review"
             }))
             .unwrap(),
             Some(session_id),
@@ -426,6 +431,211 @@ fn planframe_amend_increments_version() {
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["version"], 2);
     assert_eq!(parsed["status"], "awaiting_approval");
+    assert_eq!(parsed["parent_version"], 1);
+
+    let latest = store.load_plan_frame(&plan_id).unwrap().unwrap();
+    assert_eq!(latest.version, 2);
+    assert_eq!(latest.parent_version, Some(1));
+    assert_eq!(latest.steps.len(), 3);
+    assert_eq!(latest.steps[0].title, "First step (updated)");
+    assert_eq!(latest.status, PlanStatus::AwaitingApproval);
+
+    let v1 = store.load_plan_frame_revision(&plan_id, 1).unwrap().unwrap();
+    assert_eq!(v1.version, 1);
+    assert_eq!(v1.steps.len(), 2);
+    assert_eq!(v1.steps[0].title, "First step");
+    assert_eq!(v1.status, PlanStatus::Approved);
+}
+
+#[test]
+fn planframe_amend_preserves_original_revision() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-session-005/planner-005";
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "Original Title",
+                "objective": "Original objective",
+                "steps": [
+                    { "step_id": "s1", "title": "Step 1" }
+                ]
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "plan_id": plan_id,
+                "title": "Changed Title",
+                "objective": "Changed objective",
+                "reason": "Scope change"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-002"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v1 = store.load_plan_frame_revision(&plan_id, 1).unwrap().unwrap();
+    assert_eq!(v1.title, "Original Title");
+    assert_eq!(v1.objective, "Original objective");
+    assert_eq!(v1.status.as_str(), "awaiting_approval");
+
+    let v2 = store.load_plan_frame_revision(&plan_id, 2).unwrap().unwrap();
+    assert_eq!(v2.title, "Changed Title");
+    assert_eq!(v2.objective, "Changed objective");
+    assert_eq!(v2.status.as_str(), "awaiting_approval");
+    assert_eq!(v2.parent_version, Some(1));
+    assert_eq!(v2.reason.as_deref(), Some("Scope change"));
+}
+
+#[test]
+fn planframe_history_returns_full_revision_chain() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-session-006/planner-006";
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "History Test",
+                "objective": "Test history"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "plan_id": plan_id,
+                "title": "History Test v2",
+                "reason": "Second revision"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-002"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "plan_id": plan_id,
+                "title": "History Test v3",
+                "reason": "Third revision"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-003"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let result = registry
+        .execute(
+            "planframe_history",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id),
+            Some("turn-004"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["count"], 3);
+
+    let revisions = parsed["revisions"].as_array().unwrap();
+    assert_eq!(revisions[0]["version"], 1);
+    assert_eq!(revisions[0]["parent_version"], serde_json::Value::Null);
+    assert_eq!(revisions[1]["version"], 2);
+    assert_eq!(revisions[1]["parent_version"], 1);
+    assert_eq!(revisions[2]["version"], 3);
+    assert_eq!(revisions[2]["parent_version"], 2);
 }
 
 #[test]
@@ -447,7 +657,7 @@ fn planframe_tools_not_available_without_capability() {
 }
 
 #[test]
-fn planframe_list_returns_plans_for_workflow() {
+fn planframe_list_returns_latest_revision_per_plan() {
     let dir = tempdir().unwrap();
     let config = make_config(dir.path());
     let registry = default_registry();
@@ -460,29 +670,78 @@ fn planframe_list_returns_plans_for_workflow() {
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
     );
 
-    let session_id = "root-session-005/planner-005";
+    let session_id = "root-session-007/planner-007";
 
-    for i in 0..3u32 {
-        registry
-            .execute(
-                "planframe_propose",
-                &manifest,
-                &policy,
-                dir.path(),
-                Some(&gateway_dir),
-                &serde_json::to_string(&json!({
-                    "title": format!("Plan {}", i),
-                    "objective": format!("Objective {}", i)
-                }))
-                .unwrap(),
-                Some(session_id),
-                Some(&format!("turn-{}", i)),
-                Some(&config),
-                Some(store.clone()),
-                None,
-            )
-            .unwrap();
-    }
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "Plan A",
+                "objective": "First plan"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let plan_a_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "plan_id": plan_a_id,
+                "title": "Plan A v2",
+                "reason": "Updated"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-002"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "Plan B",
+                "objective": "Second plan"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-003"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let plan_b_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let result = registry
         .execute(
@@ -502,5 +761,136 @@ fn planframe_list_returns_plans_for_workflow() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed["ok"], true);
-    assert_eq!(parsed["count"], 3);
+    assert_eq!(parsed["count"], 2);
+
+    let plans = parsed["plans"].as_array().unwrap();
+    let plan_a_latest = plans.iter().find(|p| p["plan_id"] == plan_a_id).unwrap();
+    assert_eq!(plan_a_latest["version"], 2);
+    assert_eq!(plan_a_latest["title"], "Plan A v2");
+
+    let plan_b_latest = plans.iter().find(|p| p["plan_id"] == plan_b_id).unwrap();
+    assert_eq!(plan_b_latest["version"], 1);
+    assert_eq!(plan_b_latest["title"], "Plan B");
+}
+
+#[test]
+fn planframe_get_with_version_returns_specific_revision() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-session-008/planner-008";
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "Version Test v1",
+                "objective": "Test versioning"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "plan_id": plan_id,
+                "title": "Version Test v2",
+                "reason": "Update"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-002"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let result_v1 = registry
+        .execute(
+            "planframe_get",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "plan_id": plan_id, "version": 1 })).unwrap(),
+            Some(session_id),
+            Some("turn-003"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let parsed_v1: serde_json::Value = serde_json::from_str(&result_v1).unwrap();
+    assert_eq!(parsed_v1["plan"]["title"], "Version Test v1");
+    assert_eq!(parsed_v1["plan"]["version"], 1);
+
+    let result_v2 = registry
+        .execute(
+            "planframe_get",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "plan_id": plan_id, "version": 2 })).unwrap(),
+            Some(session_id),
+            Some("turn-004"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let parsed_v2: serde_json::Value = serde_json::from_str(&result_v2).unwrap();
+    assert_eq!(parsed_v2["plan"]["title"], "Version Test v2");
+    assert_eq!(parsed_v2["plan"]["version"], 2);
+
+    let result_latest = registry
+        .execute(
+            "planframe_get",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id),
+            Some("turn-005"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let parsed_latest: serde_json::Value = serde_json::from_str(&result_latest).unwrap();
+    assert_eq!(parsed_latest["plan"]["version"], 2);
 }

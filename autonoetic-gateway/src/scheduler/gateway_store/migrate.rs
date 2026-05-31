@@ -745,20 +745,22 @@ fn apply_plan_frames_v42(conn: &mut Connection) -> Result<()> {
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS plan_frames (
-            plan_id              TEXT PRIMARY KEY,
+            plan_id              TEXT NOT NULL,
+            version              INTEGER NOT NULL DEFAULT 1,
+            parent_version       INTEGER,
             workflow_id          TEXT NOT NULL,
             root_session_id      TEXT NOT NULL,
             title                TEXT NOT NULL,
             objective            TEXT NOT NULL,
-            status               TEXT NOT NULL DEFAULT 'draft',
-            version              INTEGER NOT NULL DEFAULT 1,
+            status               TEXT NOT NULL DEFAULT 'awaiting_approval',
             steps_json           TEXT NOT NULL DEFAULT '[]',
             validation_policy_json TEXT NOT NULL DEFAULT '{\"entries\":[]}',
             approved_by          TEXT,
             approved_at          TEXT,
             created_by_agent_id  TEXT NOT NULL,
+            reason               TEXT,
             created_at           TEXT NOT NULL,
-            updated_at           TEXT NOT NULL
+            PRIMARY KEY (plan_id, version)
         );
         CREATE INDEX IF NOT EXISTS idx_plan_frames_workflow
             ON plan_frames(workflow_id);

@@ -9,10 +9,8 @@ pub struct PlanRef {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStatus {
-    Draft,
     AwaitingApproval,
     Approved,
-    Superseded,
     Completed,
     Cancelled,
 }
@@ -20,10 +18,8 @@ pub enum PlanStatus {
 impl PlanStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            PlanStatus::Draft => "draft",
             PlanStatus::AwaitingApproval => "awaiting_approval",
             PlanStatus::Approved => "approved",
-            PlanStatus::Superseded => "superseded",
             PlanStatus::Completed => "completed",
             PlanStatus::Cancelled => "cancelled",
         }
@@ -32,7 +28,7 @@ impl PlanStatus {
 
 impl Default for PlanStatus {
     fn default() -> Self {
-        Self::Draft
+        Self::AwaitingApproval
     }
 }
 
@@ -62,34 +58,6 @@ impl Default for StepOwner {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StepStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Skipped,
-    Blocked,
-}
-
-impl StepStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            StepStatus::Pending => "pending",
-            StepStatus::InProgress => "in_progress",
-            StepStatus::Completed => "completed",
-            StepStatus::Skipped => "skipped",
-            StepStatus::Blocked => "blocked",
-        }
-    }
-}
-
-impl Default for StepStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanStep {
     pub step_id: String,
@@ -97,13 +65,7 @@ pub struct PlanStep {
     #[serde(default)]
     pub owner: StepOwner,
     #[serde(default)]
-    pub status: StepStatus,
-    #[serde(default)]
     pub depends_on: Vec<String>,
-    #[serde(default)]
-    pub task_ids: Vec<String>,
-    #[serde(default)]
-    pub artifact_refs: Vec<String>,
     #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
@@ -189,13 +151,14 @@ impl Default for ValidationPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlanFrame {
     pub plan_id: String,
+    pub version: u32,
+    pub parent_version: Option<u32>,
     pub workflow_id: String,
     pub root_session_id: String,
     pub title: String,
     pub objective: String,
     #[serde(default)]
     pub status: PlanStatus,
-    pub version: u32,
     #[serde(default)]
     pub steps: Vec<PlanStep>,
     #[serde(default)]
@@ -205,7 +168,7 @@ pub struct PlanFrame {
     #[serde(default)]
     pub approved_at: Option<String>,
     pub created_by_agent_id: String,
-    pub updated_at: String,
+    pub reason: Option<String>,
     pub created_at: String,
 }
 
@@ -215,13 +178,6 @@ impl PlanFrame {
             .steps
             .iter()
             .filter(|s| s.owner == StepOwner::Operator || s.owner == StepOwner::Shared)
-            .map(|s| s.step_id.clone())
-            .collect();
-
-        let current_steps: Vec<String> = self
-            .steps
-            .iter()
-            .filter(|s| s.status == StepStatus::InProgress)
             .map(|s| s.step_id.clone())
             .collect();
 
@@ -244,9 +200,10 @@ impl PlanFrame {
         PlanFrameSummary {
             plan_id: self.plan_id.clone(),
             version: self.version,
+            parent_version: self.parent_version,
             status: self.status,
             title: self.title.clone(),
-            current_steps,
+            step_count: self.steps.len(),
             operator_steps,
             required_validations,
             advisory_validations,
@@ -258,9 +215,10 @@ impl PlanFrame {
 pub struct PlanFrameSummary {
     pub plan_id: String,
     pub version: u32,
+    pub parent_version: Option<u32>,
     pub status: PlanStatus,
     pub title: String,
-    pub current_steps: Vec<String>,
+    pub step_count: usize,
     pub operator_steps: Vec<String>,
     pub required_validations: Vec<String>,
     pub advisory_validations: Vec<String>,

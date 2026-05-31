@@ -2,11 +2,11 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
-use autonoetic_types::agent::{AgentManifest, ToolTier};
+use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::{
-    PlanFrame, PlanFrameSummary, PlanRef, PlanStatus, PlanStep, StepOwner, StepStatus,
+    PlanFrame, PlanFrameSummary, PlanRef, PlanStatus, PlanStep, StepOwner,
     ValidationEntry, ValidationPolicy,
 };
 use serde::Deserialize;
@@ -18,6 +18,7 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(PlanFrameListTool));
     registry.register(Box::new(PlanFrameApproveTool));
     registry.register(Box::new(PlanFrameAmendTool));
+    registry.register(Box::new(PlanFrameHistoryTool));
 }
 
 fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
@@ -56,7 +57,7 @@ impl NativeTool for PlanFrameProposeTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Propose a new PlanFrame for collaborative work. Creates a workflow if one does not exist yet. The plan starts in 'draft' status and must be approved before agents act on it.".to_string(),
+            description: "Propose a new PlanFrame for collaborative work. Creates a workflow if one does not exist yet. The plan starts in 'awaiting_approval' status and must be approved before agents act on it.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -201,10 +202,7 @@ impl NativeTool for PlanFrameProposeTool {
                     Some("shared") => StepOwner::Shared,
                     _ => StepOwner::Planner,
                 },
-                status: StepStatus::Pending,
                 depends_on: s.depends_on.unwrap_or_default(),
-                task_ids: vec![],
-                artifact_refs: vec![],
                 agent_id: s.agent_id,
                 notes: s.notes,
             })
@@ -239,18 +237,19 @@ impl NativeTool for PlanFrameProposeTool {
 
         let plan = PlanFrame {
             plan_id: plan_id.clone(),
+            version: 1,
+            parent_version: None,
             workflow_id: workflow.workflow_id.clone(),
             root_session_id: root_session_id.to_string(),
             title: args.title,
             objective: args.objective,
             status: PlanStatus::AwaitingApproval,
-            version: 1,
             steps,
             validation_policy,
             approved_by: None,
             approved_at: None,
             created_by_agent_id: manifest.agent.id.clone(),
-            updated_at: now.clone(),
+            reason: None,
             created_at: now,
         };
 
@@ -262,7 +261,7 @@ impl NativeTool for PlanFrameProposeTool {
             version: 1,
         });
         updated_workflow.updated_at = now_rfc3339();
-            crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &updated_workflow)?;
+        crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &updated_workflow)?;
 
         let event_id = {
             let bytes = uuid::Uuid::new_v4();
@@ -313,13 +312,17 @@ impl NativeTool for PlanFrameGetTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Get a PlanFrame by plan_id, or get the active plan for the current session. Returns the full plan including steps and validation policy.".to_string(),
+            description: "Get a PlanFrame by plan_id (latest version), or a specific revision by version. Omit plan_id to get the active plan for the current workflow.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "plan_id": {
                         "type": "string",
                         "description": "The plan ID to retrieve. Omit to get the active plan for the current workflow."
+                    },
+                    "version": {
+                        "type": "integer",
+                        "description": "Specific revision version to retrieve. Omit for latest."
                     },
                     "compact": {
                         "type": "boolean",
@@ -344,13 +347,14 @@ impl NativeTool for PlanFrameGetTool {
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        config: Option<&GatewayConfig>,
+        _config: Option<&GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
             plan_id: Option<String>,
+            version: Option<u32>,
             compact: Option<bool>,
         }
         let args: Args = serde_json::from_str(arguments_json)
@@ -364,7 +368,11 @@ impl NativeTool for PlanFrameGetTool {
         };
 
         let plan = if let Some(pid) = &args.plan_id {
-            store.load_plan_frame(pid)?
+            if let Some(ver) = args.version {
+                store.load_plan_frame_revision(pid, ver)?
+            } else {
+                store.load_plan_frame(pid)?
+            }
         } else {
             let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required when plan_id not specified"))?;
             let root = sid.split('/').next().unwrap_or(sid);
@@ -412,7 +420,7 @@ impl NativeTool for PlanFrameListTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "List all PlanFrames for the current workflow. Returns compact summaries.".to_string(),
+            description: "List all PlanFrames for the current workflow (latest revision of each). Returns compact summaries.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -431,7 +439,7 @@ impl NativeTool for PlanFrameListTool {
         _policy: &PolicyEngine,
         _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
-        arguments_json: &str,
+        _arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&GatewayConfig>,
@@ -484,7 +492,7 @@ impl NativeTool for PlanFrameApproveTool {
                 "properties": {
                     "plan_id": {
                         "type": "string",
-                        "description": "The plan ID to approve"
+                        "description": "The plan ID to approve (approves the latest revision)"
                     },
                     "approved_by": {
                         "type": "string",
@@ -529,27 +537,30 @@ impl NativeTool for PlanFrameApproveTool {
             }))?);
         };
 
-        let Some(mut plan) = store.load_plan_frame(&args.plan_id)? else {
+        let Some(plan) = store.load_plan_frame(&args.plan_id)? else {
             return Ok(serde_json::to_string(&serde_json::json!({
                 "ok": false,
                 "error": "Plan not found"
             }))?);
         };
 
-        if plan.status != PlanStatus::AwaitingApproval && plan.status != PlanStatus::Draft {
+        if plan.status != PlanStatus::AwaitingApproval {
             return Ok(serde_json::to_string(&serde_json::json!({
                 "ok": false,
-                "error": format!("Plan is in '{}' status; only draft or awaiting_approval plans can be approved", plan.status.as_str())
+                "error": format!("Plan is in '{}' status; only awaiting_approval plans can be approved", plan.status.as_str())
             }))?);
         }
 
         let now = now_rfc3339();
-        plan.status = PlanStatus::Approved;
-        plan.approved_by = Some(args.approved_by.unwrap_or_else(|| manifest.agent.id.clone()));
-        plan.approved_at = Some(now.clone());
-        plan.updated_at = now.clone();
+        let approver = args.approved_by.unwrap_or_else(|| manifest.agent.id.clone());
 
-        store.save_plan_frame(&plan)?;
+        store.update_plan_frame_status(
+            &plan.plan_id,
+            plan.version,
+            PlanStatus::Approved,
+            Some(&approver),
+            Some(&now),
+        )?;
 
         if let Some(config) = config {
             crate::scheduler::workflow_store::append_workflow_event(
@@ -596,7 +607,7 @@ impl NativeTool for PlanFrameAmendTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Amend an existing PlanFrame. Increments the version. Substantive changes (scope, validation, risk) should require operator re-approval.".to_string(),
+            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the plan was approved, the new revision requires re-approval.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -606,22 +617,21 @@ impl NativeTool for PlanFrameAmendTool {
                     },
                     "title": {
                         "type": "string",
-                        "description": "Updated title (optional)"
+                        "description": "Updated title (optional, defaults to current)"
                     },
                     "objective": {
                         "type": "string",
-                        "description": "Updated objective (optional)"
+                        "description": "Updated objective (optional, defaults to current)"
                     },
                     "steps": {
                         "type": "array",
-                        "description": "Complete replacement step list (optional)",
+                        "description": "Complete replacement step list (optional, defaults to current)",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "step_id": { "type": "string" },
                                 "title": { "type": "string" },
                                 "owner": { "type": "string", "enum": ["planner", "agent", "operator", "shared"] },
-                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "skipped", "blocked"] },
                                 "agent_id": { "type": "string" },
                                 "depends_on": { "type": "array", "items": { "type": "string" } },
                                 "notes": { "type": "string" }
@@ -629,19 +639,23 @@ impl NativeTool for PlanFrameAmendTool {
                             "required": ["step_id", "title"]
                         }
                     },
-                    "step_updates": {
-                        "type": "array",
-                        "description": "Partial updates to specific steps (optional)",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "step_id": { "type": "string" },
-                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "skipped", "blocked"] },
-                                "task_ids": { "type": "array", "items": { "type": "string" } },
-                                "artifact_refs": { "type": "array", "items": { "type": "string" } },
-                                "notes": { "type": "string" }
-                            },
-                            "required": ["step_id"]
+                    "validation_policy": {
+                        "type": "object",
+                        "description": "Updated validation policy (optional, defaults to current)",
+                        "properties": {
+                            "entries": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "validation_id": { "type": "string" },
+                                        "title": { "type": "string" },
+                                        "class": { "type": "string", "enum": ["mechanical_safety", "security_review", "correctness_check", "quality_check", "packaging_check"] },
+                                        "requirement": { "type": "string", "enum": ["required", "advisory"] }
+                                    },
+                                    "required": ["validation_id", "title"]
+                                }
+                            }
                         }
                     },
                     "reason": {
@@ -649,7 +663,7 @@ impl NativeTool for PlanFrameAmendTool {
                         "description": "Reason for the amendment"
                     }
                 },
-                "required": ["plan_id"],
+                "required": ["plan_id", "reason"],
                 "additionalProperties": false
             }),
         }
@@ -677,19 +691,22 @@ impl NativeTool for PlanFrameAmendTool {
             step_id: String,
             title: String,
             owner: Option<String>,
-            status: Option<String>,
             agent_id: Option<String>,
             depends_on: Option<Vec<String>>,
             notes: Option<String>,
         }
 
         #[derive(Deserialize)]
-        struct StepUpdate {
-            step_id: String,
-            status: Option<String>,
-            task_ids: Option<Vec<String>>,
-            artifact_refs: Option<Vec<String>>,
-            notes: Option<String>,
+        struct ValidationInput {
+            validation_id: String,
+            title: String,
+            class: Option<String>,
+            requirement: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ValidationPolicyInput {
+            entries: Option<Vec<ValidationInput>>,
         }
 
         #[derive(Deserialize)]
@@ -698,7 +715,7 @@ impl NativeTool for PlanFrameAmendTool {
             title: Option<String>,
             objective: Option<String>,
             steps: Option<Vec<StepInput>>,
-            step_updates: Option<Vec<StepUpdate>>,
+            validation_policy: Option<ValidationPolicyInput>,
             reason: Option<String>,
         }
 
@@ -712,32 +729,25 @@ impl NativeTool for PlanFrameAmendTool {
             }))?);
         };
 
-        let Some(mut plan) = store.load_plan_frame(&args.plan_id)? else {
+        let Some(current) = store.load_plan_frame(&args.plan_id)? else {
             return Ok(serde_json::to_string(&serde_json::json!({
                 "ok": false,
                 "error": "Plan not found"
             }))?);
         };
 
-        if plan.status == PlanStatus::Completed || plan.status == PlanStatus::Cancelled {
+        if current.status == PlanStatus::Completed || current.status == PlanStatus::Cancelled {
             return Ok(serde_json::to_string(&serde_json::json!({
                 "ok": false,
-                "error": format!("Cannot amend a {} plan", plan.status.as_str())
+                "error": format!("Cannot amend a {} plan", current.status.as_str())
             }))?);
         }
 
-        let old_version = plan.version;
-        plan.version += 1;
+        let old_version = current.version;
+        let new_version = old_version + 1;
 
-        if let Some(title) = args.title {
-            plan.title = title;
-        }
-        if let Some(objective) = args.objective {
-            plan.objective = objective;
-        }
-
-        if let Some(steps) = args.steps {
-            plan.steps = steps
+        let steps = match args.steps {
+            Some(steps) => steps
                 .into_iter()
                 .map(|s| PlanStep {
                     step_id: s.step_id,
@@ -748,57 +758,78 @@ impl NativeTool for PlanFrameAmendTool {
                         Some("shared") => StepOwner::Shared,
                         _ => StepOwner::Planner,
                     },
-                    status: match s.status.as_deref() {
-                        Some("in_progress") => StepStatus::InProgress,
-                        Some("completed") => StepStatus::Completed,
-                        Some("skipped") => StepStatus::Skipped,
-                        Some("blocked") => StepStatus::Blocked,
-                        _ => StepStatus::Pending,
-                    },
                     depends_on: s.depends_on.unwrap_or_default(),
-                    task_ids: vec![],
-                    artifact_refs: vec![],
                     agent_id: s.agent_id,
                     notes: s.notes,
                 })
-                .collect();
-        }
+                .collect(),
+            None => current.steps.clone(),
+        };
 
-        if let Some(updates) = args.step_updates {
-            for upd in updates {
-                if let Some(step) = plan.steps.iter_mut().find(|s| s.step_id == upd.step_id) {
-                    if let Some(status) = upd.status {
-                        step.status = match status.as_str() {
-                            "in_progress" => StepStatus::InProgress,
-                            "completed" => StepStatus::Completed,
-                            "skipped" => StepStatus::Skipped,
-                            "blocked" => StepStatus::Blocked,
-                            _ => StepStatus::Pending,
-                        };
-                    }
-                    if let Some(task_ids) = upd.task_ids {
-                        step.task_ids = task_ids;
-                    }
-                    if let Some(artifact_refs) = upd.artifact_refs {
-                        step.artifact_refs = artifact_refs;
-                    }
-                    if let Some(notes) = upd.notes {
-                        step.notes = Some(notes);
-                    }
-                }
-            }
-        }
+        let validation_policy = match args.validation_policy {
+            Some(vp) => ValidationPolicy {
+                entries: vp
+                    .entries
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|v| ValidationEntry {
+                        validation_id: v.validation_id,
+                        title: v.title,
+                        class: match v.class.as_deref() {
+                            Some("security_review") => autonoetic_types::plan_frame::ValidationClass::SecurityReview,
+                            Some("correctness_check") => autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck,
+                            Some("quality_check") => autonoetic_types::plan_frame::ValidationClass::QualityCheck,
+                            Some("packaging_check") => autonoetic_types::plan_frame::ValidationClass::PackagingCheck,
+                            _ => autonoetic_types::plan_frame::ValidationClass::MechanicalSafety,
+                        },
+                        requirement: match v.requirement.as_deref() {
+                            Some("advisory") => autonoetic_types::plan_frame::ValidationRequirement::Advisory,
+                            Some("waived") => autonoetic_types::plan_frame::ValidationRequirement::Waived,
+                            _ => autonoetic_types::plan_frame::ValidationRequirement::Required,
+                        },
+                    })
+                    .collect(),
+            },
+            None => current.validation_policy.clone(),
+        };
 
         let now = now_rfc3339();
-        plan.updated_at = now.clone();
 
-        if plan.status == PlanStatus::Approved {
-            plan.status = PlanStatus::AwaitingApproval;
-        }
+        let new_revision = PlanFrame {
+            plan_id: current.plan_id.clone(),
+            version: new_version,
+            parent_version: Some(old_version),
+            workflow_id: current.workflow_id.clone(),
+            root_session_id: current.root_session_id.clone(),
+            title: args.title.unwrap_or(current.title.clone()),
+            objective: args.objective.unwrap_or(current.objective.clone()),
+            status: PlanStatus::AwaitingApproval,
+            steps,
+            validation_policy,
+            approved_by: None,
+            approved_at: None,
+            created_by_agent_id: manifest.agent.id.clone(),
+            reason: args.reason,
+            created_at: now,
+        };
 
-        store.save_plan_frame(&plan)?;
+        store.save_plan_frame(&new_revision)?;
 
         if let Some(config) = config {
+            let wf = crate::scheduler::workflow_store::load_workflow_run(
+                config,
+                Some(&store),
+                &current.workflow_id,
+            )?;
+            if let Some(mut wf) = wf {
+                wf.active_plan_ref = Some(PlanRef {
+                    plan_id: current.plan_id.clone(),
+                    version: new_version,
+                });
+                wf.updated_at = now_rfc3339();
+                crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &wf)?;
+            }
+
             crate::scheduler::workflow_store::append_workflow_event(
                 config,
                 Some(&store),
@@ -807,31 +838,109 @@ impl NativeTool for PlanFrameAmendTool {
                         let bytes = uuid::Uuid::new_v4();
                         format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
                     },
-                    workflow_id: plan.workflow_id.clone(),
+                    workflow_id: current.workflow_id.clone(),
                     task_id: None,
                     event_type: "planframe.amended".to_string(),
                     agent_id: Some(manifest.agent.id.clone()),
                     payload: serde_json::json!({
-                        "plan_id": plan.plan_id,
+                        "plan_id": current.plan_id,
                         "old_version": old_version,
-                        "new_version": plan.version,
-                        "reason": args.reason,
+                        "new_version": new_version,
                     }),
-                    occurred_at: now,
+                    occurred_at: now_rfc3339(),
                 },
             )?;
         }
 
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
-            "plan_id": plan.plan_id,
-            "version": plan.version,
-            "status": plan.status.as_str(),
-            "message": if plan.status == PlanStatus::AwaitingApproval {
-                "Plan amended. Operator re-approval is required."
-            } else {
-                "Plan amended."
-            },
+            "plan_id": current.plan_id,
+            "version": new_version,
+            "status": "awaiting_approval",
+            "parent_version": old_version,
+            "message": "Plan amended (new immutable revision). Operator re-approval is required.",
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct PlanFrameHistoryTool;
+
+impl NativeTool for PlanFrameHistoryTool {
+    fn name(&self) -> &'static str {
+        "planframe_history"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Get the full revision history of a plan. Returns all revisions from first to latest, showing how the plan evolved.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "The plan ID to retrieve history for"
+                    }
+                },
+                "required": ["plan_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_plan_frame_access(manifest)
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            plan_id: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            }))?);
+        };
+
+        let revisions = store.list_plan_revisions(&args.plan_id)?;
+
+        if revisions.is_empty() {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "plan_id": args.plan_id,
+                "revisions": [],
+                "message": "No revisions found for this plan"
+            }))?);
+        }
+
+        let summaries: Vec<PlanFrameSummary> = revisions.iter().map(|r| r.compact_summary()).collect();
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "plan_id": args.plan_id,
+            "revisions": summaries,
+            "count": summaries.len(),
         }))?)
     }
 
