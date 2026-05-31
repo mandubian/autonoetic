@@ -47,6 +47,8 @@ fn make_checkpoint(
         ],
         turn_counter,
         session_state: Default::default(),
+        tool_tier_escalated: false,
+        discovered_tools: Default::default(),
         loop_guard_state: default_guard_state(),
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),

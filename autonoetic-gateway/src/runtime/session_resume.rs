@@ -166,6 +166,8 @@ mod session_resume_tests {
                 ..Default::default()
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
             agent_id: "a".into(),
             session_id: "s".into(),
             turn_id: "turn-1".into(),

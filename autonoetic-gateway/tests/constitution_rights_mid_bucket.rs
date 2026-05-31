@@ -125,9 +125,9 @@ async fn ri_0_6_operator_clear_degradation_emits_causal_event() {
 #[test]
 fn ri_0_6_degraded_state_clamps_tool_tier_to_core_only() {
     let manifest = minimal_manifest();
-    let normal_filter = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal);
+    let normal_filter = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal, true);
     let degraded_filter =
-        determine_tool_tier_filter(&manifest, None, false, SessionState::Degraded);
+        determine_tool_tier_filter(&manifest, None, false, SessionState::Degraded, true);
 
     assert!(
         normal_filter.allows("web_search"),

@@ -229,6 +229,8 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         history: vec![Message::system("test")],
         turn_counter: 7,
         session_state: Default::default(),
+        tool_tier_escalated: false,
+        discovered_tools: Default::default(),
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
@@ -612,6 +614,8 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         history: vec![Message::system("test")],
         turn_counter: 1,
         session_state: Default::default(),
+        tool_tier_escalated: false,
+        discovered_tools: Default::default(),
         loop_guard_state: LoopGuardState {
             max_loops_without_progress: 10,
             max_tool_failures: 5,

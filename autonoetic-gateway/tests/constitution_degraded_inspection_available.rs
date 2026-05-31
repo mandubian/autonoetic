@@ -91,6 +91,7 @@ fn degraded_filter_is_returned_for_degraded_session_state() {
         Some("root-session"),
         false,
         SessionState::Degraded,
+        true,
     );
     assert!(
         filter.always_include_inspection_tools,

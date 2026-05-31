@@ -98,6 +98,7 @@ fn sentinel_suppress_accepts_reason_and_emits_causal_event() -> anyhow::Result<(
         user_id: None,
         artifact_id: None,
         sentinel_suppress_target: Some(target.clone()),
+        discovered_tools: None,
     };
 
     let args = r#"{"turns": 3, "reason": "Testing suppression"}"#;

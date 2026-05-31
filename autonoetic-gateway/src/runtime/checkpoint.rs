@@ -109,6 +109,12 @@ pub struct SessionCheckpoint {
     /// Session runtime state (Normal or Degraded).
     #[serde(default)]
     pub session_state: autonoetic_types::agent::SessionState,
+    /// Whether the session had escalated to all tool tiers.
+    #[serde(default)]
+    pub tool_tier_escalated: bool,
+    /// Tool names explicitly discovered via `tool_discover`.
+    #[serde(default)]
+    pub discovered_tools: std::collections::HashSet<String>,
 
     // --- Session identity ---
     pub agent_id: String,
@@ -185,6 +191,8 @@ impl SessionCheckpoint {
         runtime.guard =
             crate::runtime::guard::LoopGuard::restore(self.loop_guard_state.clone());
         runtime.session_state = self.session_state;
+        runtime.tool_tier_escalated = self.tool_tier_escalated;
+        runtime.discovered_tools = self.discovered_tools.clone();
         runtime.session_started = true;
         runtime.turn_counter = self.turn_counter;
         runtime.runtime_lock_hash = self.runtime_lock_hash.clone();
@@ -538,6 +546,8 @@ mod tests {
                 ..Default::default()
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
             agent_id: "test-agent".to_string(),
             session_id: "session-123".to_string(),
             turn_id: "turn-001".to_string(),
@@ -594,6 +604,8 @@ mod tests {
                 ..Default::default()
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: "turn-001".to_string(),
@@ -658,6 +670,8 @@ mod tests {
                     ..Default::default()
                 },
                 session_state: autonoetic_types::agent::SessionState::Normal,
+                tool_tier_escalated: false,
+                discovered_tools: Default::default(),
                 agent_id: "test-agent".to_string(),
                 session_id: session_id.to_string(),
                 turn_id: format!("turn-{:03}", i),

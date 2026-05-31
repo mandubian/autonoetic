@@ -25,6 +25,8 @@ fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
             ..Default::default()
         },
         session_state: Default::default(),
+        tool_tier_escalated: false,
+        discovered_tools: Default::default(),
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
         turn_id: format!("turn-{turn:04}"),

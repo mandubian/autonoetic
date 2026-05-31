@@ -982,6 +982,7 @@ pub mod sentinel;
 pub mod session;
 pub mod skill;
 pub mod user_interaction;
+pub mod tool_discover;
 pub mod user_profile;
 pub mod web;
 pub mod workflow;
@@ -1036,6 +1037,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::constitution::register_tools(&mut registry);
     crate::runtime::tools::security_redteam::register_tools(&mut registry);
     crate::runtime::tools::sentinel::register_tools(&mut registry);
+    crate::runtime::tools::tool_discover::register_tools(&mut registry);
     registry
 }
 

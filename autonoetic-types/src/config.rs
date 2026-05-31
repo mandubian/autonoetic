@@ -2081,6 +2081,18 @@ pub struct PromptBudgetConfig {
     /// Some LLM providers require full schemas on every request — enable with caution.
     #[serde(default)]
     pub compress_tool_schemas_after_turn_0: bool,
+
+    /// Maximum number of tool definitions to send to the LLM per turn.
+    /// 0 = unlimited. When the deduplicated tool list exceeds this cap,
+    /// lower-tier tools are dropped first (Specialized → Workflow → Core).
+    #[serde(default)]
+    pub max_tool_definitions: usize,
+
+    /// When true, root sessions start with Core + Workflow tools only.
+    /// After the first tool call that would require a Specialized tool,
+    /// the session escalates to all tiers for the rest of its lifetime.
+    #[serde(default)]
+    pub progressive_tool_disclosure: bool,
 }
 
 fn default_prompt_budget_warn_pct() -> f64 {
@@ -2099,6 +2111,8 @@ impl Default for PromptBudgetConfig {
             warn_at_pct: default_prompt_budget_warn_pct(),
             margin_tokens: default_prompt_budget_margin(),
             compress_tool_schemas_after_turn_0: false,
+            max_tool_definitions: 0,
+            progressive_tool_disclosure: false,
         }
     }
 }

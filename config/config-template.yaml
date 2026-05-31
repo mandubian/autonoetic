@@ -369,6 +369,12 @@ prompt_budget:
   warn_at_pct: 75.0
   margin_tokens: 4096
   compress_tool_schemas_after_turn_0: true
+  # Maximum number of tool definitions sent per turn (0 = unlimited).
+  # Excess tools are dropped from lowest tier first (Specialized → Workflow → Core).
+  max_tool_definitions: 40
+  # Root sessions start with Core + Workflow tools only (24 tools).
+  # After the first Specialized tool call, all tiers are unlocked for the session.
+  progressive_tool_disclosure: true
 #
 # ── Tool Tier Registry (Constitution 4.7) ──────────────────────────────
 # Tier assignments are declarative in config/tools.yaml and loaded at gateway start.

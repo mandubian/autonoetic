@@ -107,6 +107,8 @@ async fn r_2_11_timed_out_approval_marks_task_failed_and_preserves_continuation(
         suspended_at: (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
         loop_guard_state: default_loop_guard_state(),
         session_state: Default::default(),
+        tool_tier_escalated: false,
+        discovered_tools: Default::default(),
     };
     save_continuation(&config, task_id, &continuation)?;
 
@@ -221,6 +223,8 @@ async fn r_7_11_approval_timeout_records_resolution_in_session_report() -> anyho
         suspended_at: (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
         loop_guard_state: default_loop_guard_state(),
         session_state: Default::default(),
+        tool_tier_escalated: false,
+        discovered_tools: Default::default(),
     };
     save_continuation(&config, task_id, &continuation)?;
 

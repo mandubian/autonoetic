@@ -86,6 +86,7 @@ fn clarification_filter_is_returned_for_clarification_session_state() {
         Some("root/test.high-priv-clarif-abcd1234"),
         false,
         SessionState::Clarification,
+        true,
     );
     assert!(
         filter.clarification_read_only,
@@ -194,13 +195,13 @@ fn clarification_filter_blocks_action_tools_from_default_registry() {
 fn clarification_filter_distinct_from_degraded_and_normal() {
     let manifest = high_privilege_manifest();
 
-    let normal = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal);
+    let normal = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal, true);
     assert!(
         !normal.clarification_read_only,
         "SessionState::Normal must not set the clarification clamp"
     );
 
-    let degraded = determine_tool_tier_filter(&manifest, None, false, SessionState::Degraded);
+    let degraded = determine_tool_tier_filter(&manifest, None, false, SessionState::Degraded, true);
     assert!(
         !degraded.clarification_read_only,
         "SessionState::Degraded uses core_only, not the clarification clamp"
@@ -212,7 +213,7 @@ fn clarification_filter_distinct_from_degraded_and_normal() {
         degraded.allows("content_write"),
         "sanity: degraded mode allows content_write (Core tier)"
     );
-    let clarif = determine_tool_tier_filter(&manifest, None, false, SessionState::Clarification);
+    let clarif = determine_tool_tier_filter(&manifest, None, false, SessionState::Clarification, true);
     assert!(
         !clarif.allows("content_write"),
         "clarification mode must not allow content_write — read-only by construction"

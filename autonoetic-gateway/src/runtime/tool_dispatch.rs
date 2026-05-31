@@ -166,6 +166,7 @@ pub fn determine_tool_tier_filter(
     session_id: Option<&str>,
     has_pending_approvals: bool,
     session_state: autonoetic_types::agent::SessionState,
+    tool_tier_escalated: bool,
 ) -> crate::runtime::tools::ToolTierFilter {
     if session_state == autonoetic_types::agent::SessionState::Clarification {
         return crate::runtime::tools::ToolTierFilter::clarification();
@@ -193,7 +194,13 @@ pub fn determine_tool_tier_filter(
         return child_tool_tier_filter_for_manifest(manifest);
     }
 
-    crate::runtime::tools::ToolTierFilter::all()
+    // Progressive disclosure: root sessions start with Core+Workflow.
+    // Once escalated (agent attempted a Specialized tool), all tiers are available.
+    if tool_tier_escalated {
+        crate::runtime::tools::ToolTierFilter::all()
+    } else {
+        crate::runtime::tools::ToolTierFilter::core_and_workflow()
+    }
 }
 
 pub(crate) fn child_tool_tier_filter_for_manifest(
@@ -257,6 +264,7 @@ impl AgentExecutor {
             self.session_id.as_deref(),
             false,
             self.session_state,
+            true,
         );
         Ri06CapabilitySnapshot::from_filter(&filter, self.session_state)
     }
@@ -487,7 +495,7 @@ mod tier_filter_tests {
     #[test]
     fn test_root_session_no_pending_approvals_allows_all() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Normal);
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Normal, true);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("web_search"));
         assert!(filter.allows("agent_spawn"));
@@ -497,7 +505,7 @@ mod tier_filter_tests {
     #[test]
     fn test_child_session_core_only_by_default() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, Some("root/child-session"), false, SessionState::Normal);
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child-session"), false, SessionState::Normal, true);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("sandbox_exec"));
         assert!(!filter.allows("web_search"));
@@ -514,6 +522,7 @@ mod tier_filter_tests {
             Some("root/child-static-eval"),
             false,
             SessionState::Normal,
+            true,
         );
         assert!(filter.allows("promotion_record"));
         assert!(!filter.allows("web_search"));
@@ -532,6 +541,7 @@ mod tier_filter_tests {
             Some("root/child-auditor"),
             false,
             SessionState::Normal,
+            true,
         );
         assert!(filter.allows("promotion_record"));
         assert!(filter.allows("workflow_wait"));
@@ -541,7 +551,7 @@ mod tier_filter_tests {
     #[test]
     fn test_pending_approvals_restricts_to_core_and_workflow() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), true, SessionState::Normal);
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), true, SessionState::Normal, true);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("sandbox_exec"));
         assert!(filter.allows("agent_spawn"));
@@ -556,7 +566,7 @@ mod tier_filter_tests {
     fn test_manifest_declared_tiers_override_runtime_inference() {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
-        let filter = determine_tool_tier_filter(&manifest, Some("root/child"), true, SessionState::Normal);
+        let filter = determine_tool_tier_filter(&manifest, Some("root/child"), true, SessionState::Normal, true);
         assert!(filter.allows("content_write"));
         assert!(filter.allows("web_search"));
         assert!(!filter.allows("agent_spawn"));
@@ -566,14 +576,14 @@ mod tier_filter_tests {
     #[test]
     fn test_no_session_id_allows_all() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal);
+        let filter = determine_tool_tier_filter(&manifest, None, false, SessionState::Normal, true);
         assert!(filter.allows("web_search"));
     }
 
     #[test]
     fn test_degraded_session_clamps_to_core_only() {
         let manifest = test_manifest();
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded);
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded, true);
         assert!(filter.allows("content_write"), "core content tools allowed in degraded");
         assert!(filter.allows("sandbox_exec"), "sandbox_exec is core tier, allowed by tier filter");
         assert!(!filter.allows("web_search"), "web_search is specialized, blocked in degraded");
@@ -586,7 +596,7 @@ mod tier_filter_tests {
     fn test_degraded_overrides_manifest_declared_tiers() {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded);
+        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded, true);
         assert!(filter.allows("content_write"), "core allowed");
         assert!(!filter.allows("web_search"), "specialized blocked despite manifest");
         assert!(!filter.allows("agent_spawn"), "workflow blocked");

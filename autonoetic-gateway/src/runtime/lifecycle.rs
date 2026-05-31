@@ -248,6 +248,21 @@ pub struct AgentExecutor {
     /// turn counter here; the lifecycle reads it before emitting divergence
     /// messages. A value of `0` means no suppression is active.
     pub suppress_until_turn: Arc<AtomicU64>,
+
+    /// Tracks whether the session has escalated from Core+Workflow to all tiers.
+    /// Set to true when `progressive_tool_disclosure` is enabled and the agent
+    /// attempts to use a Specialized tool. Once escalated, stays escalated for
+    /// the rest of the session (including across approval suspension/resume).
+    pub tool_tier_escalated: bool,
+
+    /// Tool names explicitly discovered via `tool_discover`. These tools are
+    /// included in subsequent turns even if they would be filtered by tier.
+    pub discovered_tools: std::collections::HashSet<String>,
+
+    /// Shared handle for `tool_discover` to write newly discovered tool names
+    /// from within the `NativeTool::execute` context. Drained after each tool
+    /// batch by the lifecycle loop into `discovered_tools`.
+    pub discovered_tools_writer: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -307,6 +322,9 @@ impl AgentExecutor {
             trajectory_monitor: TrajectoryMonitor::new(Default::default()),
             last_context_utilization: None,
             suppress_until_turn: Arc::new(AtomicU64::new(0)),
+            tool_tier_escalated: false,
+            discovered_tools: std::collections::HashSet::new(),
+            discovered_tools_writer: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -687,6 +705,8 @@ impl AgentExecutor {
             turn_counter: self.turn_counter,
             loop_guard_state: self.guard.snapshot(),
             session_state: self.session_state,
+            tool_tier_escalated: self.tool_tier_escalated,
+            discovered_tools: Default::default(),
             agent_id: self.manifest.agent.id.clone(),
             session_id: self.session_id.clone().unwrap_or_default(),
             turn_id: turn_id.to_string(),
@@ -1371,11 +1391,17 @@ impl AgentExecutor {
 
             let mut tools: Vec<ToolDefinition> = {
                 let pending_approvals = self.has_pending_approvals();
+                let progressive = self
+                    .config
+                    .as_ref()
+                    .map(|c| c.prompt_budget.progressive_tool_disclosure)
+                    .unwrap_or(false);
                 let tier_filter = determine_tool_tier_filter(
                     &self.manifest,
                     self.session_id.as_deref(),
                     pending_approvals,
                     self.session_state,
+                    if progressive { self.tool_tier_escalated } else { true },
                 );
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
@@ -1387,6 +1413,53 @@ impl AgentExecutor {
                     self.registry
                         .available_definitions_filtered(&self.manifest, Some(&tier_filter)),
                 );
+                // Add tools explicitly discovered via tool_discover, bypassing tier filter.
+                if !self.discovered_tools.is_empty() {
+                    let all_defs: Vec<ToolDefinition> = self.registry
+                        .available_definitions_filtered(&self.manifest, None);
+                    for def in &all_defs {
+                        if t.iter().any(|d| d.name == def.name) {
+                            continue;
+                        }
+                        let matches = self.discovered_tools.iter().any(|pattern| {
+                            if let Some(prefix) = pattern.strip_suffix('*') {
+                                def.name.starts_with(prefix)
+                            } else {
+                                def.name == *pattern
+                            }
+                        });
+                        if matches && policy.can_invoke_tool(&def.name).is_allowed() {
+                            t.push(def.clone());
+                        }
+                    }
+                }
+                // Deduplicate by name (MCP tools may overlap with native tools).
+                // First occurrence (MCP) wins; native duplicates are dropped.
+                {
+                    let mut seen = std::collections::HashSet::new();
+                    t.retain(|def| seen.insert(def.name.clone()));
+                }
+                // Cap tool count: drop lowest-priority tier tools first when
+                // the deduplicated list exceeds max_tool_definitions.
+                let max_tools = self
+                    .config
+                    .as_ref()
+                    .map(|c| c.prompt_budget.max_tool_definitions)
+                    .unwrap_or(0);
+                if max_tools > 0 && t.len() > max_tools {
+                    use autonoetic_types::agent::ToolTier;
+                    let tier_order = |tier: &ToolTier| match tier {
+                        ToolTier::Core => 0,
+                        ToolTier::Workflow => 1,
+                        ToolTier::Specialized => 2,
+                    };
+                    t.sort_by(|a, b| {
+                        let ta = crate::runtime::prompt_budget::tool_tier(&a.name);
+                        let tb = crate::runtime::prompt_budget::tool_tier(&b.name);
+                        tier_order(&ta).cmp(&tier_order(&tb))
+                    });
+                    t.truncate(max_tools);
+                }
                 let turn_index = self.turn_counter.saturating_sub(1);
                 let should_compress = self
                     .config
@@ -2142,6 +2215,7 @@ impl AgentExecutor {
                             user_id: self.user_id.clone(),
                             artifact_id: self.artifact_id.clone(),
                             sentinel_suppress_target: Some(self.suppress_until_turn.clone()),
+                            discovered_tools: Some(self.discovered_tools_writer.clone()),
                         }
                     });
                     let mut processor = ToolCallProcessor::new(
@@ -2165,6 +2239,40 @@ impl AgentExecutor {
                             &mut tracer,
                         )
                         .await?;
+
+                    // Progressive tool disclosure: if the agent used any Specialized-tier
+                    // tool, escalate the session so subsequent turns see all tiers.
+                    if !self.tool_tier_escalated {
+                        for (_id, tool_name, _result) in &results {
+                            if matches!(
+                                crate::runtime::prompt_budget::tool_tier(tool_name),
+                                autonoetic_types::agent::ToolTier::Specialized,
+                            ) {
+                                self.tool_tier_escalated = true;
+                                tracing::info!(
+                                    target: "autonoetic::tool_disclosure",
+                                    tool = %tool_name,
+                                    "Session escalated to all tool tiers"
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    // Drain discovered tools from the writer (written by tool_discover).
+                    {
+                        let mut writer = self.discovered_tools_writer.lock().unwrap_or_else(|e| e.into_inner());
+                        if !writer.is_empty() {
+                            let count = writer.len();
+                            self.discovered_tools.extend(writer.drain());
+                            tracing::info!(
+                                target: "autonoetic::tool_discover",
+                                count,
+                                total = self.discovered_tools.len(),
+                                "Discovered tools merged into session surface"
+                            );
+                        }
+                    }
 
                     // Check whether the last executed tool call requires approval.
                     // `process_tool_calls` already stops after the first approval-required result,
@@ -2240,6 +2348,8 @@ impl AgentExecutor {
                             suspended_at: chrono::Utc::now().to_rfc3339(),
                             loop_guard_state: self.guard.snapshot(),
                             session_state: self.session_state,
+                            tool_tier_escalated: self.tool_tier_escalated,
+                            discovered_tools: self.discovered_tools.clone(),
                         };
 
                         // Persist continuation to disk when we have a task_id and config.
@@ -2941,6 +3051,7 @@ mod tests {
             Some("root/agent-factory.default-12345678"),
             false,
             SessionState::Normal,
+            true,
         );
 
         assert!(filter.allows("content_write"));
@@ -2959,6 +3070,7 @@ mod tests {
             Some("root/specialized_builder.default-12345678"),
             false,
             SessionState::Normal,
+            true,
         );
 
         assert!(filter.allows("resolve"));

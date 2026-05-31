@@ -117,6 +117,16 @@ pub struct TurnContinuation {
     /// Session state at suspension so degraded mode persists across resume.
     #[serde(default)]
     pub session_state: autonoetic_types::agent::SessionState,
+
+    /// Whether the session had escalated to all tool tiers before suspension.
+    /// Restored on resume so progressive disclosure state is preserved.
+    #[serde(default)]
+    pub tool_tier_escalated: bool,
+
+    /// Tool names explicitly discovered via `tool_discover`, persisted across
+    /// approval suspension/resume so the agent retains its tool surface.
+    #[serde(default)]
+    pub discovered_tools: std::collections::HashSet<String>,
 }
 
 /// The specific tool call that triggered the approval gate.

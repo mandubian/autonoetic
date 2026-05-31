@@ -25,6 +25,9 @@ pub struct NativeToolRunContext {
     /// suppress-until turn counter here; the lifecycle reads it after tool
     /// batches to gate divergence messaging.
     pub sentinel_suppress_target: Option<Arc<AtomicU64>>,
+    /// Shared discovered-tools set. `tool_discover` writes here; the lifecycle
+    /// reads and drains after tool execution to update the session surface.
+    pub discovered_tools: Option<Arc<Mutex<std::collections::HashSet<String>>>>,
 }
 
 #[derive(Clone)]

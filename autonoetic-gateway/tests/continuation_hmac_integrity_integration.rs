@@ -78,6 +78,8 @@ fn make_test_continuation(request_id: &str) -> TurnContinuation {
         suspended_at: chrono::Utc::now().to_rfc3339(),
         loop_guard_state: default_guard_state(),
         session_state: SessionState::default(),
+        tool_tier_escalated: false,
+        discovered_tools: Default::default(),
     }
 }
 

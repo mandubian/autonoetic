@@ -26,6 +26,10 @@ rules:
   # Core so child sessions and budget-pressured turns still see it (#315).
   - prefix: self_describe
     tier: core
+  # On-demand tool discovery — always available so agents can expand their
+  # tool surface without waiting for escalation.
+  - prefix: tool_discover
+    tier: core
 
   # Workflow tier: orchestration and approval flow.
   - prefix: agent_spawn

@@ -1155,6 +1155,8 @@ impl GatewayExecutionService {
                     ..Default::default()
                 },
                 session_state: autonoetic_types::agent::SessionState::Normal,
+                tool_tier_escalated: false,
+                discovered_tools: Default::default(),
                 agent_id: lead.to_string(),
                 session_id: root_session_id.to_string(),
                 turn_id: format!("emergency-{stop_id}"),
@@ -2293,6 +2295,8 @@ impl GatewayExecutionService {
                     runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
                     runtime.session_id = Some(cont.session_id.clone());
                     runtime.session_started = true;
+                    runtime.tool_tier_escalated = cont.tool_tier_escalated;
+                    runtime.discovered_tools = cont.discovered_tools.clone();
                     runtime.turn_counter = cont.turn_id
                         .trim_start_matches("turn-")
                         .parse()
