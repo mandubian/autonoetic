@@ -565,6 +565,7 @@ impl App {
             || self.session_overview.workflow.queued > 0
             || self.session_overview.workflow.awaiting > 0
             || self.session_overview.active_executions > 0
+            || !self.session_overview.active_sessions.is_empty()
     }
 
     /// Same selection logic as the bottom-of-transcript indicator in `draw_messages`.
