@@ -4,6 +4,22 @@ use anyhow::Result;
 use autonoetic_types::memory::MemoryObject;
 use rusqlite::params;
 
+/// Check if a query string contains FTS5-syntax characters that could cause
+/// a MATCH parse error, in which case we fall back to LIKE.
+fn looks_like_fts_syntax(query: &str) -> bool {
+    query
+        .chars()
+        .any(|c| matches!(c, '.' | '(' | ')' | '"' | '*' | '-' | '+' | '&'))
+}
+
+fn should_fallback_to_like(err: &rusqlite::Error, query: &str) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _)
+            if e.extended_code == rusqlite::ffi::SQLITE_ERROR && looks_like_fts_syntax(query)
+    )
+}
+
 impl GatewayStore {
     // --- Tier 2 memories (gateway.db) ---
 
@@ -88,6 +104,38 @@ impl GatewayStore {
     ) -> Result<Vec<String>> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
+
+        if let Some(q) = content_substr {
+            // Try FTS5 full-text search first
+            let fts_sql = String::from(
+                "SELECT m.memory_id FROM memories m
+                 JOIN memories_fts ON m.rowid = memories_fts.rowid
+                 WHERE m.scope = ?1
+                   AND (m.expires_at IS NULL OR m.expires_at > ?2)
+                   AND m.quarantine_reason IS NULL
+                   AND memories_fts MATCH ?3
+                 ORDER BY m.updated_at DESC",
+            );
+            let mut stmt = conn.prepare(&fts_sql)?;
+            let query_result = stmt.query(params![scope, &now, q]);
+            match query_result {
+                Ok(mut rows) => {
+                    let mut out = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        out.push(row.get(0)?);
+                    }
+                    if !out.is_empty() || !looks_like_fts_syntax(q) {
+                        return Ok(out);
+                    }
+                    // Empty result with FTS-special syntax — may be a parse error,
+                    // fall through to LIKE.
+                }
+                Err(ref e) if should_fallback_to_like(e, q) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Fallback: LIKE substring search (or no query)
         let mut sql = String::from(
             "SELECT memory_id FROM memories WHERE scope = ?1 AND (expires_at IS NULL OR expires_at > ?2) AND quarantine_reason IS NULL",
         );
@@ -111,7 +159,8 @@ impl GatewayStore {
     }
 
     /// Returns IDs of memories in `scope` that are readable by `agent_id` and match all `tags`.
-    /// Optional `content_substr` applies `LIKE %substr%` on content. Results are sorted by
+    /// Optional `content_substr` applies full-text search (FTS5 MATCH) on content,
+    /// falling back to `LIKE %substr%` on FTS syntax error. Results are sorted by
     /// recency and capped by `limit`.
     pub fn memory_list_ids_matching_tags(
         &self,
@@ -145,51 +194,125 @@ impl GatewayStore {
 
         let now = chrono::Utc::now().to_rfc3339();
         let sess = reader_session_id.unwrap_or("").to_string();
-        let mut sql = String::from("SELECT m.memory_id FROM memories m WHERE m.scope = ?1 ");
-        sql.push_str("AND (m.expires_at IS NULL OR m.expires_at > ?2) ");
-        sql.push_str("AND m.quarantine_reason IS NULL ");
-        sql.push_str(
-            "AND (
-                json_extract(m.visibility, '$.kind') = 'global'
-                OR json_extract(m.visibility, '$') = 'global'
-                OR json_extract(m.visibility, '$') = 'shared'
-                OR (
-                    (json_extract(m.visibility, '$.kind') = 'private'
-                     OR json_extract(m.visibility, '$') = 'private')
-                    AND (m.owner_agent_id = ?3 OR m.writer_agent_id = ?3)
-                )
-                OR (
-                    json_extract(m.visibility, '$.kind') = 'session'
-                    AND (
-                        m.owner_agent_id = ?3
-                        OR m.writer_agent_id = ?3
-                        OR (?4 != ''
-                            AND json_extract(m.visibility, '$.session_id') = ?4)
-                    )
-                )
-            ) ",
-        );
-
-        let mut next_param: i32 = 5;
-        if content_substr.is_some() {
-            sql.push_str(&format!("AND m.content LIKE ?{} ", next_param));
-            next_param += 1;
-        }
-        for _ in &norm {
-            sql.push_str(&format!(
-                "AND EXISTS (
-                    SELECT 1 FROM memory_tags mt
-                    WHERE mt.memory_id = m.memory_id
-                      AND mt.scope = ?1
-                      AND mt.tag = ?{}
-                ) ",
-                next_param
-            ));
-            next_param += 1;
-        }
-        sql.push_str(&format!("ORDER BY m.updated_at DESC LIMIT ?{}", next_param));
-
         let conn = self.conn.lock().unwrap();
+
+        let vis_clause = "\
+            (json_extract(m.visibility, '$.kind') = 'global' \
+             OR json_extract(m.visibility, '$') = 'global' \
+             OR json_extract(m.visibility, '$') = 'shared' \
+             OR ( \
+                 (json_extract(m.visibility, '$.kind') = 'private' \
+                  OR json_extract(m.visibility, '$') = 'private') \
+                 AND (m.owner_agent_id = ?A OR m.writer_agent_id = ?A) \
+             ) \
+             OR ( \
+                 json_extract(m.visibility, '$.kind') = 'session' \
+                 AND ( \
+                     m.owner_agent_id = ?A \
+                     OR m.writer_agent_id = ?A \
+                     OR (?S != '' \
+                         AND json_extract(m.visibility, '$.session_id') = ?S) \
+                 ) \
+             ) \
+            )";
+
+        fn make_tag_clauses(tags: &[String], start_param: i32) -> (String, Vec<String>) {
+            let mut clauses = Vec::new();
+            let mut vals = Vec::new();
+            for (i, t) in tags.iter().enumerate() {
+                let p = start_param + i as i32;
+                clauses.push(format!(
+                    "EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.memory_id AND mt.scope = ?1 AND mt.tag = ?{})",
+                    p
+                ));
+                vals.push(t.clone());
+            }
+            (clauses.join(" AND "), vals)
+        }
+
+        // --- FTS5 path ---
+        // Parameter layout: ?1=scope ?2=now ?3=query ?4=agent ?5=sess ?6..=tags ?N=limit
+        if let Some(q) = content_substr {
+            if !q.is_empty() {
+                let (tag_sql, tag_vals) = make_tag_clauses(&norm, 6);
+                let vis = vis_clause
+                    .replace("?A", "?4")
+                    .replace("?S", "?5");
+                let fts_sql = format!(
+                    "SELECT m.memory_id FROM memories m \
+                     JOIN memories_fts ON m.rowid = memories_fts.rowid \
+                     WHERE m.scope = ?1 \
+                       AND (m.expires_at IS NULL OR m.expires_at > ?2) \
+                       AND m.quarantine_reason IS NULL \
+                       AND {vis} \
+                       AND memories_fts MATCH ?3 \
+                       AND {tag_sql} \
+                     ORDER BY m.updated_at DESC LIMIT ?{limit_param}",
+                    vis = vis,
+                    tag_sql = tag_sql,
+                    limit_param = 6 + norm.len() as i32,
+                );
+
+                let mut stmt = match conn.prepare(&fts_sql) {
+                    Ok(s) => s,
+                    Err(e) => return Err(e.into()),
+                };
+                let mut bind: Vec<Value> = vec![
+                    Value::Text(scope.to_string()),
+                    Value::Text(now.clone()),
+                    Value::Text(q.to_string()),
+                    Value::Text(agent_id.to_string()),
+                    Value::Text(sess.clone()),
+                ];
+                for t in &tag_vals {
+                    bind.push(Value::Text(t.clone()));
+                }
+                bind.push(Value::Integer(limit));
+
+                let fts_result = stmt.query(rusqlite::params_from_iter(bind.iter()));
+                match fts_result {
+                    Ok(mut rows) => {
+                        let mut out = Vec::new();
+                        while let Some(row) = rows.next()? {
+                            out.push(row.get(0)?);
+                        }
+                        if !out.is_empty() || !looks_like_fts_syntax(q) {
+                            return Ok(out);
+                        }
+                        // Empty result with FTS-special syntax — fall through to LIKE
+                    }
+                    Err(ref e) if should_fallback_to_like(e, q) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+
+        // --- LIKE fallback path ---
+        // Parameter layout: ?1=scope ?2=now ?3=agent ?4=sess ?5=content_substr(if present) ?6../=tags ?N=limit
+        let like_offset: i32 = if content_substr.is_some() { 1 } else { 0 };
+        let content_param = 5;
+        let tag_start = content_param + like_offset;
+        let (tag_sql, tag_vals) = make_tag_clauses(&norm, tag_start);
+        let vis = vis_clause
+            .replace("?A", "?3")
+            .replace("?S", "?4");
+        let mut sql = format!(
+            "SELECT m.memory_id FROM memories m \
+             WHERE m.scope = ?1 \
+               AND (m.expires_at IS NULL OR m.expires_at > ?2) \
+               AND m.quarantine_reason IS NULL \
+               AND {vis}",
+            vis = vis,
+        );
+        if content_substr.is_some() {
+            sql.push_str(&format!(" AND m.content LIKE ?{} ", content_param));
+        }
+        sql.push_str(&format!(
+            " AND {tag_sql} ORDER BY m.updated_at DESC LIMIT ?{limit_param}",
+            tag_sql = tag_sql,
+            limit_param = tag_start + norm.len() as i32,
+        ));
+
         let mut stmt = conn.prepare(&sql)?;
         let mut bind: Vec<Value> = vec![
             Value::Text(scope.to_string()),
@@ -198,9 +321,11 @@ impl GatewayStore {
             Value::Text(sess),
         ];
         if let Some(q) = content_substr {
-            bind.push(Value::Text(format!("%{}%", q)));
+            if !q.is_empty() {
+                bind.push(Value::Text(format!("%{}%", q)));
+            }
         }
-        for t in norm {
+        for t in tag_vals {
             bind.push(Value::Text(t));
         }
         bind.push(Value::Integer(limit));

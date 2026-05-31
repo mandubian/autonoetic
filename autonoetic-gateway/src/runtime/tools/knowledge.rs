@@ -309,12 +309,12 @@ impl NativeTool for KnowledgeSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search the knowledge base in a scope. Without `tags`, returns scope contents optionally filtered by `query` substring. With `tags` (AND semantics — every tag must be present on a record), filters to tagged records, with `query` as an optional substring filter on content. Results are capped at `limit` (default 10, max 100).".to_string(),
+            description: "Search the knowledge base in a scope using full-text search (FTS5, with stemming). Without `tags`, returns scope contents optionally filtered by `query`. With `tags` (AND semantics — every tag must be present on a record), filters to tagged records, with `query` as an optional full-text search filter on content. Results are capped at `limit` (default 10, max 100). Tip: FTS5 uses a porter stemmer, so \"trade\" matches \"trading\" and \"traded\".".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "scope": { "type": "string", "description": "The scope/namespace to search in (e.g., 'api-keys', 'lessons')" },
-                    "query": { "type": "string", "description": "Optional substring filter on content" },
+                    "query": { "type": "string", "description": "Optional full-text search on content (FTS5 MATCH syntax — uses porter stemmer)" },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional AND-match tags: every tag listed must appear on a record's tags list" },
                     "limit": { "type": "integer", "description": "Max results (1–100)", "default": 10 }
                 },

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 40;
+const SCHEMA_VERSION_LATEST: i64 = 41;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -525,6 +525,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_outcomes_v38(conn)?;
     apply_improvement_cycles_v39(conn)?;
     apply_credential_label_v40(conn)?;
+    apply_memories_fts_v41(conn)?;
 
     Ok(())
 }
@@ -681,6 +682,55 @@ fn apply_credential_label_v40(conn: &mut Connection) -> Result<()> {
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![40_i64, "credential_label", chrono::Utc::now().to_rfc3339()],
     )?;
+    Ok(())
+}
+
+fn apply_memories_fts_v41(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 41 {
+        return Ok(());
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            content,
+            content='memories',
+            content_rowid='rowid'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+            INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
+        ",
+    )?;
+
+    // Backfill existing rows into the FTS index (within the transaction,
+    // so if it fails the migration is cleanly rolled back).
+    tx.execute(
+        "INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories WHERE quarantine_reason IS NULL",
+        [],
+    )?;
+
+    tx.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![41_i64, "memories_fts", chrono::Utc::now().to_rfc3339()],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
