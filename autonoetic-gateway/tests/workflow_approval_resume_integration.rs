@@ -40,6 +40,7 @@ async fn test_runnable_task_refreshes_stale_queue_message_from_approval_checkpoi
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.clone()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 

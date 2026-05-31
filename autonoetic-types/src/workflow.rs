@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::plan_frame::PlanRef;
 use crate::tool_error::{FailureClass, RetryAdvice, SideEffectState};
 
 fn default_true() -> bool {
@@ -111,6 +112,9 @@ pub struct WorkflowRun {
     /// Task IDs that must complete before the planner resumes (join condition).
     #[serde(default)]
     pub join_task_ids: Vec<String>,
+    /// Reference to the active PlanFrame governing this workflow, if any.
+    #[serde(default)]
+    pub active_plan_ref: Option<PlanRef>,
 }
 
 /// One delegated task (typically one `agent.spawn` child path).

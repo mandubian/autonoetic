@@ -612,6 +612,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::GithubIssueCreate { .. } => "GithubIssueCreate".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
         Capability::CapsuleExport => "CapsuleExport".to_string(),
+        Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
     }
 }
 
@@ -972,6 +973,7 @@ pub mod github_issue;
 pub mod improvement;
 pub mod knowledge;
 pub mod observability;
+pub mod plan_frame;
 pub mod promotion;
 pub mod quality_trend;
 pub mod sandbox;
@@ -1025,6 +1027,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::user_interaction::register_tools(&mut registry);
     crate::runtime::tools::user_profile::register_tools(&mut registry);
     crate::runtime::tools::observability::register_tools(&mut registry);
+    crate::runtime::tools::plan_frame::register_tools(&mut registry);
     crate::runtime::tools::federation::register_tools(&mut registry);
     crate::runtime::tools::improvement::register_tools(&mut registry);
     crate::runtime::tools::github_issue::register_tools(&mut registry);
