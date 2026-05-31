@@ -21,6 +21,8 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(WorkbenchCheckpointTool));
     registry.register(Box::new(WorkbenchCheckpointsTool));
     registry.register(Box::new(WorkbenchCheckoutTool));
+    registry.register(Box::new(WorkbenchReconcileTool));
+    registry.register(Box::new(WorkbenchDiscardTool));
 }
 
 fn has_workbench_access(manifest: &AgentManifest) -> bool {
@@ -48,6 +50,71 @@ fn file_sha256(path: &Path) -> anyhow::Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(&data);
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn mint_artifact_ref_id() -> String {
+    let b = *uuid::Uuid::new_v4().as_bytes();
+    format!(
+        "ar.{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5]
+    )
+}
+
+fn compute_diff(
+    source_dir: &Path,
+    base_digests: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<Vec<WorkbenchFileDiff>> {
+    let current_files = collect_workbench_files(source_dir)?;
+    let current_names: std::collections::HashSet<&str> =
+        current_files.iter().map(|(n, _)| n.as_str()).collect();
+
+    let mut diffs: Vec<WorkbenchFileDiff> = Vec::new();
+
+    for name in base_digests.keys() {
+        if !current_names.contains(name.as_str()) {
+            diffs.push(WorkbenchFileDiff {
+                path: name.clone(),
+                change_type: FileChangeType::Deleted,
+                base_digest: Some(base_digests[name].clone()),
+                current_digest: None,
+            });
+        }
+    }
+
+    for (name, _) in &current_files {
+        match base_digests.get(name) {
+            Some(base) => {
+                let current = file_sha256(&source_dir.join(name))?;
+                if &current == base {
+                    diffs.push(WorkbenchFileDiff {
+                        path: name.clone(),
+                        change_type: FileChangeType::Unchanged,
+                        base_digest: Some(base.clone()),
+                        current_digest: Some(current),
+                    });
+                } else {
+                    diffs.push(WorkbenchFileDiff {
+                        path: name.clone(),
+                        change_type: FileChangeType::Modified,
+                        base_digest: Some(base.clone()),
+                        current_digest: Some(current),
+                    });
+                }
+            }
+            None => {
+                let current = file_sha256(&source_dir.join(name))?;
+                diffs.push(WorkbenchFileDiff {
+                    path: name.clone(),
+                    change_type: FileChangeType::Added,
+                    base_digest: None,
+                    current_digest: Some(current),
+                });
+            }
+        }
+    }
+
+    diffs.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(diffs)
 }
 
 fn validate_relative_path(name: &str) -> anyhow::Result<()> {
@@ -452,57 +519,7 @@ impl NativeTool for WorkbenchDiffTool {
             std::collections::HashMap::new()
         };
 
-        let current_files = collect_workbench_files(source_dir)?;
-        let mut current_names: std::collections::HashSet<&str> =
-            current_files.iter().map(|(n, _)| n.as_str()).collect();
-
-        let mut diffs: Vec<WorkbenchFileDiff> = Vec::new();
-
-        for (name, _) in &base_digests {
-            if !current_names.contains(name.as_str()) {
-                diffs.push(WorkbenchFileDiff {
-                    path: name.clone(),
-                    change_type: FileChangeType::Deleted,
-                    base_digest: Some(base_digests[name].clone()),
-                    current_digest: None,
-                });
-            }
-        }
-
-        for (name, _) in &current_files {
-            match base_digests.get(name) {
-                Some(base) => {
-                    let current = file_sha256(&source_dir.join(name))?;
-                    if &current == base {
-                        diffs.push(WorkbenchFileDiff {
-                            path: name.clone(),
-                            change_type: FileChangeType::Unchanged,
-                            base_digest: Some(base.clone()),
-                            current_digest: Some(current),
-                        });
-                    } else {
-                        diffs.push(WorkbenchFileDiff {
-                            path: name.clone(),
-                            change_type: FileChangeType::Modified,
-                            base_digest: Some(base.clone()),
-                            current_digest: Some(current),
-                        });
-                    }
-                }
-                None => {
-                    let current = file_sha256(&source_dir.join(name))?;
-                    diffs.push(WorkbenchFileDiff {
-                        path: name.clone(),
-                        change_type: FileChangeType::Added,
-                        base_digest: None,
-                        current_digest: Some(current),
-                    });
-                }
-            }
-        }
-
-        diffs.sort_by(|a, b| a.path.cmp(&b.path));
-
+        let diffs = compute_diff(source_dir, &base_digests)?;
         let changed = diffs.iter().filter(|d| d.change_type != FileChangeType::Unchanged).count();
 
         Ok(serde_json::to_string(&serde_json::json!({
@@ -823,6 +840,283 @@ impl NativeTool for WorkbenchCheckoutTool {
             "label": cp.label,
             "file_count": cp.file_count,
             "message": "Workbench restored to checkpoint."
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct WorkbenchReconcileTool;
+
+impl NativeTool for WorkbenchReconcileTool {
+    fn name(&self) -> &'static str {
+        "workbench_reconcile"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Reconcile workbench edits into a new immutable artifact revision. Reads current files from the workbench, classifies authorship (operator-modified vs agent-generated), builds a new artifact, and marks the workbench as reconciled.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workbench_id": {
+                        "type": "string",
+                        "description": "The workbench ID to reconcile"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Optional human-readable message describing the edits"
+                    }
+                },
+                "required": ["workbench_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_workbench_access(manifest)
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            workbench_id: String,
+            message: Option<String>,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(gateway_dir) = gateway_dir else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "Gateway directory not available"
+            }))?);
+        };
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "Gateway store not available"
+            }))?);
+        };
+
+        let Some(config) = config else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "Gateway config not available"
+            }))?);
+        };
+
+        let session_id_val = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
+        let root_session_id = session_id_val.split('/').next().unwrap_or(session_id_val);
+
+        let Some(wb) = store.load_workbench(&args.workbench_id)? else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "Workbench not found"
+            }))?);
+        };
+
+        if wb.status != WorkbenchStatus::Active {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": format!("Cannot reconcile a {} workbench", wb.status.as_str())
+            }))?);
+        }
+
+        let source_dir = Path::new(&wb.workspace_path);
+        if !source_dir.exists() {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "Workbench source directory does not exist"
+            }))?);
+        }
+
+        let meta_dir = source_dir.parent().unwrap().join(".autonoetic");
+        let digests_path = meta_dir.join("base_digests.json");
+        let base_digests: std::collections::HashMap<String, String> = if digests_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&digests_path)?)?
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        let diffs = compute_diff(source_dir, &base_digests)?;
+
+        let current_files = collect_workbench_files(source_dir)?;
+        if current_files.is_empty() {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "No files in workbench to reconcile"
+            }))?);
+        }
+
+        let content_store = ContentStore::new(gateway_dir)?;
+        let mut input_names: Vec<String> = Vec::new();
+
+        for (name, _) in &current_files {
+            let file_path = source_dir.join(name);
+            let content = std::fs::read(&file_path)?;
+            let handle = content_store.write(&content)?;
+            content_store.register_name(root_session_id, name, &handle)?;
+            input_names.push(name.clone());
+        }
+
+        let artifact_store = ArtifactStore::new(gateway_dir)?;
+        let bundle = artifact_store.build(&input_names, None, None, root_session_id)?;
+
+        let root = crate::runtime::content_store::root_session_id(root_session_id);
+        let (scope_type, scope_id) =
+            match crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                config, root,
+            ) {
+                Ok(Some(wf_id)) => (
+                    autonoetic_types::artifact::ArtifactRefScopeType::Workflow,
+                    wf_id,
+                ),
+                _ => (
+                    autonoetic_types::artifact::ArtifactRefScopeType::Session,
+                    root.to_string(),
+                ),
+            };
+
+        let ref_id = mint_artifact_ref_id();
+        store.create_artifact_ref(&autonoetic_types::artifact::ArtifactRefRecord {
+            ref_id: ref_id.clone(),
+            scope_type,
+            scope_id: scope_id.clone(),
+            artifact_id: bundle.artifact_id.clone(),
+            artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+            artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+            created_by_agent_id: manifest.agent.id.clone(),
+            created_at: now_rfc3339(),
+            expires_at: None,
+            revoked_at: None,
+        })?;
+
+        let now = now_rfc3339();
+        store.update_workbench_status(&wb.workbench_id, WorkbenchStatus::Reconciled, &now)?;
+
+        let provenance = serde_json::json!({
+            "base_artifact_id": wb.base_artifact_id,
+            "new_artifact_id": bundle.artifact_id,
+            "new_artifact_ref": ref_id,
+            "operator_modified": diffs.iter().filter(|d| d.change_type == FileChangeType::Modified).map(|d| d.path.clone()).collect::<Vec<_>>(),
+            "operator_added": diffs.iter().filter(|d| d.change_type == FileChangeType::Added).map(|d| d.path.clone()).collect::<Vec<_>>(),
+            "deleted": diffs.iter().filter(|d| d.change_type == FileChangeType::Deleted).map(|d| d.path.clone()).collect::<Vec<_>>(),
+            "unchanged": diffs.iter().filter(|d| d.change_type == FileChangeType::Unchanged).count(),
+        });
+
+        let provenance_path = meta_dir.join("reconciliation.json");
+        std::fs::write(&provenance_path, serde_json::to_string_pretty(&provenance)?)?;
+
+        let changed = diffs.iter().filter(|d| d.change_type != FileChangeType::Unchanged).count();
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "workbench_id": wb.workbench_id,
+            "new_artifact_ref": ref_id,
+            "new_artifact_id": bundle.artifact_id,
+            "base_artifact_id": wb.base_artifact_id,
+            "total_files": current_files.len(),
+            "changed_files": changed,
+            "provenance": provenance,
+            "reconciled_at": now,
+            "message": args.message.unwrap_or_default(),
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct WorkbenchDiscardTool;
+
+impl NativeTool for WorkbenchDiscardTool {
+    fn name(&self) -> &'static str {
+        "workbench_discard"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Discard a workbench without reconciling. Marks the workbench as discarded. The workbench directory and checkpoints are preserved for audit but the workbench can no longer be edited or reconciled.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workbench_id": {
+                        "type": "string",
+                        "description": "The workbench ID to discard"
+                    }
+                },
+                "required": ["workbench_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_workbench_access(manifest)
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            workbench_id: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "Gateway store not available"
+            }))?);
+        };
+
+        let Some(wb) = store.load_workbench(&args.workbench_id)? else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false, "error": "Workbench not found"
+            }))?);
+        };
+
+        if wb.status != WorkbenchStatus::Active {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": format!("Cannot discard a {} workbench", wb.status.as_str())
+            }))?);
+        }
+
+        let now = now_rfc3339();
+        store.update_workbench_status(&wb.workbench_id, WorkbenchStatus::Discarded, &now)?;
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "workbench_id": wb.workbench_id,
+            "status": "discarded",
+            "discarded_at": now,
+            "message": "Workbench discarded. Files preserved for audit."
         }))?)
     }
 

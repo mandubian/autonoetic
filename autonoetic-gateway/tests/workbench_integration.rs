@@ -572,3 +572,353 @@ fn artifact_project_rejects_path_traversal() {
         }
     }
 }
+
+fn project_artifact(
+    registry: &autonoetic_gateway::runtime::tools::NativeToolRegistry,
+    manifest: &AgentManifest,
+    policy: &PolicyEngine,
+    agent_dir: &std::path::Path,
+    gateway_dir: &std::path::Path,
+    config: &GatewayConfig,
+    store: &Arc<GatewayStore>,
+    session_id: &str,
+    artifact_ref: &str,
+) -> String {
+    let out = registry
+        .execute(
+            "artifact_project",
+            manifest,
+            policy,
+            agent_dir,
+            Some(gateway_dir),
+            &serde_json::to_string(&json!({ "artifact_ref": artifact_ref })).unwrap(),
+            Some(session_id),
+            None,
+            Some(config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    if v["ok"] != true {
+        panic!("artifact_project failed: {:?}", v);
+    }
+    v["workbench_id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn workbench_reconcile_creates_new_artifact() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-006";
+
+    let artifact_ref = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("hello.txt", b"hello world"), ("config.toml", b"[settings]\nkey = \"value\"")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_ref,
+    );
+
+    let wb = store.load_workbench(&wb_id).unwrap().unwrap();
+    let source_dir = std::path::Path::new(&wb.workspace_path);
+
+    let edited = std::fs::read_to_string(source_dir.join("hello.txt")).unwrap();
+    std::fs::write(source_dir.join("hello.txt"), format!("{} -- edited by operator", edited)).unwrap();
+    std::fs::write(source_dir.join("new_file.txt"), b"brand new content").unwrap();
+
+    let reconcile_args = serde_json::json!({
+        "workbench_id": wb_id,
+        "message": "operator edited hello.txt and added new_file.txt"
+    });
+    let out = registry
+        .execute(
+            "workbench_reconcile",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &reconcile_args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], true, "reconcile should succeed: {:?}", v);
+    assert!(v["new_artifact_ref"].as_str().unwrap().starts_with("ar."));
+    assert!(v["new_artifact_id"].as_str().unwrap().starts_with("art_"));
+    assert_eq!(v["base_artifact_id"], v["base_artifact_id"]);
+    assert_eq!(v["changed_files"], 2);
+    assert_eq!(v["total_files"], 3);
+
+    let provenance = &v["provenance"];
+    let modified: Vec<&str> = provenance["operator_modified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(modified.contains(&"hello.txt"));
+    let added: Vec<&str> = provenance["operator_added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(added.contains(&"new_file.txt"));
+    assert_eq!(provenance["unchanged"], 1);
+
+    let wb_after = store.load_workbench(&wb_id).unwrap().unwrap();
+    assert_eq!(wb_after.status, autonoetic_types::workbench::WorkbenchStatus::Reconciled);
+    assert!(wb_after.reconciled_at.is_some());
+}
+
+#[test]
+fn workbench_reconcile_rejects_non_active() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-007";
+
+    let artifact_ref = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("test.txt", b"test")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_ref,
+    );
+
+    let discard_args = serde_json::json!({ "workbench_id": wb_id });
+    registry
+        .execute(
+            "workbench_discard",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &discard_args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let reconcile_args = serde_json::json!({ "workbench_id": wb_id });
+    let out = registry
+        .execute(
+            "workbench_reconcile",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &reconcile_args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(v["error"].as_str().unwrap().contains("discard"));
+}
+
+#[test]
+fn workbench_discard_marks_discarded() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-008";
+
+    let artifact_ref = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("test.txt", b"test")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_ref,
+    );
+
+    let args = serde_json::json!({ "workbench_id": wb_id });
+    let out = registry
+        .execute(
+            "workbench_discard",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["status"], "discarded");
+    assert!(v["discarded_at"].is_string());
+
+    let wb = store.load_workbench(&wb_id).unwrap().unwrap();
+    assert_eq!(wb.status, autonoetic_types::workbench::WorkbenchStatus::Discarded);
+    assert!(wb.discarded_at.is_some());
+}
+
+#[test]
+fn workbench_discard_rejects_already_discarded() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-009";
+
+    let artifact_ref = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("test.txt", b"test")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_ref,
+    );
+
+    let args = serde_json::json!({ "workbench_id": wb_id });
+    registry
+        .execute(
+            "workbench_discard",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let out = registry
+        .execute(
+            "workbench_discard",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(v["error"].as_str().unwrap().contains("discard"));
+}
