@@ -3,6 +3,7 @@
 //! Resolves the effective context window from manifest, env vars, or
 //! provider catalog. Also includes static lookup for common models.
 
+use crate::runtime::local_model_context::LocalModelContextCache;
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use autonoetic_types::agent::AgentManifest;
 use std::sync::Arc;
@@ -25,12 +26,25 @@ pub async fn resolve_context_window_for_run(
     manifest: &AgentManifest,
     model: &str,
     catalog: Option<&Arc<OpenRouterCatalog>>,
+    local_context: Option<&Arc<LocalModelContextCache>>,
 ) -> Option<u32> {
     if let Some(w) = resolve_context_window_tokens(manifest) {
         return Some(w);
     }
     if let Some(w) = static_context_window(model) {
         return Some(w);
+    }
+    if let Some(cache) = local_context {
+        if let Some(base_url) = manifest
+            .llm_config
+            .as_ref()
+            .and_then(|c| c.base_url.as_deref())
+            .filter(|u| !u.is_empty())
+        {
+            if let Some(w) = cache.get(base_url, model) {
+                return Some(w);
+            }
+        }
     }
     let use_openrouter = manifest
         .llm_config

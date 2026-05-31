@@ -50,6 +50,22 @@ rules:
     tier: workflow
   - prefix: agent_inspect
     tier: workflow
+  # Federation promotion gate — planner orchestration after jury roles complete.
+  - prefix: federation.
+    tier: workflow
+  # Read-only promotion status for planners collecting federation verdicts.
+  # Must precede the promotion_ specialized rule (promotion_record stays gated).
+  - prefix: promotion_query
+    tier: workflow
+  # Credential onboarding is planner-first orchestration (vault-side, not web I/O).
+  - prefix: credential_
+    tier: workflow
+  # Normalize third-party API docs into credential_setup-compatible skills.
+  - prefix: skill_normalize
+    tier: workflow
+  # Cron scheduling for durable agents the planner installs.
+  - prefix: scheduler_
+    tier: workflow
 
   # Specialized tier: expensive or role-specific operations.
   - prefix: web_

@@ -24,6 +24,13 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
 
     let (provider, _original_entry, model, base_url) = super::model_discovery::interactive_select(&client).await?;
 
+    let context_window_tokens = match base_url.as_deref() {
+        Some(url) => {
+            autonoetic_gateway::fetch_context_window_tokens(&client, url, &model).await
+        }
+        None => None,
+    };
+
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(config_dir)?;
 
@@ -34,6 +41,9 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
         Some(ref url) => format!("\n    base_url: \"{}\"", url),
         None => String::new(),
     };
+    let context_window_line = context_window_tokens
+        .map(|tokens| format!("\n    context_window_tokens: {tokens}"))
+        .unwrap_or_default();
 
     // Enable reasoning by default for providers whose API accepts it.
     // OpenRouter silently ignores `reasoning` on non-reasoning models, so
@@ -63,7 +73,7 @@ auto_learning:
 llm_presets:
   default:
     provider: "{provider}"
-    model: "{model}"{base_url}{thinking_block}
+    model: "{model}"{base_url}{context_window}{thinking_block}
 
 llm_preset_mapping:
   planner: default
@@ -89,6 +99,7 @@ llm_preset_mapping:
         provider = provider,
         model = model,
         base_url = base_url_line,
+        context_window = context_window_line,
         thinking_block = thinking_block,
     );
 
@@ -96,6 +107,9 @@ llm_preset_mapping:
     eprintln!("\n  Config written to {}", config_path.display());
     if let Some(ref url) = base_url {
         eprintln!("  Base URL: {}", url);
+    }
+    if let Some(tokens) = context_window_tokens {
+        eprintln!("  Context window: {} tokens (probed from model server)", tokens);
     }
 
     prompt_persona(config_dir)?;
@@ -212,6 +226,22 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
         }
         (None, None) => {}
     }
+
+    if let Some(url) = base_url.as_deref().or_else(|| {
+        regex::Regex::new(r#"base_url:\s*"([^"]+)""#)
+            .ok()
+            .and_then(|re| re.captures(&updated))
+            .and_then(|cap| cap.get(1))
+            .map(|m| m.as_str())
+    }) {
+        if let Some(tokens) =
+            autonoetic_gateway::fetch_context_window_tokens(&client, url, &model).await
+        {
+            updated = autonoetic_gateway::patch_context_window_tokens_in_yaml(&updated, tokens);
+            eprintln!("  Context window: {} tokens (probed from model server)", tokens);
+        }
+    }
+
     if updated != current {
         std::fs::write(config_path, &updated)?;
         eprintln!("  Config updated: provider={}, model={}", provider, model);

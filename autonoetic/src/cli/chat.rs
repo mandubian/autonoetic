@@ -290,6 +290,58 @@ struct TaskLifecycle {
     expanded: bool,
 }
 
+/// Aggregate token statistics across all completions in the session.
+#[derive(Debug, Clone)]
+struct TokenStats {
+    count: u64,
+    total_input: u64,
+    total_output: u64,
+    max_input: u64,
+    min_input: u64,
+    max_output: u64,
+    min_output: u64,
+    total_cost: f64,
+    cost_count: u64,
+}
+
+impl TokenStats {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            total_input: 0,
+            total_output: 0,
+            max_input: 0,
+            min_input: u64::MAX,
+            max_output: 0,
+            min_output: u64::MAX,
+            total_cost: 0.0,
+            cost_count: 0,
+        }
+    }
+
+    fn record(&mut self, usage: &LlmExchangeUsage) {
+        self.count += 1;
+        self.total_input = self.total_input.saturating_add(usage.input_tokens);
+        self.total_output = self.total_output.saturating_add(usage.output_tokens);
+        self.max_input = self.max_input.max(usage.input_tokens);
+        self.min_input = self.min_input.min(usage.input_tokens);
+        self.max_output = self.max_output.max(usage.output_tokens);
+        self.min_output = self.min_output.min(usage.output_tokens);
+        if let Some(cost) = usage.estimated_cost_usd {
+            self.total_cost += cost;
+            self.cost_count += 1;
+        }
+    }
+
+    fn avg_input(&self) -> u64 {
+        if self.count == 0 { 0 } else { self.total_input / self.count }
+    }
+
+    fn avg_output(&self) -> u64 {
+        if self.count == 0 { 0 } else { self.total_output / self.count }
+    }
+}
+
 struct App {
     messages: Vec<ChatMessage>,
     input: String,
@@ -353,6 +405,8 @@ struct App {
     prompt_history_draft: Option<String>,
     /// If set, the next submitted line is handled as structured input instead of chat.
     pending_prompt: Option<PendingPrompt>,
+    /// Aggregate token statistics across all completions this session.
+    token_stats: TokenStats,
     /// Latest prompt footprint from the gateway: largest `input_tokens` among `llm_usage` entries
     /// for the last completed `event.ingest` (sync) response.
     last_llm_context: Option<LlmExchangeUsage>,
@@ -416,6 +470,7 @@ impl App {
             prompt_history_scroll_back: None,
             prompt_history_draft: None,
             pending_prompt: None,
+            token_stats: TokenStats::new(),
             last_llm_context: None,
             post_approval_pending_ids: Vec::new(),
             pending_session_status_ids: HashSet::new(),
@@ -3577,6 +3632,23 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // Aggregate session token stats
+    let ts = &app.token_stats;
+    if ts.count > 0 {
+        let in_min = format_tokens_compact(ts.min_input);
+        let in_avg = format_tokens_compact(ts.avg_input());
+        let in_max = format_tokens_compact(ts.max_input);
+        let out_min = format_tokens_compact(ts.min_output);
+        let out_avg = format_tokens_compact(ts.avg_output());
+        let out_max = format_tokens_compact(ts.max_output);
+        lines.push(Line::raw(format!("in: avg {}·max {}·min {}", in_avg, in_max, in_min)));
+        lines.push(Line::raw(format!("out: avg {}·max {}·min {}", out_avg, out_max, out_min)));
+        lines.push(Line::raw(format!("calls: {}", ts.count)));
+        if ts.cost_count > 0 {
+            lines.push(Line::raw(format!("cost: ${:.6}", ts.total_cost)));
+        }
+    }
+
     lines.extend([
         Line::raw(""),
         Line::from(Span::styled("Active Agents", Style::default().add_modifier(Modifier::BOLD))),
@@ -5015,6 +5087,14 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                 } else {
                                     let result_json = resp.result.as_ref();
                                     if let Some(v) = result_json {
+                                        // Record all LLM usages for aggregate stats, then pick peak for display
+                                        if let Some(usages) = v.get("llm_usage").and_then(|a| a.as_array()) {
+                                            for u_val in usages {
+                                                if let Ok(u) = serde_json::from_value::<LlmExchangeUsage>(u_val.clone()) {
+                                                    app.token_stats.record(&u);
+                                                }
+                                            }
+                                        }
                                         if let Some(usage) = pick_peak_llm_usage_from_result(v) {
                                             app.last_llm_context = Some(usage);
                                         }

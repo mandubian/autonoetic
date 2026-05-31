@@ -47,6 +47,9 @@ pub use layer_store::LayerStore;
 pub use llm::{build_driver, LlmDriver};
 pub use policy::PolicyEngine;
 pub use router::{JsonRpcRequest, JsonRpcResponse, JsonRpcRouter};
+pub use runtime::local_model_context::{
+    fetch_context_window_tokens, patch_context_window_tokens_in_yaml, LocalModelContextCache,
+};
 pub use runtime::openrouter_catalog::OpenRouterCatalog;
 pub use runtime::session_budget::SessionBudgetRegistry;
 pub use runtime::tools::resolve_target_to_agent_ref;

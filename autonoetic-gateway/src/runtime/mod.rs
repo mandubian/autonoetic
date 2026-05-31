@@ -34,6 +34,7 @@ pub mod memory;
 pub mod middleware;
 pub mod model_router;
 pub mod network_policy;
+pub mod local_model_context;
 pub mod openrouter_catalog;
 pub mod parser;
 pub mod post_session_digest;

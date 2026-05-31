@@ -5,6 +5,7 @@ use crate::causal_chain::CausalLogger;
 use crate::llm::{build_driver, Message};
 use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
 use crate::runtime::lifecycle::{AgentExecutor, TurnOutcome};
+use crate::runtime::local_model_context::LocalModelContextCache;
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::reevaluation_state::execute_scheduled_action;
 use crate::runtime::response_validation::{
@@ -490,6 +491,7 @@ pub struct GatewayExecutionService {
     hook_executor: Arc<crate::scheduler::hooks::HookExecutor>,
     degraded_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
     persona: Option<String>,
+    local_model_context_cache: Arc<LocalModelContextCache>,
 }
 
 impl GatewayExecutionService {
@@ -549,6 +551,7 @@ impl GatewayExecutionService {
             hook_executor,
             degraded_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             persona,
+            local_model_context_cache: Arc::new(LocalModelContextCache::new()),
         };
 
         // Spawn the drain task that turns HookSpawnRequests into actual agent runs.
@@ -611,6 +614,27 @@ impl GatewayExecutionService {
         });
 
         svc
+    }
+
+    /// Probe local model servers for runtime context windows (best-effort).
+    pub async fn warm_local_model_context(&self) {
+        self.local_model_context_cache
+            .warm_from_config(&self.http_client, self.config.as_ref())
+            .await;
+    }
+
+    pub fn local_model_context_cache(&self) -> Arc<LocalModelContextCache> {
+        self.local_model_context_cache.clone()
+    }
+
+    fn attach_model_metadata(
+        &self,
+        runtime: AgentExecutor,
+        openrouter_catalog: Arc<OpenRouterCatalog>,
+    ) -> AgentExecutor {
+        runtime
+            .with_openrouter_catalog(Some(openrouter_catalog))
+            .with_local_model_context_cache(Some(self.local_model_context_cache.clone()))
     }
 
     pub fn config(&self) -> Arc<GatewayConfig> {
@@ -1980,7 +2004,8 @@ impl GatewayExecutionService {
             let openrouter_catalog =
                 Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
             let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
-            let mut runtime = AgentExecutor::new(
+            let mut runtime = self.attach_model_metadata(
+                AgentExecutor::new(
                 loaded.manifest,
                 loaded.instructions,
                 driver,
@@ -1992,7 +2017,6 @@ impl GatewayExecutionService {
             .with_config(self.config.clone())
             .with_session_budget(Some(self.session_budget.clone()))
             .with_root_session_budget(Some(self.root_session_budget.clone()))
-            .with_openrouter_catalog(Some(openrouter_catalog))
             .with_middleware(middleware)
             .with_initial_user_message(message.to_string())
             .with_session_id(session_id.to_string())
@@ -2005,7 +2029,9 @@ impl GatewayExecutionService {
             .with_artifact_id(artifact_id.map(String::from))
             .with_degraded_sessions(Some(self.degraded_sessions.clone()))
         .with_persona(self.persona.clone())
-        .with_extended_instructions(loaded.extended_instructions.clone());
+        .with_extended_instructions(loaded.extended_instructions.clone()),
+                openrouter_catalog,
+            );
             // Phase 3: propagate overflow_recovery flag so the governor
             // uses an aggressive reduction pipeline on retry.
             let overflow_recovery = metadata
@@ -2910,7 +2936,8 @@ impl GatewayExecutionService {
 
         let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
         let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
-        let mut runtime = AgentExecutor::new(
+        let mut runtime = self.attach_model_metadata(
+            AgentExecutor::new(
             loaded.manifest,
             loaded.instructions,
             driver,
@@ -2922,7 +2949,6 @@ impl GatewayExecutionService {
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
         .with_root_session_budget(Some(self.root_session_budget.clone()))
-        .with_openrouter_catalog(Some(openrouter_catalog))
         .with_middleware(middleware)
         .with_session_id(session_id.to_string())
         .with_workflow_context(workflow_id.map(String::from), task_id.map(String::from))
@@ -2930,7 +2956,9 @@ impl GatewayExecutionService {
         .with_http_client(self.http_client.clone())
         .with_degraded_sessions(Some(self.degraded_sessions.clone()))
         .with_persona(self.persona.clone())
-        .with_extended_instructions(loaded.extended_instructions.clone());
+        .with_extended_instructions(loaded.extended_instructions.clone()),
+            openrouter_catalog,
+        );
 
         checkpoint.restore_into(&mut runtime);
 
@@ -3186,7 +3214,8 @@ impl GatewayExecutionService {
         let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
         let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
 
-        let mut runtime = AgentExecutor::new(
+        let mut runtime = self.attach_model_metadata(
+            AgentExecutor::new(
             loaded.manifest,
             loaded.instructions,
             driver,
@@ -3198,7 +3227,6 @@ impl GatewayExecutionService {
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
         .with_root_session_budget(Some(self.root_session_budget.clone()))
-        .with_openrouter_catalog(Some(openrouter_catalog))
         .with_middleware(middleware)
         .with_initial_user_message(message)
         .with_session_id(child_session_id.clone())
@@ -3207,7 +3235,9 @@ impl GatewayExecutionService {
         .with_degraded_sessions(Some(self.degraded_sessions.clone()))
         .with_persona(self.persona.clone())
         .with_initial_session_state(SessionState::Clarification)
-        .with_extended_instructions(loaded.extended_instructions.clone());
+        .with_extended_instructions(loaded.extended_instructions.clone()),
+            openrouter_catalog,
+        );
 
         let mut history: Vec<Message> = Vec::new();
         let outcome = runtime.execute_with_history(&mut history).await;
@@ -3337,7 +3367,8 @@ impl GatewayExecutionService {
         let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
         let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
 
-        let mut runtime = AgentExecutor::new(
+        let mut runtime = self.attach_model_metadata(
+            AgentExecutor::new(
             loaded.manifest,
             loaded.instructions,
             driver,
@@ -3349,7 +3380,6 @@ impl GatewayExecutionService {
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
         .with_root_session_budget(Some(self.root_session_budget.clone()))
-        .with_openrouter_catalog(Some(openrouter_catalog))
         .with_middleware(middleware)
         .with_initial_user_message(message)
         .with_session_id(child_session_id.clone())
@@ -3358,7 +3388,9 @@ impl GatewayExecutionService {
         .with_degraded_sessions(Some(self.degraded_sessions.clone()))
         .with_persona(self.persona.clone())
         .with_initial_session_state(SessionState::Clarification)
-        .with_extended_instructions(loaded.extended_instructions.clone());
+        .with_extended_instructions(loaded.extended_instructions.clone()),
+            openrouter_catalog,
+        );
 
         let mut history: Vec<Message> = Vec::new();
         let outcome = runtime.execute_with_history(&mut history).await;

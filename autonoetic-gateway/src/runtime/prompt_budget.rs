@@ -113,6 +113,57 @@ pub fn filter_tools_by_tier(
         .collect()
 }
 
+/// Whether `tool_name` matches a `tool_discover` pattern (exact name or `prefix*`).
+pub fn tool_matches_discovered_pattern(tool_name: &str, pattern: &str) -> bool {
+    let p = pattern.trim();
+    if p.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = p.strip_suffix('*') {
+        tool_name.starts_with(prefix)
+    } else {
+        tool_name == p
+    }
+}
+
+/// Cap tool count for the LLM request, dropping lowest-priority tiers first.
+///
+/// Tools explicitly matched by `discovered_patterns` (from `tool_discover`) are
+/// never dropped — the agent asked for them by name.
+pub fn cap_tool_definitions_preserving_discovered(
+    tools: Vec<ToolDefinition>,
+    max_tools: usize,
+    discovered_patterns: &HashSet<String>,
+) -> Vec<ToolDefinition> {
+    if max_tools == 0 || tools.len() <= max_tools {
+        return tools;
+    }
+
+    let (mut pinned, mut rest): (Vec<ToolDefinition>, Vec<ToolDefinition>) = tools
+        .into_iter()
+        .partition(|def| {
+            discovered_patterns
+                .iter()
+                .any(|pattern| tool_matches_discovered_pattern(&def.name, pattern))
+        });
+
+    let budget = max_tools.saturating_sub(pinned.len());
+    if rest.len() > budget {
+        let tier_order = |tier: &ToolTier| match tier {
+            ToolTier::Core => 0,
+            ToolTier::Workflow => 1,
+            ToolTier::Specialized => 2,
+        };
+        rest.sort_by(|a, b| {
+            tier_order(&tool_tier(&a.name)).cmp(&tier_order(&tool_tier(&b.name)))
+        });
+        rest.truncate(budget);
+    }
+
+    rest.append(&mut pinned);
+    rest
+}
+
 /// Compress tool definitions for subsequent turns.
 ///
 /// On turn 0, returns full tool definitions. On subsequent turns,
@@ -488,5 +539,135 @@ mod tests {
         assert_eq!(compressed[1].input_schema, serde_json::json!({}));
         assert_eq!(compressed[0].name, "content_write");
         assert_eq!(compressed[1].name, "web_search");
+    }
+
+    #[test]
+    fn cap_tool_definitions_preserves_discovered_specialized_tools() {
+        let tools: Vec<ToolDefinition> = (0..45)
+            .map(|i| ToolDefinition {
+                name: format!("core_tool_{i}"),
+                description: "core".to_string(),
+                input_schema: serde_json::json!({}),
+            })
+            .chain([ToolDefinition {
+                name: "federation.escalate".to_string(),
+                description: "Escalate".to_string(),
+                input_schema: serde_json::json!({}),
+            }])
+            .collect();
+
+        let discovered = HashSet::from(["federation.escalate".to_string()]);
+        let capped = cap_tool_definitions_preserving_discovered(tools, 40, &discovered);
+
+        assert_eq!(capped.len(), 40);
+        assert!(
+            capped.iter().any(|t| t.name == "federation.escalate"),
+            "discovered tool must survive truncation"
+        );
+    }
+
+    #[test]
+    fn planner_tool_surface_counts_by_tier() {
+        use crate::runtime::tool_dispatch::determine_tool_tier_filter;
+        use crate::runtime::tools::default_registry;
+        use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+        use autonoetic_types::capability::Capability;
+
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "planner.default".to_string(),
+                name: "Planner".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![
+                Capability::SandboxFunctions {
+                    allowed: vec![
+                        "knowledge.".to_string(),
+                        "agent.".to_string(),
+                        "credential.".to_string(),
+                    ],
+                },
+                Capability::CredentialAccess {
+                    services: vec!["*".to_string()],
+                },
+                Capability::AgentSpawn {
+                    max_children: 10,
+                    max_spawn_depth: 0,
+                },
+                Capability::SchedulerAccess {
+                    patterns: vec!["*".to_string()],
+                },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::AgentMessage {
+                    patterns: vec!["*".to_string()],
+                },
+            ],
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        };
+
+        let registry = default_registry();
+        let all_available = registry.available_definitions(&manifest);
+        let core_workflow_filter =
+            determine_tool_tier_filter(&manifest, Some("session-root"), false, autonoetic_types::agent::SessionState::Normal, false);
+        let core_workflow = registry.available_definitions_filtered(&manifest, Some(&core_workflow_filter));
+        let all_tiers_filter =
+            determine_tool_tier_filter(&manifest, Some("session-root"), false, autonoetic_types::agent::SessionState::Normal, true);
+        let all_tiers = registry.available_definitions_filtered(&manifest, Some(&all_tiers_filter));
+
+        eprintln!(
+            "planner tool counts: all_available={} core+workflow={} all_tiers_escalated={}",
+            all_available.len(),
+            core_workflow.len(),
+            all_tiers.len()
+        );
+        let specialized_only: Vec<&str> = all_tiers
+            .iter()
+            .filter(|d| !core_workflow.iter().any(|c| c.name == d.name))
+            .map(|d| d.name.as_str())
+            .collect();
+        eprintln!(
+            "planner specialized-only (need tier escalation): {:?}",
+            specialized_only
+        );
+
+        // Documented baseline in config-template.yaml — keep in sync when tiers change.
+        assert!(
+            core_workflow.len() >= 35 && core_workflow.len() <= 45,
+            "expected ~40 core+workflow tools for planner, got {}",
+            core_workflow.len()
+        );
+        assert!(
+            all_tiers.len() >= 45 && all_tiers.len() <= 55,
+            "escalated planner surface should remain modestly above max_tool_definitions cap (got {})",
+            all_tiers.len()
+        );
     }
 }

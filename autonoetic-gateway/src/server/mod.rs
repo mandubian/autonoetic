@@ -183,9 +183,19 @@ impl GatewayServer {
             }
         }
 
+        let jsonrpc_router = Arc::new(crate::router::JsonRpcRouter::new(
+            self.config.as_ref().clone(),
+            Some(gateway_store.clone()),
+        ));
+        jsonrpc_router
+            .execution_service()
+            .warm_local_model_context()
+            .await;
+
         // Warn at startup if any LLM preset has no context_window_tokens and
-        // the provider cannot resolve one from env, static table, or catalog.
+        // the provider cannot resolve one from env, static table, catalog, or probe.
         let env_override = std::env::var("AUTONOETIC_LLM_CONTEXT_WINDOW").ok();
+        let local_context = jsonrpc_router.execution_service().local_model_context_cache();
         for (name, preset) in &self.config.llm_presets {
             if preset.routing.is_some() {
                 continue;
@@ -200,6 +210,11 @@ impl GatewayServer {
                 if crate::runtime::context_governor::resolver::static_context_window(model).is_some() {
                     continue;
                 }
+                if let Some(ref base_url) = preset.base_url {
+                    if local_context.get(base_url, model).is_some() {
+                        continue;
+                    }
+                }
             }
             if preset.provider.as_deref().map(|p| p.eq_ignore_ascii_case("openrouter")).unwrap_or(false) {
                 continue;
@@ -210,14 +225,11 @@ impl GatewayServer {
                 provider = ?preset.provider,
                 model = ?preset.model,
                 "LLM preset has no context_window_tokens — context governor cannot enforce budget for this preset. \
-                 Set context_window_tokens in the preset, or set AUTONOETIC_LLM_CONTEXT_WINDOW env var."
+                 Set context_window_tokens in the preset, run `autonoetic run --refresh-models`, \
+                 or set AUTONOETIC_LLM_CONTEXT_WINDOW env var."
             );
         }
 
-        let jsonrpc_router = Arc::new(crate::router::JsonRpcRouter::new(
-            self.config.as_ref().clone(),
-            Some(gateway_store.clone()),
-        ));
         crate::scheduler::signal::start_signal_poller_if_needed(
             self.config.agents_dir.clone(),
             self.config.port,

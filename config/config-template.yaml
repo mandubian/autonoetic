@@ -372,8 +372,8 @@ prompt_budget:
   # Maximum number of tool definitions sent per turn (0 = unlimited).
   # Excess tools are dropped from lowest tier first (Specialized → Workflow → Core).
   max_tool_definitions: 40
-  # Root sessions start with Core + Workflow tools only (24 tools).
-  # After the first Specialized tool call, all tiers are unlocked for the session.
+  # Root sessions start with Core + Workflow tools only (~40 for planner.default).
+  # After the first Specialized tool call, all tiers unlock (~10 more; total ~50).
   progressive_tool_disclosure: true
 #
 # ── Tool Tier Registry (Constitution 4.7) ──────────────────────────────

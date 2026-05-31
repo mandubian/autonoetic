@@ -19,6 +19,7 @@ use crate::runtime::guard::LoopGuard;
 use crate::runtime::history_persist::persist_history_to_content_store;
 use crate::runtime::mcp::McpToolRuntime;
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
+use crate::runtime::local_model_context::LocalModelContextCache;
 use crate::runtime::reevaluation_state::persist_reevaluation_state;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_tracer::{EvidenceMode, SessionTracer};
@@ -189,6 +190,8 @@ pub struct AgentExecutor {
     pub llm_usage_last_run: Vec<LlmExchangeUsage>,
     /// Optional OpenRouter models catalog (context + pricing) for UX and session price budgets.
     pub openrouter_catalog: Option<Arc<OpenRouterCatalog>>,
+    /// Probed context windows for local OpenAI-compatible model servers.
+    pub local_model_context_cache: Option<Arc<LocalModelContextCache>>,
     pub gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     /// Workflow / task context used to populate `TurnContinuation` on suspension.
     pub workflow_id: Option<String>,
@@ -300,6 +303,7 @@ impl AgentExecutor {
             middleware: manifest.middleware.clone().unwrap_or_default(),
             llm_usage_last_run: Vec::new(),
             openrouter_catalog: None,
+            local_model_context_cache: None,
             gateway_store,
             workflow_id: None,
             task_id: None,
@@ -377,6 +381,14 @@ impl AgentExecutor {
 
     pub fn with_openrouter_catalog(mut self, catalog: Option<Arc<OpenRouterCatalog>>) -> Self {
         self.openrouter_catalog = catalog;
+        self
+    }
+
+    pub fn with_local_model_context_cache(
+        mut self,
+        cache: Option<Arc<LocalModelContextCache>>,
+    ) -> Self {
+        self.local_model_context_cache = cache;
         self
     }
 
@@ -1189,6 +1201,7 @@ impl AgentExecutor {
             &self.manifest,
             &model,
             self.openrouter_catalog.as_ref(),
+            self.local_model_context_cache.as_ref(),
         )
         .await;
         let mut latest_assistant_text: Option<String> = None;
@@ -1441,24 +1454,18 @@ impl AgentExecutor {
                 }
                 // Cap tool count: drop lowest-priority tier tools first when
                 // the deduplicated list exceeds max_tool_definitions.
+                // Tools matched by tool_discover patterns are never dropped.
                 let max_tools = self
                     .config
                     .as_ref()
                     .map(|c| c.prompt_budget.max_tool_definitions)
                     .unwrap_or(0);
                 if max_tools > 0 && t.len() > max_tools {
-                    use autonoetic_types::agent::ToolTier;
-                    let tier_order = |tier: &ToolTier| match tier {
-                        ToolTier::Core => 0,
-                        ToolTier::Workflow => 1,
-                        ToolTier::Specialized => 2,
-                    };
-                    t.sort_by(|a, b| {
-                        let ta = crate::runtime::prompt_budget::tool_tier(&a.name);
-                        let tb = crate::runtime::prompt_budget::tool_tier(&b.name);
-                        tier_order(&ta).cmp(&tier_order(&tb))
-                    });
-                    t.truncate(max_tools);
+                    t = crate::runtime::prompt_budget::cap_tool_definitions_preserving_discovered(
+                        t,
+                        max_tools,
+                        &self.discovered_tools,
+                    );
                 }
                 let turn_index = self.turn_counter.saturating_sub(1);
                 let should_compress = self
