@@ -248,6 +248,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
         Capability::SecurityRedTeam => "SecurityRedTeam",
         Capability::CapsuleExport => "CapsuleExport",
+        Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
     }
     .to_string()
 }

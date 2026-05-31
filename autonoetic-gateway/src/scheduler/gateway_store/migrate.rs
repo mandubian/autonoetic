@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 41;
+const SCHEMA_VERSION_LATEST: i64 = 42;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -526,6 +526,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_improvement_cycles_v39(conn)?;
     apply_credential_label_v40(conn)?;
     apply_memories_fts_v41(conn)?;
+    apply_plan_frames_v42(conn)?;
 
     Ok(())
 }
@@ -719,8 +720,6 @@ fn apply_memories_fts_v41(conn: &mut Connection) -> Result<()> {
         ",
     )?;
 
-    // Backfill existing rows into the FTS index (within the transaction,
-    // so if it fails the migration is cleanly rolled back).
     tx.execute(
         "INSERT INTO memories_fts(rowid, content) SELECT rowid, content FROM memories WHERE quarantine_reason IS NULL",
         [],
@@ -731,6 +730,50 @@ fn apply_memories_fts_v41(conn: &mut Connection) -> Result<()> {
         params![41_i64, "memories_fts", chrono::Utc::now().to_rfc3339()],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+fn apply_plan_frames_v42(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 42 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS plan_frames (
+            plan_id              TEXT NOT NULL,
+            version              INTEGER NOT NULL DEFAULT 1,
+            parent_version       INTEGER,
+            workflow_id          TEXT NOT NULL,
+            root_session_id      TEXT NOT NULL,
+            title                TEXT NOT NULL,
+            objective            TEXT NOT NULL,
+            status               TEXT NOT NULL DEFAULT 'awaiting_approval',
+            steps_json           TEXT NOT NULL DEFAULT '[]',
+            validation_policy_json TEXT NOT NULL DEFAULT '{\"entries\":[]}',
+            approved_by          TEXT,
+            approved_at          TEXT,
+            created_by_agent_id  TEXT NOT NULL,
+            reason               TEXT,
+            created_at           TEXT NOT NULL,
+            PRIMARY KEY (plan_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_plan_frames_workflow
+            ON plan_frames(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_plan_frames_root_session
+            ON plan_frames(root_session_id);
+        CREATE INDEX IF NOT EXISTS idx_plan_frames_status
+            ON plan_frames(status);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![42_i64, "plan_frames", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 

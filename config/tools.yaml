@@ -65,6 +65,7 @@ rules:
     tier: workflow
   # Cron scheduling for durable agents the planner installs.
   - prefix: scheduler_
+  - prefix: planframe_
     tier: workflow
 
   # Specialized tier: expensive or role-specific operations.

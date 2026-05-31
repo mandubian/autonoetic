@@ -912,6 +912,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub llm_preset_mapping: HashMap<String, String>,
 
+    /// Default orchestrator agent ID for new sessions and workflows.
+    /// When set, this agent is used as the lead/planner instead of `planner.default`.
+    /// Can be overridden per-session via CLI or API. Default: "planner.default".
+    #[serde(default = "default_default_orchestrator")]
+    pub default_orchestrator: String,
+
     /// Code analysis configuration for agent.install validation.
     /// Controls how the gateway analyzes code for capabilities and security.
     #[serde(default)]
@@ -1962,6 +1968,10 @@ fn default_agents_dir() -> PathBuf {
     PathBuf::from("./agents")
 }
 
+fn default_default_orchestrator() -> String {
+    "planner.default".to_string()
+}
+
 fn default_port() -> u16 {
     4000
 }
@@ -2487,6 +2497,7 @@ impl Default for GatewayConfig {
             schema_enforcement: SchemaEnforcementConfig::default(),
             llm_presets: HashMap::new(),
             llm_preset_mapping: HashMap::new(),
+            default_orchestrator: default_default_orchestrator(),
             code_analysis: CodeAnalysisConfig::default(),
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
             session_budget: SessionBudgetConfig::default(),

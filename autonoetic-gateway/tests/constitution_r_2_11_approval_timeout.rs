@@ -62,6 +62,7 @@ async fn r_2_11_timed_out_approval_marks_task_failed_and_preserves_continuation(
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.to_string()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 
@@ -163,6 +164,7 @@ async fn r_7_11_approval_timeout_records_resolution_in_session_report() -> anyho
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.to_string()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 
