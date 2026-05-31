@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 42;
+const SCHEMA_VERSION_LATEST: i64 = 43;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -527,6 +527,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_credential_label_v40(conn)?;
     apply_memories_fts_v41(conn)?;
     apply_plan_frames_v42(conn)?;
+    apply_workbenches_v43(conn)?;
 
     Ok(())
 }
@@ -773,6 +774,59 @@ fn apply_plan_frames_v42(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![42_i64, "plan_frames", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_workbenches_v43(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 43 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workbenches (
+            workbench_id              TEXT PRIMARY KEY,
+            workflow_id               TEXT NOT NULL,
+            root_session_id           TEXT NOT NULL,
+            plan_id                   TEXT,
+            base_artifact_id          TEXT NOT NULL,
+            base_artifact_canonical_digest TEXT NOT NULL,
+            workspace_path            TEXT NOT NULL,
+            status                    TEXT NOT NULL DEFAULT 'active',
+            created_by_agent_id       TEXT NOT NULL,
+            created_at                TEXT NOT NULL,
+            last_checkpoint_at        TEXT,
+            reconciled_at             TEXT,
+            discarded_at              TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_workbenches_workflow
+            ON workbenches(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_workbenches_root_session
+            ON workbenches(root_session_id);
+        CREATE INDEX IF NOT EXISTS idx_workbenches_status
+            ON workbenches(status);
+
+        CREATE TABLE IF NOT EXISTS workbench_checkpoints (
+            checkpoint_id             TEXT PRIMARY KEY,
+            workbench_id              TEXT NOT NULL,
+            label                     TEXT,
+            file_count                INTEGER NOT NULL DEFAULT 0,
+            total_bytes               INTEGER NOT NULL DEFAULT 0,
+            created_at                TEXT NOT NULL,
+            FOREIGN KEY (workbench_id) REFERENCES workbenches(workbench_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_wb_checkpoints_workbench
+            ON workbench_checkpoints(workbench_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![43_i64, "workbenches", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

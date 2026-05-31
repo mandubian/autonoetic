@@ -977,6 +977,7 @@ pub mod plan_frame;
 pub mod promotion;
 pub mod quality_trend;
 pub mod sandbox;
+pub mod workbench;
 pub mod scheduler;
 pub mod security_redteam;
 pub mod self_describe;
@@ -1028,6 +1029,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::user_profile::register_tools(&mut registry);
     crate::runtime::tools::observability::register_tools(&mut registry);
     crate::runtime::tools::plan_frame::register_tools(&mut registry);
+    crate::runtime::tools::workbench::register_tools(&mut registry);
     crate::runtime::tools::federation::register_tools(&mut registry);
     crate::runtime::tools::improvement::register_tools(&mut registry);
     crate::runtime::tools::github_issue::register_tools(&mut registry);

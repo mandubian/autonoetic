@@ -32,4 +32,5 @@ pub mod session_outcome;
 pub mod task_board;
 pub mod task_completion;
 pub mod tool_error;
+pub mod workbench;
 pub mod workflow;

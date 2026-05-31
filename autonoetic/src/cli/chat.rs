@@ -1164,6 +1164,9 @@ fn load_known_sessions(
             event_count: 0,
         });
 
+    // Only root sessions are meaningful to restore — child sessions (containing `/`)
+    // are transient workflow agents that cannot be resumed independently.
+    by_session.retain(|sid, _| !sid.contains('/'));
     let mut sessions: Vec<KnownSessionEntry> = by_session.into_values().collect();
     sessions.sort_by(|a, b| {
         b.last_timestamp
