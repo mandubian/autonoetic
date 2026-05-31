@@ -86,6 +86,7 @@ fn seed_two_tasks(
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_a.to_string(), task_b.to_string()],
+        active_plan_ref: None,
     };
     save_workflow_run(config, Some(store), &workflow)?;
 

@@ -331,6 +331,7 @@ pub fn ensure_workflow_for_root_session(
                     queued_task_ids: vec![],
                     join_policy: Default::default(),
                     join_task_ids: vec![],
+                    active_plan_ref: None,
                 }
             }
         };
@@ -357,6 +358,7 @@ pub fn ensure_workflow_for_root_session(
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![],
+        active_plan_ref: None,
     };
 
     save_workflow_run(config, store, &run)?;

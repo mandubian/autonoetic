@@ -15,6 +15,7 @@ mod messages;
 mod migrate;
 mod notifications;
 mod observability;
+pub mod plan_frames;
 pub mod post_promotion_reviews;
 mod reclamation;
 mod recordings;
@@ -351,6 +352,64 @@ impl GatewayStore {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    pub fn save_plan_frame(&self, plan: &autonoetic_types::plan_frame::PlanFrame) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::save_plan_frame(&conn, plan)
+    }
+
+    pub fn load_plan_frame(
+        &self,
+        plan_id: &str,
+    ) -> Result<Option<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::load_plan_frame(&conn, plan_id)
+    }
+
+    pub fn load_plan_frame_revision(
+        &self,
+        plan_id: &str,
+        version: u32,
+    ) -> Result<Option<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::load_plan_frame_revision(&conn, plan_id, version)
+    }
+
+    pub fn update_plan_frame_status(
+        &self,
+        plan_id: &str,
+        version: u32,
+        status: autonoetic_types::plan_frame::PlanStatus,
+        approved_by: Option<&str>,
+        approved_at: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::update_plan_frame_status(&conn, plan_id, version, status, approved_by, approved_at)
+    }
+
+    pub fn load_active_plan_for_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::load_active_plan_for_workflow(&conn, workflow_id)
+    }
+
+    pub fn list_plan_frames_for_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::list_plan_frames_for_workflow(&conn, workflow_id)
+    }
+
+    pub fn list_plan_revisions(
+        &self,
+        plan_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::list_plan_revisions(&conn, plan_id)
     }
 }
 

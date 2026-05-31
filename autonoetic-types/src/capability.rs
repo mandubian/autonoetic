@@ -170,6 +170,15 @@ pub enum Capability {
     /// explicitly granted. Not a default. See
     /// `docs/cognitive-capsule.md`.
     CapsuleExport,
+
+    /// Access to PlanFrame operations (propose, amend, approve, list, get).
+    /// Controls whether an agent can create and modify collaborative plans.
+    /// The `patterns` field restricts which operations are allowed.
+    /// Use ["*"] for all operations, or specific patterns like "planframe.propose".
+    PlanFrameAccess {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -286,6 +295,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "budget.no_price_available.allow",
         "SecurityRedTeam",
         "CapsuleExport",
+        "PlanFrameAccess",
     ]
 }
 
@@ -314,6 +324,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
         Capability::CapsuleExport => "CapsuleExport".to_string(),
+        Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
     }
 }
 
@@ -378,6 +389,10 @@ fn capability_broadening(
         (
             Capability::GithubIssueCreate { patterns: a },
             Capability::GithubIssueCreate { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::PlanFrameAccess { patterns: a },
+            Capability::PlanFrameAccess { patterns: b },
         ) => scope_broadening(capability_type, a, b),
         (
             Capability::CodeExecution {
@@ -687,6 +702,7 @@ mod tests {
             Capability::BudgetNoPriceAvailableAllow,
             Capability::SecurityRedTeam,
             Capability::CapsuleExport,
+            Capability::PlanFrameAccess { patterns: vec![] },
         ];
         for cap in &samples {
             let name = capability_type_name(cap);

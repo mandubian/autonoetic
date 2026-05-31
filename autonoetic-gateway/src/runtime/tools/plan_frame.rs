@@ -1,0 +1,950 @@
+use crate::llm::ToolDefinition;
+use crate::policy::PolicyEngine;
+use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
+use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::capability::Capability;
+use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::plan_frame::{
+    PlanFrame, PlanFrameSummary, PlanRef, PlanStatus, PlanStep, StepOwner,
+    ValidationEntry, ValidationPolicy,
+};
+use serde::Deserialize;
+use std::path::Path;
+
+pub fn register_tools(registry: &mut NativeToolRegistry) {
+    registry.register(Box::new(PlanFrameProposeTool));
+    registry.register(Box::new(PlanFrameGetTool));
+    registry.register(Box::new(PlanFrameListTool));
+    registry.register(Box::new(PlanFrameApproveTool));
+    registry.register(Box::new(PlanFrameAmendTool));
+    registry.register(Box::new(PlanFrameHistoryTool));
+}
+
+fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
+    manifest.capabilities.iter().any(|c| {
+        matches!(c, Capability::PlanFrameAccess { .. })
+    })
+}
+
+fn can_perform(manifest: &AgentManifest, operation: &str) -> bool {
+    manifest.capabilities.iter().any(|c| {
+        match c {
+            Capability::PlanFrameAccess { patterns } => patterns
+                .iter()
+                .any(|p| p == "*" || p == operation || operation.starts_with(p.trim_end_matches('.'))),
+            _ => false,
+        }
+    })
+}
+
+fn new_plan_id() -> String {
+    let bytes = uuid::Uuid::new_v4();
+    format!("plan-{}", hex::encode(&bytes.as_bytes()[..6]))
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+pub struct PlanFrameProposeTool;
+
+impl NativeTool for PlanFrameProposeTool {
+    fn name(&self) -> &'static str {
+        "planframe_propose"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Propose a new PlanFrame for collaborative work. Creates a workflow if one does not exist yet. The plan starts in 'awaiting_approval' status and must be approved before agents act on it.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short title for the plan"
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "Detailed objective and acceptance criteria"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Ordered list of plan steps",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step_id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "owner": { "type": "string", "enum": ["planner", "agent", "operator", "shared"] },
+                                "agent_id": { "type": "string" },
+                                "depends_on": { "type": "array", "items": { "type": "string" } },
+                                "notes": { "type": "string" }
+                            },
+                            "required": ["step_id", "title"]
+                        }
+                    },
+                    "validation_policy": {
+                        "type": "object",
+                        "description": "Validation checks required/advisory for this plan",
+                        "properties": {
+                            "entries": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "validation_id": { "type": "string" },
+                                        "title": { "type": "string" },
+                                        "class": { "type": "string", "enum": ["mechanical_safety", "security_review", "correctness_check", "quality_check", "packaging_check"] },
+                                        "requirement": { "type": "string", "enum": ["required", "advisory"] }
+                                    },
+                                    "required": ["validation_id", "title"]
+                                }
+                            }
+                        }
+                    }
+                },
+                "required": ["title", "objective"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_plan_frame_access(manifest) && can_perform(manifest, "planframe.propose")
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct StepInput {
+            step_id: String,
+            title: String,
+            owner: Option<String>,
+            agent_id: Option<String>,
+            depends_on: Option<Vec<String>>,
+            notes: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ValidationInput {
+            validation_id: String,
+            title: String,
+            class: Option<String>,
+            requirement: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ValidationPolicyInput {
+            entries: Option<Vec<ValidationInput>>,
+        }
+
+        #[derive(Deserialize)]
+        struct Args {
+            title: String,
+            objective: String,
+            steps: Option<Vec<StepInput>>,
+            validation_policy: Option<ValidationPolicyInput>,
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            }))?);
+        };
+
+        let Some(config) = config else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway config not available"
+            }))?);
+        };
+
+        let session_id = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
+        let root_session_id = session_id.split('/').next().unwrap_or(session_id);
+
+        let workflow = crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            config,
+            Some(&store),
+            root_session_id,
+            Some(&manifest.agent.id),
+        )?;
+
+        let plan_id = new_plan_id();
+        let now = now_rfc3339();
+
+        let steps: Vec<PlanStep> = args
+            .steps
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| PlanStep {
+                step_id: s.step_id,
+                title: s.title,
+                owner: match s.owner.as_deref() {
+                    Some("agent") => StepOwner::Agent,
+                    Some("operator") => StepOwner::Operator,
+                    Some("shared") => StepOwner::Shared,
+                    _ => StepOwner::Planner,
+                },
+                depends_on: s.depends_on.unwrap_or_default(),
+                agent_id: s.agent_id,
+                notes: s.notes,
+            })
+            .collect();
+
+        let validation_policy = match args.validation_policy {
+            Some(vp) => ValidationPolicy {
+                entries: vp
+                    .entries
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|v| ValidationEntry {
+                        validation_id: v.validation_id,
+                        title: v.title,
+                        class: match v.class.as_deref() {
+                            Some("security_review") => autonoetic_types::plan_frame::ValidationClass::SecurityReview,
+                            Some("correctness_check") => autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck,
+                            Some("quality_check") => autonoetic_types::plan_frame::ValidationClass::QualityCheck,
+                            Some("packaging_check") => autonoetic_types::plan_frame::ValidationClass::PackagingCheck,
+                            _ => autonoetic_types::plan_frame::ValidationClass::MechanicalSafety,
+                        },
+                        requirement: match v.requirement.as_deref() {
+                            Some("advisory") => autonoetic_types::plan_frame::ValidationRequirement::Advisory,
+                            Some("waived") => autonoetic_types::plan_frame::ValidationRequirement::Waived,
+                            _ => autonoetic_types::plan_frame::ValidationRequirement::Required,
+                        },
+                    })
+                    .collect(),
+            },
+            None => ValidationPolicy::default(),
+        };
+
+        let plan = PlanFrame {
+            plan_id: plan_id.clone(),
+            version: 1,
+            parent_version: None,
+            workflow_id: workflow.workflow_id.clone(),
+            root_session_id: root_session_id.to_string(),
+            title: args.title,
+            objective: args.objective,
+            status: PlanStatus::AwaitingApproval,
+            steps,
+            validation_policy,
+            approved_by: None,
+            approved_at: None,
+            created_by_agent_id: manifest.agent.id.clone(),
+            reason: None,
+            created_at: now,
+        };
+
+        store.save_plan_frame(&plan)?;
+
+        let mut updated_workflow = workflow;
+        updated_workflow.active_plan_ref = Some(PlanRef {
+            plan_id: plan_id.clone(),
+            version: 1,
+        });
+        updated_workflow.updated_at = now_rfc3339();
+        crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &updated_workflow)?;
+
+        let event_id = {
+            let bytes = uuid::Uuid::new_v4();
+            format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
+        };
+        crate::scheduler::workflow_store::append_workflow_event(
+            config,
+            Some(&store),
+            &autonoetic_types::workflow::WorkflowEventRecord {
+                event_id,
+                workflow_id: updated_workflow.workflow_id.clone(),
+                task_id: None,
+                event_type: "planframe.proposed".to_string(),
+                agent_id: Some(manifest.agent.id.clone()),
+                payload: serde_json::json!({
+                    "plan_id": plan_id,
+                    "title": plan.title,
+                    "step_count": plan.steps.len(),
+                }),
+                occurred_at: now_rfc3339(),
+            },
+        )?;
+
+        let summary = plan.compact_summary();
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "plan_id": plan_id,
+            "workflow_id": updated_workflow.workflow_id,
+            "status": "awaiting_approval",
+            "version": 1,
+            "message": "Plan proposed. Operator approval is required before agents can act on it.",
+            "summary": summary,
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct PlanFrameGetTool;
+
+impl NativeTool for PlanFrameGetTool {
+    fn name(&self) -> &'static str {
+        "planframe_get"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Get a PlanFrame by plan_id (latest version), or a specific revision by version. Omit plan_id to get the active plan for the current workflow.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "The plan ID to retrieve. Omit to get the active plan for the current workflow."
+                    },
+                    "version": {
+                        "type": "integer",
+                        "description": "Specific revision version to retrieve. Omit for latest."
+                    },
+                    "compact": {
+                        "type": "boolean",
+                        "description": "If true, return a compact summary instead of the full plan."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_plan_frame_access(manifest)
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            plan_id: Option<String>,
+            version: Option<u32>,
+            compact: Option<bool>,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            }))?);
+        };
+
+        let plan = if let Some(pid) = &args.plan_id {
+            if let Some(ver) = args.version {
+                store.load_plan_frame_revision(pid, ver)?
+            } else {
+                store.load_plan_frame(pid)?
+            }
+        } else {
+            let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required when plan_id not specified"))?;
+            let root = sid.split('/').next().unwrap_or(sid);
+            let wf_id = store.resolve_workflow_id(root)?;
+            match wf_id {
+                Some(wid) => store.load_active_plan_for_workflow(&wid)?,
+                None => None,
+            }
+        };
+
+        match plan {
+            Some(p) => {
+                if args.compact.unwrap_or(false) {
+                    Ok(serde_json::to_string(&serde_json::json!({
+                        "ok": true,
+                        "summary": p.compact_summary(),
+                    }))?)
+                } else {
+                    Ok(serde_json::to_string(&serde_json::json!({
+                        "ok": true,
+                        "plan": p,
+                    }))?)
+                }
+            }
+            None => Ok(serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "plan": null,
+                "message": "No plan found"
+            }))?),
+        }
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct PlanFrameListTool;
+
+impl NativeTool for PlanFrameListTool {
+    fn name(&self) -> &'static str {
+        "planframe_list"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "List all PlanFrames for the current workflow (latest revision of each). Returns compact summaries.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_plan_frame_access(manifest)
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        _arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            }))?);
+        };
+
+        let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
+        let root = sid.split('/').next().unwrap_or(sid);
+        let wf_id = store.resolve_workflow_id(root)?;
+
+        let plans = match wf_id {
+            Some(wid) => store.list_plan_frames_for_workflow(&wid)?,
+            None => vec![],
+        };
+
+        let summaries: Vec<PlanFrameSummary> = plans.iter().map(|p| p.compact_summary()).collect();
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "plans": summaries,
+            "count": summaries.len(),
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct PlanFrameApproveTool;
+
+impl NativeTool for PlanFrameApproveTool {
+    fn name(&self) -> &'static str {
+        "planframe_approve"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Approve a PlanFrame. Moves status from 'awaiting_approval' to 'approved'. Typically invoked by the operator through the gateway, not directly by agents.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "The plan ID to approve (approves the latest revision)"
+                    },
+                    "approved_by": {
+                        "type": "string",
+                        "description": "Identity of the approver (e.g., 'operator', user ID)"
+                    }
+                },
+                "required": ["plan_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_plan_frame_access(manifest) && can_perform(manifest, "planframe.approve")
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            plan_id: String,
+            approved_by: Option<String>,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            }))?);
+        };
+
+        let Some(plan) = store.load_plan_frame(&args.plan_id)? else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Plan not found"
+            }))?);
+        };
+
+        if plan.status != PlanStatus::AwaitingApproval {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": format!("Plan is in '{}' status; only awaiting_approval plans can be approved", plan.status.as_str())
+            }))?);
+        }
+
+        let now = now_rfc3339();
+        let approver = args.approved_by.unwrap_or_else(|| manifest.agent.id.clone());
+
+        store.update_plan_frame_status(
+            &plan.plan_id,
+            plan.version,
+            PlanStatus::Approved,
+            Some(&approver),
+            Some(&now),
+        )?;
+
+        if let Some(config) = config {
+            crate::scheduler::workflow_store::append_workflow_event(
+                config,
+                Some(&store),
+                &autonoetic_types::workflow::WorkflowEventRecord {
+                    event_id: {
+                        let bytes = uuid::Uuid::new_v4();
+                        format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
+                    },
+                    workflow_id: plan.workflow_id.clone(),
+                    task_id: None,
+                    event_type: "planframe.approved".to_string(),
+                    agent_id: Some(manifest.agent.id.clone()),
+                    payload: serde_json::json!({
+                        "plan_id": plan.plan_id,
+                        "version": plan.version,
+                    }),
+                    occurred_at: now,
+                },
+            )?;
+        }
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "plan_id": plan.plan_id,
+            "status": "approved",
+            "version": plan.version,
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct PlanFrameAmendTool;
+
+impl NativeTool for PlanFrameAmendTool {
+    fn name(&self) -> &'static str {
+        "planframe_amend"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the plan was approved, the new revision requires re-approval.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "The plan ID to amend"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Updated title (optional, defaults to current)"
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "Updated objective (optional, defaults to current)"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Complete replacement step list (optional, defaults to current)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step_id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "owner": { "type": "string", "enum": ["planner", "agent", "operator", "shared"] },
+                                "agent_id": { "type": "string" },
+                                "depends_on": { "type": "array", "items": { "type": "string" } },
+                                "notes": { "type": "string" }
+                            },
+                            "required": ["step_id", "title"]
+                        }
+                    },
+                    "validation_policy": {
+                        "type": "object",
+                        "description": "Updated validation policy (optional, defaults to current)",
+                        "properties": {
+                            "entries": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "validation_id": { "type": "string" },
+                                        "title": { "type": "string" },
+                                        "class": { "type": "string", "enum": ["mechanical_safety", "security_review", "correctness_check", "quality_check", "packaging_check"] },
+                                        "requirement": { "type": "string", "enum": ["required", "advisory"] }
+                                    },
+                                    "required": ["validation_id", "title"]
+                                }
+                            }
+                        }
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Reason for the amendment"
+                    }
+                },
+                "required": ["plan_id", "reason"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_plan_frame_access(manifest) && can_perform(manifest, "planframe.amend")
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct StepInput {
+            step_id: String,
+            title: String,
+            owner: Option<String>,
+            agent_id: Option<String>,
+            depends_on: Option<Vec<String>>,
+            notes: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ValidationInput {
+            validation_id: String,
+            title: String,
+            class: Option<String>,
+            requirement: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ValidationPolicyInput {
+            entries: Option<Vec<ValidationInput>>,
+        }
+
+        #[derive(Deserialize)]
+        struct Args {
+            plan_id: String,
+            title: Option<String>,
+            objective: Option<String>,
+            steps: Option<Vec<StepInput>>,
+            validation_policy: Option<ValidationPolicyInput>,
+            reason: Option<String>,
+        }
+
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            }))?);
+        };
+
+        let Some(current) = store.load_plan_frame(&args.plan_id)? else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Plan not found"
+            }))?);
+        };
+
+        if current.status == PlanStatus::Completed || current.status == PlanStatus::Cancelled {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": format!("Cannot amend a {} plan", current.status.as_str())
+            }))?);
+        }
+
+        let old_version = current.version;
+        let new_version = old_version + 1;
+
+        let steps = match args.steps {
+            Some(steps) => steps
+                .into_iter()
+                .map(|s| PlanStep {
+                    step_id: s.step_id,
+                    title: s.title,
+                    owner: match s.owner.as_deref() {
+                        Some("agent") => StepOwner::Agent,
+                        Some("operator") => StepOwner::Operator,
+                        Some("shared") => StepOwner::Shared,
+                        _ => StepOwner::Planner,
+                    },
+                    depends_on: s.depends_on.unwrap_or_default(),
+                    agent_id: s.agent_id,
+                    notes: s.notes,
+                })
+                .collect(),
+            None => current.steps.clone(),
+        };
+
+        let validation_policy = match args.validation_policy {
+            Some(vp) => ValidationPolicy {
+                entries: vp
+                    .entries
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|v| ValidationEntry {
+                        validation_id: v.validation_id,
+                        title: v.title,
+                        class: match v.class.as_deref() {
+                            Some("security_review") => autonoetic_types::plan_frame::ValidationClass::SecurityReview,
+                            Some("correctness_check") => autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck,
+                            Some("quality_check") => autonoetic_types::plan_frame::ValidationClass::QualityCheck,
+                            Some("packaging_check") => autonoetic_types::plan_frame::ValidationClass::PackagingCheck,
+                            _ => autonoetic_types::plan_frame::ValidationClass::MechanicalSafety,
+                        },
+                        requirement: match v.requirement.as_deref() {
+                            Some("advisory") => autonoetic_types::plan_frame::ValidationRequirement::Advisory,
+                            Some("waived") => autonoetic_types::plan_frame::ValidationRequirement::Waived,
+                            _ => autonoetic_types::plan_frame::ValidationRequirement::Required,
+                        },
+                    })
+                    .collect(),
+            },
+            None => current.validation_policy.clone(),
+        };
+
+        let now = now_rfc3339();
+
+        let new_revision = PlanFrame {
+            plan_id: current.plan_id.clone(),
+            version: new_version,
+            parent_version: Some(old_version),
+            workflow_id: current.workflow_id.clone(),
+            root_session_id: current.root_session_id.clone(),
+            title: args.title.unwrap_or(current.title.clone()),
+            objective: args.objective.unwrap_or(current.objective.clone()),
+            status: PlanStatus::AwaitingApproval,
+            steps,
+            validation_policy,
+            approved_by: None,
+            approved_at: None,
+            created_by_agent_id: manifest.agent.id.clone(),
+            reason: args.reason,
+            created_at: now,
+        };
+
+        store.save_plan_frame(&new_revision)?;
+
+        if let Some(config) = config {
+            let wf = crate::scheduler::workflow_store::load_workflow_run(
+                config,
+                Some(&store),
+                &current.workflow_id,
+            )?;
+            if let Some(mut wf) = wf {
+                wf.active_plan_ref = Some(PlanRef {
+                    plan_id: current.plan_id.clone(),
+                    version: new_version,
+                });
+                wf.updated_at = now_rfc3339();
+                crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &wf)?;
+            }
+
+            crate::scheduler::workflow_store::append_workflow_event(
+                config,
+                Some(&store),
+                &autonoetic_types::workflow::WorkflowEventRecord {
+                    event_id: {
+                        let bytes = uuid::Uuid::new_v4();
+                        format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
+                    },
+                    workflow_id: current.workflow_id.clone(),
+                    task_id: None,
+                    event_type: "planframe.amended".to_string(),
+                    agent_id: Some(manifest.agent.id.clone()),
+                    payload: serde_json::json!({
+                        "plan_id": current.plan_id,
+                        "old_version": old_version,
+                        "new_version": new_version,
+                    }),
+                    occurred_at: now_rfc3339(),
+                },
+            )?;
+        }
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "plan_id": current.plan_id,
+            "version": new_version,
+            "status": "awaiting_approval",
+            "parent_version": old_version,
+            "message": "Plan amended (new immutable revision). Operator re-approval is required.",
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}
+
+pub struct PlanFrameHistoryTool;
+
+impl NativeTool for PlanFrameHistoryTool {
+    fn name(&self) -> &'static str {
+        "planframe_history"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Get the full revision history of a plan. Returns all revisions from first to latest, showing how the plan evolved.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "string",
+                        "description": "The plan ID to retrieve history for"
+                    }
+                },
+                "required": ["plan_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        has_plan_frame_access(manifest)
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        _gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        _session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            plan_id: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(store) = gateway_store else {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": "Gateway store not available"
+            }))?);
+        };
+
+        let revisions = store.list_plan_revisions(&args.plan_id)?;
+
+        if revisions.is_empty() {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "plan_id": args.plan_id,
+                "revisions": [],
+                "message": "No revisions found for this plan"
+            }))?);
+        }
+
+        let summaries: Vec<PlanFrameSummary> = revisions.iter().map(|r| r.compact_summary()).collect();
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "plan_id": args.plan_id,
+            "revisions": summaries,
+            "count": summaries.len(),
+        }))?)
+    }
+
+    fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+}

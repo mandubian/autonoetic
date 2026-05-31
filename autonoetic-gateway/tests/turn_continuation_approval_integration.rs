@@ -543,6 +543,7 @@ async fn test_parallel_join_waits_for_approval_task_completion() -> anyhow::Resu
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![approval_task_id.to_string(), fast_task_id.to_string()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 
@@ -814,6 +815,7 @@ async fn test_approval_timeout_fails_task_and_satisfies_join() -> anyhow::Result
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.to_string()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 
@@ -976,6 +978,7 @@ async fn test_restart_during_suspension_then_approve_and_resume() -> anyhow::Res
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.to_string()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 
@@ -1172,6 +1175,7 @@ async fn test_two_approval_tasks_both_resume_before_join_satisfies() -> anyhow::
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_a.to_string(), task_b.to_string()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 
@@ -1455,6 +1459,7 @@ async fn test_workflow_cancel_task_cancels_suspended_task_and_satisfies_join() -
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.to_string()],
+        active_plan_ref: None,
     };
     workflow_store::save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 

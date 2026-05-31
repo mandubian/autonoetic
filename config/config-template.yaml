@@ -524,6 +524,11 @@ llm_preset_mapping:
   context_compression: haiku      # capsule summarization LLM (cross-cutting role)
   default: gemma4_31b
 
+# ── Default Orchestrator ────────────────────────────────────────────
+# The lead agent used for new sessions. Override to use the
+# collaborative planner for PlanFrame-aware workflows.
+# default_orchestrator: "planner.collaborative"
+
 
 # ── Template → Preset Mapping ────────────────────────────────────────
 # Used during 'agent bootstrap' and 'agent init --template <name>'.

@@ -38,6 +38,7 @@ fn retry_budget_exhaustion_emits_event_and_stops_further_retry_progress() -> any
         queued_task_ids: vec![],
         join_policy: Default::default(),
         join_task_ids: vec![task_id.to_string()],
+        active_plan_ref: None,
     };
     save_workflow_run(&config, Some(store.as_ref()), &workflow)?;
 

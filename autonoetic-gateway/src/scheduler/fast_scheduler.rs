@@ -287,6 +287,7 @@ pub async fn run_fast_scheduler_tick_at(
                         queued_task_ids: Vec::new(),
                         join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
                         join_task_ids: Vec::new(),
+                        active_plan_ref: None,
                     };
                     if let Err(e) =
                         workflow_store::save_workflow_run(&config, Some(store.as_ref()), &new_run)

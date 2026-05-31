@@ -50,6 +50,8 @@ rules:
     tier: workflow
   - prefix: agent_inspect
     tier: workflow
+  - prefix: planframe_
+    tier: workflow
 
   # Specialized tier: expensive or role-specific operations.
   - prefix: web_
