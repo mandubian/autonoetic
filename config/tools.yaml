@@ -71,6 +71,8 @@ rules:
     tier: workflow
   - prefix: artifact_project
     tier: workflow
+  - prefix: validation_
+    tier: workflow
 
   # Specialized tier: expensive or role-specific operations.
   - prefix: web_
