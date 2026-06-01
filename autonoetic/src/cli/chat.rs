@@ -276,6 +276,10 @@ enum SlashCommand {
     WbDiscard,
     WbDiff,
     WbStatus,
+    /// `/return [--force] [note...]` — hand the active workbench back to the
+    /// selected orchestrator (default: planner.default). Refuses to proceed
+    /// when the workbench has unsaved edits unless `--force` is supplied.
+    ReturnToAgent { force: bool, message: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +291,17 @@ enum ChatOutbound {
     /// Notify the gateway that an approval was resolved so it can transition
     /// `async_results` from `SuspendedApproval` to `Processing`.
     ApprovalResolved { session_id: String, root_session_id: Option<String> },
+    /// Hand the active workbench back to a selected orchestrator. The
+    /// `message` is the natural-language wake-up string the orchestrator
+    /// sees; `target_agent_id` is the resolved orchestrator id
+    /// (planner.default by default). `metadata` carries the structured
+    /// `workbench_reconciled` payload for the gateway to attach to the
+    /// event for downstream tooling.
+    ReturnToAgent {
+        message: String,
+        target_agent_id: String,
+        metadata: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1037,6 +1052,23 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
                 Some(other) => Err(format!("Unknown /wb subcommand '{}'. Try: status, diff, reconcile, discard.", other)),
             }
         }
+        "/return" => {
+            let mut force = false;
+            let mut note_tokens: Vec<String> = Vec::new();
+            for tok in parts {
+                if tok == "--force" || tok == "-f" {
+                    force = true;
+                } else {
+                    note_tokens.push(tok.to_string());
+                }
+            }
+            let message = if note_tokens.is_empty() {
+                None
+            } else {
+                Some(note_tokens.join(" "))
+            };
+            Ok(SlashCommand::ReturnToAgent { force, message })
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -1050,6 +1082,8 @@ fn format_help_card() -> String {
         "  /status                Show current session details",
         "  /pending               Open pending approvals & interactions overlay (Ctrl+P)",
         "  /wb [status|diff|reconcile|discard]  Workbench actions",
+        "  /return [--force] [note]   Hand the active workbench back to the orchestrator (planner.default).",
+        "                            Refuses if there are unsaved edits; use --force to override (edits are dropped).",
         "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
         "  /policy <text>          Route natural language governance requests to governance-author.default",
         "  /persona [text]        Show or set session persona (user context/preferences)",
@@ -1783,6 +1817,18 @@ fn handle_slash_command_submission(
             }
             true
         }
+        // `/return` is handled in the main event loop (where `tx` is in
+        // scope) so it can dispatch the wake-up via the channel. This arm
+        // should never be reached in practice; if it is, the user gets a
+        // clear error instead of a silent no-op.
+        SlashCommand::ReturnToAgent { .. } => {
+            app.add_message(
+                MessageRole::System,
+                "/return could not be dispatched from this code path. Please retry."
+                    .to_string(),
+            );
+            true
+        }
         SlashCommand::WbReconcile | SlashCommand::WbDiscard => {
             match &app.active_workbench {
                 Some(wb) => {
@@ -1969,6 +2015,386 @@ fn format_workbench_diff(
         }
     }
     lines.join("\n")
+}
+
+/// Inputs for `build_return_to_agent_wakeup`. Kept as a plain struct so the
+/// builder stays unit-testable without constructing a full workbench record.
+/// Owns all of its data (no borrowed references) so the caller can free
+/// scratch workbench lookups after constructing the input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReturnToAgentInput {
+    workbench_id: String,
+    base_artifact_id: String,
+    /// True when the workbench has been reconciled (i.e. the operator already
+    /// committed the edits into a new artifact revision). False when the
+    /// workbench is still active and the wake-up is being sent without a
+    /// prior reconcile (operator chose --force).
+    reconciled: bool,
+    /// Optional new artifact ref/id from the most recent reconcile.
+    new_artifact_ref: Option<String>,
+    new_artifact_id: Option<String>,
+    /// Optional operator note typed alongside `/return ...`.
+    operator_note: Option<String>,
+    /// Number of files that differ from the base artifact (modified+added+deleted).
+    /// 0 when the workbench is in sync with the base (or already reconciled).
+    unsaved_change_count: usize,
+    /// IDs of files modified by the operator since the projection. May be
+    /// empty when the workbench is reconciled or unsaved_change_count is 0.
+    operator_modified_files: Vec<String>,
+    /// IDs of files added by the operator since the projection.
+    operator_added_files: Vec<String>,
+    /// IDs of files deleted by the operator since the projection.
+    deleted_files: Vec<String>,
+}
+
+/// Output of `build_return_to_agent_wakeup`. The `message` is the natural
+/// language text the orchestrator will read; `metadata` is the structured
+/// `workbench_reconciled` payload attached to the event.ingest call for
+/// downstream tooling and the agent's own state updates.
+#[derive(Debug, Clone, PartialEq)]
+struct ReturnToAgentWakeup {
+    message: String,
+    metadata: serde_json::Value,
+}
+
+fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWakeup {
+    let mut structured = serde_json::json!({
+        "event": "workbench_reconciled",
+        "workbench_id": input.workbench_id,
+        "base_artifact_id": input.base_artifact_id,
+        "reconciled": input.reconciled,
+        "unsaved_change_count": input.unsaved_change_count,
+        "operator_modified": !input.operator_modified_files.is_empty()
+            || !input.operator_added_files.is_empty()
+            || !input.deleted_files.is_empty(),
+    });
+
+    if let Some(new_artifact_ref) = &input.new_artifact_ref {
+        structured["new_artifact_ref"] = serde_json::Value::String(new_artifact_ref.clone());
+    }
+    if let Some(new_artifact_id) = &input.new_artifact_id {
+        structured["new_artifact_id"] = serde_json::Value::String(new_artifact_id.clone());
+    }
+    if !input.operator_modified_files.is_empty() {
+        structured["operator_modified_files"] = serde_json::Value::Array(
+            input
+                .operator_modified_files
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        );
+    }
+    if !input.operator_added_files.is_empty() {
+        structured["operator_added_files"] = serde_json::Value::Array(
+            input
+                .operator_added_files
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        );
+    }
+    if !input.deleted_files.is_empty() {
+        structured["deleted_files"] = serde_json::Value::Array(
+            input
+                .deleted_files
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        );
+    }
+
+    let artifact_ref_label = input
+        .new_artifact_ref
+        .as_ref()
+        .map(|r| format!("`{}`", r))
+        .unwrap_or_else(|| format!("base `{}`", input.base_artifact_id));
+
+    let mut message = String::new();
+    message.push_str(&format!(
+        "Operator returned workbench `{}` to you. Active artifact: {}.",
+        input.workbench_id, artifact_ref_label
+    ));
+    if input.reconciled {
+        message.push_str(" Status: reconciled.");
+    } else if input.unsaved_change_count > 0 {
+        message.push_str(&format!(
+            " Status: active with {} unsaved change(s) (sent with --force; edits were not committed).",
+            input.unsaved_change_count
+        ));
+    } else {
+        message.push_str(" Status: active, in sync with base artifact (no edits).");
+    }
+    if let Some(note) = &input.operator_note {
+        if !note.trim().is_empty() {
+            message.push_str(&format!(" Operator note: {}.", note.trim()));
+        }
+    }
+    message.push_str(" Please continue the workflow.");
+
+    ReturnToAgentWakeup {
+        message,
+        metadata: serde_json::json!({
+            "workbench_reconciled": structured,
+        }),
+    }
+}
+
+/// Read the active workbench's operator-edited file lists from the gateway
+/// store. Returns `None` when the workbench is not found, the store is
+/// missing, or the workspace dir is gone.
+///
+/// For a *reconciled* workbench, the data is sourced from
+/// `.autonoetic/reconciliation.json` (written by the workbench_reconcile
+/// tool) so the wake-up carries the new artifact ref/id and the
+/// operator-vs-agent authorship classification recorded at reconcile time.
+/// For an *active* workbench, the data is computed live from
+/// `base_digests.json` and the current files on disk.
+fn read_return_to_agent_input(
+    gateway_store: Option<&GatewayStore>,
+    workbench_id: &str,
+    operator_note: Option<&str>,
+) -> Option<ReturnToAgentInput> {
+    let store = gateway_store?;
+    let wb = store.load_workbench(workbench_id).ok().flatten()?;
+
+    let reconciled = matches!(wb.status, autonoetic_types::workbench::WorkbenchStatus::Reconciled);
+
+    let source_dir = Path::new(&wb.workspace_path);
+    let meta_dir = source_dir.parent().map(|p| p.join(".autonoetic"));
+
+    if reconciled {
+        // Reconciled workbench: trust the recorded provenance. If the
+        // reconciliation.json is missing, fall back to the base artifact
+        // ref and an empty file list.
+        let provenance_path = meta_dir
+            .as_ref()
+            .map(|d| d.join("reconciliation.json"));
+        let provenance: Option<serde_json::Value> = provenance_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+
+        let new_artifact_ref = provenance
+            .as_ref()
+            .and_then(|v| v.get("new_artifact_ref"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let new_artifact_id = provenance
+            .as_ref()
+            .and_then(|v| v.get("new_artifact_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let modified: Vec<String> = provenance
+            .as_ref()
+            .and_then(|v| v.get("operator_modified"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let added: Vec<String> = provenance
+            .as_ref()
+            .and_then(|v| v.get("operator_added"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let deleted: Vec<String> = provenance
+            .as_ref()
+            .and_then(|v| v.get("deleted"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let unsaved_change_count = modified.len() + added.len() + deleted.len();
+        return Some(ReturnToAgentInput {
+            workbench_id: wb.workbench_id,
+            base_artifact_id: wb.base_artifact_id,
+            reconciled,
+            new_artifact_ref,
+            new_artifact_id,
+            operator_note: operator_note.map(|s| s.to_string()),
+            unsaved_change_count,
+            operator_modified_files: modified,
+            operator_added_files: added,
+            deleted_files: deleted,
+        });
+    }
+
+    // Active workbench: compute live from base_digests + current files.
+    if !source_dir.exists() {
+        return Some(ReturnToAgentInput {
+            workbench_id: wb.workbench_id,
+            base_artifact_id: wb.base_artifact_id,
+            reconciled,
+            new_artifact_ref: None,
+            new_artifact_id: None,
+            operator_note: operator_note.map(|s| s.to_string()),
+            unsaved_change_count: 0,
+            operator_modified_files: Vec::new(),
+            operator_added_files: Vec::new(),
+            deleted_files: Vec::new(),
+        });
+    }
+
+    let base_digests: std::collections::HashMap<String, String> = meta_dir
+        .as_ref()
+        .and_then(|d| {
+            let p = d.join("base_digests.json");
+            if p.exists() {
+                serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    let mut current_names: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(source_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() {
+            let rel = entry.path().strip_prefix(source_dir).unwrap();
+            let rel_str = rel.to_string_lossy().to_string();
+            if rel_str.starts_with(".autonoetic/") {
+                continue;
+            }
+            current_names.push(rel_str);
+        }
+    }
+    let current_set: std::collections::HashSet<&str> =
+        current_names.iter().map(|s| s.as_str()).collect();
+
+    let mut modified: Vec<String> = Vec::new();
+    let mut added: Vec<String> = Vec::new();
+    let mut deleted: Vec<String> = Vec::new();
+    for name in &current_names {
+        match base_digests.get(name.as_str()) {
+            Some(base_digest) => {
+                match file_sha256(&source_dir.join(name)) {
+                    Ok(current_digest) if current_digest == *base_digest => {}
+                    _ => modified.push(name.clone()),
+                }
+            }
+            None => added.push(name.clone()),
+        }
+    }
+    for name in base_digests.keys() {
+        if !current_set.contains(name.as_str()) {
+            deleted.push(name.clone());
+        }
+    }
+
+    let unsaved_change_count = modified.len() + added.len() + deleted.len();
+
+    Some(ReturnToAgentInput {
+        workbench_id: wb.workbench_id,
+        base_artifact_id: wb.base_artifact_id,
+        reconciled,
+        new_artifact_ref: None,
+        new_artifact_id: None,
+        operator_note: operator_note.map(|s| s.to_string()),
+        unsaved_change_count,
+        operator_modified_files: modified,
+        operator_added_files: added,
+        deleted_files: deleted,
+    })
+}
+
+/// Outcome of `prepare_return_to_agent_wakeup`. Drives the TUI's response
+/// to a `/return` slash command: either render an inline error and stop, or
+/// dispatch the wake-up to the orchestrator.
+#[derive(Debug)]
+enum ReturnToAgentStatus {
+    /// No active workbench — nothing to return. TUI shows a friendly message.
+    NoWorkbench,
+    /// Workbench has unsaved edits and `--force` was not supplied. TUI
+    /// shows the refusal (with the list of edited files) and stops.
+    Refused { reason: String },
+    /// Wake-up is built and ready to send. TUI dispatches via the channel.
+    Ready {
+        target_agent_id: String,
+        outbound_message: String,
+        metadata: serde_json::Value,
+    },
+}
+
+/// Prepare the wake-up that `/return` will dispatch. Pulls the active
+/// workbench from the gateway store, applies the unsaved-edits safety
+/// check, and produces the structured payload for `event.ingest`.
+fn prepare_return_to_agent_wakeup(
+    gateway_store: Option<&GatewayStore>,
+    active_workbench: Option<&WorkbenchOverview>,
+    force: bool,
+    operator_note: Option<&str>,
+) -> ReturnToAgentStatus {
+    let Some(wb_overview) = active_workbench else {
+        return ReturnToAgentStatus::NoWorkbench;
+    };
+
+    let Some(input) = read_return_to_agent_input(
+        gateway_store,
+        &wb_overview.workbench_id,
+        operator_note,
+    ) else {
+        return ReturnToAgentStatus::Refused {
+            reason: format!(
+                "Workbench {} is no longer in the gateway store. Cannot return.",
+                wb_overview.workbench_id
+            ),
+        };
+    };
+
+    if !force && !input.reconciled && input.unsaved_change_count > 0 {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Workbench {} has {} unsaved edit(s). Refusing to silently drop them.",
+            input.workbench_id, input.unsaved_change_count
+        ));
+        if !input.operator_modified_files.is_empty() {
+            lines.push("  Modified:".to_string());
+            for f in &input.operator_modified_files {
+                lines.push(format!("    ~ {}", f));
+            }
+        }
+        if !input.operator_added_files.is_empty() {
+            lines.push("  Added:".to_string());
+            for f in &input.operator_added_files {
+                lines.push(format!("    + {}", f));
+            }
+        }
+        if !input.deleted_files.is_empty() {
+            lines.push("  Deleted:".to_string());
+            for f in &input.deleted_files {
+                lines.push(format!("    - {}", f));
+            }
+        }
+        lines.push(
+            "Reconcile them first (autonoetic workbench reconcile <wb>) or re-run with --force to drop the edits and return the base artifact.".to_string(),
+        );
+        return ReturnToAgentStatus::Refused {
+            reason: lines.join("\n"),
+        };
+    }
+
+    let target_agent_id = "planner.default".to_string();
+    let wakeup = build_return_to_agent_wakeup(&input);
+
+    ReturnToAgentStatus::Ready {
+        target_agent_id,
+        outbound_message: wakeup.message,
+        metadata: wakeup.metadata,
+    }
 }
 
 /// Pending `user.ask` rows for this terminal session: exact session plus any under the same root
@@ -4845,6 +5271,9 @@ async fn handle_chat_test_mode(
                  Ok(SlashCommand::WbStatus | SlashCommand::WbDiff | SlashCommand::WbReconcile | SlashCommand::WbDiscard) => {
                      println!("/wb commands are not supported in test mode.");
                  }
+                 Ok(SlashCommand::ReturnToAgent { .. }) => {
+                     println!("/return is not supported in test mode.");
+                 }
                  Err(error) => {
                     println!("{}", error);
                 }
@@ -5529,6 +5958,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
                     let message_text = match &outbound {
                         ChatOutbound::Chat(s) | ChatOutbound::PolicyAuthor(s) => s.clone(),
+                        ChatOutbound::ReturnToAgent { message, .. } => message.clone(),
                         ChatOutbound::SessionStatusQuery { .. } | ChatOutbound::ApprovalResolved { .. } => unreachable!(),
                     };
                     // Pending user.ask: gateway-owned answer + resume (workflow Runnable or session checkpoint).
@@ -5663,21 +6093,59 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         }
                     }
 
-                    let (target_agent_id, ingest_message) = match &outbound {
-                        ChatOutbound::Chat(_) => (app.target_hint.clone(), message_text.clone()),
+                    // /return ingests must target the root session: the
+                    // router only reroutes child→root for event_type=="chat",
+                    // so a workbench_reconciled ingest from a child session
+                    // would otherwise wake the orchestrator on the child.
+                    let return_root_session_id = get_root_session_id(app).to_string();
+
+                    let (target_agent_id, ingest_message, ingest_event_type, ingest_session_id, ingest_metadata) = match &outbound {
+                        ChatOutbound::Chat(_) => (
+                            app.target_hint.clone(),
+                            message_text.clone(),
+                            "chat".to_string(),
+                            app.session_id.clone(),
+                            metadata_value,
+                        ),
                         ChatOutbound::PolicyAuthor(_) => (
                             "governance-author.default".to_string(),
                             message_text.clone(),
+                            "chat".to_string(),
+                            app.session_id.clone(),
+                            metadata_value,
                         ),
+                        ChatOutbound::ReturnToAgent { message, target_agent_id, metadata } => {
+                            // Merge the workbench payload into the existing
+                            // terminal channel envelope (channel, sender,
+                            // session, etc.) so return-to-agent events
+                            // remain attributable like every other TUI
+                            // ingest.
+                            let mut merged = metadata_value;
+                            if let serde_json::Value::Object(ref mut map) = merged {
+                                map.insert("root_session_id".to_string(), serde_json::json!(return_root_session_id));
+                                if let Some(obj) = metadata.as_object() {
+                                    for (k, v) in obj {
+                                        map.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            (
+                                target_agent_id.clone(),
+                                message.clone(),
+                                "workbench_reconciled".to_string(),
+                                return_root_session_id.clone(),
+                                merged,
+                            )
+                        }
                         ChatOutbound::SessionStatusQuery { .. } | ChatOutbound::ApprovalResolved { .. } => unreachable!(),
                     };
 
                     let params = serde_json::json!({
-                        "event_type": "chat",
+                        "event_type": ingest_event_type,
                         "message": ingest_message,
-                        "session_id": app.session_id.clone(),
+                        "session_id": ingest_session_id,
                         "target_agent_id": target_agent_id,
-                        "metadata": metadata_value,
+                        "metadata": ingest_metadata,
                     });
 
                     let request = GatewayJsonRpcRequest {
@@ -5712,6 +6180,63 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 app.add_pending(id);
                                                 app.add_message(MessageRole::User, input.clone());
                                                 let _ = tx.send((id, ChatOutbound::PolicyAuthor(text)));
+                                            }
+                                            Ok(SlashCommand::ReturnToAgent { force, message }) => {
+                                                let id = app.next_id();
+                                                let return_status =
+                                                    prepare_return_to_agent_wakeup(
+                                                        gateway_store,
+                                                        app.active_workbench.as_ref(),
+                                                        force,
+                                                        message.as_deref(),
+                                                    );
+                                                match return_status {
+                                                    ReturnToAgentStatus::Refused { reason } => {
+                                                        app.add_message(
+                                                            MessageRole::System,
+                                                            reason,
+                                                        );
+                                                    }
+                                                    ReturnToAgentStatus::NoWorkbench => {
+                                                        app.add_message(
+                                                            MessageRole::System,
+                                                            "No active workbench to return. Use /wb status to check.".to_string(),
+                                                        );
+                                                    }
+                                                    ReturnToAgentStatus::Ready {
+                                                        target_agent_id,
+                                                        outbound_message,
+                                                        metadata,
+                                                    } => {
+                                                        let force_label = if force { " --force" } else { "" };
+                                                        let note_label = message
+                                                            .as_deref()
+                                                            .filter(|m| !m.trim().is_empty())
+                                                            .map(|m| format!(" \"{}\"", m))
+                                                            .unwrap_or_default();
+                                                        let echo = format!(
+                                                            "/return{force}{note} → {target} (workbench `{wb}`)",
+                                                            force = force_label,
+                                                            note = note_label,
+                                                            target = target_agent_id,
+                                                            wb = app
+                                                                .active_workbench
+                                                                .as_ref()
+                                                                .map(|w| w.workbench_id.as_str())
+                                                                .unwrap_or("?"),
+                                                        );
+                                                        app.add_message(MessageRole::User, echo);
+                                                        app.add_pending(id);
+                                                        let _ = tx.send((
+                                                            id,
+                                                            ChatOutbound::ReturnToAgent {
+                                                                message: outbound_message,
+                                                                target_agent_id,
+                                                                metadata,
+                                                            },
+                                                        ));
+                                                    }
+                                                }
                                             }
                                             Ok(command) => {
                                                 if !handle_slash_command_submission(
@@ -7478,9 +8003,10 @@ fn copy_selection_to_clipboard(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_approval_request_id, extract_structured_approval, format_lifecycle_line,
-        format_user_interaction_prompt, format_workflow_event_card, parse_slash_command,
-        SlashCommand,
+        build_return_to_agent_wakeup, extract_approval_request_id, extract_structured_approval,
+        format_lifecycle_line, format_user_interaction_prompt, format_workflow_event_card,
+        parse_slash_command, prepare_return_to_agent_wakeup, ReturnToAgentInput, ReturnToAgentStatus,
+        SlashCommand, WorkbenchOverview,
     };
     use autonoetic_types::background::{
         UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
@@ -7674,6 +8200,415 @@ mod tests {
             parse_slash_command("/session switch alpha").unwrap(),
             SlashCommand::SessionSwitch("alpha".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_slash_command_return_to_agent_default() {
+        assert_eq!(
+            parse_slash_command("/return").unwrap(),
+            SlashCommand::ReturnToAgent {
+                force: false,
+                message: None
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_slash_command_wb_subcommands() {
+        assert_eq!(
+            parse_slash_command("/wb").unwrap(),
+            SlashCommand::WbStatus
+        );
+        assert_eq!(
+            parse_slash_command("/wb status").unwrap(),
+            SlashCommand::WbStatus
+        );
+        assert_eq!(
+            parse_slash_command("/wb diff").unwrap(),
+            SlashCommand::WbDiff
+        );
+        assert_eq!(
+            parse_slash_command("/wb reconcile").unwrap(),
+            SlashCommand::WbReconcile
+        );
+        assert_eq!(
+            parse_slash_command("/wb discard").unwrap(),
+            SlashCommand::WbDiscard
+        );
+        // Subcommand is case-insensitive.
+        assert_eq!(
+            parse_slash_command("/wb DIFF").unwrap(),
+            SlashCommand::WbDiff
+        );
+        // Unknown subcommands return an error.
+        assert!(parse_slash_command("/wb unknown").is_err());
+    }
+
+    #[test]
+    fn test_parse_slash_command_return_to_agent_force_flag() {
+        assert_eq!(
+            parse_slash_command("/return --force").unwrap(),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: None
+            }
+        );
+        // Short form flag is accepted too.
+        assert_eq!(
+            parse_slash_command("/return -f").unwrap(),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: None
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_slash_command_return_to_agent_with_note() {
+        // Multiple tokens after /return are joined into a single operator note.
+        assert_eq!(
+            parse_slash_command("/return please look at the auth flow").unwrap(),
+            SlashCommand::ReturnToAgent {
+                force: false,
+                message: Some("please look at the auth flow".to_string())
+            }
+        );
+        // Force flag can appear anywhere in the token list.
+        assert_eq!(
+            parse_slash_command("/return --force ship it").unwrap(),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: Some("ship it".to_string())
+            }
+        );
+    }
+
+    fn make_wakeup_input(
+        workbench_id: &str,
+        base_artifact_id: &str,
+        reconciled: bool,
+        modified: Vec<String>,
+        added: Vec<String>,
+        deleted: Vec<String>,
+        note: Option<&str>,
+    ) -> ReturnToAgentInput {
+        let unsaved_change_count = modified.len() + added.len() + deleted.len();
+        ReturnToAgentInput {
+            workbench_id: workbench_id.to_string(),
+            base_artifact_id: base_artifact_id.to_string(),
+            reconciled,
+            new_artifact_ref: None,
+            new_artifact_id: None,
+            operator_note: note.map(|s| s.to_string()),
+            unsaved_change_count,
+            operator_modified_files: modified,
+            operator_added_files: added,
+            deleted_files: deleted,
+        }
+    }
+
+    #[test]
+    fn test_build_wakeup_reconciled_no_note() {
+        let input = make_wakeup_input(
+            "wb-abc",
+            "art-base",
+            true,
+            vec![],
+            vec![],
+            vec![],
+            None,
+        );
+        let wakeup = build_return_to_agent_wakeup(&input);
+        assert!(wakeup.message.contains("wb-abc"));
+        assert!(wakeup.message.contains("art-base"));
+        assert!(wakeup.message.contains("reconciled"));
+        assert!(!wakeup.message.contains("Operator note"));
+        let payload = &wakeup.metadata["workbench_reconciled"];
+        assert_eq!(payload["event"], "workbench_reconciled");
+        assert_eq!(payload["workbench_id"], "wb-abc");
+        assert_eq!(payload["base_artifact_id"], "art-base");
+        assert_eq!(payload["operator_modified"], false);
+    }
+
+    #[test]
+    fn test_build_wakeup_unsaved_with_note_includes_modified_files() {
+        let input = make_wakeup_input(
+            "wb-xyz",
+            "art-base",
+            false,
+            vec!["src/main.rs".to_string()],
+            vec!["newfile.txt".to_string()],
+            vec!["old.rs".to_string()],
+            Some("check the security review"),
+        );
+        let wakeup = build_return_to_agent_wakeup(&input);
+        assert!(wakeup.message.contains("wb-xyz"));
+        assert!(wakeup.message.contains("3 unsaved change(s)"));
+        assert!(wakeup.message.contains("--force"));
+        assert!(wakeup.message.contains("Operator note: check the security review"));
+        let payload = &wakeup.metadata["workbench_reconciled"];
+        assert_eq!(payload["operator_modified"], true);
+        let modified = payload["operator_modified_files"].as_array().unwrap();
+        assert_eq!(modified.len(), 1);
+        assert_eq!(modified[0], "src/main.rs");
+        let added = payload["operator_added_files"].as_array().unwrap();
+        assert_eq!(added[0], "newfile.txt");
+        let deleted = payload["deleted_files"].as_array().unwrap();
+        assert_eq!(deleted[0], "old.rs");
+    }
+
+    #[test]
+    fn test_build_wakeup_active_no_edits_no_force_message() {
+        // An active workbench with zero unsaved changes (operator projected
+        // then never touched the files) should send a calm "in sync" message
+        // and `operator_modified: false` in the payload.
+        let input = make_wakeup_input(
+            "wb-clean",
+            "art-base",
+            false,
+            vec![],
+            vec![],
+            vec![],
+            None,
+        );
+        let wakeup = build_return_to_agent_wakeup(&input);
+        assert!(wakeup.message.contains("in sync with base artifact"));
+        let payload = &wakeup.metadata["workbench_reconciled"];
+        assert_eq!(payload["operator_modified"], false);
+        assert!(payload.get("operator_modified_files").is_none());
+        assert!(payload.get("operator_added_files").is_none());
+        assert!(payload.get("deleted_files").is_none());
+    }
+
+    #[test]
+    fn test_prepare_return_no_workbench() {
+        let status = prepare_return_to_agent_wakeup(None, None, false, None);
+        assert!(matches!(status, ReturnToAgentStatus::NoWorkbench));
+    }
+
+    #[test]
+    fn test_prepare_return_refuses_unsaved_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .unwrap();
+        let workspace = dir.path().join("wb-src");
+        std::fs::create_dir_all(&workspace).unwrap();
+        // Write a base file and modify it to simulate an operator edit.
+        let original = b"original content";
+        std::fs::write(workspace.join("hello.txt"), original).unwrap();
+        use sha2::Digest;
+        let base_digest = format!("{:x}", sha2::Sha256::digest(original));
+        let meta_dir = workspace.parent().unwrap().join(".autonoetic");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let mut digests = std::collections::HashMap::new();
+        digests.insert("hello.txt".to_string(), base_digest);
+        std::fs::write(
+            meta_dir.join("base_digests.json"),
+            serde_json::to_string(&digests).unwrap(),
+        )
+        .unwrap();
+        // Now modify the file.
+        std::fs::write(workspace.join("hello.txt"), b"edited content").unwrap();
+        let wb = autonoetic_types::workbench::WorkbenchProjection {
+            workbench_id: "wb-test-1".to_string(),
+            workflow_id: "wf-1".to_string(),
+            root_session_id: "root-1".to_string(),
+            plan_id: None,
+            base_artifact_id: "art-base-1".to_string(),
+            base_artifact_canonical_digest: "deadbeef".repeat(8),
+            workspace_path: workspace.to_string_lossy().to_string(),
+            status: autonoetic_types::workbench::WorkbenchStatus::Active,
+            created_by_agent_id: "planner.default".to_string(),
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            last_checkpoint_at: None,
+            reconciled_at: None,
+            discarded_at: None,
+        };
+        store.save_workbench(&wb).unwrap();
+
+        let overview = WorkbenchOverview {
+            workbench_id: "wb-test-1".to_string(),
+            status: "active".to_string(),
+            base_artifact_id: "art-base-1".to_string(),
+            file_count: 1,
+            changed_files: 1,
+        };
+        let status =
+            prepare_return_to_agent_wakeup(Some(&store), Some(&overview), false, None);
+        match status {
+            ReturnToAgentStatus::Refused { reason } => {
+                assert!(reason.contains("1 unsaved edit"));
+                assert!(reason.contains("hello.txt"));
+                assert!(reason.contains("--force"));
+            }
+            other => panic!("expected Refused, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_prepare_return_force_overrides_unsaved_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .unwrap();
+        let workspace = dir.path().join("wb-src");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("hello.txt"), b"edited content").unwrap();
+        let meta_dir = workspace.parent().unwrap().join(".autonoetic");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let mut digests = std::collections::HashMap::new();
+        digests.insert("hello.txt".to_string(), "deadbeef".repeat(8));
+        std::fs::write(
+            meta_dir.join("base_digests.json"),
+            serde_json::to_string(&digests).unwrap(),
+        )
+        .unwrap();
+        let wb = autonoetic_types::workbench::WorkbenchProjection {
+            workbench_id: "wb-test-2".to_string(),
+            workflow_id: "wf-2".to_string(),
+            root_session_id: "root-2".to_string(),
+            plan_id: None,
+            base_artifact_id: "art-base-2".to_string(),
+            base_artifact_canonical_digest: "deadbeef".repeat(8),
+            workspace_path: workspace.to_string_lossy().to_string(),
+            status: autonoetic_types::workbench::WorkbenchStatus::Active,
+            created_by_agent_id: "planner.default".to_string(),
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            last_checkpoint_at: None,
+            reconciled_at: None,
+            discarded_at: None,
+        };
+        store.save_workbench(&wb).unwrap();
+
+        let overview = WorkbenchOverview {
+            workbench_id: "wb-test-2".to_string(),
+            status: "active".to_string(),
+            base_artifact_id: "art-base-2".to_string(),
+            file_count: 1,
+            changed_files: 1,
+        };
+        let status =
+            prepare_return_to_agent_wakeup(Some(&store), Some(&overview), true, Some("ok"));
+        match status {
+            ReturnToAgentStatus::Ready {
+                target_agent_id,
+                outbound_message,
+                metadata,
+            } => {
+                assert_eq!(target_agent_id, "planner.default");
+                assert!(outbound_message.contains("1 unsaved change(s)"));
+                assert!(outbound_message.contains("--force"));
+                assert!(outbound_message.contains("Operator note: ok"));
+                let payload = &metadata["workbench_reconciled"];
+                assert_eq!(payload["operator_modified"], true);
+            }
+            other => panic!("expected Ready, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_prepare_return_reconciled_reads_provenance_file() {
+        // A reconciled workbench's wake-up should carry the
+        // `new_artifact_ref` / `new_artifact_id` recorded in
+        // `.autonoetic/reconciliation.json` (written by the
+        // workbench_reconcile tool), not the base artifact ref.
+        let dir = tempfile::tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .unwrap();
+        let workspace = dir.path().join("wb-src");
+        std::fs::create_dir_all(&workspace).unwrap();
+        // No need to write actual files; the reconciled path uses
+        // provenance.json, not the filesystem.
+        let meta_dir = workspace.parent().unwrap().join(".autonoetic");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let provenance = serde_json::json!({
+            "base_artifact_id": "art-base-3",
+            "new_artifact_id": "art-new-9",
+            "new_artifact_ref": "ref-new-9",
+            "operator_modified": ["src/main.rs", "README.md"],
+            "operator_added": ["docs/intro.md"],
+            "deleted": ["old/legacy.rs"],
+            "unchanged": 3,
+        });
+        std::fs::write(
+            meta_dir.join("reconciliation.json"),
+            serde_json::to_string_pretty(&provenance).unwrap(),
+        )
+        .unwrap();
+        let wb = autonoetic_types::workbench::WorkbenchProjection {
+            workbench_id: "wb-test-3".to_string(),
+            workflow_id: "wf-3".to_string(),
+            root_session_id: "root-3".to_string(),
+            plan_id: None,
+            base_artifact_id: "art-base-3".to_string(),
+            base_artifact_canonical_digest: "deadbeef".repeat(8),
+            workspace_path: workspace.to_string_lossy().to_string(),
+            status: autonoetic_types::workbench::WorkbenchStatus::Reconciled,
+            created_by_agent_id: "planner.default".to_string(),
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            last_checkpoint_at: None,
+            reconciled_at: Some("2026-06-01T01:00:00Z".to_string()),
+            discarded_at: None,
+        };
+        store.save_workbench(&wb).unwrap();
+
+        let overview = WorkbenchOverview {
+            workbench_id: "wb-test-3".to_string(),
+            status: "reconciled".to_string(),
+            base_artifact_id: "art-base-3".to_string(),
+            file_count: 3,
+            changed_files: 0,
+        };
+        let status = prepare_return_to_agent_wakeup(Some(&store), Some(&overview), false, None);
+        match status {
+            ReturnToAgentStatus::Ready {
+                target_agent_id,
+                outbound_message,
+                metadata,
+            } => {
+                assert_eq!(target_agent_id, "planner.default");
+                assert!(outbound_message.contains("reconciled"));
+                assert!(outbound_message.contains("ref-new-9"));
+                let payload = &metadata["workbench_reconciled"];
+                assert_eq!(payload["reconciled"], true);
+                assert_eq!(payload["unsaved_change_count"], 4);
+                assert_eq!(payload["new_artifact_ref"], "ref-new-9");
+                assert_eq!(payload["new_artifact_id"], "art-new-9");
+                let modified = payload["operator_modified_files"].as_array().unwrap();
+                assert_eq!(modified.len(), 2);
+                assert!(modified.iter().any(|v| v == "src/main.rs"));
+                let added = payload["operator_added_files"].as_array().unwrap();
+                assert_eq!(added[0], "docs/intro.md");
+                let deleted = payload["deleted_files"].as_array().unwrap();
+                assert_eq!(deleted[0], "old/legacy.rs");
+            }
+            other => panic!("expected Ready, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_wakeup_includes_reconciled_and_unsaved_count_in_payload() {
+        // Even an Active workbench should expose `reconciled: false` and
+        // `unsaved_change_count` in the metadata, so downstream consumers
+        // don't have to infer those from message text.
+        let input = make_wakeup_input(
+            "wb-meta",
+            "art-base",
+            false,
+            vec!["x.rs".to_string()],
+            vec![],
+            vec![],
+            None,
+        );
+        let wakeup = build_return_to_agent_wakeup(&input);
+        let payload = &wakeup.metadata["workbench_reconciled"];
+        assert_eq!(payload["reconciled"], false);
+        assert_eq!(payload["unsaved_change_count"], 1);
     }
 
     #[test]
