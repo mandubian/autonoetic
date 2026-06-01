@@ -2062,6 +2062,8 @@ fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWake
         "event": "workbench_reconciled",
         "workbench_id": input.workbench_id,
         "base_artifact_id": input.base_artifact_id,
+        "reconciled": input.reconciled,
+        "unsaved_change_count": input.unsaved_change_count,
         "operator_modified": !input.operator_modified_files.is_empty()
             || !input.operator_added_files.is_empty()
             || !input.deleted_files.is_empty(),
@@ -2139,8 +2141,14 @@ fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWake
 
 /// Read the active workbench's operator-edited file lists from the gateway
 /// store. Returns `None` when the workbench is not found, the store is
-/// missing, or the workspace dir is gone. The `unsaved_change_count` in the
-/// returned `ReturnToAgentInput` reflects modified+added+deleted files.
+/// missing, or the workspace dir is gone.
+///
+/// For a *reconciled* workbench, the data is sourced from
+/// `.autonoetic/reconciliation.json` (written by the workbench_reconcile
+/// tool) so the wake-up carries the new artifact ref/id and the
+/// operator-vs-agent authorship classification recorded at reconcile time.
+/// For an *active* workbench, the data is computed live from
+/// `base_digests.json` and the current files on disk.
 fn read_return_to_agent_input(
     gateway_store: Option<&GatewayStore>,
     workbench_id: &str,
@@ -2152,6 +2160,77 @@ fn read_return_to_agent_input(
     let reconciled = matches!(wb.status, autonoetic_types::workbench::WorkbenchStatus::Reconciled);
 
     let source_dir = Path::new(&wb.workspace_path);
+    let meta_dir = source_dir.parent().map(|p| p.join(".autonoetic"));
+
+    if reconciled {
+        // Reconciled workbench: trust the recorded provenance. If the
+        // reconciliation.json is missing, fall back to the base artifact
+        // ref and an empty file list.
+        let provenance_path = meta_dir
+            .as_ref()
+            .map(|d| d.join("reconciliation.json"));
+        let provenance: Option<serde_json::Value> = provenance_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+
+        let new_artifact_ref = provenance
+            .as_ref()
+            .and_then(|v| v.get("new_artifact_ref"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let new_artifact_id = provenance
+            .as_ref()
+            .and_then(|v| v.get("new_artifact_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let modified: Vec<String> = provenance
+            .as_ref()
+            .and_then(|v| v.get("operator_modified"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let added: Vec<String> = provenance
+            .as_ref()
+            .and_then(|v| v.get("operator_added"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let deleted: Vec<String> = provenance
+            .as_ref()
+            .and_then(|v| v.get("deleted"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let unsaved_change_count = modified.len() + added.len() + deleted.len();
+        return Some(ReturnToAgentInput {
+            workbench_id: wb.workbench_id,
+            base_artifact_id: wb.base_artifact_id,
+            reconciled,
+            new_artifact_ref,
+            new_artifact_id,
+            operator_note: operator_note.map(|s| s.to_string()),
+            unsaved_change_count,
+            operator_modified_files: modified,
+            operator_added_files: added,
+            deleted_files: deleted,
+        });
+    }
+
+    // Active workbench: compute live from base_digests + current files.
     if !source_dir.exists() {
         return Some(ReturnToAgentInput {
             workbench_id: wb.workbench_id,
@@ -2167,8 +2246,8 @@ fn read_return_to_agent_input(
         });
     }
 
-    let meta_dir = source_dir.parent().map(|p| p.join(".autonoetic"));
     let base_digests: std::collections::HashMap<String, String> = meta_dir
+        .as_ref()
         .and_then(|d| {
             let p = d.join("base_digests.json");
             if p.exists() {
@@ -2252,17 +2331,15 @@ enum ReturnToAgentStatus {
 
 /// Prepare the wake-up that `/return` will dispatch. Pulls the active
 /// workbench from the gateway store, applies the unsaved-edits safety
-/// check, and produces the structured payload for `event.ingest`. The
-/// second tuple element is unused for control flow but kept so callers
-/// can render a one-line status without re-running the builder.
+/// check, and produces the structured payload for `event.ingest`.
 fn prepare_return_to_agent_wakeup(
     gateway_store: Option<&GatewayStore>,
     active_workbench: Option<&WorkbenchOverview>,
     force: bool,
     operator_note: Option<&str>,
-) -> (ReturnToAgentStatus, String) {
+) -> ReturnToAgentStatus {
     let Some(wb_overview) = active_workbench else {
-        return (ReturnToAgentStatus::NoWorkbench, String::new());
+        return ReturnToAgentStatus::NoWorkbench;
     };
 
     let Some(input) = read_return_to_agent_input(
@@ -2270,18 +2347,15 @@ fn prepare_return_to_agent_wakeup(
         &wb_overview.workbench_id,
         operator_note,
     ) else {
-        return (
-            ReturnToAgentStatus::Refused {
-                reason: format!(
-                    "Workbench {} is no longer in the gateway store. Cannot return.",
-                    wb_overview.workbench_id
-                ),
-            },
-            String::new(),
-        );
+        return ReturnToAgentStatus::Refused {
+            reason: format!(
+                "Workbench {} is no longer in the gateway store. Cannot return.",
+                wb_overview.workbench_id
+            ),
+        };
     };
 
-    if !force && input.unsaved_change_count > 0 {
+    if !force && !input.reconciled && input.unsaved_change_count > 0 {
         let mut lines = Vec::new();
         lines.push(format!(
             "Workbench {} has {} unsaved edit(s). Refusing to silently drop them.",
@@ -2308,26 +2382,19 @@ fn prepare_return_to_agent_wakeup(
         lines.push(
             "Reconcile them first (autonoetic workbench reconcile <wb>) or re-run with --force to drop the edits and return the base artifact.".to_string(),
         );
-        return (
-            ReturnToAgentStatus::Refused {
-                reason: lines.join("\n"),
-            },
-            String::new(),
-        );
+        return ReturnToAgentStatus::Refused {
+            reason: lines.join("\n"),
+        };
     }
 
     let target_agent_id = "planner.default".to_string();
     let wakeup = build_return_to_agent_wakeup(&input);
-    let body = wakeup.message.clone();
 
-    (
-        ReturnToAgentStatus::Ready {
-            target_agent_id,
-            outbound_message: wakeup.message,
-            metadata: wakeup.metadata,
-        },
-        body,
-    )
+    ReturnToAgentStatus::Ready {
+        target_agent_id,
+        outbound_message: wakeup.message,
+        metadata: wakeup.metadata,
+    }
 }
 
 /// Pending `user.ask` rows for this terminal session: exact session plus any under the same root
@@ -6026,32 +6093,57 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         }
                     }
 
-                    let (target_agent_id, ingest_message, ingest_event_type, ingest_metadata) = match &outbound {
+                    // /return ingests must target the root session: the
+                    // router only reroutes child→root for event_type=="chat",
+                    // so a workbench_reconciled ingest from a child session
+                    // would otherwise wake the orchestrator on the child.
+                    let return_root_session_id = get_root_session_id(app).to_string();
+
+                    let (target_agent_id, ingest_message, ingest_event_type, ingest_session_id, ingest_metadata) = match &outbound {
                         ChatOutbound::Chat(_) => (
                             app.target_hint.clone(),
                             message_text.clone(),
                             "chat".to_string(),
+                            app.session_id.clone(),
                             metadata_value,
                         ),
                         ChatOutbound::PolicyAuthor(_) => (
                             "governance-author.default".to_string(),
                             message_text.clone(),
                             "chat".to_string(),
+                            app.session_id.clone(),
                             metadata_value,
                         ),
-                        ChatOutbound::ReturnToAgent { message, target_agent_id, metadata } => (
-                            target_agent_id.clone(),
-                            message.clone(),
-                            "workbench_reconciled".to_string(),
-                            metadata.clone(),
-                        ),
+                        ChatOutbound::ReturnToAgent { message, target_agent_id, metadata } => {
+                            // Merge the workbench payload into the existing
+                            // terminal channel envelope (channel, sender,
+                            // session, etc.) so return-to-agent events
+                            // remain attributable like every other TUI
+                            // ingest.
+                            let mut merged = metadata_value;
+                            if let serde_json::Value::Object(ref mut map) = merged {
+                                map.insert("root_session_id".to_string(), serde_json::json!(return_root_session_id));
+                                if let Some(obj) = metadata.as_object() {
+                                    for (k, v) in obj {
+                                        map.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            (
+                                target_agent_id.clone(),
+                                message.clone(),
+                                "workbench_reconciled".to_string(),
+                                return_root_session_id.clone(),
+                                merged,
+                            )
+                        }
                         ChatOutbound::SessionStatusQuery { .. } | ChatOutbound::ApprovalResolved { .. } => unreachable!(),
                     };
 
                     let params = serde_json::json!({
                         "event_type": ingest_event_type,
                         "message": ingest_message,
-                        "session_id": app.session_id.clone(),
+                        "session_id": ingest_session_id,
                         "target_agent_id": target_agent_id,
                         "metadata": ingest_metadata,
                     });
@@ -6091,7 +6183,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                             Ok(SlashCommand::ReturnToAgent { force, message }) => {
                                                 let id = app.next_id();
-                                                let (return_status, body) =
+                                                let return_status =
                                                     prepare_return_to_agent_wakeup(
                                                         gateway_store,
                                                         app.active_workbench.as_ref(),
@@ -8290,7 +8382,7 @@ mod tests {
 
     #[test]
     fn test_prepare_return_no_workbench() {
-        let (status, _body) = prepare_return_to_agent_wakeup(None, None, false, None);
+        let status = prepare_return_to_agent_wakeup(None, None, false, None);
         assert!(matches!(status, ReturnToAgentStatus::NoWorkbench));
     }
 
@@ -8343,7 +8435,7 @@ mod tests {
             file_count: 1,
             changed_files: 1,
         };
-        let (status, _body) =
+        let status =
             prepare_return_to_agent_wakeup(Some(&store), Some(&overview), false, None);
         match status {
             ReturnToAgentStatus::Refused { reason } => {
@@ -8398,7 +8490,7 @@ mod tests {
             file_count: 1,
             changed_files: 1,
         };
-        let (status, body) =
+        let status =
             prepare_return_to_agent_wakeup(Some(&store), Some(&overview), true, Some("ok"));
         match status {
             ReturnToAgentStatus::Ready {
@@ -8415,7 +8507,108 @@ mod tests {
             }
             other => panic!("expected Ready, got {:?}", other),
         }
-        assert!(body.contains("Operator note: ok"));
+    }
+
+    #[test]
+    fn test_prepare_return_reconciled_reads_provenance_file() {
+        // A reconciled workbench's wake-up should carry the
+        // `new_artifact_ref` / `new_artifact_id` recorded in
+        // `.autonoetic/reconciliation.json` (written by the
+        // workbench_reconcile tool), not the base artifact ref.
+        let dir = tempfile::tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .unwrap();
+        let workspace = dir.path().join("wb-src");
+        std::fs::create_dir_all(&workspace).unwrap();
+        // No need to write actual files; the reconciled path uses
+        // provenance.json, not the filesystem.
+        let meta_dir = workspace.parent().unwrap().join(".autonoetic");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let provenance = serde_json::json!({
+            "base_artifact_id": "art-base-3",
+            "new_artifact_id": "art-new-9",
+            "new_artifact_ref": "ref-new-9",
+            "operator_modified": ["src/main.rs", "README.md"],
+            "operator_added": ["docs/intro.md"],
+            "deleted": ["old/legacy.rs"],
+            "unchanged": 3,
+        });
+        std::fs::write(
+            meta_dir.join("reconciliation.json"),
+            serde_json::to_string_pretty(&provenance).unwrap(),
+        )
+        .unwrap();
+        let wb = autonoetic_types::workbench::WorkbenchProjection {
+            workbench_id: "wb-test-3".to_string(),
+            workflow_id: "wf-3".to_string(),
+            root_session_id: "root-3".to_string(),
+            plan_id: None,
+            base_artifact_id: "art-base-3".to_string(),
+            base_artifact_canonical_digest: "deadbeef".repeat(8),
+            workspace_path: workspace.to_string_lossy().to_string(),
+            status: autonoetic_types::workbench::WorkbenchStatus::Reconciled,
+            created_by_agent_id: "planner.default".to_string(),
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            last_checkpoint_at: None,
+            reconciled_at: Some("2026-06-01T01:00:00Z".to_string()),
+            discarded_at: None,
+        };
+        store.save_workbench(&wb).unwrap();
+
+        let overview = WorkbenchOverview {
+            workbench_id: "wb-test-3".to_string(),
+            status: "reconciled".to_string(),
+            base_artifact_id: "art-base-3".to_string(),
+            file_count: 3,
+            changed_files: 0,
+        };
+        let status = prepare_return_to_agent_wakeup(Some(&store), Some(&overview), false, None);
+        match status {
+            ReturnToAgentStatus::Ready {
+                target_agent_id,
+                outbound_message,
+                metadata,
+            } => {
+                assert_eq!(target_agent_id, "planner.default");
+                assert!(outbound_message.contains("reconciled"));
+                assert!(outbound_message.contains("ref-new-9"));
+                let payload = &metadata["workbench_reconciled"];
+                assert_eq!(payload["reconciled"], true);
+                assert_eq!(payload["unsaved_change_count"], 4);
+                assert_eq!(payload["new_artifact_ref"], "ref-new-9");
+                assert_eq!(payload["new_artifact_id"], "art-new-9");
+                let modified = payload["operator_modified_files"].as_array().unwrap();
+                assert_eq!(modified.len(), 2);
+                assert!(modified.iter().any(|v| v == "src/main.rs"));
+                let added = payload["operator_added_files"].as_array().unwrap();
+                assert_eq!(added[0], "docs/intro.md");
+                let deleted = payload["deleted_files"].as_array().unwrap();
+                assert_eq!(deleted[0], "old/legacy.rs");
+            }
+            other => panic!("expected Ready, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_wakeup_includes_reconciled_and_unsaved_count_in_payload() {
+        // Even an Active workbench should expose `reconciled: false` and
+        // `unsaved_change_count` in the metadata, so downstream consumers
+        // don't have to infer those from message text.
+        let input = make_wakeup_input(
+            "wb-meta",
+            "art-base",
+            false,
+            vec!["x.rs".to_string()],
+            vec![],
+            vec![],
+            None,
+        );
+        let wakeup = build_return_to_agent_wakeup(&input);
+        let payload = &wakeup.metadata["workbench_reconciled"];
+        assert_eq!(payload["reconciled"], false);
+        assert_eq!(payload["unsaved_change_count"], 1);
     }
 
     #[test]
