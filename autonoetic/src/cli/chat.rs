@@ -36,6 +36,7 @@ use autonoetic_types::background::{
     UserInteractionStatus,
 };
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::plan_frame::PlanFrame;
 use autonoetic_types::semantic_diff::SemanticSummary;
 
 // ============================================================================
@@ -94,6 +95,10 @@ enum RichCard {
         request: Box<ApprovalRequest>,
         detail: String,
         enrichment: Vec<autonoetic_gateway::runtime::human_gate::GateMessage>,
+    },
+    PlanFrame {
+        plan: Box<PlanFrame>,
+        detail: String,
     },
 }
 
@@ -252,6 +257,7 @@ enum PendingPrompt {
 #[derive(Debug, Clone)]
 enum PendingItem {
     Approval(Box<ApprovalRequest>),
+    PlanFrame(Box<PlanFrame>),
     Interaction(Box<UserInteraction>),
 }
 
@@ -281,6 +287,8 @@ enum SlashCommand {
     /// selected orchestrator (default: planner.default). Refuses to proceed
     /// when the workbench has unsaved edits unless `--force` is supplied.
     ReturnToAgent { force: bool, message: Option<String> },
+    /// `/plan` lists pending plans; `/plan approve [plan_id]` approves one.
+    PlanApprove(Option<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -415,6 +423,12 @@ struct App {
     inline_approvals_enabled: bool,
     /// Store-derived approval IDs we already announced (avoid repeating every poll).
     announced_store_approval_ids: HashSet<String>,
+    /// PlanFrame IDs awaiting operator approval (latest revision per plan).
+    pending_plan_ids: Vec<String>,
+    /// (plan_id, title snippet) for status display.
+    pending_plan_summaries: Vec<(String, String)>,
+    /// Plan IDs we already showed as rich cards this session.
+    announced_plan_ids: HashSet<String>,
     /// Gateway TCP JSON-RPC connection state.
     gateway_connected: bool,
     /// Causal events already surfaced in the policy pane.
@@ -452,6 +466,8 @@ struct App {
     pending_overlay: Option<PendingOverlay>,
     wrap_width: u16,
     messages_area_row_end: u16,
+    messages_area_x: u16,
+    messages_area_col_end: u16,
     active_workbench: Option<WorkbenchOverview>,
     /// Cursor for gateway `operator.activity.list` polling (exclusive).
     last_operator_activity_cursor: Option<String>,
@@ -495,6 +511,9 @@ impl App {
             pending_approval_summaries: Vec::new(),
             inline_approvals_enabled: false,
             announced_store_approval_ids: HashSet::new(),
+            pending_plan_ids: Vec::new(),
+            pending_plan_summaries: Vec::new(),
+            announced_plan_ids: HashSet::new(),
             gateway_connected: false,
             seen_causal_policy_event_ids: HashSet::new(),
             policy_causal_pane: Vec::new(),
@@ -515,6 +534,8 @@ impl App {
             pending_overlay: None,
             wrap_width: 80,
             messages_area_row_end: 0,
+            messages_area_x: 0,
+            messages_area_col_end: 0,
             active_workbench: None,
             last_operator_activity_cursor: None,
             operator_activity_bootstrapped: false,
@@ -653,6 +674,7 @@ impl App {
     fn has_active_work(&self) -> bool {
         !self.pending.is_empty()
             || !self.pending_approval_ids.is_empty()
+            || !self.pending_plan_ids.is_empty()
             || self.session_overview.pending_user_interactions > 0
             || self.session_overview.workflow.running > 0
             || self.session_overview.workflow.queued > 0
@@ -680,12 +702,19 @@ impl App {
                 self.oldest_secs(),
                 activity
             )
-        } else if !self.pending_approval_ids.is_empty() {
+        } else if !self.pending_approval_ids.is_empty() || !self.pending_plan_ids.is_empty() {
             let activity = primary_activity.as_deref().map(|a| format!(" │ {}", a)).unwrap_or_default();
+            let gate = self.pending_approval_ids.len();
+            let plans = self.pending_plan_ids.len();
+            let label = match (gate, plans) {
+                (g, 0) => format!("{g} gate approval(s)"),
+                (0, p) => format!("{p} plan(s)"),
+                (g, p) => format!("{g} gate + {p} plan"),
+            };
             format!(
-                "{} Waiting for approval ({} pending){}",
+                "{} Waiting for approval ({}){}",
                 self.spinner(),
-                self.pending_approval_ids.len(),
+                label,
                 activity
             )
         } else if self.session_overview.pending_user_interactions > 0 {
@@ -786,6 +815,9 @@ impl App {
                         detail,
                         enrichment,
                     } => render_approval_card(request, detail, enrichment, wrap_width),
+                    RichCard::PlanFrame { plan, detail } => {
+                        render_plan_frame_card(plan, detail, wrap_width)
+                    }
                 };
                 for rl in &rich_lines {
                     count = count.saturating_add(transcript_wrap_line_count(rl.clone(), ww));
@@ -855,12 +887,31 @@ impl App {
         }
     }
 
-    fn in_messages_area(&self, row: u16) -> bool {
+    fn in_messages_area(&self, row: u16, col: u16) -> bool {
         // Allow 1-row tolerance at the bottom boundary to handle imprecise
         // mouse clicks on [click to expand] text near the input area.
         // The input area has Borders::TOP at messages_area_row_end, so the
         // last message line sits right above it with zero gap.
+        self.in_messages_rows(row) && self.in_messages_cols(col)
+    }
+
+    fn in_messages_rows(&self, row: u16) -> bool {
         row >= 2 && row < self.messages_area_row_end + 1
+    }
+
+    fn in_messages_cols(&self, col: u16) -> bool {
+        // When the right pane is shown, messages_area_col_end is strictly less
+        // than the terminal width; columns at/after it belong to the right pane.
+        col >= self.messages_area_x && col < self.messages_area_col_end
+    }
+
+    /// Clamp a screen column so it stays within the messages pane.
+    /// Used for mouse drag/release events that may stray into the right pane:
+    /// the selection extends to the right edge of the left pane rather than
+    /// jumping into right-pane columns.
+    fn clamp_col_to_messages(&self, col: u16) -> u16 {
+        let right_edge = self.messages_area_col_end.saturating_sub(1);
+        col.clamp(self.messages_area_x, right_edge)
     }
 
     fn toggle_lifecycle_at_content_row(&mut self, content_row: usize) -> bool {
@@ -878,6 +929,9 @@ impl App {
                         detail,
                         enrichment,
                     } => render_approval_card(request, detail, enrichment, ww),
+                    RichCard::PlanFrame { plan, detail } => {
+                        render_plan_frame_card(plan, detail, ww)
+                    }
                 };
                 let mut h = 0usize;
                 for rl in &rich_lines {
@@ -1076,6 +1130,20 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
             };
             Ok(SlashCommand::ReturnToAgent { force, message })
         }
+        "/plan" => {
+            let sub = parts.next().map(|s| s.to_lowercase());
+            match sub.as_deref() {
+                None => Ok(SlashCommand::PlanApprove(None)),
+                Some("approve") => {
+                    let plan_id = parts.next().map(|s| s.to_string());
+                    Ok(SlashCommand::PlanApprove(plan_id))
+                }
+                Some(other) => Err(format!(
+                    "Unknown /plan subcommand '{}'. Try: /plan, /plan approve [plan_id].",
+                    other
+                )),
+            }
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -1088,6 +1156,8 @@ fn format_help_card() -> String {
         "  /session switch <id>   Switch to an existing session",
         "  /status                Show current session details",
         "  /pending               Open pending approvals & interactions overlay (Ctrl+P)",
+        "  /plan                  List plans awaiting operator approval",
+        "  /plan approve [id]     Approve a plan (default: latest pending)",
         "  /wb [status|diff|reconcile|discard]  Workbench actions",
         "  /return [--force] [note]   Hand the active workbench back to the orchestrator (planner.default).",
         "                            Refuses if there are unsaved edits; use --force to override (edits are dropped).",
@@ -1109,12 +1179,13 @@ fn format_session_status(app: &App) -> String {
         .unwrap_or("n/a");
     let root_session_id = get_root_session_id(app);
     format!(
-        "Session: {}\nRoot: {}\nTarget: {}\nWorkflow: {}\nPending approvals: {}\nPending questions: {}\nResolved approvals: {}\nAnswered questions: {}\nGateway: {}",
+        "Session: {}\nRoot: {}\nTarget: {}\nWorkflow: {}\nPending gate approvals: {}\nPending plans: {}\nPending questions: {}\nResolved approvals: {}\nAnswered questions: {}\nGateway: {}",
         app.session_id,
         root_session_id,
         app.target_hint,
         workflow_id,
         app.pending_approval_ids.len(),
+        app.pending_plan_ids.len(),
         app.session_overview.pending_user_interactions,
         app.gate_history_approvals.len(),
         app.gate_history_interactions.len(),
@@ -1467,7 +1538,10 @@ fn reset_for_session_switch(
     app.live_tasks.clear();
     app.seen_user_interaction_prompts.clear();
     app.pending_approval_ids.clear();
+    app.pending_plan_ids.clear();
+    app.pending_plan_summaries.clear();
     app.announced_store_approval_ids.clear();
+    app.announced_plan_ids.clear();
     app.post_approval_pending_ids.clear();
     app.task_lifecycles.clear();
     app.task_lifecycle_msg_idx.clear();
@@ -1765,6 +1839,14 @@ fn handle_slash_command_submission(
                     }
                 }
 
+                if let Ok(plans) =
+                    autonoetic_gateway::scheduler::pending_plan_frames_for_root(store, &root)
+                {
+                    for plan in plans {
+                        items.push(PendingItem::PlanFrame(Box::new(plan)));
+                    }
+                }
+
                 if let Ok(interactions) = list_pending_user_interactions_for_terminal_session(store, &app.session_id) {
                     for ui in interactions {
                         items.push(PendingItem::Interaction(Box::new(ui)));
@@ -1774,13 +1856,67 @@ fn handle_slash_command_submission(
                 if items.is_empty() {
                     app.add_message(
                         MessageRole::System,
-                        "No pending approvals or interactions.".to_string(),
+                        "No pending approvals, plans, or interactions.".to_string(),
                     );
                 } else {
                     app.pending_overlay = Some(PendingOverlay {
                         items,
                         selected: 0,
                     });
+                }
+            } else {
+                app.add_message(
+                    MessageRole::System,
+                    "Gateway store not available.".to_string(),
+                );
+            }
+            true
+        }
+        SlashCommand::PlanApprove(plan_id) => {
+            if let Some(store) = gateway_store {
+                let root =
+                    autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id);
+                let resolved_id = match plan_id {
+                    Some(id) => Some(id),
+                    None => autonoetic_gateway::scheduler::pending_plan_frames_for_root(store, root)
+                        .ok()
+                        .and_then(|plans| plans.last().map(|p| p.plan_id.clone())),
+                };
+                match resolved_id {
+                    Some(id) => {
+                        approve_plan_frame_in_chat(app, config, store, &id, false, None);
+                    }
+                    None => {
+                        match autonoetic_gateway::scheduler::pending_plan_frames_for_root(
+                            store, root,
+                        ) {
+                            Ok(plans) if plans.is_empty() => {
+                                app.add_message(
+                                    MessageRole::System,
+                                    "No plans awaiting operator approval.".to_string(),
+                                );
+                            }
+                            Ok(plans) => {
+                                let mut lines = vec![
+                                    "Plans awaiting approval:".to_string(),
+                                ];
+                                for p in plans {
+                                    lines.push(format!(
+                                        "  {} v{} — {}",
+                                        p.plan_id, p.version, p.title
+                                    ));
+                                }
+                                lines.push("Approve with: /plan approve <plan_id>".to_string());
+                                app.add_message(MessageRole::System, lines.join("\n"));
+                            }
+                            Err(e) => {
+                                app.add_message(
+                                    MessageRole::System,
+                                    format!("Failed to list plans: {e}"),
+                                );
+                            }
+                        }
+                    }
                 }
             } else {
                 app.add_message(
@@ -2915,6 +3051,106 @@ fn render_approval_card(
     lines
 }
 
+fn format_plan_frame_card(plan: &PlanFrame, approval_instructions: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "📋 Plan awaiting approval — {} (v{})",
+        plan.plan_id, plan.version
+    ));
+    lines.push(format!("Title: {}", clamp_chat_field(&plan.title)));
+    lines.push(String::new());
+    lines.push("Objective:".to_string());
+    for ln in plan.objective.lines().take(12) {
+        lines.push(format!("  {}", clamp_chat_field(ln)));
+    }
+    if !plan.steps.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("Steps ({}):", plan.steps.len()));
+        for step in plan.steps.iter().take(12) {
+            let owner = step.owner.as_str();
+            let agent = step
+                .agent_id
+                .as_deref()
+                .map(|a| format!(" → {a}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  {}. [{}] {}{}",
+                step.step_id, owner, clamp_chat_field(&step.title), agent
+            ));
+        }
+        if plan.steps.len() > 12 {
+            lines.push(format!("  … and {} more", plan.steps.len() - 12));
+        }
+    }
+    let summary = plan.compact_summary();
+    if !summary.required_validations.is_empty() || !summary.advisory_validations.is_empty() {
+        lines.push(String::new());
+        if !summary.required_validations.is_empty() {
+            lines.push(format!(
+                "Required validations: {}",
+                summary.required_validations.join(", ")
+            ));
+        }
+        if !summary.advisory_validations.is_empty() {
+            lines.push(format!(
+                "Advisory validations: {}",
+                summary.advisory_validations.join(", ")
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push(approval_instructions.to_string());
+    lines.join("\n")
+}
+
+fn render_plan_frame_card(plan: &PlanFrame, detail: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let inner_width = width.saturating_sub(2).max(10) as usize;
+    let text_width = inner_width.saturating_sub(4).max(8);
+
+    let header = format!(
+        "📋 Plan Approval — {} — {}",
+        clamp_chat_field(&plan.title),
+        plan.plan_id
+    );
+    lines.push(rich_box_top(&header, width));
+    lines.push(rich_box_empty(width));
+
+    let body_style = Style::default().fg(Color::White);
+    for ln in plan.objective.lines().take(8) {
+        for wl in word_wrap_text(&clamp_chat_field(ln), text_width) {
+            lines.push(rich_box_mid_styled(&wl, width, body_style));
+        }
+    }
+
+    if !plan.steps.is_empty() {
+        lines.push(rich_box_empty(width));
+        lines.push(rich_box_separator("steps", width));
+        for step in plan.steps.iter().take(8) {
+            let line = format!(
+                "{} [{}] {}",
+                step.step_id,
+                step.owner.as_str(),
+                clamp_chat_field(&step.title)
+            );
+            for wl in word_wrap_text(&line, text_width) {
+                lines.push(rich_box_mid_styled(&wl, width, Style::default().fg(Color::DarkGray)));
+            }
+        }
+    }
+
+    lines.push(rich_box_empty(width));
+    let hint_style = Style::default().fg(Color::Green);
+    for dl in detail.lines() {
+        for wl in word_wrap_text(dl, text_width) {
+            lines.push(rich_box_mid_styled(&wl, width, hint_style));
+        }
+    }
+    lines.push(rich_box_empty(width));
+    lines.push(rich_box_bottom(width));
+    lines
+}
+
 /// Structured display data extracted from an agent's JSON assistant_reply.
 struct AssistantReplyDisplay {
     display: String,
@@ -3283,6 +3519,57 @@ fn format_workflow_event_card(
                 .unwrap_or(0);
             Some((
                 format!("🆘 [{}] Failure threshold reached: {} tasks failed", ts_short, count),
+                MessageRole::Signal,
+            ))
+        }
+        "planframe.proposed" => {
+            let plan_id = event
+                .payload
+                .get("plan_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let title = event
+                .payload
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let step_count = event
+                .payload
+                .get("step_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let approve_hint = if plan_id.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n   → Approve: Ctrl+A or `/plan approve {}`",
+                    plan_id
+                )
+            };
+            Some((
+                format!(
+                    "📋 [{}] Plan proposed: {}{} ({} steps){}",
+                    ts_short,
+                    if title.is_empty() { plan_id } else { title },
+                    if plan_id.is_empty() || title.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", plan_id)
+                    },
+                    step_count,
+                    approve_hint
+                ),
+                MessageRole::Signal,
+            ))
+        }
+        "planframe.approved" => {
+            let plan_id = event
+                .payload
+                .get("plan_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Some((
+                format!("✅ [{}] Plan approved: {}", ts_short, plan_id),
                 MessageRole::Signal,
             ))
         }
@@ -4120,6 +4407,15 @@ fn draw_pending_overlay(f: &mut Frame, overlay: &PendingOverlay, area: Rect) {
                         Span::styled(label.to_string(), Style::default().fg(Color::White)),
                     ])
                 }
+                PendingItem::PlanFrame(plan) => {
+                    let id_short = &plan.plan_id[..plan.plan_id.len().min(16)];
+                    let title: String = plan.title.chars().take(24).collect();
+                    Line::from(vec![
+                        Span::styled(marker.to_string(), style),
+                        Span::styled(format!("📋 {:16} ", id_short), style),
+                        Span::styled(title, Style::default().fg(Color::Cyan)),
+                    ])
+                }
                 PendingItem::Interaction(ui) => {
                     let id_short = &ui.interaction_id[..ui.interaction_id.len().min(16)];
                     let kind_str = format!("{}", ui.kind);
@@ -4184,6 +4480,40 @@ fn draw_pending_overlay(f: &mut Frame, overlay: &PendingOverlay, area: Rect) {
                         lines.push(Line::from(Span::styled(
                             format!("Risk: {}", parts.join(" | ")),
                             Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Press [a] to approve",
+                    Style::default().fg(Color::Green),
+                )));
+                lines
+            }
+            PendingItem::PlanFrame(plan) => {
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    "PLAN",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(format!("ID:       {}", plan.plan_id)));
+                lines.push(Line::from(format!("Version:  {}", plan.version)));
+                lines.push(Line::from(format!("Title:    {}", plan.title)));
+                lines.push(Line::from(""));
+                let obj: String = plan.objective.chars().take(200).collect();
+                lines.push(Line::from("Objective:"));
+                for ln in obj.lines().take(4) {
+                    lines.push(Line::from(format!("  {}", ln)));
+                }
+                if !plan.steps.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(format!("Steps: {}", plan.steps.len())));
+                    for step in plan.steps.iter().take(5) {
+                        lines.push(Line::from(format!(
+                            "  {} [{}] {}",
+                            step.step_id,
+                            step.owner.as_str(),
+                            step.title
                         )));
                     }
                 }
@@ -4430,24 +4760,44 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let has_pending_approvals = !app.pending_approval_ids.is_empty();
+    let has_pending_plans = !app.pending_plan_ids.is_empty();
     let has_pending_questions = !app.pending_question_summaries.is_empty();
 
-    if has_pending_approvals || has_pending_questions {
+    if has_pending_approvals || has_pending_plans || has_pending_questions {
         lines.push(Line::raw(""));
+        let pending_label = {
+            let mut parts = Vec::new();
+            if has_pending_approvals {
+                parts.push(format!(
+                    "{} gate",
+                    app.pending_approval_ids.len()
+                ));
+            }
+            if has_pending_plans {
+                parts.push(format!("{} plan(s)", app.pending_plan_ids.len()));
+            }
+            if has_pending_questions {
+                parts.push(format!(
+                    "{} ask",
+                    app.pending_question_summaries.len()
+                ));
+            }
+            format!("⚠ Pending ({})", parts.join(", "))
+        };
         lines.push(Line::from(Span::styled(
-            if has_pending_approvals && has_pending_questions {
-                format!("⚠ Pending ({}/{})", app.pending_approval_ids.len(), app.pending_question_summaries.len())
-            } else if has_pending_approvals {
-                format!("⚠ Pending ({} approval{})", app.pending_approval_ids.len(), if app.pending_approval_ids.len() == 1 { "" } else { "s" })
-            } else {
-                format!("⚠ Pending ({} question{})", app.pending_question_summaries.len(), if app.pending_question_summaries.len() == 1 { "" } else { "s" })
-            },
+            pending_label,
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         )));
         for (_, summary) in app.pending_approval_summaries.iter().take(3) {
             lines.push(Line::from(Span::styled(
                 format!("  ⏸ {}", summary),
                 Style::default().fg(Color::Yellow),
+            )));
+        }
+        for (_, title) in app.pending_plan_summaries.iter().take(3) {
+            lines.push(Line::from(Span::styled(
+                format!("  📋 {}", title),
+                Style::default().fg(Color::Cyan),
             )));
         }
         for q in app.pending_question_summaries.iter().take(2) {
@@ -4475,6 +4825,25 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
                 break;
             }
             lines.push(Line::raw(format!("- {}", id)));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        if has_pending_plans {
+            "Plans:"
+        } else {
+            "Plans"
+        },
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if app.pending_plan_ids.is_empty() {
+        lines.push(Line::raw("none"));
+    } else {
+        for (i, (id, title)) in app.pending_plan_summaries.iter().rev().enumerate() {
+            if i >= 5 {
+                break;
+            }
+            lines.push(Line::raw(format!("- {} ({})", id, title)));
         }
     }
     lines.push(Line::raw(""));
@@ -4562,12 +4931,17 @@ fn draw_hints_pane(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::raw("Ctrl+F jump live"));
     lines.push(Line::raw("/session picker"));
     if app.inline_approvals_enabled {
-        if app.pending_approval_ids.is_empty() {
+        let gate = app.pending_approval_ids.len();
+        let plans = app.pending_plan_ids.len();
+        if gate == 0 && plans == 0 {
             lines.push(Line::raw("Ctrl+A approve: none"));
+        } else if plans == 0 {
+            lines.push(Line::raw(format!("Ctrl+A approve: {gate} gate")));
+        } else if gate == 0 {
+            lines.push(Line::raw(format!("Ctrl+A approve: {plans} plan")));
         } else {
             lines.push(Line::raw(format!(
-                "Ctrl+A approve: {}",
-                app.pending_approval_ids.len()
+                "Ctrl+A approve: {gate} gate + {plans} plan"
             )));
         }
     }
@@ -4878,6 +5252,9 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                     detail,
                     enrichment,
                 } => render_approval_card(request, detail, enrichment, content_width),
+                RichCard::PlanFrame { plan, detail } => {
+                    render_plan_frame_card(plan, detail, content_width)
+                }
             };
             for rl in &rich_lines {
                 let visual_line_count = transcript_wrap_line_count(rl.clone(), wrap_width);
@@ -5096,11 +5473,18 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             esc_hint,
             follow_hint,
         )
-    } else if !app.pending_approval_ids.is_empty() {
+    } else if !app.pending_approval_ids.is_empty() || !app.pending_plan_ids.is_empty() {
+        let gate = app.pending_approval_ids.len();
+        let plans = app.pending_plan_ids.len();
+        let pending_label = match (gate, plans) {
+            (g, 0) => format!("{g} gate approval(s)"),
+            (0, p) => format!("{p} plan(s)"),
+            (g, p) => format!("{g} gate + {p} plan"),
+        };
         format!(
-            "{} {} approval(s) pending | {} | {} | {} | {} | {}",
+            "{} {} pending | {} | {} | {} | {} | {}",
             app.spinner(),
-            app.pending_approval_ids.len(),
+            pending_label,
             workflow,
             gateway,
             pause_hint,
@@ -5353,6 +5737,9 @@ async fn handle_chat_test_mode(
                  }
                  Ok(SlashCommand::ReturnToAgent { .. }) => {
                      println!("/return is not supported in test mode.");
+                 }
+                 Ok(SlashCommand::PlanApprove(_)) => {
+                     println!("/plan is not supported in test mode.");
                  }
                  Err(error) => {
                     println!("{}", error);
@@ -5675,6 +6062,8 @@ async fn run_loop<B: ratatui::backend::Backend>(
             let messages_content_width = layout.messages.width.saturating_sub(1);
             app.wrap_width = messages_content_width;
             app.messages_area_row_end = layout.messages.y.saturating_add(layout.messages.height);
+            app.messages_area_x = layout.messages.x;
+            app.messages_area_col_end = layout.messages.x.saturating_add(layout.messages.width);
             app.last_max_scroll_offset = app
                 .content_line_count(messages_content_width)
                 .saturating_sub(messages_height);
@@ -6443,6 +6832,23 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         );
                                     }
                                 }
+                                HandleKeyAction::ApprovePlanInline(plan_id) => {
+                                    if let Some(store) = gateway_store {
+                                        approve_plan_frame_in_chat(
+                                            app,
+                                            config,
+                                            store,
+                                            &plan_id,
+                                            true,
+                                            Some(tx),
+                                        );
+                                    } else {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            "Gateway store not available for plan approval.".to_string(),
+                                        );
+                                    }
+                                }
                                 HandleKeyAction::ApproveInline(apr_id) => {
                                     if let Some(store) = gateway_store {
                                         let approver_level =
@@ -6548,6 +6954,16 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             }
                                         }
 
+                                        if let Ok(plans) =
+                                            autonoetic_gateway::scheduler::pending_plan_frames_for_root(
+                                                store, &root,
+                                            )
+                                        {
+                                            for plan in plans {
+                                                items.push(PendingItem::PlanFrame(Box::new(plan)));
+                                            }
+                                        }
+
                                         if let Ok(interactions) = list_pending_user_interactions_for_terminal_session(store, &app.session_id) {
                                             for ui in interactions {
                                                 items.push(PendingItem::Interaction(Box::new(ui)));
@@ -6557,7 +6973,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         if items.is_empty() {
                                             app.add_message(
                                                 MessageRole::System,
-                                                "No pending approvals or interactions.".to_string(),
+                                                "No pending approvals, plans, or interactions.".to_string(),
                                             );
                                         } else {
                                             app.pending_overlay = Some(PendingOverlay {
@@ -6574,7 +6990,32 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                 }
                                 HandleKeyAction::OverlayApprove(idx) => {
                                     if let Some(store) = gateway_store {
-                                        if let Some(PendingItem::Approval(req)) = app.pending_overlay.as_ref().and_then(|o| o.items.get(idx)) {
+                                        if let Some(PendingItem::PlanFrame(plan)) = app
+                                            .pending_overlay
+                                            .as_ref()
+                                            .and_then(|o| o.items.get(idx))
+                                        {
+                                            let plan_id = plan.plan_id.clone();
+                                            approve_plan_frame_in_chat(
+                                                app,
+                                                config,
+                                                store,
+                                                &plan_id,
+                                                true,
+                                                Some(tx),
+                                            );
+                                            if let Some(ref mut overlay) = app.pending_overlay {
+                                                overlay.items.remove(idx);
+                                                if overlay.selected >= overlay.items.len()
+                                                    && overlay.selected > 0
+                                                {
+                                                    overlay.selected -= 1;
+                                                }
+                                                if overlay.items.is_empty() {
+                                                    app.pending_overlay = None;
+                                                }
+                                            }
+                                        } else if let Some(PendingItem::Approval(req)) = app.pending_overlay.as_ref().and_then(|o| o.items.get(idx)) {
                                             let apr_id = req.request_id.clone();
                                             let approver_level =
                                                 autonoetic_types::background::ApprovalLevel::Operator;
@@ -6718,29 +7159,29 @@ async fn run_loop<B: ratatui::backend::Backend>(
 }
 
 fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
-    // Shift+mouse events pass through to the terminal for native selection/copy.
-    // This lets users hold Shift to use the terminal emulator's built-in
-    // click-drag-to-select and middle-click-to-paste without interference
-    // from the application's mouse capture.
-    if mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-        return false;
-    }
+    // All mouse events are handled by the application's pane-aware handler so
+    // that selection is confined to the left (messages) pane. Shift+click does
+    // NOT pass through to the terminal's native selector — the app copies
+    // selected text to the OS clipboard automatically on mouse release.
     match mouse.kind {
         crossterm::event::MouseEventKind::ScrollUp => {
-            if app.in_messages_area(mouse.row) {
+            if app.in_messages_area(mouse.row, mouse.column) {
                 app.scroll_messages_up(3);
             }
             true
         }
         crossterm::event::MouseEventKind::ScrollDown => {
-            if app.in_messages_area(mouse.row) {
+            if app.in_messages_area(mouse.row, mouse.column) {
                 app.scroll_messages_down(3);
             }
             true
         }
         crossterm::event::MouseEventKind::Down(btn) => {
             if btn == crossterm::event::MouseButton::Left {
-                if app.in_messages_area(mouse.row) {
+                // Selection may only START in the left (messages) pane. Clicking
+                // in the right pane must not begin a selection that would span
+                // across panes.
+                if app.in_messages_area(mouse.row, mouse.column) {
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
                     let content_col = (mouse.column as usize).saturating_sub(3);
                     app.selecting = true;
@@ -6763,14 +7204,25 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
         }
         crossterm::event::MouseEventKind::Up(btn) => {
             if btn == crossterm::event::MouseButton::Left && app.selecting {
-                if app.in_messages_area(mouse.row) {
+                // Accept the release as long as it is within the messages rows;
+                // if the cursor strayed into the right pane horizontally, clamp
+                // the column to the left pane's right edge so the selection
+                // stays inside the messages pane.
+                if app.in_messages_rows(mouse.row) {
+                    let clamped_col = app.clamp_col_to_messages(mouse.column);
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
-                    let content_col = (mouse.column as usize).saturating_sub(3);
+                    let content_col = (clamped_col as usize).saturating_sub(3);
                     app.sel_end = Some((content_row, content_col));
                     app.selecting = false;
-                    let was_click = app
-                        .click_down_screen
-                        .map_or(false, |(r, c)| r == mouse.row && c == mouse.column);
+                    // Click vs drag: only treat as a click when the release
+                    // landed on the exact same screen cell as the press AND
+                    // that cell was inside the messages pane (so a stray
+                    // release in the right pane never counts as a click).
+                    let was_click = app.click_down_screen.map_or(false, |(r, c)| {
+                        r == mouse.row
+                            && c == mouse.column
+                            && app.in_messages_area(mouse.row, mouse.column)
+                    });
                     if was_click {
                         let toggled = app.toggle_lifecycle_at_content_row(content_row);
                         if toggled {
@@ -6793,9 +7245,15 @@ fn handle_mouse(mouse: crossterm::event::MouseEvent, app: &mut App) -> bool {
         }
         crossterm::event::MouseEventKind::Drag(btn) => {
             if btn == crossterm::event::MouseButton::Left && app.selecting {
-                if app.in_messages_area(mouse.row) {
+                // While dragging, extend the selection as long as the cursor
+                // is within the messages rows. If the cursor drifts into the
+                // right pane horizontally, clamp the column to the left pane's
+                // right edge so the selection still extends to end-of-line in
+                // the left pane but never enters the right pane.
+                if app.in_messages_rows(mouse.row) {
+                    let clamped_col = app.clamp_col_to_messages(mouse.column);
                     let content_row = (mouse.row as usize - 2) + app.effective_scroll_offset();
-                    let content_col = (mouse.column as usize).saturating_sub(3);
+                    let content_col = (clamped_col as usize).saturating_sub(3);
                     app.sel_end = Some((content_row, content_col));
                 }
                 true
@@ -6812,6 +7270,7 @@ enum HandleKeyAction {
     Quit,
     SubmitInput(String),
     ApproveInline(String),
+    ApprovePlanInline(String),
     PauseSession,
     CancelSession,
     OpenPendingOverlay,
@@ -6844,7 +7303,9 @@ fn handle_overlay_key(
         }
         KeyCode::Char('a') => {
             let idx = overlay.selected;
-            if let Some(PendingItem::Approval(_)) = overlay.items.get(idx) {
+            if let Some(PendingItem::Approval(_) | PendingItem::PlanFrame(_)) =
+                overlay.items.get(idx)
+            {
                 return Ok(HandleKeyAction::OverlayApprove(idx));
             }
         }
@@ -6966,22 +7427,24 @@ fn handle_key(
             }
         }
 
-        // Inline approval: Ctrl+A approves the latest pending approval
+        // Inline approval: Ctrl+A approves gate approvals first, then PlanFrames.
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if !app.inline_approvals_enabled {
                 app.add_message(
                     MessageRole::System,
-                    "Inline approvals are off (`chat.inline_approvals: false`). Set to true in gateway config or use `autonoetic gateway approvals`.".to_string(),
+                    "Inline approvals are off (`chat.inline_approvals: false`). Set to true in gateway config or use `autonoetic gateway approvals` / `/plan approve`.".to_string(),
                 );
-            } else if app.pending_approval_ids.is_empty() {
-                app.add_message(
-                    MessageRole::System,
-                    "No pending approvals to approve.".to_string(),
-                );
-            } else {
-                // Pop the latest pending approval ID
+            } else if !app.pending_approval_ids.is_empty() {
                 let apr_id = app.pending_approval_ids.pop().unwrap();
                 return Ok(HandleKeyAction::ApproveInline(apr_id));
+            } else if !app.pending_plan_ids.is_empty() {
+                let plan_id = app.pending_plan_ids.pop().unwrap();
+                return Ok(HandleKeyAction::ApprovePlanInline(plan_id));
+            } else {
+                app.add_message(
+                    MessageRole::System,
+                    "No pending gate approvals or plans to approve.".to_string(),
+                );
             }
         }
 
@@ -7560,6 +8023,102 @@ fn merge_gateway_store_pending_approvals(
     announced
 }
 
+/// Sync PlanFrames awaiting operator approval for this root session into the chat UI.
+fn merge_pending_plan_frames(
+    app: &mut App,
+    store: &GatewayStore,
+    session_id: &str,
+) -> bool {
+    let root = autonoetic_gateway::runtime::content_store::root_session_id(session_id);
+    let Ok(plans) =
+        autonoetic_gateway::scheduler::pending_plan_frames_for_root(store, root)
+    else {
+        return false;
+    };
+
+    app.pending_plan_ids = plans.iter().map(|p| p.plan_id.clone()).collect();
+    app.pending_plan_summaries = plans
+        .iter()
+        .map(|p| {
+            let title: String = p.title.chars().take(48).collect();
+            (p.plan_id.clone(), title)
+        })
+        .collect();
+
+    let mut announced = false;
+    for plan in plans {
+        if app.announced_plan_ids.insert(plan.plan_id.clone()) {
+            let detail = if app.inline_approvals_enabled {
+                "Approve: Ctrl+A (after gate approvals), or `/plan approve`.".to_string()
+            } else {
+                "Approve: `/plan approve`.".to_string()
+            };
+            let card = format_plan_frame_card(&plan, &detail);
+            app.add_rich_card(
+                MessageRole::Signal,
+                card,
+                RichCard::PlanFrame {
+                    plan: Box::new(plan),
+                    detail,
+                },
+            );
+            announced = true;
+        }
+    }
+    announced
+}
+
+fn approve_plan_frame_in_chat(
+    app: &mut App,
+    config: &GatewayConfig,
+    store: &GatewayStore,
+    plan_id: &str,
+    wake_planner: bool,
+    tx: Option<&tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>>,
+) {
+    match autonoetic_gateway::scheduler::approve_plan_frame_operator(
+        config,
+        store,
+        plan_id,
+        "operator",
+    ) {
+        Ok(plan) => {
+            app.pending_plan_ids.retain(|id| id != plan_id);
+            app.pending_plan_summaries.retain(|(id, _)| id != plan_id);
+            app.add_message(
+                MessageRole::System,
+                format!(
+                    "Plan approved: {} — \"{}\" (v{})",
+                    plan.plan_id, plan.title, plan.version
+                ),
+            );
+            if wake_planner {
+                if let Some(tx) = tx {
+                    let wake = format!(
+                        "[Operator approved plan {}] \"{}\" is approved. Proceed with execution per the plan.",
+                        plan.plan_id, plan.title
+                    );
+                    let id = app.next_id();
+                    app.add_pending(id);
+                    app.add_message(MessageRole::User, wake.clone());
+                    let _ = tx.send((id, ChatOutbound::Chat(wake)));
+                }
+            } else {
+                app.add_message(
+                    MessageRole::System,
+                    "Send a message to the planner to continue execution.".to_string(),
+                );
+            }
+        }
+        Err(e) => {
+            app.add_message(
+                MessageRole::System,
+                format!("Failed to approve plan {plan_id}: {e}"),
+            );
+        }
+    }
+}
+
 /// Short human-readable summary of an action for the right-pane display.
 fn action_summary(action: &autonoetic_types::background::ScheduledAction) -> &'static str {
     match action {
@@ -7707,6 +8266,9 @@ async fn check_signals(
                 if merge_gateway_store_pending_approvals(app, config, st, session_id) {
                     processed_any = true;
                 }
+                if merge_pending_plan_frames(app, st, session_id) {
+                    processed_any = true;
+                }
             }
             return processed_any;
         }
@@ -7724,6 +8286,9 @@ async fn check_signals(
     // they are approving.
     if let Some(st) = store {
         if merge_gateway_store_pending_approvals(app, config, st, session_id) {
+            processed_any = true;
+        }
+        if merge_pending_plan_frames(app, st, session_id) {
             processed_any = true;
         }
     }
@@ -7885,6 +8450,28 @@ async fn check_signals(
                                     }
 
                                     // Track pending approval IDs for inline approval (Ctrl+A)
+                                    if event.event_type == "planframe.proposed" {
+                                        if let Some(plan_id) = event
+                                            .payload
+                                            .get("plan_id")
+                                            .and_then(|v| v.as_str())
+                                        {
+                                            if !app.pending_plan_ids.contains(&plan_id.to_string())
+                                            {
+                                                app.pending_plan_ids.push(plan_id.to_string());
+                                            }
+                                        }
+                                    } else if event.event_type == "planframe.approved" {
+                                        if let Some(plan_id) = event
+                                            .payload
+                                            .get("plan_id")
+                                            .and_then(|v| v.as_str())
+                                        {
+                                            app.pending_plan_ids.retain(|id| id != plan_id);
+                                            app.pending_plan_summaries.retain(|(id, _)| id != plan_id);
+                                        }
+                                    }
+
                                     if app.inline_approvals_enabled {
                                         if event.event_type == "task.awaiting_approval" {
                                             if let Some(apr_id) = event
@@ -8227,6 +8814,25 @@ mod tests {
         assert!(parsed
             .card
             .contains("retry field: promotion_gate.install_approval_ref"));
+    }
+
+    #[test]
+    fn test_format_workflow_event_card_planframe_proposed() {
+        let event = workflow_event(
+            "planframe.proposed",
+            None,
+            serde_json::json!({
+                "plan_id": "plan-f3d403758844",
+                "title": "Build Improved Agent",
+                "step_count": 7
+            }),
+        );
+        let line = format_workflow_event_card(&event)
+            .map(|(s, _)| s)
+            .expect("event should render");
+        assert!(line.contains("Plan proposed"));
+        assert!(line.contains("plan-f3d403758844"));
+        assert!(line.contains("/plan approve"));
     }
 
     #[test]

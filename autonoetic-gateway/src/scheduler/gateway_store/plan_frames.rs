@@ -143,6 +143,31 @@ pub(crate) fn list_plan_frames_for_workflow(
     Ok(plans)
 }
 
+/// Latest revision of each plan for `root_session_id` that is still awaiting operator approval.
+pub(crate) fn list_pending_plan_frames_for_root(
+    conn: &Connection,
+    root_session_id: &str,
+) -> Result<Vec<PlanFrame>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM plan_frames p
+         WHERE p.root_session_id = ?1 AND p.status = 'awaiting_approval'
+           AND p.version = (
+             SELECT MAX(p2.version) FROM plan_frames p2 WHERE p2.plan_id = p.plan_id
+           )
+         ORDER BY p.created_at ASC"
+    ))?;
+
+    let rows = stmt.query_map(params![root_session_id], |row| {
+        Ok(row_to_plan_frame(row))
+    })?;
+
+    let mut plans = Vec::new();
+    for row in rows {
+        plans.push(row??);
+    }
+    Ok(plans)
+}
+
 pub(crate) fn list_plan_revisions(
     conn: &Connection,
     plan_id: &str,

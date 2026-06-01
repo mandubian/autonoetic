@@ -256,6 +256,22 @@ The summary is persisted to `<workbench>/.autonoetic/semantic_summary.json` and 
 
 The `autonoetic chat` session supports these slash commands for collaboration:
 
+### Plan approval (`/plan`)
+
+When a collaborative planner calls `planframe_propose`, the plan is stored with status
+`awaiting_approval`. The chat TUI surfaces it separately from gateway gate approvals
+(`apr-*`):
+
+| Action | How |
+|--------|-----|
+| View pending plans | `/plan` or Ctrl+P pending overlay |
+| Approve (inline) | Ctrl+A (after any `apr-*` approvals; requires `chat.inline_approvals: true`) |
+| Approve (explicit) | `/plan approve` or `/plan approve <plan_id>` |
+
+After inline approval, chat sends a wake message to the planner so execution can continue.
+`/plan approve` without inline wake only updates the plan record — send a follow-up message
+to the planner if needed.
+
 ### Workbench commands (`/wb`)
 
 | Command | Description |
@@ -287,6 +303,19 @@ The agent resumes with full context of what changed, including which files the o
 ## Workflow Completion Warning
 
 When a workflow completes while active (unreconciled) workbenches still exist, the gateway emits a `workflow.unreconciled_workbenches` event with the workbench IDs. The workflow still completes — the event is a warning, not a block. This ensures unreconciled operator edits are never silently dropped.
+
+## Live session visibility (chat and future channels)
+
+The chat TUI today shows **assistant replies** and **workflow events** (`task.*`, plan approval).
+It does **not** stream every root-session tool call (for example `content_write`), even though
+`digest.md` and `session_overview.md` record them.
+
+A channel-agnostic fix is planned in
+[`docs/design/operator-activity-feed-plan.md`](design/operator-activity-feed-plan.md): the gateway
+will emit an `operator_activity` feed keyed by `root_session_id` so the terminal, Discord,
+WhatsApp, and HTTP bridges all consume the same summaries.
+
+Until that ships, use `digest.md` or `autonoetic trace` for in-run tool activity.
 
 ## Security Model
 

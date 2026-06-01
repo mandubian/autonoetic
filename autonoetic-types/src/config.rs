@@ -2103,6 +2103,18 @@ pub struct PromptBudgetConfig {
     /// the session escalates to all tiers for the rest of its lifetime.
     #[serde(default)]
     pub progressive_tool_disclosure: bool,
+
+    /// Override the chars-per-token ratio used by the prompt budget
+    /// estimator. `None` (the default) means "use the built-in default of
+    /// 3.0 chars/token". Operators running a tokenizer that is known to
+    /// behave differently (e.g. a quantized local model that splits short
+    /// identifiers aggressively) can pin a different value here.
+    ///
+    /// Out-of-range values are clamped at the gateway to the range
+    /// `[0.5, 16.0]`; non-finite or non-positive values are silently
+    /// treated as "use the default".
+    #[serde(default)]
+    pub chars_per_token: Option<f64>,
 }
 
 fn default_prompt_budget_warn_pct() -> f64 {
@@ -2123,6 +2135,7 @@ impl Default for PromptBudgetConfig {
             compress_tool_schemas_after_turn_0: false,
             max_tool_definitions: 0,
             progressive_tool_disclosure: false,
+            chars_per_token: None,
         }
     }
 }

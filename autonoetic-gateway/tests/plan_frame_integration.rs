@@ -341,6 +341,75 @@ fn planframe_approve_transitions_status() {
 }
 
 #[test]
+fn operator_approve_plan_frame_via_scheduler_ops() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-session-operator/planner-op";
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "Operator Approval Test",
+                "objective": "Test chat/CLI operator path"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let pending = autonoetic_gateway::scheduler::pending_plan_frames_for_root(
+        store.as_ref(),
+        "root-session-operator",
+    )
+    .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].plan_id, plan_id);
+
+    let approved = autonoetic_gateway::scheduler::approve_plan_frame_operator(
+        &config,
+        store.as_ref(),
+        &plan_id,
+        "chat-tui",
+    )
+    .unwrap();
+    assert_eq!(approved.status, PlanStatus::Approved);
+    assert_eq!(approved.approved_by.as_deref(), Some("chat-tui"));
+
+    assert!(
+        autonoetic_gateway::scheduler::pending_plan_frames_for_root(
+            store.as_ref(),
+            "root-session-operator"
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
 fn planframe_amend_creates_new_revision() {
     let dir = tempdir().unwrap();
     let config = make_config(dir.path());

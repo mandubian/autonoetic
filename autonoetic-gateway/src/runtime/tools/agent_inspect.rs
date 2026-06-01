@@ -10,6 +10,71 @@ use crate::runtime::tools::{NativeTool, NativeToolRunContext};
 
 pub struct AgentInspectTool;
 
+/// Directory names that are never useful to surface to the LLM:
+/// build/cache artifacts, virtual environments, VCS metadata. The walker
+/// does not recurse into these — they are dropped entirely (both from the
+/// `files` list and from `source`).
+const EXCLUDED_DIRECTORY_NAMES: &[&str] = &[
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    "target",
+    ".git",
+    ".hg",
+    ".svn",
+    "dist",
+    "build",
+    ".next",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".cache",
+    "__pypackages__",
+    ".idea",
+    ".vscode",
+];
+
+/// File extensions that are always excluded — compiled bytecode, shared
+/// libraries, executables, archives. These are listed without the leading dot
+/// and matched case-insensitively against the file's extension.
+const EXCLUDED_FILE_EXTENSIONS: &[&str] = &[
+    "pyc", "pyo", "pyd", // Python bytecode / extension modules
+    "so", "dylib", "dll", // Shared libraries
+    "o", "a", "obj", "lib", // Object/static archives
+    "class", "jar", "war", // JVM
+    "wasm", // WebAssembly binaries
+    "exe", "bin", // Executables
+    "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", // Archives
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", // Images
+    "mp3", "mp4", "wav", "ogg", "flac", "mov", "avi", "webm", // Media
+    "pdf", "ttf", "otf", "woff", "woff2", "eot", // Documents/fonts
+    "db", "sqlite", "sqlite3", "mdb", // Databases
+];
+
+/// Whole-filename suffixes (after the last `.`) that should be skipped. Used
+/// for Unix socket files and other non-content artifacts whose presence in a
+/// revision dir is purely a runtime side-effect.
+const EXCLUDED_FILE_SUFFIXES: &[&str] = &[".sock"];
+
+/// Maximum size of a single file included in `source` (per-file cap).
+/// Larger files are truncated and listed under `truncated_files` with their
+/// original byte size.
+const MAX_PER_FILE_BYTES: usize = 64 * 1024;
+
+/// Maximum aggregate size across all files in `source` (response-level cap).
+/// Once exceeded, remaining files are listed under `skipped_files` with
+/// `reason="total_size_cap"` instead of being inlined.
+const MAX_TOTAL_SOURCE_BYTES: usize = 256 * 1024;
+
+/// A file is treated as binary (and skipped from `source`) when it contains
+/// any NUL byte in the first this-many bytes scanned, OR when it is not valid
+/// UTF-8. NUL bytes very rarely occur in legitimate source/config files and
+/// strongly indicate compiled output.
+const BINARY_SNIFF_BYTES: usize = 4096;
+
 impl NativeTool for AgentInspectTool {
     fn name(&self) -> &'static str {
         "agent_inspect"
@@ -118,18 +183,21 @@ impl NativeTool for AgentInspectTool {
             ));
         }
 
-        let file_map = collect_revision_files(&revision_dir)?;
+        let walk = walk_revision_dir(&revision_dir)?;
 
-        let skill_content = file_map
-            .get("SKILL.md")
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string());
+        let skill_content = walk
+            .files
+            .iter()
+            .find(|f| f.rel_path == "SKILL.md")
+            .map(|f| String::from_utf8_lossy(&f.bytes).to_string());
 
         let parsed_manifest = skill_content
             .as_deref()
             .and_then(|s| crate::runtime::parser::SkillParser::parse(s).ok());
 
         let (skill_meta, file_list) = {
-            let mut files: Vec<String> = file_map.keys().cloned().collect();
+            let mut files: Vec<String> =
+                walk.files.iter().map(|f| f.rel_path.clone()).collect();
             files.sort();
 
             let meta = if let Some((ref m, _)) = parsed_manifest {
@@ -173,13 +241,51 @@ impl NativeTool for AgentInspectTool {
             "files": file_list,
         });
 
+        // Always surface what the walker excluded, even when include_source is
+        // false, so the caller can reason about what's on disk vs. what's
+        // returned. Empty arrays/maps are omitted.
+        if !walk.excluded_dirs.is_empty() {
+            out.as_object_mut().map(|o| {
+                o.insert(
+                    "excluded_directories".to_string(),
+                    serde_json::to_value(&walk.excluded_dirs).unwrap(),
+                );
+            });
+        }
+        if !walk.excluded_files.is_empty() {
+            out.as_object_mut().map(|o| {
+                o.insert(
+                    "excluded_files".to_string(),
+                    serde_json::to_value(&walk.excluded_files).unwrap(),
+                );
+            });
+        }
+
         if include_source && is_local {
-            let source: std::collections::BTreeMap<String, String> = file_map
-                .iter()
-                .map(|(k, v)| (k.clone(), String::from_utf8_lossy(v).to_string()))
-                .collect();
+            let SourceBuild {
+                source,
+                truncated_files,
+                skipped_files,
+                total_bytes,
+            } = build_source_map(&walk.files);
             out.as_object_mut().map(|o| {
                 o.insert("source".to_string(), serde_json::to_value(&source).unwrap());
+                if !truncated_files.is_empty() {
+                    o.insert(
+                        "truncated_files".to_string(),
+                        serde_json::to_value(&truncated_files).unwrap(),
+                    );
+                }
+                if !skipped_files.is_empty() {
+                    o.insert(
+                        "skipped_files".to_string(),
+                        serde_json::to_value(&skipped_files).unwrap(),
+                    );
+                }
+                o.insert(
+                    "source_total_bytes".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(total_bytes)),
+                );
             });
         } else if include_source && !is_local {
             out.as_object_mut().map(|o| {
@@ -237,35 +343,215 @@ impl NativeTool for AgentInspectTool {
     }
 }
 
-fn collect_revision_files(root: &Path) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+/// A single file collected by `walk_revision_dir`. The bytes are read eagerly
+/// because the revision dir is small (text source + manifests) once excluded
+/// directories are pruned.
+struct WalkedFile {
+    rel_path: String,
+    bytes: Vec<u8>,
+}
+
+/// Result of walking a revision directory: the files retained for inspection
+/// plus diagnostic lists of what was pruned and why.
+struct WalkResult {
+    files: Vec<WalkedFile>,
+    /// Relative paths of directories that were not recursed into (e.g.
+    /// `"venv"`, `"__pycache__"`). Stored once per excluded dir, not per file.
+    excluded_dirs: Vec<String>,
+    /// Relative paths of files dropped by the name/extension/suffix filter,
+    /// each annotated with the exclusion reason.
+    excluded_files: Vec<ExcludedFile>,
+}
+
+#[derive(serde::Serialize)]
+struct ExcludedFile {
+    path: String,
+    reason: String,
+}
+
+/// Walk the revision directory, pruning known-junk subdirectories and files.
+/// The returned `WalkResult` contains only the files retained for inspection
+/// (i.e. ones that could reasonably be source/config/text) plus diagnostic
+/// records of what was filtered.
+fn walk_revision_dir(root: &Path) -> anyhow::Result<WalkResult> {
     fn walk(
         base: &Path,
         current: &Path,
-        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+        out: &mut WalkResult,
     ) -> anyhow::Result<()> {
         for entry in std::fs::read_dir(current)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
-                walk(base, &path, out)?;
-                continue;
-            }
-            if !path.is_file() {
-                continue;
-            }
+            let file_name = entry.file_name();
+            let name_str = file_name.to_string_lossy();
             let rel = path
                 .strip_prefix(base)
                 .map_err(|e| anyhow::anyhow!("Failed to compute relative path: {}", e))?;
-            let rel = rel.to_string_lossy().replace('\\', "/");
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+            // Resolve once: kind of filesystem entry, with symlinks NOT followed.
+            // Symlinks are skipped entirely — a malicious or accidental symlink
+            // into the user's home directory must never leak content.
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                out.excluded_files.push(ExcludedFile {
+                    path: rel_str,
+                    reason: "symlink".to_string(),
+                });
+                continue;
+            }
+            if file_type.is_dir() {
+                if EXCLUDED_DIRECTORY_NAMES.contains(&name_str.as_ref()) {
+                    out.excluded_dirs.push(rel_str);
+                    continue;
+                }
+                walk(base, &path, out)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                // Sockets, fifos, block/char devices.
+                out.excluded_files.push(ExcludedFile {
+                    path: rel_str,
+                    reason: "not_a_regular_file".to_string(),
+                });
+                continue;
+            }
+
+            // Filename-based filter (suffixes like `.sock`).
+            if EXCLUDED_FILE_SUFFIXES
+                .iter()
+                .any(|suf| name_str.ends_with(suf))
+            {
+                out.excluded_files.push(ExcludedFile {
+                    path: rel_str,
+                    reason: "excluded_suffix".to_string(),
+                });
+                continue;
+            }
+
+            // Extension-based filter (case-insensitive).
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let ext_lc = ext.to_ascii_lowercase();
+                if EXCLUDED_FILE_EXTENSIONS.contains(&ext_lc.as_str()) {
+                    out.excluded_files.push(ExcludedFile {
+                        path: rel_str,
+                        reason: format!("excluded_extension:{}", ext_lc),
+                    });
+                    continue;
+                }
+            }
+
             let bytes = std::fs::read(&path)?;
-            out.insert(rel, bytes);
+            out.files.push(WalkedFile {
+                rel_path: rel_str,
+                bytes,
+            });
         }
         Ok(())
     }
 
-    let mut files = std::collections::BTreeMap::new();
-    walk(root, root, &mut files)?;
-    Ok(files)
+    let mut result = WalkResult {
+        files: Vec::new(),
+        excluded_dirs: Vec::new(),
+        excluded_files: Vec::new(),
+    };
+    walk(root, root, &mut result)?;
+    // Stable ordering for deterministic test output and reproducible digests.
+    result.files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    result.excluded_dirs.sort();
+    result.excluded_files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(result)
+}
+
+/// Output of assembling the `source` map under the per-file and total-size
+/// caps. `truncated_files` lists files that were included but cut short;
+/// `skipped_files` lists files that were dropped entirely (binary, oversized
+/// past the total cap, etc.).
+struct SourceBuild {
+    source: std::collections::BTreeMap<String, String>,
+    truncated_files: Vec<TruncatedFile>,
+    skipped_files: Vec<ExcludedFile>,
+    total_bytes: usize,
+}
+
+#[derive(serde::Serialize)]
+struct TruncatedFile {
+    path: String,
+    original_bytes: usize,
+    included_bytes: usize,
+}
+
+/// Build the `source` map, applying:
+///   1. Binary detection (skipped),
+///   2. Per-file truncation at `MAX_PER_FILE_BYTES`,
+///   3. Total-size cap at `MAX_TOTAL_SOURCE_BYTES` (remaining files skipped).
+fn build_source_map(files: &[WalkedFile]) -> SourceBuild {
+    let mut source = std::collections::BTreeMap::new();
+    let mut truncated = Vec::new();
+    let mut skipped = Vec::new();
+    let mut total: usize = 0;
+
+    for file in files {
+        let original_bytes = file.bytes.len();
+
+        if is_binary_payload(&file.bytes) {
+            skipped.push(ExcludedFile {
+                path: file.rel_path.clone(),
+                reason: "binary_content".to_string(),
+            });
+            continue;
+        }
+
+        // Apply per-file cap before measuring against the total budget so a
+        // single huge file can't consume the entire response on its own.
+        let (slice, was_truncated) = if original_bytes > MAX_PER_FILE_BYTES {
+            (&file.bytes[..MAX_PER_FILE_BYTES], true)
+        } else {
+            (&file.bytes[..], false)
+        };
+
+        // Respect the total cap. If adding this file would push past the cap,
+        // skip it entirely rather than producing a partial mid-file cut that
+        // the caller has no way to interpret.
+        if total.saturating_add(slice.len()) > MAX_TOTAL_SOURCE_BYTES {
+            skipped.push(ExcludedFile {
+                path: file.rel_path.clone(),
+                reason: "total_size_cap".to_string(),
+            });
+            continue;
+        }
+
+        // Decode the (possibly truncated) slice as UTF-8 lossily. A
+        // mid-multibyte cut becomes a single replacement char rather than an
+        // error, which is the desired behaviour.
+        let text = String::from_utf8_lossy(slice).to_string();
+        total = total.saturating_add(text.len());
+        source.insert(file.rel_path.clone(), text);
+
+        if was_truncated {
+            truncated.push(TruncatedFile {
+                path: file.rel_path.clone(),
+                original_bytes,
+                included_bytes: slice.len(),
+            });
+        }
+    }
+
+    SourceBuild {
+        source,
+        truncated_files: truncated,
+        skipped_files: skipped,
+        total_bytes: total,
+    }
+}
+
+/// Cheap binary heuristic: a NUL byte anywhere in the first `BINARY_SNIFF_BYTES`
+/// of a file is treated as conclusive evidence of binary content. Legitimate
+/// text/source files (including UTF-8, UTF-16-without-BOM is rare in source
+/// trees) do not contain interior NUL bytes.
+fn is_binary_payload(bytes: &[u8]) -> bool {
+    let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
+    bytes[..sniff_len].iter().any(|b| *b == 0)
 }
 
 pub fn register_tools(registry: &mut crate::runtime::tools::NativeToolRegistry) {

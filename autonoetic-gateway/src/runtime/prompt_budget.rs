@@ -6,9 +6,65 @@
 use crate::llm::{Message, ToolDefinition};
 use serde::Serialize;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Heuristic: ~4 characters per token (works across most models).
-const CHARS_PER_TOKEN: f64 = 4.0;
+/// Default chars-per-token ratio used when no override is configured.
+///
+/// 3.0 is intentionally conservative: real-world tokenizers (Qwen3, Llama3,
+/// GPT-4o) typically achieve 2.2–3.5 chars per token, with code/JSON content
+/// on the lower end. The previous default of 4.0 matched English prose under
+/// the GPT-2 BPE and materially underestimated the prompt size of code-heavy
+/// or mixed-format content, which let the context governor stay silent until
+/// the LLM call returned a 400.
+///
+/// Operators running a model whose tokenizer is known to produce more tokens
+/// per character (or vice versa) can override this with
+/// `prompt_budget.chars_per_token` in the gateway config.
+pub const DEFAULT_CHARS_PER_TOKEN: f64 = 3.0;
+
+/// Hard sanity bound on the configurable ratio. A value below 0.5 chars/token
+/// would imply more than 2 tokens per character (unrealistic for any
+/// commercial tokenizer), and a value above 16 would correspond to ~0.06
+/// tokens/char (single-token sentences). Both are rejected at the setter.
+const MIN_CHARS_PER_TOKEN: f64 = 0.5;
+const MAX_CHARS_PER_TOKEN: f64 = 16.0;
+
+/// Effective chars-per-token ratio, stored as centi-units (multiply by 100)
+/// so the value can live in an `AtomicU32` instead of requiring
+/// platform-specific `AtomicU64`/`AtomicF64` plumbing. Default = 3.00.
+static CHARS_PER_TOKEN_CENTIS: AtomicU32 = AtomicU32::new(300);
+
+/// Return the current effective chars-per-token ratio. Reads from a process-
+/// wide atomic; safe to call from any thread.
+pub fn chars_per_token() -> f64 {
+    (CHARS_PER_TOKEN_CENTIS.load(Ordering::Relaxed) as f64) / 100.0
+}
+
+/// Override the chars-per-token ratio at runtime. Returns the clamped value
+/// that was actually stored (i.e. the input after bounding to
+/// `[MIN_CHARS_PER_TOKEN, MAX_CHARS_PER_TOKEN]`). Callers should pass the
+/// returned value to `tracing` so operators can see when clamping occurred.
+///
+/// Setting the value to a non-finite or non-positive number resets the
+/// atomic to the default — this is the safe fallback for malformed config.
+pub fn set_chars_per_token(value: f64) -> f64 {
+    let stored = if value.is_finite() && value > 0.0 {
+        let clamped = value.clamp(MIN_CHARS_PER_TOKEN, MAX_CHARS_PER_TOKEN);
+        CHARS_PER_TOKEN_CENTIS.store(
+            (clamped * 100.0).round() as u32,
+            Ordering::Relaxed,
+        );
+        clamped
+    } else {
+        // Malformed config: revert to default and report what we did.
+        CHARS_PER_TOKEN_CENTIS.store(
+            (DEFAULT_CHARS_PER_TOKEN * 100.0).round() as u32,
+            Ordering::Relaxed,
+        );
+        DEFAULT_CHARS_PER_TOKEN
+    };
+    stored
+}
 
 /// Estimated overhead tokens per tool definition (name + description + schema structure).
 const TOOL_OVERHEAD_TOKENS: usize = 30;
@@ -76,12 +132,14 @@ impl PromptBudgetBreakdown {
     }
 }
 
-/// Estimate tokens from a text string using the ~4 chars/token heuristic.
+/// Estimate tokens from a text string using the current chars-per-token
+/// ratio (see [`chars_per_token`] / [`set_chars_per_token`]).
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         0
     } else {
-        (text.chars().count() as f64 / CHARS_PER_TOKEN).ceil() as usize
+        let ratio = chars_per_token();
+        (text.chars().count() as f64 / ratio).ceil() as usize
     }
 }
 
@@ -426,6 +484,62 @@ mod tests {
         let text = "hello world this is a test";
         let tokens = estimate_tokens(text);
         assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_default_chars_per_token_is_three() {
+        // The default ratio was lowered from 4.0 → 3.0 because real-world
+        // tokenizers (Qwen3, Llama3, GPT-4o) typically achieve 2.2–3.5
+        // chars/token on code/JSON content, and the 4.0 heuristic
+        // systematically underestimated such prompts, letting the context
+        // governor stay silent until the LLM call returned a 400.
+        assert_eq!(DEFAULT_CHARS_PER_TOKEN, 3.0);
+        // We don't assert on chars_per_token() directly here because other
+        // tests in this module may have already set it; the next test
+        // resets it.
+    }
+
+    #[test]
+    fn test_set_chars_per_token_round_trips_and_clamps() {
+        // Round-trip a value inside the legal range.
+        let stored = set_chars_per_token(2.5);
+        assert_eq!(stored, 2.5);
+        assert!((chars_per_token() - 2.5).abs() < 1e-9);
+
+        // Values below MIN get clamped to MIN.
+        let stored = set_chars_per_token(0.1);
+        assert_eq!(stored, 0.5);
+        assert!((chars_per_token() - 0.5).abs() < 1e-9);
+
+        // Values above MAX get clamped to MAX.
+        let stored = set_chars_per_token(100.0);
+        assert_eq!(stored, 16.0);
+        assert!((chars_per_token() - 16.0).abs() < 1e-9);
+
+        // Malformed input (NaN, 0, negative, infinity) resets to default.
+        for bad in [f64::NAN, 0.0, -1.0, f64::INFINITY, f64::NEG_INFINITY] {
+            let stored = set_chars_per_token(bad);
+            assert_eq!(stored, DEFAULT_CHARS_PER_TOKEN);
+            assert!((chars_per_token() - DEFAULT_CHARS_PER_TOKEN).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_estimate_tokens_obeys_setter() {
+        // Lock the ratio to 1.0 so the math is exact regardless of default.
+        set_chars_per_token(1.0);
+        // 4 chars → 4 tokens.
+        assert_eq!(estimate_tokens("abcd"), 4);
+        set_chars_per_token(2.0);
+        // ceil(4/2) = 2 tokens.
+        assert_eq!(estimate_tokens("abcd"), 2);
+        set_chars_per_token(4.0);
+        // ceil(4/4) = 1 token.
+        assert_eq!(estimate_tokens("abcd"), 1);
+        // Restore the default so downstream tests that rely on it are
+        // unaffected. Use a safe round-trip rather than reaching into the
+        // atomic directly.
+        set_chars_per_token(DEFAULT_CHARS_PER_TOKEN);
     }
 
     #[test]
