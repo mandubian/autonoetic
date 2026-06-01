@@ -30,6 +30,7 @@ arboard = "3.4"
 rpassword = "7.3"
 chrono = "0.4"
 tempfile = "3.26.0"
+walkdir = "2"
 
 [dev-dependencies]
 rusqlite = { version = "0.38.0", features = ["bundled"] }
