@@ -487,6 +487,11 @@ impl GatewayStore {
         workbenches::list_checkpoints_for_workbench(&conn, workbench_id)
     }
 
+    pub fn delete_workbench(&self, workbench_id: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        workbenches::delete_workbench(&mut conn, workbench_id)
+    }
+
     pub fn save_validation_waiver(
         &self,
         waiver: &autonoetic_types::plan_frame::ValidationWaiver,

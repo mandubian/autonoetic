@@ -225,3 +225,17 @@ fn parse_workbench_status(s: &str) -> WorkbenchStatus {
         _ => WorkbenchStatus::Active,
     }
 }
+
+pub(crate) fn delete_workbench(conn: &mut Connection, workbench_id: &str) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM workbench_checkpoints WHERE workbench_id = ?1",
+        params![workbench_id],
+    )?;
+    tx.execute(
+        "DELETE FROM workbenches WHERE workbench_id = ?1",
+        params![workbench_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
