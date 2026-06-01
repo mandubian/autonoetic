@@ -34,11 +34,14 @@ config, bootstraps agents, starts the gateway in-process, and opens chat —
 all without requiring the user to understand the decomposed commands.
 
 ```bash
-autonoetic run [OPTIONS]
+autonoetic run [OPTIONS] [AGENT_ID]
 
 Options:
-  --agent-id <ID>      Target agent (default: planner.default)
-  --session-id <ID>    Resume an existing session
+  -c, --collaborative   Use planner.collaborative (PlanFrame, workbench, /wb, /return)
+  --session-id <ID>     Resume an existing session
+  --resume              Resume the most recent session
+  --overwrite           Re-copy and re-bootstrap reference agents
+  --refresh-models      Interactively select a new provider/model
 ```
 
 **Interactive setup (first run only):**
@@ -51,6 +54,20 @@ Options:
 6. Bootstraps agents and starts gateway + chat.
 
 Subsequent runs skip setup and go straight to chat.
+
+**Collaborative mode** (`--collaborative` or `-c`):
+
+```bash
+autonoetic run -c
+```
+
+Uses `planner.collaborative` instead of `planner.default`. This agent has the `PlanFrameAccess` capability, which enables the full collaboration lifecycle: PlanFrame proposals, workbench projection, reconciliation, semantic summaries, validation waivers, and the `/return` handoff. The TUI will show workbench status and `/wb` commands when a workbench is active.
+
+You can also select any agent by ID as a positional argument:
+
+```bash
+autonoetic run planner.collaborative
+```
 
 ---
 
@@ -420,12 +437,19 @@ Requires `AUTONOETIC_SHARED_SECRET` in the environment so chat requests can auth
 - `/session new [name]` — Create a new session, optionally naming it explicitly
 - `/session switch <id>` — Switch to an existing session
 - `/status` — Show current session info
+- `/wb` or `/wb status` — Show active workbench status (collaborative mode)
+- `/wb diff` — Show diff of active workbench against base artifact
+- `/wb reconcile` — Reconcile active workbench edits into new artifact
+- `/wb discard` — Discard active workbench without reconciling
+- `/return [--force] [note]` — Hand active workbench back to the orchestrator
 - `/why [request_id]` — Explain why an approval was triggered (shows constitutional rules)
 - `/policy <text>` — Route a governance request to `governance-author.default` (constitutional proposals)
 - `/persona [text]` — Show or set user persona (persists to `persona.md`)
 - `/cancel` — Leave the current session picker/prompt
 - `/exit` or `/quit` — Exit chat
 - `/help` — Show available chat commands
+
+Workbench and `/return` commands are available when the active agent has `PlanFrameAccess` (e.g. `planner.collaborative`). See [Human-Agent Collaboration](human-agent-collaboration.md) for the full lifecycle.
 
 ---
 

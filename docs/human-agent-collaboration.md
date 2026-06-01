@@ -2,6 +2,23 @@
 
 The collaboration system lets operators and agents co-edit artifacts through a structured **PlanFrame → Workbench → Reconcile → Return** lifecycle. The agent proposes a plan; the operator edits files in a projected workbench; edits are reconciled into immutable artifact revisions; the agent resumes with full context of what changed.
 
+## Getting Started
+
+```bash
+autonoetic run -c
+```
+
+The `--collaborative` (or `-c`) flag selects `planner.collaborative`, which has the `PlanFrameAccess` capability required for all collaboration tools. The TUI will automatically show workbench status and enable `/wb` and `/return` commands when a workbench is active.
+
+Without this flag, `autonoetic run` uses `planner.default` which does not have collaboration tools.
+
+You can also use any agent with `PlanFrameAccess` explicitly:
+
+```bash
+autonoetic run planner.collaborative
+autonoetic chat --agent planner.collaborative
+```
+
 All collaboration tools require the `PlanFrameAccess` capability.
 
 ## Core Concepts
