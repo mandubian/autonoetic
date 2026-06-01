@@ -138,7 +138,7 @@ constitutional frame first, then builds the runtime around it. The LLM proposes
 
 ---
 
-## 4. Designed for agents, not just for humans
+## 4. Designed for agents first
 
 This is the deepest difference between Autonoetic and systems like Hermes or
 OpenClaw.
@@ -157,6 +157,8 @@ exists so agents can:
 - Inspect their own rights and capabilities (`self_describe`)
 - Trust other agents because all parties operate under the same constitution
 - Install agents built by other agents, with mechanical capability gating
+- Act as gate deciders — agents with `GateDecider` capability can approve or
+  reject approval gates, subject to the same hardening rules as human operators
 
 Here is how the same task plays out differently:
 
@@ -167,11 +169,19 @@ Here is how the same task plays out differently:
 | Unattended work | Not designed for it | Workflows persist across restarts |
 | Audit trail | Chat history | Causal chain: who did what, with which authority |
 | Agent install | CLI only (manual) | Agents can install agents (capability-gated) |
+| Gate approval | Human only | Human or agent (GateDecider capability); agents escalate to a human when unsure |
 | Trust model | Trust the prompt writer | Trust the constitution — mechanically enforced |
 
 The constitution isn't there to restrict **you**. It's there so **agents can
 trust each other** without you mediating every interaction. That's the
 difference between a tool and an ecosystem.
+
+Notably, "operator" in Autonoetic is a **role**, not necessarily a human. The
+constitution names three kinds of deciders: human operators, autonomous reviewer
+agents, and policy engines. Each decision is recorded with the decider's
+identity on the causal chain. But the human remains the ultimate escalation
+path — an agent-decider that cannot resolve a gate must escalate to a human
+rather than reject.
 
 ---
 
@@ -256,9 +266,9 @@ common frame can evolve deliberately rather than silently drifting.
 
 ---
 
-## 6. The four principles behind the design
+## 6. The principles behind the design
 
-Autonoetic is built around four strong beliefs that shape every decision.
+Autonoetic is built around several strong beliefs that shape every decision.
 
 ### 6.1 LLM decisions are useful but not authoritative
 
@@ -349,12 +359,14 @@ An agent can inspect itself at any time:
   accurate.
 - **Capabilities and policy** — the agent knows its declared permissions, its
   budget, its active gates, and its session lineage.
-- **Workbench state** (`workbench_status`, `workbench_diff`) — the agent
-  sees what the operator has edited, which files changed, and how the workbench
-  diverges from the base artifact.
-- **Semantic summary** — a deterministic classification of every changed file,
-  telling the agent whether its capabilities, runtime lock, or entry points
-  were modified without it needing to re-read every file.
+- **Workbench state** (`workbench_status`, `workbench_diff`) — a workbench
+  (see §12) is a mutable human-editable copy of an artifact. The agent can
+  see what the operator edited, which files changed, and how the workbench
+  diverges from the base artifact — without re-reading every file.
+- **Semantic summary** — a gateway-computed structural diff: the agent asks
+  *"what actually changed?"* and gets a deterministic classification of every
+  modified file by what it affects (capabilities, runtime lock, entry points,
+  etc.). No re-reading, no guessing.
 
 Self-awareness is not a luxury feature — it is how an agent reasons
 *correctly*. An agent that knows its constraints makes better delegation
@@ -432,6 +444,26 @@ Examples of agents:
 
 An agent's role is a contract — instructions, bounded by capabilities,
 interpreted inside the same constitution as every other agent.
+
+### Capsules: agents you can export and import
+
+Agents aren't locked to one machine. A **cognitive capsule** is a portable
+export of an agent that wraps everything needed to reproduce it elsewhere:
+
+- the agent bundle (SKILL.md, instructions, entry scripts)
+- its runtime closure (`runtime.lock`, layer dependencies)
+- referenced artifacts (or their content digests)
+- optionally the exact gateway binary for hermetic replay
+
+Capsules are content-addressed (immutable once created), secret-free (credentials
+are scrubbed before export — the receiving gateway provides its own), and
+optionally signed for authenticity.
+
+This means a tuned agent can move from a dev machine to a production gateway,
+be shared via a marketplace, or serve as a disaster-recovery snapshot — all
+without re-bootstrapping.
+
+See `docs/cognitive-capsule.md` for the full pipeline.
 
 ---
 
@@ -531,7 +563,7 @@ Which revision was installed?
 
 ---
 
-## 13. Approvals and gates: humans are part of the system
+## 13. Approvals and gates: deciders keep authority visible
 
 Some actions need explicit approval: network access, sandbox execution,
 credential use, promotion/install, high-risk artifact actions.
@@ -540,11 +572,13 @@ Autonoetic treats approval as a **durable gate**, not a chat suggestion:
 
 1. Gateway records a pending gate.
 2. The relevant turn/task **suspends**.
-3. Operator approves or rejects.
+3. A decider (human operator, agent with `GateDecider` capability, or policy
+   engine) approves or rejects.
 4. Gateway resumes or cancels the task.
 
 Approval authorizes a specific gateway execution path under specific conditions
-— it does not give the agent permanent authority.
+— it does not give the agent permanent authority. Agent-deciders that cannot
+resolve a gate must escalate to a human rather than reject silently.
 
 ---
 
@@ -751,8 +785,13 @@ so. Autonoetic prefers honest state over optimistic summaries.
 
 ## 19. Consequences for operators
 
-If you operate Autonoetic, you are participating in a governed workflow, not
-just chatting.
+In Autonoetic, "operator" is a **role** — a decider who approves, rejects, or
+escalates gates. This role can be filled by a human using the CLI, by an agent
+with `GateDecider` capability, or by a policy engine. Every decision is recorded
+with the decider's identity on the causal chain.
+
+Whether human or agent, operating Autonoetic means participating in a governed
+workflow, not just chatting.
 
 You may be asked to approve a plan, approve a network action, inspect an
 artifact, waive an advisory validation, or decide whether an agent should be

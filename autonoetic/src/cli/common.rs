@@ -315,6 +315,10 @@ pub struct RunArgs {
     /// SKILL.md files, and create new revisions. Old revisions are preserved.
     #[arg(long)]
     pub refresh_models: bool,
+    /// Use the collaborative planner (planner.collaborative) instead of the default.
+    /// Enables PlanFrame, workbench projection, reconciliation, and the /return handoff.
+    #[arg(short, long)]
+    pub collaborative: bool,
 }
 
 // ---------------------------------------------------------------------------

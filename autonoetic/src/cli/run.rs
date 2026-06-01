@@ -77,6 +77,7 @@ llm_presets:
 
 llm_preset_mapping:
   planner: default
+  planner.collaborative: default
   researcher: default
   coder: default
   auditor: default
@@ -321,8 +322,14 @@ pub async fn handle_run(
         eprintln!("  Generated ephemeral shared secret for this session.");
     }
 
+    let resolved_agent_id = if args.collaborative {
+        Some("planner.collaborative".to_string())
+    } else {
+        args.agent_id.clone()
+    };
+
     let chat_args = super::common::ChatArgs {
-        agent_id: args.agent_id.clone(),
+        agent_id: resolved_agent_id,
         sender_id: None,
         channel_id: None,
         session_id: args.session_id.clone(),
@@ -350,6 +357,10 @@ pub async fn handle_run(
     let ready = wait_for_gateway_ready(gateway_port, std::time::Duration::from_secs(30)).await;
     if !ready {
         eprintln!("Warning: gateway did not become ready within timeout. Chat may fail to connect.");
+    }
+
+    if args.collaborative {
+        eprintln!("  Mode: collaborative (planner.collaborative — PlanFrame, workbench, /wb, /return)");
     }
 
     let log_dir = gateway_config.agents_dir.join(".gateway").join("logs");
