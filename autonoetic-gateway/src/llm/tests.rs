@@ -550,4 +550,103 @@ mod tests {
             assert_eq!(args["query"], "rust lifetimes");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // is_context_overflow_error — cross-provider error body recognition
+    // -----------------------------------------------------------------------
+
+    mod context_overflow {
+        use crate::llm::is_context_overflow_error;
+
+        #[test]
+        fn rejects_status_zero() {
+            // Status 0 means we never reached the server; never treat as overflow.
+            assert!(!is_context_overflow_error(
+                0,
+                r#"{"error":{"code":"context_length_exceeded"}}"#
+            ));
+        }
+
+        #[test]
+        fn openai_cloud_string_code() {
+            let body = r#"{"error":{"message":"too long","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+            assert!(is_context_overflow_error(400, body));
+        }
+
+        #[test]
+        fn openai_cloud_unrelated_400_is_not_overflow() {
+            let body = r#"{"error":{"message":"missing api key","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+            assert!(!is_context_overflow_error(401, body));
+        }
+
+        #[test]
+        fn llama_cpp_numeric_code_and_exceed_context_size_type() {
+            // Real body observed from llama.cpp / lmstudio when prompt exceeds n_ctx.
+            // Note: `code` is a NUMBER (400), not a string — the previous
+            // implementation missed this because it required a string code.
+            let body = r#"{"error":{"code":400,"message":"request (115537 tokens) exceeds the available context size (114688 tokens),try increasing it","type":"exceed_context_size_error","n_prompt_tokens":115537,"n_ctx":114688}}"#;
+            assert!(is_context_overflow_error(400, body));
+        }
+
+        #[test]
+        fn message_text_fallback_when_no_structured_signal() {
+            // Some OpenAI-compatible servers omit `code`/`type` but still
+            // surface the overflow in the message.
+            let body = r#"{"error":{"message":"This model's maximum context length is 4096 tokens"}}"#;
+            assert!(is_context_overflow_error(400, body));
+        }
+
+        #[test]
+        fn message_text_exceeds_context_phrase() {
+            let body = r#"{"error":{"message":"request exceeds the context length supported by this model"}}"#;
+            assert!(is_context_overflow_error(400, body));
+        }
+
+        #[test]
+        fn n_prompt_tokens_and_n_ctx_keys_alone_are_enough() {
+            // Defensive: if the server reports both counters, it's an overflow
+            // even if the message wording is unusual.
+            let body =
+                r#"{"error":{"message":"boom","n_prompt_tokens":200000,"n_ctx":131072}}"#;
+            assert!(is_context_overflow_error(400, body));
+        }
+
+        #[test]
+        fn anthropic_max_context_window_reached() {
+            assert!(is_context_overflow_error(
+                400,
+                "max_context_window_reached: input too long"
+            ));
+        }
+
+        #[test]
+        fn gemini_resource_exhausted_with_context() {
+            assert!(is_context_overflow_error(
+                429,
+                r#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"context too long"}}"#
+            ));
+        }
+
+        #[test]
+        fn gemini_resource_exhausted_without_context_is_not_overflow() {
+            // RESOURCE_EXHAUSTED without "context" is a rate-limit, not overflow.
+            assert!(!is_context_overflow_error(
+                429,
+                r#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"rate limit hit"}}"#
+            ));
+        }
+
+        #[test]
+        fn safety_filter_treated_as_overflow_like() {
+            assert!(is_context_overflow_error(
+                400,
+                r#"{"candidates":[{"finishReason":"SAFETY"}]}"#
+            ));
+        }
+
+        #[test]
+        fn non_json_body_returns_false_when_no_known_marker() {
+            assert!(!is_context_overflow_error(500, "internal server error"));
+        }
+    }
 }

@@ -69,20 +69,55 @@ pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {
 /// trigger reduction strategies rather than propagate a fatal error.
 ///
 /// Pattern matching order:
-///  1. `\"code\":\"context_length_exceeded\"` — OpenAI minified JSON in error body
-///  2. `max_context_window_reached` — Anthropic
-///  3. `RESOURCE_EXHAUSTED` + `context` — Gemini
-///  4. `SAFETY` — content-filter rejections (not overflow but surfaced the same way)
+///  1. `error.code == "context_length_exceeded"` — OpenAI cloud (string code)
+///  2. `error.type == "exceed_context_size_error"` — llama.cpp / lmstudio /
+///     other OpenAI-compatible local servers (numeric code, structured `type`)
+///  3. `error.message` containing context-overflow phrasing — generic fallback
+///     for OpenAI-compatible servers that don't standardize the `type` field
+///  4. `n_prompt_tokens` + `n_ctx` keys present — llama.cpp structured signal
+///  5. `max_context_window_reached` — Anthropic
+///  6. `RESOURCE_EXHAUSTED` + `context` — Gemini
+///  7. `SAFETY` — content-filter rejections (not overflow but surfaced the same way)
 pub fn is_context_overflow_error(status: u16, body: &str) -> bool {
     if status == 0 {
         return false;
     }
 
-    // OpenRouter / OpenAI — pass through the JSON error body to check
+    // OpenRouter / OpenAI / llama.cpp / lmstudio — parse the JSON error body
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
-        // OpenAI returns error.code == "context_length_exceeded"
-        if let Some(code) = val.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()) {
-            if code == "context_length_exceeded" {
+        if let Some(err) = val.get("error") {
+            // 1. OpenAI cloud: error.code == "context_length_exceeded"
+            if let Some(code) = err.get("code").and_then(|c| c.as_str()) {
+                if code == "context_length_exceeded" {
+                    return true;
+                }
+            }
+            // 2. llama.cpp / lmstudio: error.type == "exceed_context_size_error"
+            if let Some(err_type) = err.get("type").and_then(|t| t.as_str()) {
+                if err_type == "exceed_context_size_error"
+                    || err_type == "context_length_exceeded"
+                {
+                    return true;
+                }
+            }
+            // 3. Generic message-text signal (case-insensitive) for any
+            //    OpenAI-compatible server that doesn't use a standard code/type.
+            if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
+                let lc = msg.to_lowercase();
+                if lc.contains("exceeds the available context")
+                    || lc.contains("exceeds the context")
+                    || lc.contains("context length exceeded")
+                    || lc.contains("maximum context length")
+                    || lc.contains("context window")
+                        && (lc.contains("exceed") || lc.contains("too long"))
+                {
+                    return true;
+                }
+            }
+            // 4. llama.cpp structured signal: presence of n_prompt_tokens / n_ctx
+            //    in the error body means the server explicitly reported a
+            //    context-size violation, regardless of the message wording.
+            if err.get("n_prompt_tokens").is_some() && err.get("n_ctx").is_some() {
                 return true;
             }
         }
