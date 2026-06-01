@@ -196,9 +196,15 @@ pub struct SemanticSummaryInputs<'a> {
     pub base_artifact_id: &'a str,
     pub new_artifact_id: &'a str,
     pub diffs: &'a [WorkbenchFileDiff],
-    /// Map from relative path → file content. Caller is responsible for
-    /// loading only the files that appear in `diffs`.
+    /// Map from relative path → file content for the current (new)
+    /// version of each file. Populated for Added and Modified entries;
+    /// empty for Deleted entries (use `base_files` instead).
     pub current_files: &'a std::collections::HashMap<String, Vec<u8>>,
+    /// Map from relative path → file content for the base (original)
+    /// version of each file. Populated for Modified and Deleted entries
+    /// so the classifier can inspect the *old* content (e.g. detect
+    /// network-access patterns in a deleted source file).
+    pub base_files: &'a std::collections::HashMap<String, Vec<u8>>,
     pub plan: Option<&'a PlanFrameSummary>,
     /// Waiver ids on the base artifact, indexed by validation id.
     pub waivers_by_validation: &'a std::collections::HashMap<String, Vec<String>>,

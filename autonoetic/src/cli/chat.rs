@@ -36,6 +36,7 @@ use autonoetic_types::background::{
     UserInteractionStatus,
 };
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::semantic_diff::SemanticSummary;
 
 // ============================================================================
 // Constants
@@ -2049,7 +2050,8 @@ struct ReturnToAgentInput {
     /// impact, validation state, file-role classifications). Loaded
     /// from `.autonoetic/semantic_summary.json` for reconciled
     /// workbenches; `None` when missing or for active workbenches.
-    semantic_summary: Option<serde_json::Value>,
+    /// Uses the typed struct so `ReturnToAgentInput` preserves `Eq`.
+    semantic_summary: Option<SemanticSummary>,
 }
 
 /// Output of `build_return_to_agent_wakeup`. The `message` is the natural
@@ -2108,12 +2110,8 @@ fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWake
         );
     }
     if let Some(semantic_summary) = &input.semantic_summary {
-        // Issue #332: surface the rule-based semantic summary (contract
-        // impacts, file-role classifications, validation state) so the
-        // orchestrator gets both raw precision and high-level
-        // orientation. The summary is *additive* — the file lists above
-        // remain the source of truth for grounding.
-        structured["semantic_summary"] = semantic_summary.clone();
+        structured["semantic_summary"] = serde_json::to_value(semantic_summary)
+            .unwrap_or(serde_json::Value::Null);
     }
 
     let artifact_ref_label = input
@@ -2159,23 +2157,20 @@ fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWake
 
 /// Render a one-line summary of the contract-impact changes recorded in
 /// the semantic summary. Returns `None` when there are no
-/// `contract_changes` to call out, or when the summary is malformed.
+/// `contract_changes` to call out.
 ///
 /// Format: a comma-separated list of `"<impact> on <path>"` items,
 /// truncated to the first three to keep the wake-up message compact.
-fn summarize_contract_changes(summary: &serde_json::Value) -> Option<String> {
-    let changes = summary.get("contract_changes")?.as_array()?;
-    if changes.is_empty() {
+fn summarize_contract_changes(summary: &SemanticSummary) -> Option<String> {
+    if summary.contract_changes.is_empty() {
         return None;
     }
     let mut labels: Vec<String> = Vec::new();
-    for c in changes.iter().take(3) {
-        let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-        let impact = c.get("impact").and_then(|v| v.as_str()).unwrap_or("?");
-        labels.push(format!("{impact} on {path}"));
+    for c in summary.contract_changes.iter().take(3) {
+        labels.push(format!("{} on {}", c.impact.as_str(), c.path));
     }
-    let suffix = if changes.len() > 3 {
-        format!(" (+{} more)", changes.len() - 3)
+    let suffix = if summary.contract_changes.len() > 3 {
+        format!(" (+{} more)", summary.contract_changes.len() - 3)
     } else {
         String::new()
     };

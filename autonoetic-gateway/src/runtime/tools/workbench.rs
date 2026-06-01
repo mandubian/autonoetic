@@ -1015,6 +1015,7 @@ impl NativeTool for WorkbenchReconcileTool {
             &bundle.artifact_id,
             &diffs,
             source_dir,
+            &content_store,
             &now,
         )?;
 
@@ -1032,10 +1033,9 @@ impl NativeTool for WorkbenchReconcileTool {
         std::fs::write(&provenance_path, serde_json::to_string_pretty(&provenance)?)?;
 
         let summary_path = meta_dir.join("semantic_summary.json");
-        std::fs::write(
-            &summary_path,
-            serde_json::to_string_pretty(&semantic_summary)?,
-        )?;
+        if let Ok(json) = serde_json::to_string_pretty(&semantic_summary) {
+            let _ = std::fs::write(&summary_path, json);
+        }
 
         let changed = diffs.iter().filter(|d| d.change_type != FileChangeType::Unchanged).count();
 
@@ -1074,20 +1074,31 @@ fn build_semantic_summary(
     new_artifact_id: &str,
     diffs: &[WorkbenchFileDiff],
     source_dir: &Path,
+    content_store: &ContentStore,
     generated_at: &str,
 ) -> anyhow::Result<SemanticSummary> {
     let summarizer = RuleBasedSemanticSummarizer::default();
 
     let mut current_files: std::collections::HashMap<String, Vec<u8>> =
         std::collections::HashMap::new();
+    let mut base_files: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
     for d in diffs {
-        if d.change_type == FileChangeType::Added
-            || d.change_type == FileChangeType::Modified
-        {
-            let path = source_dir.join(&d.path);
-            if let Ok(bytes) = std::fs::read(&path) {
-                current_files.insert(d.path.clone(), bytes);
+        match d.change_type {
+            FileChangeType::Added | FileChangeType::Modified => {
+                let path = source_dir.join(&d.path);
+                if let Ok(bytes) = std::fs::read(&path) {
+                    current_files.insert(d.path.clone(), bytes);
+                }
             }
+            FileChangeType::Deleted => {
+                if let Some(digest) = &d.base_digest {
+                    if let Ok(bytes) = content_store.read(digest) {
+                        base_files.insert(d.path.clone(), bytes);
+                    }
+                }
+            }
+            FileChangeType::Unchanged => {}
         }
     }
 
@@ -1123,6 +1134,7 @@ fn build_semantic_summary(
         new_artifact_id,
         diffs,
         current_files: &current_files,
+        base_files: &base_files,
         plan: plan_summary.as_ref(),
         waivers_by_validation: &waivers_by_validation,
         generated_at,

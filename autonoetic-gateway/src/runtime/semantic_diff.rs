@@ -125,7 +125,10 @@ impl SemanticSummarizer for RuleBasedSemanticSummarizer {
                 FileChangeType::Unchanged => continue,
             }
 
-            let content = inputs.current_files.get(&d.path);
+            let content = match d.change_type {
+                FileChangeType::Deleted => inputs.base_files.get(&d.path),
+                _ => inputs.current_files.get(&d.path),
+            };
             let role = classify_role(&d.path, content, &self.network_check_extensions);
             let impact = role_to_impact(role);
             let rationale = rationale_for(&d.path, role, impact, content);
@@ -427,6 +430,9 @@ mod tests {
         }
     }
 
+    static EMPTY_FILES: std::sync::LazyLock<HashMap<String, Vec<u8>>> =
+        std::sync::LazyLock::new(HashMap::new);
+
     #[test]
     fn classifies_capability_yaml() {
         let summarizer = RuleBasedSemanticSummarizer::default();
@@ -439,6 +445,7 @@ mod tests {
             new_artifact_id: "ar.b",
             diffs: &diffs,
             current_files: &files,
+            base_files: &EMPTY_FILES,
             plan: None,
             waivers_by_validation: &HashMap::new(),
             generated_at: "2026-06-01T00:00:00Z",
@@ -468,6 +475,7 @@ mod tests {
             new_artifact_id: "ar.b",
             diffs: &diffs,
             current_files: &files,
+            base_files: &EMPTY_FILES,
             plan: None,
             waivers_by_validation: &HashMap::new(),
             generated_at: "2026-06-01T00:00:00Z",
@@ -496,6 +504,7 @@ mod tests {
             new_artifact_id: "ar.b",
             diffs: &diffs,
             current_files: &files,
+            base_files: &EMPTY_FILES,
             plan: None,
             waivers_by_validation: &HashMap::new(),
             generated_at: "2026-06-01T00:00:00Z",
@@ -522,6 +531,7 @@ mod tests {
             new_artifact_id: "ar.b",
             diffs: &diffs,
             current_files: &files,
+            base_files: &EMPTY_FILES,
             plan: None,
             waivers_by_validation: &HashMap::new(),
             generated_at: "2026-06-01T00:00:00Z",
@@ -547,6 +557,7 @@ mod tests {
             new_artifact_id: "ar.b",
             diffs: &diffs,
             current_files: &files,
+            base_files: &EMPTY_FILES,
             plan: Some(&plan),
             waivers_by_validation: &waivers,
             generated_at: "2026-06-01T00:00:00Z",
@@ -579,6 +590,7 @@ mod tests {
             new_artifact_id: "ar.b",
             diffs: &diffs,
             current_files: &files,
+            base_files: &EMPTY_FILES,
             plan: None,
             waivers_by_validation: &HashMap::new(),
             generated_at: "2026-06-01T00:00:00Z",
@@ -588,5 +600,31 @@ mod tests {
         assert_eq!(s.changed_files, 1);
         assert_eq!(s.file_classifications.len(), 1);
         assert_eq!(s.file_classifications[0].path, "b.rs");
+    }
+
+    #[test]
+    fn deleted_file_with_network_pattern_uses_base_content() {
+        let summarizer = RuleBasedSemanticSummarizer::default();
+        let diffs = vec![diff("src/lib.rs", FileChangeType::Deleted)];
+        let mut base = HashMap::new();
+        base.insert(
+            "src/lib.rs".to_string(),
+            b"fn fetch() { let _ = reqwest::get(\"https://example.com\"); }".to_vec(),
+        );
+        let inputs = SemanticSummaryInputs {
+            workbench_id: "wb-1",
+            base_artifact_id: "ar.a",
+            new_artifact_id: "ar.b",
+            diffs: &diffs,
+            current_files: &HashMap::new(),
+            base_files: &base,
+            plan: None,
+            waivers_by_validation: &HashMap::new(),
+            generated_at: "2026-06-01T00:00:00Z",
+        };
+        let s = summarizer.summarize(&inputs);
+        let c = &s.file_classifications[0];
+        assert_eq!(c.role, FileRole::NetworkAccess);
+        assert_eq!(c.impact, ContractImpact::NetworkAccessChange);
     }
 }
