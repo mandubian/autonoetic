@@ -3,10 +3,12 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::content_store::ContentStore;
+use crate::runtime::semantic_diff::RuleBasedSemanticSummarizer;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::semantic_diff::{SemanticSummary, SemanticSummaryInputs, SemanticSummarizer};
 use autonoetic_types::workbench::{
     FileChangeType, WorkbenchCheckpoint, WorkbenchFileDiff, WorkbenchProjection, WorkbenchStatus,
 };
@@ -1006,6 +1008,17 @@ impl NativeTool for WorkbenchReconcileTool {
         let now = now_rfc3339();
         store.update_workbench_status(&wb.workbench_id, WorkbenchStatus::Reconciled, &now)?;
 
+        let semantic_summary = build_semantic_summary(
+            &store,
+            &wb,
+            &scope_id,
+            &bundle.artifact_id,
+            &diffs,
+            source_dir,
+            &content_store,
+            &now,
+        )?;
+
         let provenance = serde_json::json!({
             "base_artifact_id": wb.base_artifact_id,
             "new_artifact_id": bundle.artifact_id,
@@ -1019,6 +1032,11 @@ impl NativeTool for WorkbenchReconcileTool {
         let provenance_path = meta_dir.join("reconciliation.json");
         std::fs::write(&provenance_path, serde_json::to_string_pretty(&provenance)?)?;
 
+        let summary_path = meta_dir.join("semantic_summary.json");
+        if let Ok(json) = serde_json::to_string_pretty(&semantic_summary) {
+            let _ = std::fs::write(&summary_path, json);
+        }
+
         let changed = diffs.iter().filter(|d| d.change_type != FileChangeType::Unchanged).count();
 
         Ok(serde_json::to_string(&serde_json::json!({
@@ -1030,6 +1048,7 @@ impl NativeTool for WorkbenchReconcileTool {
             "total_files": current_files.len(),
             "changed_files": changed,
             "provenance": provenance,
+            "semantic_summary": semantic_summary,
             "reconciled_at": now,
             "message": args.message.unwrap_or_default(),
         }))?)
@@ -1038,6 +1057,90 @@ impl NativeTool for WorkbenchReconcileTool {
     fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
         ToolMetadata::default()
     }
+}
+
+/// Build a [`SemanticSummary`] for the workbench's reconciled diff.
+///
+/// The summarizer is the deterministic rule-based default; callers can
+/// swap in a different `SemanticSummarizer` impl later without changing
+/// the rest of the reconcile path. Failures here are *not* fatal to the
+/// reconcile itself — the raw provenance in `reconciliation.json`
+/// remains the source of truth, and a missing `semantic_summary.json`
+/// just means the wake-up payload will not carry a summary.
+fn build_semantic_summary(
+    store: &std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+    wb: &WorkbenchProjection,
+    scope_id: &str,
+    new_artifact_id: &str,
+    diffs: &[WorkbenchFileDiff],
+    source_dir: &Path,
+    content_store: &ContentStore,
+    generated_at: &str,
+) -> anyhow::Result<SemanticSummary> {
+    let summarizer = RuleBasedSemanticSummarizer::default();
+
+    let mut current_files: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
+    let mut base_files: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
+    for d in diffs {
+        match d.change_type {
+            FileChangeType::Added | FileChangeType::Modified => {
+                let path = source_dir.join(&d.path);
+                if let Ok(bytes) = std::fs::read(&path) {
+                    current_files.insert(d.path.clone(), bytes);
+                }
+            }
+            FileChangeType::Deleted => {
+                if let Some(digest) = &d.base_digest {
+                    if let Ok(bytes) = content_store.read(digest) {
+                        base_files.insert(d.path.clone(), bytes);
+                    }
+                }
+            }
+            FileChangeType::Unchanged => {}
+        }
+    }
+
+    let plan_summary = if wb.workflow_id.is_empty() {
+        None
+    } else {
+        store
+            .load_active_plan_for_workflow(&wb.workflow_id)
+            .ok()
+            .flatten()
+            .map(|p| p.compact_summary())
+    };
+    let _ = scope_id;
+
+    let waivers_by_validation: std::collections::HashMap<String, Vec<String>> =
+        match store.list_waivers_for_artifact(&wb.base_artifact_id) {
+            Ok(rows) => {
+                let mut map: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for w in rows {
+                    map.entry(w.validation_id)
+                        .or_default()
+                        .push(w.waiver_id);
+                }
+                map
+            }
+            Err(_) => std::collections::HashMap::new(),
+        };
+
+    let inputs = SemanticSummaryInputs {
+        workbench_id: &wb.workbench_id,
+        base_artifact_id: &wb.base_artifact_id,
+        new_artifact_id,
+        diffs,
+        current_files: &current_files,
+        base_files: &base_files,
+        plan: plan_summary.as_ref(),
+        waivers_by_validation: &waivers_by_validation,
+        generated_at,
+    };
+
+    Ok(summarizer.summarize(&inputs))
 }
 
 pub struct WorkbenchDiscardTool;

@@ -44,6 +44,7 @@ pub mod prompt_budget;
 pub mod quality_signal;
 pub mod reevaluation_state;
 pub mod remote_access;
+pub mod semantic_diff;
 pub mod sealed_network;
 pub mod sealed_network_proxy;
 pub mod response_validation;

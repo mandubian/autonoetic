@@ -1017,6 +1017,141 @@ Acceptance criteria:
   runtime-lock, and entrypoint changes before reconcile.
 - `return to agent` refuses to silently drop local edits.
 
+#### Reflections on Phase 5 + 6 implementation (post-PR #341, #342)
+
+After shipping Phases 0–4 (PlanFrame MVP, projection, reconcile, validation
+waivers, TUI cockpit, `/wb`), the two remaining slices (Phase 5 context
+lens, Phase 6 return-to-agent) were implemented as PR #341 and PR #342.
+Below: what matched the plan, what didn't, and what was learned.
+
+**Phase 5 — PlanFrame as context-compression lens** shipped a thin slice of
+the original design.
+
+| | Plan | Shipped | Gap |
+|---|---|---|---|
+| PlanFrame as relevance lens for context compression | ✓ | ✓ — `plan_anchor` plumbed through `GovernorContext` → `extract_delta`; `build_delta_extraction_prompt` renders an "Active Plan (...)" block | None — works for delta extraction |
+| PlanFrame as relevance lens for **State Capsule** generation | ✓ | ✗ — capsule rendering still doesn't reference the plan | Deferred — would mean re-rendering the capsule body when a plan changes; bigger design call |
+| Promote PlanFrame from workflow-scoped to project-scoped | ✓ | ✗ | Deferred — multi-workflow plan reuse is a larger surface |
+| `capsule.project` into a workbench | ✓ | ✗ | Not started |
+| Capsule export of reconciled workbench + plan as a draft | ✓ | ✗ | Not started |
+| Cross-machine workbench transfer (provenance preserved) | ✓ | ✗ | Not started |
+
+The one shipped slice is small but high-leverage: when the LLM is asked
+to compress history, it now sees the active plan's title, operator and
+agent step ids, and required/advisory validation ids framed as
+*"prefer plan-advancing items"*. Empty optional sections are omitted
+to keep the prompt small. The active plan is loaded in `lifecycle.rs`
+via `load_active_plan_for_workflow(workflow_id)?.compact_summary()`,
+with graceful fallback to no anchor when the store, workflow_id, or
+plan is missing.
+
+Two real bugs caught at review (worth keeping in mind for similar plumbing):
+
+1. **`PlanFrameSummary` initially had only `operator_steps`, not `agent_steps`.**
+   The plan called for both, but the first cut only surfaced operator/shared
+   steps. Copilot flagged the gap during PR #341 review; `agent_steps` was
+   added to the struct, `compact_summary` was updated to populate it, and the
+   prompt was extended with a `- agent steps:` line.
+
+2. **Child session ids of the form `root/x` silently disabled the plan anchor.**
+   `resolve_workflow_id_for_root_session` is keyed on the *root* id; the
+   `lifecycle.rs` call site was passing the child id directly. Fix: wrap
+   `session_id` in `content_store::root_session_id(&session_id).to_string()`
+   before the workflow lookup. This is the same pattern the rest of the
+   codebase already uses (`workflow_store.rs:2985` and
+   `lifecycle.rs:2823`) — copying it cost one line.
+
+**Phase 6 — Return-to-agent flow** shipped the TUI `return to agent` action
+and most of the wake-up contract, with a few items deferred.
+
+| | Plan | Shipped | Gap |
+|---|---|---|---|
+| `return to agent` TUI action | ✓ | ✓ — `/return [--force\|-f] [note...]` slash command | None |
+| Refuses to silently drop local edits | ✓ | ✓ — by default; `--force` overrides | None |
+| Wake the **selected** orchestrator | ✓ | ✗ — hard-coded to `planner.default` | Deferred — requires #326 (orchestrator selection) |
+| `workbench.ask` for operator questions | ✓ | ✗ | Not started — could be a small follow-up tool |
+| `workbench.open` one-command edit mode | ✓ | ✗ | Not started — projection tool already covers the use case |
+| File watcher warnings for risky changes | ✓ | ✗ | Not started — separate surface (TUI status bar / hook) |
+| Semantic summary in the wake-up | ✓ | ✗ | Tracked by #332 — the wake-up currently carries raw file lists; an LLM-generated summary would let the planner orient faster |
+
+The shipped action is `ChatOutbound::ReturnToAgent`, which dispatches via
+`event.ingest` with `event_type: "workbench_reconciled"`. The structured
+metadata now includes `workbench_id`, `base_artifact_id`, `new_artifact_ref/id`
+when present, `reconciled` (bool), `unsaved_change_count`, and the
+operator/added/deleted file lists. The orchestrator wakes with both
+raw precision (the file lists) and high-level orientation
+(operator note, status, "in sync" / "unsaved --force" / "reconciled"
+label in the natural-language message).
+
+Three real bugs / surprises caught at review:
+
+1. **The reconciled path needed to read `.autonoetic/reconciliation.json`.**
+   First cut always set `new_artifact_ref`/`new_artifact_id` to `None`, which
+   would have made `/return` on a *reconciled* workbench incorrectly tell the
+   orchestrator to use the *base* artifact. Fix: `read_return_to_agent_input`
+   now branches on status — `Reconciled` reads the provenance file
+   (authoritative at reconcile time), `Active` computes live from
+   `base_digests.json` + the current files.
+
+2. **`event.ingest` only reroutes child→root for `event_type == "chat"`.**
+   The first dispatch sent `app.session_id` as the ingest `session_id`,
+   which on a child session would wake the orchestrator *on the child* —
+   the opposite of the user-visible "return-to-orchestrator" intent.
+   Fix: resolve the root session id via `get_root_session_id(app)` and
+   send that. The merge-with-envelope step then attaches
+   `metadata.root_session_id` so downstream consumers can still tell
+   which chat the request originated from.
+
+3. **The unsaved-edits safety check should not apply to reconciled workbenches.**
+   Reconciled workbenches have already committed their changes to a new
+   artifact, so `unsaved_change_count > 0` from provenance is *informational*
+   (e.g. "12 files were touched during the reconcile") not a drop risk.
+   First cut refused on any `unsaved_change_count > 0` regardless of
+   `reconciled`; the check is now `!reconciled && unsaved_change_count > 0`.
+
+**Cross-phase observations.**
+
+The structured `workbench_reconciled` payload that PR #342 puts on the
+wire is now the contract between the TUI and the orchestrator. It
+already has enough surface to be useful: workbench/artifact identifiers,
+operator/added/deleted file lists, reconciled flag, unsaved_change_count,
+and operator note. The natural next enrichment is **semantic summary
+generation** (#332) — the wake-up should tell the planner *what the
+operator changed and why it matters*, not just *which files were touched*.
+That converts the current "agent re-discovers context from raw diff"
+into "agent gets a curated brief plus the raw diff for grounding."
+
+The wake-up also currently targets `planner.default` because the
+runtime orchestrator selection mechanism (#326) does not exist yet.
+Once that lands, the TUI should resolve the wake-up target from the
+workflow's pinned orchestrator rather than hard-coding it. A
+collaborative-planner agent that knows about PlanFrame and workbenches
+would also be the natural recipient of the future semantic summary.
+
+**Open questions for the post-Phase-6 era.**
+
+1. **Should `/return` block until the orchestrator acknowledges the wake-up?**
+   Current implementation dispatches and returns to the chat loop
+   immediately; the user sees the assistant's next reply when the
+   orchestrator's first turn completes. An optional sync mode (e.g.
+   `/return --wait`) could be useful when the operator wants to know
+   the orchestrator has resumed before they keep typing.
+2. **What happens to a workbench the orchestrator *rejects*?**
+   Right now the orchestrator can either accept the edits (continue)
+   or push back (ask the operator to re-edit). There's no explicit
+   "rejected" event; the operator would have to infer it from the
+   orchestrator's message. A `workbench.rejected` event in the same
+   shape as `workbench_reconciled` would close the loop.
+3. **Does the operator need a way to **cancel** a wake-up after
+   dispatching it?** Currently once the event is on the wire, it
+   can't be unsent. A short cancellation window (e.g. 30 s) would
+   be a safety net for "oh wait, I sent that to the wrong session."
+4. **Should `workbench.ask` be a single tool or a family?** The plan
+   lists it as a single thing, but a one-shot operator question
+   ("summarize the current state") and a structured multi-step
+   Q&A ("walk me through how `auth.rs` changed") feel like different
+   surfaces. Worth scoping before implementation.
+
 ---
 
 ## 11. Planner policy changes
