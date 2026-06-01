@@ -148,9 +148,9 @@ Respond ONLY with a JSON object matching this schema:
 
 /// Render the "Active Plan" block that anchors the delta-extraction prompt
 /// to the session's current PlanFrame. The LLM uses this as a relevance
-/// lens: plan-advancing decisions, artifacts, and identifiers should land
-/// in `decisions_and_rationale` / `stable_identifiers`, while abandoned
-/// detours can be safely dropped.
+/// lens: plan-advancing items should be captured in the resulting delta
+/// (under `new_decisions` / `new_identifiers` in the delta-extraction
+/// schema), while abandoned detours can be safely dropped.
 fn render_plan_anchor_block(p: &PlanFrameSummary) -> String {
     let mut s = String::from("Active Plan (use as a relevance lens — prefer plan-advancing items):\n");
     s.push_str(&format!(
@@ -166,6 +166,11 @@ fn render_plan_anchor_block(p: &PlanFrameSummary) -> String {
     if !p.operator_steps.is_empty() {
         s.push_str("- operator/shared steps: ");
         s.push_str(&p.operator_steps.join(", "));
+        s.push('\n');
+    }
+    if !p.agent_steps.is_empty() {
+        s.push_str("- agent steps: ");
+        s.push_str(&p.agent_steps.join(", "));
         s.push('\n');
     }
     if !p.required_validations.is_empty() {
@@ -923,6 +928,7 @@ mod tests {
             title: "Add OAuth login".into(),
             step_count: 5,
             operator_steps: vec!["op_login".into(), "op_logout".into()],
+            agent_steps: vec!["agent_oauth".into(), "agent_logout".into()],
             required_validations: vec!["security_review".into()],
             advisory_validations: vec!["unit_tests".into()],
         }
@@ -960,6 +966,7 @@ mod tests {
         assert!(prompt.contains("plan_abc"), "expected plan_id in prompt");
         assert!(prompt.contains("Add OAuth login"), "expected title in prompt");
         assert!(prompt.contains("op_login, op_logout"), "expected operator steps in prompt");
+        assert!(prompt.contains("agent_oauth, agent_logout"), "expected agent steps in prompt");
         assert!(prompt.contains("security_review"), "expected required validations");
         assert!(prompt.contains("unit_tests"), "expected advisory validations");
         assert!(prompt.contains("relevance lens"), "expected framing as relevance lens");
@@ -975,6 +982,7 @@ mod tests {
             title: String::new(),
             step_count: 0,
             operator_steps: vec![],
+            agent_steps: vec![],
             required_validations: vec![],
             advisory_validations: vec![],
         };

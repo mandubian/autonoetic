@@ -22,10 +22,10 @@ pub struct GovernorContext {
     pub capsule_state: Option<StateCapsule>,
     /// Active PlanFrame summary, used as a relevance lens by the capsule
     /// strategy. `None` when the session has no plan or no active plan.
-    /// When set, the capsule strategy prepends a "## Active Plan" block to
-    /// its delta-extraction prompt so the LLM knows which decisions,
-    /// artifacts, and identifiers are plan-advancing (and which detours
-    /// can be compressed more aggressively).
+    /// When set, the capsule strategy prepends an "Active Plan (...)"
+    /// block to its delta-extraction prompt so the LLM knows which
+    /// decisions, artifacts, and identifiers are plan-advancing (and
+    /// which detours can be compressed more aggressively).
     pub plan_anchor: Option<PlanFrameSummary>,
 }
 

@@ -158,6 +158,7 @@ fn plan_anchor_loads_from_store_with_expected_summary() {
     assert_eq!(summary.title, "Add OAuth login");
     assert_eq!(summary.step_count, 2);
     assert_eq!(summary.operator_steps, vec!["op_login".to_string()]);
+    assert_eq!(summary.agent_steps, vec!["agent_oauth".to_string()]);
     assert_eq!(summary.required_validations, vec!["security_review".to_string()]);
     assert_eq!(summary.advisory_validations, vec!["unit_tests".to_string()]);
 }
