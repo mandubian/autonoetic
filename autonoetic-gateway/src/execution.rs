@@ -2491,6 +2491,41 @@ impl GatewayExecutionService {
                     &resolved_session_id,
                     agent_id,
                 );
+                if close_reason == "jsonrpc_spawn_complete_empty" {
+                    if let Ok(tool_count) =
+                        store.count_execution_traces_for_session(&resolved_session_id)
+                    {
+                        if let Some(draft) =
+                            crate::runtime::operator_activity::classify_session_lifecycle(
+                                close_reason,
+                                tool_count.min(u32::MAX as u64) as u32,
+                            )
+                        {
+                            let root_id = crate::runtime::live_digest::base_session_id(
+                                &resolved_session_id,
+                            )
+                            .to_string();
+                            let record = draft.into_record(
+                                root_id,
+                                resolved_session_id.clone(),
+                                agent_id.to_string(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            );
+                            if let Err(e) = store.insert_operator_activity(&record) {
+                                tracing::warn!(
+                                    target: "operator_activity",
+                                    error = %e,
+                                    "Failed to persist session lifecycle operator activity"
+                                );
+                            }
+                        }
+                    }
+                }
             }
             runtime.close_session(close_reason)?;
             {

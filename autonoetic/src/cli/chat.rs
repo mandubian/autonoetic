@@ -453,6 +453,10 @@ struct App {
     wrap_width: u16,
     messages_area_row_end: u16,
     active_workbench: Option<WorkbenchOverview>,
+    /// Cursor for gateway `operator.activity.list` polling (exclusive).
+    last_operator_activity_cursor: Option<String>,
+    /// When false, the next poll baselines the cursor without flooding the transcript.
+    operator_activity_bootstrapped: bool,
 }
 
 impl App {
@@ -512,6 +516,8 @@ impl App {
             wrap_width: 80,
             messages_area_row_end: 0,
             active_workbench: None,
+            last_operator_activity_cursor: None,
+            operator_activity_bootstrapped: false,
         }
     }
 
@@ -1471,6 +1477,8 @@ fn reset_for_session_switch(
     app.gate_history_interactions.clear();
     app.pending_prompt = None;
     app.active_workbench = None;
+    app.last_operator_activity_cursor = None;
+    app.operator_activity_bootstrapped = false;
 }
 
 fn switch_session(
@@ -7616,6 +7624,58 @@ fn refresh_policy_causal_pane(
 }
 
 /// Check for signals and inject into app. Returns true if signals were processed.
+fn format_operator_activity_card(
+    record: &autonoetic_types::operator_activity::OperatorActivityRecord,
+) -> String {
+    use autonoetic_types::operator_activity::OperatorActivitySeverity;
+    let icon = match record.severity {
+        OperatorActivitySeverity::Error => "❌",
+        OperatorActivitySeverity::Attention => "⚠",
+        OperatorActivitySeverity::Progress => "▸",
+        OperatorActivitySeverity::Info => "·",
+    };
+    format!("{} [{}] {}", icon, record.agent_id, record.summary)
+}
+
+fn merge_operator_activity(
+    app: &mut App,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    root_session_id: &str,
+) -> bool {
+    use autonoetic_types::operator_activity::OperatorActivitySeverity;
+
+    if !app.operator_activity_bootstrapped {
+        if let Ok(result) = store.list_operator_activity(root_session_id, None, 200, None) {
+            if let Some(last) = result.activities.last() {
+                app.last_operator_activity_cursor = Some(last.activity_id.clone());
+            }
+        }
+        app.operator_activity_bootstrapped = true;
+        return false;
+    }
+
+    let Ok(result) = store.list_operator_activity(
+        root_session_id,
+        app.last_operator_activity_cursor.as_deref(),
+        50,
+        Some(OperatorActivitySeverity::Progress),
+    ) else {
+        return false;
+    };
+
+    if result.activities.is_empty() {
+        return false;
+    }
+
+    for activity in &result.activities {
+        app.last_operator_activity_cursor = Some(activity.activity_id.clone());
+        let card = format_operator_activity_card(activity);
+        app.session_overview.latest_signal = Some(card.clone());
+        app.add_message(MessageRole::Signal, card);
+    }
+    true
+}
+
 async fn check_signals(
     app: &mut App,
     config: &autonoetic_types::config::GatewayConfig,
@@ -7962,6 +8022,9 @@ async fn check_signals(
     }
 
     if let Some(store) = store {
+        if merge_operator_activity(app, store, &root_session_id) {
+            processed_any = true;
+        }
         refresh_policy_causal_pane(app, store, &root_session_id);
         refresh_gate_history(app, store);
     }

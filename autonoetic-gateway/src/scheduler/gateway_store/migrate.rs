@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 44;
+const SCHEMA_VERSION_LATEST: i64 = 45;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -529,7 +529,55 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_plan_frames_v42(conn)?;
     apply_workbenches_v43(conn)?;
     apply_validation_waivers_v44(conn)?;
+    apply_operator_activity_v45(conn)?;
 
+    Ok(())
+}
+
+fn apply_operator_activity_v45(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 45 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS operator_activity (
+            activity_id       TEXT PRIMARY KEY,
+            root_session_id   TEXT NOT NULL,
+            session_id        TEXT NOT NULL,
+            agent_id          TEXT NOT NULL,
+            workflow_id       TEXT,
+            task_id           TEXT,
+            turn_id           TEXT,
+            occurred_at       TEXT NOT NULL,
+            kind              TEXT NOT NULL,
+            severity          TEXT NOT NULL,
+            summary           TEXT NOT NULL,
+            tool_name         TEXT,
+            causal_event_id   TEXT,
+            workflow_event_id TEXT,
+            refs_json         TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_activity_causal
+            ON operator_activity(causal_event_id) WHERE causal_event_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_activity_workflow_event
+            ON operator_activity(workflow_event_id) WHERE workflow_event_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_operator_activity_root_time
+            ON operator_activity(root_session_id, occurred_at, activity_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            45_i64,
+            "operator_activity",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

@@ -36,6 +36,7 @@ pub mod model_router;
 pub mod network_policy;
 pub mod local_model_context;
 pub mod openrouter_catalog;
+pub mod operator_activity;
 pub mod parser;
 pub mod post_session_digest;
 pub mod promotion_governor;

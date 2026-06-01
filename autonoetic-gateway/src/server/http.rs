@@ -283,6 +283,16 @@ struct SessionStreamQuery {
     interval_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct OperatorActivityStreamQuery {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    interval_ms: Option<u64>,
+    #[serde(default)]
+    after: Option<String>,
+}
+
 /// Create the HTTP router for content API
 pub fn create_router(state: HttpState) -> Router {
     Router::new()
@@ -290,6 +300,10 @@ pub fn create_router(state: HttpState) -> Router {
         .route(
             "/api/session/stream/{session_id}",
             get(handle_session_stream_sse),
+        )
+        .route(
+            "/api/operator/activity/stream/{root_session_id}",
+            get(handle_operator_activity_stream_sse),
         )
         .route("/api/content/write", post(handle_write))
         .route(
@@ -399,6 +413,101 @@ async fn handle_session_stream_sse(
             });
             let evt = Ok(Event::default().event("session.status").data(json));
             Some((evt, if terminal { None } else { Some(()) }))
+        }
+    });
+
+    Ok(
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))),
+    )
+}
+
+async fn dispatch_operator_activity_list(
+    router: &JsonRpcRouter,
+    root_session_id: &str,
+    after_activity_id: Option<&str>,
+    secret: &str,
+) -> JsonRpcResponse {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: format!("http-oa-{}", uuid::Uuid::new_v4()),
+        method: "operator.activity.list".to_string(),
+        params: serde_json::json!({
+            "root_session_id": root_session_id,
+            "after_activity_id": after_activity_id,
+            "limit": 50,
+            "min_severity": "progress",
+        }),
+        auth_token: Some(secret.to_string()),
+    };
+    router.dispatch(req).await
+}
+
+/// GET /api/operator/activity/stream/{root_session_id} — SSE stream of operator activity rows.
+async fn handle_operator_activity_stream_sse(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Path(root_session_id): Path<String>,
+    Query(q): Query<OperatorActivityStreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ErrorResponse> {
+    validate_bearer_or_query(&headers, q.token.as_deref(), &state.shared_secret)?;
+    validate_session_id(&root_session_id)?;
+
+    let Some(router) = state.router.clone() else {
+        return Err(ErrorResponse {
+            error: "HTTP ingress router not configured".to_string(),
+            code: 503,
+        });
+    };
+
+    let interval_ms = q.interval_ms.unwrap_or(500).clamp(100, 10_000);
+    let secret = state.shared_secret.clone();
+
+    let stream = stream::unfold(q.after, move |cursor_state| {
+        let router = router.clone();
+        let root_session_id = root_session_id.clone();
+        let secret = secret.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+            let resp = dispatch_operator_activity_list(
+                router.as_ref(),
+                &root_session_id,
+                cursor_state.as_deref(),
+                &secret,
+            )
+            .await;
+            if resp.error.is_some() {
+                let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+                return Some((
+                    Ok(Event::default().event("operator.activity.error").data(json)),
+                    cursor_state,
+                ));
+            }
+            let activities = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("activities"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let next_cursor = activities
+                .last()
+                .and_then(|a| a.get("activity_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or(cursor_state);
+            if activities.is_empty() {
+                return Some((
+                    Ok(Event::default().event("operator.activity.heartbeat").data("{}")),
+                    next_cursor,
+                ));
+            }
+            let batch = serde_json::json!({ "activities": activities });
+            Some((
+                Ok(Event::default()
+                    .event("operator.activity")
+                    .data(batch.to_string())),
+                next_cursor,
+            ))
         }
     });
 

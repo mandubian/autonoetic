@@ -305,6 +305,12 @@ The security model does not rely solely on the gateway to prevent every possible
 
 See `docs/autonoetic-concepts-for-beginners.md` for the full conceptual framing.
 
+## Live session visibility
+
+Root-session tool work (`content_write`, delegation, failures) is recorded in the gateway **`operator_activity`** feed, keyed by `root_session_id`. The chat TUI polls this feed during `check_signals`; future Discord/WhatsApp bridges should use the same `operator.activity.list` JSON-RPC method or the HTTP SSE stream documented in `docs/remote-agents-http-api.md`.
+
+Design: `docs/design/operator-activity-feed-plan.md`.
+
 ## File Layout
 
 A projected workbench creates this structure:

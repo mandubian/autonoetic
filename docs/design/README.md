@@ -11,6 +11,7 @@ under [`../archived/`](../archived/).
 | [`constitution-restructure.md`](constitution-restructure.md) | Partial — P-x.y restructure in progress | [`constitution/enforcement-register.md`](../constitution/enforcement-register.md) |
 | [`operator-approval-inspection-plan.md`](operator-approval-inspection-plan.md) | Partial — Phase 1 (code excerpts) shipped; Phase 2 pending | Approval CLI / `code_excerpts.rs` |
 | [`human-agent-artifact-collaboration-plan.md`](human-agent-artifact-collaboration-plan.md) | Draft RFC — PlanFrame + workbench projection for human/agent co-construction | — |
+| [`operator-activity-feed-plan.md`](operator-activity-feed-plan.md) | Draft RFC — gateway-owned operator activity stream for TUI + messaging bridges | — |
 | [`post-promotion-review-design.md`](post-promotion-review-design.md) | Partial — Tier 1 observational review shipped; Tier 2 fixture drift pending | `post_promotion_review.rs` |
 | [`divergence-sentinel-design.md`](divergence-sentinel-design.md) | Partial — Layer 1 + manual watchdog shipped; P4 validation pending | [`security-sentinel.md`](../security-sentinel.md) |
 | [`divergence-sentinel-validation.md`](divergence-sentinel-validation.md) | Pending operator sign-off | `sentinel_experiment` CLI |

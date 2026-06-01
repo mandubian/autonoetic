@@ -20,6 +20,7 @@ pub mod improvement_cycle;
 pub mod layer;
 pub mod memory;
 pub mod notification;
+pub mod operator_activity;
 pub mod plan_frame;
 pub mod promotion;
 pub mod recording;
