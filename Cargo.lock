@@ -186,6 +186,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "hex",
  "ratatui",
  "regex",
  "reqwest",
@@ -196,6 +197,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serial_test",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
@@ -203,6 +205,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.2.0",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]

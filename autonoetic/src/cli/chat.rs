@@ -213,6 +213,7 @@ impl SessionOverview {
 struct SessionPollSnapshot {
     overview: SessionOverview,
     pending_interactions: Vec<UserInteraction>,
+    active_workbench: Option<WorkbenchOverview>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -220,6 +221,15 @@ struct LiveTaskSummary {
     task_id: String,
     agent_id: String,
     status: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WorkbenchOverview {
+    workbench_id: String,
+    status: String,
+    base_artifact_id: String,
+    file_count: usize,
+    changed_files: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +272,10 @@ enum SlashCommand {
     Persona(Option<String>),
     Policy(String),
     Pending,
+    WbReconcile,
+    WbDiscard,
+    WbDiff,
+    WbStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +436,7 @@ struct App {
     pending_overlay: Option<PendingOverlay>,
     wrap_width: u16,
     messages_area_row_end: u16,
+    active_workbench: Option<WorkbenchOverview>,
 }
 
 impl App {
@@ -480,6 +495,7 @@ impl App {
             pending_overlay: None,
             wrap_width: 80,
             messages_area_row_end: 0,
+            active_workbench: None,
         }
     }
 
@@ -1011,6 +1027,16 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
             }
         }
         "/pending" | "/approvals" => Ok(SlashCommand::Pending),
+        "/wb" => {
+            let sub = parts.next();
+            match sub.map(|s| s.to_lowercase()).as_deref() {
+                Some("reconcile") => Ok(SlashCommand::WbReconcile),
+                Some("discard") => Ok(SlashCommand::WbDiscard),
+                Some("diff") => Ok(SlashCommand::WbDiff),
+                Some("status") | None => Ok(SlashCommand::WbStatus),
+                Some(other) => Err(format!("Unknown /wb subcommand '{}'. Try: status, diff, reconcile, discard.", other)),
+            }
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -1023,6 +1049,7 @@ fn format_help_card() -> String {
         "  /session switch <id>   Switch to an existing session",
         "  /status                Show current session details",
         "  /pending               Open pending approvals & interactions overlay (Ctrl+P)",
+        "  /wb [status|diff|reconcile|discard]  Workbench actions",
         "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
         "  /policy <text>          Route natural language governance requests to governance-author.default",
         "  /persona [text]        Show or set session persona (user context/preferences)",
@@ -1352,6 +1379,7 @@ fn refresh_session_snapshot(
             app.session_overview.latest_signal.clone(),
         ) {
             app.session_overview = snapshot.overview.clone();
+            app.active_workbench = snapshot.active_workbench;
             app.pending_question_summaries = snapshot
                 .pending_interactions
                 .iter()
@@ -1407,6 +1435,7 @@ fn reset_for_session_switch(
     app.gate_history_approvals.clear();
     app.gate_history_interactions.clear();
     app.pending_prompt = None;
+    app.active_workbench = None;
 }
 
 fn switch_session(
@@ -1718,6 +1747,63 @@ fn handle_slash_command_submission(
             }
             true
         }
+        SlashCommand::WbStatus => {
+            match &app.active_workbench {
+                Some(wb) => {
+                    app.add_message(
+                        MessageRole::System,
+                        format!(
+                            "Workbench {} ({})\n  base: {}\n  files: {}  changed: {}\n  commands: /wb reconcile | /wb discard | /wb diff",
+                            wb.workbench_id, wb.status, wb.base_artifact_id,
+                            wb.file_count, wb.changed_files
+                        ),
+                    );
+                }
+                None => {
+                    app.add_message(
+                        MessageRole::System,
+                        "No active workbench.".to_string(),
+                    );
+                }
+            }
+            true
+        }
+        SlashCommand::WbDiff => {
+            match &app.active_workbench {
+                Some(wb) => {
+                    let msg = format_workbench_diff(gateway_store, &wb.workbench_id);
+                    app.add_message(MessageRole::System, msg);
+                }
+                None => {
+                    app.add_message(
+                        MessageRole::System,
+                        "No active workbench.".to_string(),
+                    );
+                }
+            }
+            true
+        }
+        SlashCommand::WbReconcile | SlashCommand::WbDiscard => {
+            match &app.active_workbench {
+                Some(wb) => {
+                    let msg = format!(
+                        "To {} workbench {}, ask the agent or use the CLI:\n  autonoetic workbench {} {}",
+                        if matches!(command, SlashCommand::WbReconcile) { "reconcile" } else { "discard" },
+                        wb.workbench_id,
+                        if matches!(command, SlashCommand::WbReconcile) { "reconcile" } else { "discard" },
+                        wb.workbench_id,
+                    );
+                    app.add_message(MessageRole::System, msg);
+                }
+                None => {
+                    app.add_message(
+                        MessageRole::System,
+                        "No active workbench.".to_string(),
+                    );
+                }
+            }
+            true
+        }
     }
 }
 
@@ -1798,6 +1884,91 @@ fn format_why_explanation(
             lines.join("\n")
         }
     }
+}
+
+fn file_sha256(path: &Path) -> std::result::Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    let data = std::fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn format_workbench_diff(
+    gateway_store: Option<&GatewayStore>,
+    workbench_id: &str,
+) -> String {
+    let Some(store) = gateway_store else {
+        return "Gateway store not available.".to_string();
+    };
+    let wb = match store.load_workbench(workbench_id) {
+        Ok(Some(wb)) => wb,
+        _ => return format!("Workbench {} not found.", workbench_id),
+    };
+    let source_dir = Path::new(&wb.workspace_path);
+    let meta_dir = source_dir.parent().map(|p| p.join(".autonoetic"));
+    let base_digests: std::collections::HashMap<String, String> = meta_dir
+        .and_then(|d| {
+            let p = d.join("base_digests.json");
+            if p.exists() {
+                serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    let mut current_names: Vec<String> = Vec::new();
+    if source_dir.exists() {
+        for entry in walkdir::WalkDir::new(source_dir).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                let rel = entry.path().strip_prefix(source_dir).unwrap();
+                let rel_str = rel.to_string_lossy().to_string();
+                if rel_str.starts_with(".autonoetic/") {
+                    continue;
+                }
+                current_names.push(rel_str);
+            }
+        }
+    }
+    let current_set: std::collections::HashSet<&str> =
+        current_names.iter().map(|s| s.as_str()).collect();
+
+    let mut added: Vec<&str> = Vec::new();
+    let mut deleted: Vec<&str> = Vec::new();
+    let mut modified: Vec<&str> = Vec::new();
+    let mut unchanged = 0usize;
+
+    for name in &current_names {
+        match base_digests.get(name.as_str()) {
+            Some(base_digest) => {
+                match file_sha256(&source_dir.join(name)) {
+                    Ok(current_digest) if current_digest == *base_digest => unchanged += 1,
+                    _ => modified.push(name.as_str()),
+                }
+            }
+            None => added.push(name.as_str()),
+        }
+    }
+    for name in base_digests.keys() {
+        if !current_set.contains(name.as_str()) {
+            deleted.push(name.as_str());
+        }
+    }
+
+    let mut lines = Vec::new();
+    lines.push(format!("Workbench {} diff:", workbench_id));
+    if added.is_empty() && deleted.is_empty() && modified.is_empty() {
+        lines.push("  No changes.".to_string());
+    } else {
+        for f in &added { lines.push(format!("  + {}", f)); }
+        for f in &modified { lines.push(format!("  ~ {}", f)); }
+        for f in &deleted { lines.push(format!("  - {}", f)); }
+        if unchanged > 0 {
+            lines.push(format!("  ({} unchanged)", unchanged));
+        }
+    }
+    lines.join("\n")
 }
 
 /// Pending `user.ask` rows for this terminal session: exact session plus any under the same root
@@ -1901,6 +2072,68 @@ fn poll_session_snapshot(
         .and_then(|s| s.list_active_session_turn_counts(&root_session_id).ok())
         .unwrap_or_default();
 
+    let active_workbench = store.and_then(|s| {
+        if let Some(ref wf_id) = workflow.workflow_id {
+            s.load_active_workbench_for_workflow(wf_id).ok().flatten()
+        } else {
+            None
+        }
+    }).map(|wb| {
+        let source_dir = std::path::Path::new(&wb.workspace_path);
+        let meta_dir = source_dir.parent().map(|p| p.join(".autonoetic"));
+        let base_digests: std::collections::HashMap<String, String> = meta_dir
+            .and_then(|d| {
+                let p = d.join("base_digests.json");
+                if p.exists() {
+                    serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let current_files: Vec<String> = if source_dir.exists() {
+            let mut files = Vec::new();
+            for entry in walkdir::WalkDir::new(source_dir).into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() {
+                    let rel = entry.path().strip_prefix(source_dir).unwrap();
+                    let rel_str = rel.to_string_lossy().to_string();
+                    if rel_str.starts_with(".autonoetic/") {
+                        continue;
+                    }
+                    files.push(rel_str);
+                }
+            }
+            files
+        } else {
+            Vec::new()
+        };
+        let current_set: std::collections::HashSet<&str> =
+            current_files.iter().map(|s| s.as_str()).collect();
+        let mut changed = 0usize;
+        for name in &current_files {
+            match base_digests.get(name.as_str()) {
+                Some(base_digest) => {
+                    if file_sha256(&source_dir.join(name)).map_or(true, |d| d != *base_digest) {
+                        changed += 1;
+                    }
+                }
+                None => changed += 1,
+            }
+        }
+        for name in base_digests.keys() {
+            if !current_set.contains(name.as_str()) {
+                changed += 1;
+            }
+        }
+        WorkbenchOverview {
+            workbench_id: wb.workbench_id.clone(),
+            status: wb.status.as_str().to_string(),
+            base_artifact_id: wb.base_artifact_id.clone(),
+            file_count: current_files.len(),
+            changed_files: changed,
+        }
+    });
+
     Ok(SessionPollSnapshot {
         overview: SessionOverview {
             root_session_id: root_session_id.to_string(),
@@ -1911,6 +2144,7 @@ fn poll_session_snapshot(
             active_sessions,
         },
         pending_interactions,
+        active_workbench,
     })
 }
 
@@ -3765,6 +3999,39 @@ fn draw_right_pane(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    if let Some(ref wb) = app.active_workbench {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Workbench",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        let id_short = if wb.workbench_id.len() > 14 {
+            format!("{}…", &wb.workbench_id[..14])
+        } else {
+            wb.workbench_id.clone()
+        };
+        lines.push(Line::raw(format!("{} ({})", id_short, wb.status)));
+        lines.push(Line::raw(format!(
+            "files:{} changed:{}",
+            wb.file_count, wb.changed_files
+        )));
+        let art_short = if wb.base_artifact_id.len() > 18 {
+            format!("{}…", &wb.base_artifact_id[..18])
+        } else {
+            wb.base_artifact_id.clone()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("base: {}", art_short),
+            Style::default().fg(Color::DarkGray),
+        )));
+        if wb.status == "active" {
+            lines.push(Line::from(Span::styled(
+                "  → /wb reconcile | /wb discard",
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+    }
+
     let paragraph = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: true })
         .block(
@@ -4575,7 +4842,10 @@ async fn handle_chat_test_mode(
                  Ok(SlashCommand::Pending) => {
                      println!("/pending is not supported in test mode.");
                  }
-                Err(error) => {
+                 Ok(SlashCommand::WbStatus | SlashCommand::WbDiff | SlashCommand::WbReconcile | SlashCommand::WbDiscard) => {
+                     println!("/wb commands are not supported in test mode.");
+                 }
+                 Err(error) => {
                     println!("{}", error);
                 }
             }
@@ -5140,6 +5410,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 app.session_overview.root_session_id = snapshot.overview.root_session_id.clone();
                                                 app.session_overview.workflow = snapshot.overview.workflow.clone();
                                                 app.session_overview.pending_user_interactions = snapshot.overview.pending_user_interactions;
+                                                app.active_workbench = snapshot.active_workbench;
                                                 append_new_pending_user_interaction_prompts(
                                                     app,
                                                     &snapshot.pending_interactions,
@@ -6785,6 +7056,7 @@ async fn check_signals(
     };
 
     let root_session_id = snapshot.overview.root_session_id.clone();
+    app.active_workbench = snapshot.active_workbench;
 
     tracing::debug!(target: "chat", session_id = %session_id, root_session_id = %root_session_id, "check_signals: starting");
 
