@@ -1544,6 +1544,21 @@ impl AgentExecutor {
                         default_window.saturating_sub(margin)
                     });
                 let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
+                let plan_anchor = self
+                    .gateway_store
+                    .as_ref()
+                    .and_then(|store| {
+                        let wf_id = self.workflow_id.clone().or_else(|| {
+                            crate::scheduler::resolve_workflow_id_for_root_session(
+                                self.config.as_ref()?,
+                                &session_id,
+                            )
+                            .ok()
+                            .flatten()
+                        })?;
+                        let plan = store.load_active_plan_for_workflow(&wf_id).ok().flatten()?;
+                        Some(plan.compact_summary())
+                    });
                 let mut ctx = crate::runtime::context_governor::strategies::GovernorContext::new(
                     history.clone(),
                     tools.clone(),
@@ -1556,6 +1571,7 @@ impl AgentExecutor {
                         .unwrap_or_default(),
                     compression_cfg.cloned(),
                     self.manifest.compression.clone(),
+                    plan_anchor,
                 );
                 let governor = if self.overflow_recovery {
                     tracing::info!(

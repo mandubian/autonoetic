@@ -2,6 +2,7 @@ use crate::runtime::compression::{self, resolve_compression_llm_config, split_co
 use crate::runtime::context_governor::strategies::{GovernorContext, ReductionOutcome};
 use crate::runtime::content_store::{ContentStore, ContentVisibility};
 use autonoetic_types::config::LlmPreset;
+use autonoetic_types::plan_frame::PlanFrameSummary;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -91,11 +92,16 @@ impl CapsuleStrategy {
 fn build_delta_extraction_prompt(
     compressible_messages: &[crate::llm::Message],
     capsule_json: &str,
+    plan_anchor: Option<&PlanFrameSummary>,
 ) -> String {
+    let plan_block = match plan_anchor {
+        Some(p) => render_plan_anchor_block(p),
+        None => String::new(),
+    };
     format!(
         r#"You are a state capsule update extractor. Given the current session state capsule and recent conversation turns, produce a structured delta describing what changed.
 
-Current State Capsule (JSON):
+{plan_block}Current State Capsule (JSON):
 {capsule_json}
 
 Recent Conversation Turns:
@@ -138,6 +144,42 @@ Respond ONLY with a JSON object matching this schema:
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+/// Render the "Active Plan" block that anchors the delta-extraction prompt
+/// to the session's current PlanFrame. The LLM uses this as a relevance
+/// lens: plan-advancing decisions, artifacts, and identifiers should land
+/// in `decisions_and_rationale` / `stable_identifiers`, while abandoned
+/// detours can be safely dropped.
+fn render_plan_anchor_block(p: &PlanFrameSummary) -> String {
+    let mut s = String::from("Active Plan (use as a relevance lens — prefer plan-advancing items):\n");
+    s.push_str(&format!(
+        "- plan_id: {} v{} (status: {})\n",
+        p.plan_id, p.version, p.status.as_str()
+    ));
+    if !p.title.is_empty() {
+        s.push_str(&format!("- title: {}\n", p.title));
+    }
+    if p.step_count > 0 {
+        s.push_str(&format!("- step_count: {}\n", p.step_count));
+    }
+    if !p.operator_steps.is_empty() {
+        s.push_str("- operator/shared steps: ");
+        s.push_str(&p.operator_steps.join(", "));
+        s.push('\n');
+    }
+    if !p.required_validations.is_empty() {
+        s.push_str("- required validations: ");
+        s.push_str(&p.required_validations.join(", "));
+        s.push('\n');
+    }
+    if !p.advisory_validations.is_empty() {
+        s.push_str("- advisory validations: ");
+        s.push_str(&p.advisory_validations.join(", "));
+        s.push('\n');
+    }
+    s.push('\n');
+    s
 }
 
 fn compile_capsule_injection(capsule: &StateCapsule) -> String {
@@ -336,6 +378,7 @@ pub(crate) async fn extract_delta(
     agent_cfg: Option<&autonoetic_types::agent::CompressionConfig>,
     presets: &HashMap<String, LlmPreset>,
     http_client: &reqwest::Client,
+    plan_anchor: Option<&PlanFrameSummary>,
 ) -> anyhow::Result<CapsuleDelta> {
     let llm_config = match resolve_compression_llm_config(gateway_cfg, agent_cfg, presets) {
         Some(c) => c,
@@ -344,7 +387,7 @@ pub(crate) async fn extract_delta(
 
     let driver = crate::llm::build_driver(llm_config.clone(), http_client.clone())?;
     let capsule_json = serde_json::to_string(capsule)?;
-    let prompt = build_delta_extraction_prompt(compressible, &capsule_json);
+    let prompt = build_delta_extraction_prompt(compressible, &capsule_json, plan_anchor);
 
     let system_msg = crate::llm::Message::system(
         "You are a state capsule extractor. Output ONLY valid JSON matching the schema.",
@@ -463,6 +506,7 @@ impl super::ReductionStrategy for CapsuleStrategy {
             ctx.agent_compression.as_ref(),
             &self.presets,
             &self.http_client,
+            ctx.plan_anchor.as_ref(),
         )
         .await?;
 
@@ -868,5 +912,76 @@ mod tests {
 
         let result = bootstrap_capsule_from_compressed_markers("sess-1", &history, 10);
         assert!(result.is_none());
+    }
+
+    fn make_plan_summary() -> PlanFrameSummary {
+        PlanFrameSummary {
+            plan_id: "plan_abc".into(),
+            version: 3,
+            parent_version: Some(2),
+            status: autonoetic_types::plan_frame::PlanStatus::Approved,
+            title: "Add OAuth login".into(),
+            step_count: 5,
+            operator_steps: vec!["op_login".into(), "op_logout".into()],
+            required_validations: vec!["security_review".into()],
+            advisory_validations: vec!["unit_tests".into()],
+        }
+    }
+
+    #[test]
+    fn delta_prompt_without_plan_omits_anchor_block() {
+        let messages = vec![crate::llm::Message {
+            role: crate::llm::Role::User,
+            content: "Discuss the auth flow".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+        let prompt = build_delta_extraction_prompt(&messages, "{}", None);
+        assert!(!prompt.contains("Active Plan"));
+        assert!(!prompt.contains("plan_id"));
+        assert!(prompt.contains("Recent Conversation Turns"));
+    }
+
+    #[test]
+    fn delta_prompt_with_plan_includes_anchor_block() {
+        let messages = vec![crate::llm::Message {
+            role: crate::llm::Role::User,
+            content: "Discuss the auth flow".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+        let plan = make_plan_summary();
+        let prompt = build_delta_extraction_prompt(&messages, "{}", Some(&plan));
+        assert!(prompt.contains("Active Plan"), "expected 'Active Plan' in prompt");
+        assert!(prompt.contains("plan_abc"), "expected plan_id in prompt");
+        assert!(prompt.contains("Add OAuth login"), "expected title in prompt");
+        assert!(prompt.contains("op_login, op_logout"), "expected operator steps in prompt");
+        assert!(prompt.contains("security_review"), "expected required validations");
+        assert!(prompt.contains("unit_tests"), "expected advisory validations");
+        assert!(prompt.contains("relevance lens"), "expected framing as relevance lens");
+    }
+
+    #[test]
+    fn delta_prompt_with_minimal_plan_omits_empty_sections() {
+        let plan = PlanFrameSummary {
+            plan_id: "plan_min".into(),
+            version: 1,
+            parent_version: None,
+            status: autonoetic_types::plan_frame::PlanStatus::AwaitingApproval,
+            title: String::new(),
+            step_count: 0,
+            operator_steps: vec![],
+            required_validations: vec![],
+            advisory_validations: vec![],
+        };
+        let prompt = build_delta_extraction_prompt(&[], "{}", Some(&plan));
+        assert!(prompt.contains("plan_min"));
+        assert!(!prompt.contains("operator/shared steps"));
+        assert!(!prompt.contains("required validations"));
+        assert!(!prompt.contains("advisory validations"));
     }
 }
