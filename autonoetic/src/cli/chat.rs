@@ -1435,6 +1435,7 @@ fn reset_for_session_switch(
     app.gate_history_approvals.clear();
     app.gate_history_interactions.clear();
     app.pending_prompt = None;
+    app.active_workbench = None;
 }
 
 fn switch_session(
@@ -1885,6 +1886,14 @@ fn format_why_explanation(
     }
 }
 
+fn file_sha256(path: &Path) -> std::result::Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    let data = std::fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
 fn format_workbench_diff(
     gateway_store: Option<&GatewayStore>,
     workbench_id: &str,
@@ -1909,7 +1918,7 @@ fn format_workbench_diff(
         })
         .unwrap_or_default();
 
-    let mut current_files: Vec<String> = Vec::new();
+    let mut current_names: Vec<String> = Vec::new();
     if source_dir.exists() {
         for entry in walkdir::WalkDir::new(source_dir).into_iter().filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
@@ -1918,35 +1927,42 @@ fn format_workbench_diff(
                 if rel_str.starts_with(".autonoetic/") {
                     continue;
                 }
-                current_files.push(rel_str);
+                current_names.push(rel_str);
             }
         }
     }
+    let current_set: std::collections::HashSet<&str> =
+        current_names.iter().map(|s| s.as_str()).collect();
 
     let mut added: Vec<&str> = Vec::new();
     let mut deleted: Vec<&str> = Vec::new();
-    let mut unchanged = 0usize;
     let mut modified: Vec<&str> = Vec::new();
+    let mut unchanged = 0usize;
 
-    for name in &current_files {
-        if base_digests.contains_key(name.as_str()) {
-            unchanged += 1;
-        } else {
-            added.push(name.as_str());
+    for name in &current_names {
+        match base_digests.get(name.as_str()) {
+            Some(base_digest) => {
+                match file_sha256(&source_dir.join(name)) {
+                    Ok(current_digest) if current_digest == *base_digest => unchanged += 1,
+                    _ => modified.push(name.as_str()),
+                }
+            }
+            None => added.push(name.as_str()),
         }
     }
     for name in base_digests.keys() {
-        if !current_files.iter().any(|c| c.as_str() == name.as_str()) {
+        if !current_set.contains(name.as_str()) {
             deleted.push(name.as_str());
         }
     }
 
     let mut lines = Vec::new();
     lines.push(format!("Workbench {} diff:", workbench_id));
-    if added.is_empty() && deleted.is_empty() && unchanged == current_files.len() {
+    if added.is_empty() && deleted.is_empty() && modified.is_empty() {
         lines.push("  No changes.".to_string());
     } else {
         for f in &added { lines.push(format!("  + {}", f)); }
+        for f in &modified { lines.push(format!("  ~ {}", f)); }
         for f in &deleted { lines.push(format!("  - {}", f)); }
         if unchanged > 0 {
             lines.push(format!("  ({} unchanged)", unchanged));
@@ -2091,12 +2107,24 @@ fn poll_session_snapshot(
         } else {
             Vec::new()
         };
-        let changed = current_files.iter().filter(|name| {
-            !base_digests.contains_key(*name)
-        }).count()
-            + base_digests.keys().filter(|name| {
-                !current_files.iter().any(|c| c == *name)
-            }).count();
+        let current_set: std::collections::HashSet<&str> =
+            current_files.iter().map(|s| s.as_str()).collect();
+        let mut changed = 0usize;
+        for name in &current_files {
+            match base_digests.get(name.as_str()) {
+                Some(base_digest) => {
+                    if file_sha256(&source_dir.join(name)).map_or(true, |d| d != *base_digest) {
+                        changed += 1;
+                    }
+                }
+                None => changed += 1,
+            }
+        }
+        for name in base_digests.keys() {
+            if !current_set.contains(name.as_str()) {
+                changed += 1;
+            }
+        }
         WorkbenchOverview {
             workbench_id: wb.workbench_id.clone(),
             status: wb.status.as_str().to_string(),
