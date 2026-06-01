@@ -921,6 +921,70 @@ Acceptance criteria:
 - Waiver is visible in workflow trace and promotion record.
 - Required safety checks still block promotion/execution.
 
+#### Reflections on Phase 4 implementation (post-PR #340)
+
+While reviewing the `validation.waive` / `validation.waivers` tools, we surfaced
+a real overlap with two existing autonoetic mechanisms: **approvals** (used
+by `sandbox.exec`, network access, etc.) and **clarifications** (`user_interaction.ask`).
+Documenting the distinction here so future contributors do not conflate them.
+
+| | Approval | Clarification | Validation waiver |
+|---|---|---|---|
+| Scope | Action | Turn | Artifact revision |
+| Decider | Human/operator | Human/operator | **Agent itself** (recorded for audit) |
+| Suspends turn | Yes | Yes | **No** |
+| About | Future action | Current intent | **Past validation result** |
+| Revocable mid-flight | Yes (`withdraw`) | N/A | **No — durable record** |
+| Authoritative? | **Yes** — gates execution | Yes — gates continuation | **No** — declares a known gap |
+
+**Key insight: a waiver is a *pre-decision* made by the operator during
+conception, not a way to avoid validation during promotion.** The agent
+records the waiver so reviewers can see "the operator explicitly accepted
+the gap before the artifact went into the validation pipeline." The waiver
+does **not**:
+
+- Suppress `promotion.record` findings. A waived check is still a "skipped"
+  line in the promotion record, not a "pass".
+- Bypass downstream approvals. A waiver on `unit_tests` does not let you
+  skip a `sandbox.exec` approval for deploying the artifact.
+- Override mechanical safety gates. `mechanical_safety` and
+  `security_review` cannot be waived by the current implementation; the
+  tool rejects them with a hard error.
+
+**Relationship to `promotion.record`.** A waiver is *additive provenance*,
+not a replacement for a finding. A future refinement could merge the two —
+for example, `promotion.record` could grow a `skipped_validations: [..]`
+field that the gateway cross-checks against the `validation_waivers` table
+before accepting `pass=true`. For now, the two are deliberately separate:
+
+- Waivers live in their own table, indexed on artifact_id and workflow_id,
+  queryable independently of any single promotion attempt.
+- Promotion records remain the canonical post-decision evidence for a
+  specific promotion attempt and may reference one or more waivers by id.
+
+**Pending questions to validate with usage:**
+
+1. **Lifecycle:** do waivers expire? Should they stick to the artifact
+   across multiple promotion attempts, or be re-issued per attempt?
+2. **Who can waive:** the current tool accepts the waiver from any
+   workflow-tier agent on its own behalf. Should it require an explicit
+   operator approval (matching the design's original "gated by operator
+   approval" wording)? The current implementation logs `waived_by` as the
+   agent id, not a human user.
+3. **Granularity:** the current schema has one row per (artifact,
+   validation_id) tuple. Should there be a bulk-waive operation, or a
+   "waive policy" attached to a workflow that applies to all artifacts in
+   that workflow?
+4. **Surface in `promotion.record`:** how should waivers be referenced
+   inside a promotion record's findings? As `waiver_ref: "vw-..."` next to
+   the corresponding `skipped` finding, or as a top-level
+   `waivers: [...]` array?
+5. **Should we ever merge?** If usage shows waivers and `skipped`
+   promotion-record findings are always created together, folding them
+   into a single `promotion.record` payload would reduce schema surface
+   and eliminate the cross-table consistency check. Worth revisiting after
+   Phase 4 has been in production for a while.
+
 ### Phase 5 — Project-scoped PlanFrames and capsules
 
 - Promote PlanFrames from workflow-scoped to project-scoped where requested.
