@@ -66,8 +66,11 @@ fn mint_artifact_ref_id() -> String {
 /// Create a checkpoint of the workbench's current files. Used for both
 /// manual checkpoints (the `workbench_checkpoint` tool) and automatic
 /// checkpoints (on projection and before reconcile). Returns the
-/// checkpoint id on success. Failures are non-fatal to the caller —
-/// the checkpoint is best-effort, not a gate.
+/// checkpoint id on success.
+///
+/// For **automatic** callers the result is discarded (`let _ = …`) so
+/// a checkpoint failure is non-fatal.  The **manual** `workbench_checkpoint`
+/// tool propagates the error so the operator gets feedback.
 fn create_auto_checkpoint(
     store: &crate::scheduler::gateway_store::GatewayStore,
     wb: &WorkbenchProjection,
@@ -673,7 +676,14 @@ impl NativeTool for WorkbenchCheckpointTool {
         }
 
         let label = args.label.as_deref().unwrap_or("manual");
-        let cp_id = create_auto_checkpoint(&store, &wb, label)?;
+        let cp_id = match create_auto_checkpoint(&store, &wb, label) {
+            Ok(id) => id,
+            Err(e) => {
+                return Ok(serde_json::to_string(&serde_json::json!({
+                    "ok": false, "error": format!("Checkpoint failed: {e}")
+                }))?);
+            }
+        };
 
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -1031,8 +1041,6 @@ impl NativeTool for WorkbenchReconcileTool {
             revoked_at: None,
         })?;
 
-        let now = now_rfc3339();
-
         // Issue #330: auto-checkpoint before reconcile so the operator
         // can restore the pre-reconcile state if needed. Best-effort.
         if let Ok(_cp_id) = create_auto_checkpoint(&store, &wb, "auto: pre-reconcile") {
@@ -1334,29 +1342,48 @@ impl NativeTool for WorkbenchCleanupTool {
         let parent = workspace_path.parent().unwrap();
         let meta_dir = parent.join(".autonoetic");
 
+        let mut warnings: Vec<String> = Vec::new();
+
         let checkpoints_dir = meta_dir.join("checkpoints");
         if checkpoints_dir.exists() {
-            let _ = std::fs::remove_dir_all(&checkpoints_dir);
+            if let Err(e) = std::fs::remove_dir_all(&checkpoints_dir) {
+                warnings.push(format!("Failed to remove checkpoints dir: {e}"));
+            }
         }
 
         if workspace_path.exists() {
-            let _ = std::fs::remove_dir_all(workspace_path);
+            if let Err(e) = std::fs::remove_dir_all(workspace_path) {
+                warnings.push(format!("Failed to remove workspace dir: {e}"));
+            }
         }
 
         if meta_dir.exists() {
             for stem in &["projection", "base_digests", "reconciliation", "semantic_summary"] {
                 let p = meta_dir.join(format!("{stem}.json"));
-                let _ = std::fs::remove_file(p);
+                let _ = std::fs::remove_file(&p);
+            }
+            if std::fs::read_dir(&meta_dir).map_or(true, |mut d| d.next().is_none()) {
+                let _ = std::fs::remove_dir(&meta_dir);
+            }
+        }
+
+        if parent.exists() {
+            if std::fs::read_dir(parent).map_or(true, |mut d| d.next().is_none()) {
+                let _ = std::fs::remove_dir(parent);
             }
         }
 
         store.delete_workbench(&wb.workbench_id)?;
 
-        Ok(serde_json::to_string(&serde_json::json!({
+        let mut response = serde_json::json!({
             "ok": true,
             "workbench_id": wb.workbench_id,
             "message": format!("Cleaned up {} workbench.", wb.status.as_str())
-        }))?)
+        });
+        if !warnings.is_empty() {
+            response["warnings"] = serde_json::json!(warnings);
+        }
+        Ok(serde_json::to_string(&response)?)
     }
 
     fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {

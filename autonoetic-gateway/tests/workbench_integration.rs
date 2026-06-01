@@ -1425,10 +1425,9 @@ fn workbench_cleanup_succeeds_on_reconciled() {
     assert!(cps.is_empty(), "checkpoint records should be deleted after cleanup");
 
     // Disk artifacts should be removed.
-    let workspace_exists = source_dir.exists();
+    assert!(!source_dir.exists(), "workspace directory should be removed");
     let checkpoints_dir = source_dir.parent().unwrap().join(".autonoetic").join("checkpoints");
-    assert!(!workspace_exists || !checkpoints_dir.exists(),
-        "workbench disk artifacts should be cleaned up");
+    assert!(!checkpoints_dir.exists(), "checkpoints directory should be removed");
 }
 
 // Issue #330 (c): cleanup succeeds on discarded workbench.
