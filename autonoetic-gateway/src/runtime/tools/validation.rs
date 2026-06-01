@@ -127,6 +127,13 @@ impl NativeTool for ValidationWaiveTool {
         let session_id_val = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
         let root_session_id = session_id_val.split('/').next().unwrap_or(session_id_val);
 
+        if !args.artifact_id.starts_with("art_") {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "error": format!("Invalid artifact_id '{}': must be a canonical artifact ID (art_*). Use artifact_inspect or resolve to look up art_* from a ref.", args.artifact_id)
+            }))?);
+        }
+
         let validation_class = match parse_class(&args.validation_class) {
             Some(c) => c,
             None => {
@@ -150,13 +157,24 @@ impl NativeTool for ValidationWaiveTool {
             }))?);
         }
 
-        let workflow_id = crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
-            config, root_session_id,
-        ).ok().flatten().unwrap_or_default();
+        let workflow_id = match crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            config,
+            Some(&store),
+            root_session_id,
+            Some(&manifest.agent.id),
+        ) {
+            Ok(w) => w.workflow_id,
+            Err(e) => {
+                return Ok(serde_json::to_string(&serde_json::json!({
+                    "ok": false,
+                    "error": format!("Failed to ensure workflow for root session: {}", e)
+                }))?);
+            }
+        };
 
         let waiver = ValidationWaiver {
             waiver_id: new_waiver_id(),
-            workflow_id: workflow_id.clone(),
+            workflow_id,
             artifact_id: args.artifact_id.clone(),
             validation_id: args.validation_id.clone(),
             validation_class,
@@ -256,6 +274,8 @@ impl NativeTool for ValidationWaiversTool {
         let summary: Vec<serde_json::Value> = waivers.iter().map(|w| {
             serde_json::json!({
                 "waiver_id": w.waiver_id,
+                "workflow_id": w.workflow_id,
+                "artifact_id": w.artifact_id,
                 "validation_id": w.validation_id,
                 "validation_class": w.validation_class.as_str(),
                 "waived_by": w.waived_by,

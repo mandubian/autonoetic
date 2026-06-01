@@ -65,24 +65,32 @@ pub(crate) fn list_waivers_for_workflow(
 
 fn row_to_waiver(row: &rusqlite::Row<'_>) -> Result<ValidationWaiver, rusqlite::Error> {
     let class_str: String = row.get(4)?;
+    let validation_class = parse_validation_class(&class_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
     Ok(ValidationWaiver {
         waiver_id: row.get(0)?,
         workflow_id: row.get(1)?,
         artifact_id: row.get(2)?,
         validation_id: row.get(3)?,
-        validation_class: parse_validation_class(&class_str),
+        validation_class,
         waived_by: row.get(5)?,
         reason: row.get(6)?,
         created_at: row.get(7)?,
     })
 }
 
-fn parse_validation_class(s: &str) -> ValidationClass {
+fn parse_validation_class(s: &str) -> Result<ValidationClass, String> {
     match s {
-        "mechanical_safety" => ValidationClass::MechanicalSafety,
-        "security_review" => ValidationClass::SecurityReview,
-        "quality_check" => ValidationClass::QualityCheck,
-        "packaging_check" => ValidationClass::PackagingCheck,
-        _ => ValidationClass::CorrectnessCheck,
+        "mechanical_safety" => Ok(ValidationClass::MechanicalSafety),
+        "security_review" => Ok(ValidationClass::SecurityReview),
+        "correctness_check" => Ok(ValidationClass::CorrectnessCheck),
+        "quality_check" => Ok(ValidationClass::QualityCheck),
+        "packaging_check" => Ok(ValidationClass::PackagingCheck),
+        other => Err(format!("Unknown validation_class '{}' in stored waiver", other)),
     }
 }

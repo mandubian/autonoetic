@@ -377,3 +377,52 @@ fn validation_waivers_listed_for_workflow() {
     assert_eq!(workflow_waivers.len(), 1);
     assert_eq!(workflow_waivers[0].validation_id, "style_review");
 }
+
+#[test]
+fn validation_waive_rejects_non_art_artifact_id() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-waiver-006";
+    let _ = make_artifact(
+        &registry, &manifest, &policy, &agent_dir,
+        &gateway_dir, &config, &store, session_id,
+    );
+
+    let args = json!({
+        "artifact_id": "ar.abc123def456",
+        "validation_id": "unit_tests",
+        "validation_class": "correctness_check",
+        "reason": "trying to pass a ref instead of an id"
+    });
+    let out = registry
+        .execute(
+            "validation_waive",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    let err = v["error"].as_str().unwrap();
+    assert!(err.contains("art_*"), "error should mention art_*: {}", err);
+
+    let waivers = store.list_waivers_for_workflow("").unwrap();
+    assert_eq!(waivers.len(), 0, "no waiver should be persisted");
+}
