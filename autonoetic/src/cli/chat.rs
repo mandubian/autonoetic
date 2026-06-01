@@ -2045,6 +2045,11 @@ struct ReturnToAgentInput {
     operator_added_files: Vec<String>,
     /// IDs of files deleted by the operator since the projection.
     deleted_files: Vec<String>,
+    /// Issue #332: high-level semantic summary of the diff (contract
+    /// impact, validation state, file-role classifications). Loaded
+    /// from `.autonoetic/semantic_summary.json` for reconciled
+    /// workbenches; `None` when missing or for active workbenches.
+    semantic_summary: Option<serde_json::Value>,
 }
 
 /// Output of `build_return_to_agent_wakeup`. The `message` is the natural
@@ -2102,6 +2107,14 @@ fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWake
                 .collect(),
         );
     }
+    if let Some(semantic_summary) = &input.semantic_summary {
+        // Issue #332: surface the rule-based semantic summary (contract
+        // impacts, file-role classifications, validation state) so the
+        // orchestrator gets both raw precision and high-level
+        // orientation. The summary is *additive* — the file lists above
+        // remain the source of truth for grounding.
+        structured["semantic_summary"] = semantic_summary.clone();
+    }
 
     let artifact_ref_label = input
         .new_artifact_ref
@@ -2129,6 +2142,11 @@ fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWake
             message.push_str(&format!(" Operator note: {}.", note.trim()));
         }
     }
+    if let Some(semantic_summary) = &input.semantic_summary {
+        if let Some(label) = summarize_contract_changes(semantic_summary) {
+            message.push_str(&format!(" Contract impact: {label}."));
+        }
+    }
     message.push_str(" Please continue the workflow.");
 
     ReturnToAgentWakeup {
@@ -2137,6 +2155,31 @@ fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWake
             "workbench_reconciled": structured,
         }),
     }
+}
+
+/// Render a one-line summary of the contract-impact changes recorded in
+/// the semantic summary. Returns `None` when there are no
+/// `contract_changes` to call out, or when the summary is malformed.
+///
+/// Format: a comma-separated list of `"<impact> on <path>"` items,
+/// truncated to the first three to keep the wake-up message compact.
+fn summarize_contract_changes(summary: &serde_json::Value) -> Option<String> {
+    let changes = summary.get("contract_changes")?.as_array()?;
+    if changes.is_empty() {
+        return None;
+    }
+    let mut labels: Vec<String> = Vec::new();
+    for c in changes.iter().take(3) {
+        let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+        let impact = c.get("impact").and_then(|v| v.as_str()).unwrap_or("?");
+        labels.push(format!("{impact} on {path}"));
+    }
+    let suffix = if changes.len() > 3 {
+        format!(" (+{} more)", changes.len() - 3)
+    } else {
+        String::new()
+    };
+    Some(format!("{}{suffix}", labels.join(", ")))
 }
 
 /// Read the active workbench's operator-edited file lists from the gateway
@@ -2216,6 +2259,11 @@ fn read_return_to_agent_input(
             .unwrap_or_default();
 
         let unsaved_change_count = modified.len() + added.len() + deleted.len();
+        let semantic_summary = meta_dir
+            .as_ref()
+            .map(|d| d.join("semantic_summary.json"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|raw| serde_json::from_str(&raw).ok());
         return Some(ReturnToAgentInput {
             workbench_id: wb.workbench_id,
             base_artifact_id: wb.base_artifact_id,
@@ -2227,6 +2275,7 @@ fn read_return_to_agent_input(
             operator_modified_files: modified,
             operator_added_files: added,
             deleted_files: deleted,
+            semantic_summary,
         });
     }
 
@@ -2243,6 +2292,7 @@ fn read_return_to_agent_input(
             operator_modified_files: Vec::new(),
             operator_added_files: Vec::new(),
             deleted_files: Vec::new(),
+            semantic_summary: None,
         });
     }
 
@@ -2308,6 +2358,7 @@ fn read_return_to_agent_input(
         operator_modified_files: modified,
         operator_added_files: added,
         deleted_files: deleted,
+        semantic_summary: None,
     })
 }
 
@@ -8304,6 +8355,7 @@ mod tests {
             operator_modified_files: modified,
             operator_added_files: added,
             deleted_files: deleted,
+            semantic_summary: None,
         }
     }
 

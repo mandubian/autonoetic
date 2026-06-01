@@ -922,3 +922,189 @@ fn workbench_discard_rejects_already_discarded() {
     assert_eq!(v["ok"], false);
     assert!(v["error"].as_str().unwrap().contains("discard"));
 }
+
+// Issue #332: reconcile must produce a semantic_summary that flags
+// capability changes and store the summary in
+// `.autonoetic/semantic_summary.json` next to `reconciliation.json`.
+#[test]
+fn workbench_reconcile_writes_semantic_summary_with_capability_flag() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-sem";
+
+    let artifact_ref = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[
+            ("capabilities.yaml", b"[]"),
+            ("src/lib.rs", b"pub fn x() { 1 + 1 }"),
+        ],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_ref,
+    );
+
+    let wb = store.load_workbench(&wb_id).unwrap().unwrap();
+    let source_dir = std::path::Path::new(&wb.workspace_path);
+
+    std::fs::write(
+        source_dir.join("capabilities.yaml"),
+        b"- network\n- shell\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source_dir.join("src/lib.rs"),
+        b"pub fn fetch() { let _ = reqwest::get(\"https://example.com\"); }",
+    )
+    .unwrap();
+
+    let reconcile_args = json!({
+        "workbench_id": wb_id,
+    });
+    let out = registry
+        .execute(
+            "workbench_reconcile",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &reconcile_args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], true, "reconcile failed: {:?}", v);
+
+    let summary = &v["semantic_summary"];
+    assert_eq!(summary["summarizer_id"], "rule_based_v1");
+    assert_eq!(summary["workbench_id"], wb_id);
+
+    let contract_changes = summary["contract_changes"].as_array().unwrap();
+    let impacts: Vec<&str> = contract_changes
+        .iter()
+        .map(|c| c["impact"].as_str().unwrap())
+        .collect();
+    assert!(
+        impacts.contains(&"capability_change"),
+        "expected capability_change in contract_changes, got {:?}",
+        impacts
+    );
+    assert!(
+        impacts.contains(&"network_access_change"),
+        "expected network_access_change in contract_changes, got {:?}",
+        impacts
+    );
+
+    let summary_path = source_dir
+        .parent()
+        .unwrap()
+        .join(".autonoetic")
+        .join("semantic_summary.json");
+    assert!(
+        summary_path.exists(),
+        "semantic_summary.json not written to disk at {:?}",
+        summary_path
+    );
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+    assert_eq!(on_disk["summarizer_id"], "rule_based_v1");
+    assert_eq!(on_disk["workbench_id"], wb_id);
+}
+
+#[test]
+fn workbench_reconcile_semantic_summary_no_contract_changes_for_source_edit() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-sem-src-edit";
+
+    let artifact_ref = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("hello.txt", b"hello world"), ("readme.md", b"# readme")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_ref,
+    );
+
+    let wb = store.load_workbench(&wb_id).unwrap().unwrap();
+    let source_dir = std::path::Path::new(&wb.workspace_path);
+
+    // Modify a plain text file (no contract impact).
+    let edited = std::fs::read_to_string(source_dir.join("hello.txt")).unwrap();
+    std::fs::write(source_dir.join("hello.txt"), format!("{} -- edited", edited)).unwrap();
+
+    let reconcile_args = json!({ "workbench_id": wb_id });
+    let out = registry
+        .execute(
+            "workbench_reconcile",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &reconcile_args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], true);
+    let summary = &v["semantic_summary"];
+    assert_eq!(summary["summarizer_id"], "rule_based_v1");
+    assert_eq!(summary["contract_changes"].as_array().unwrap().len(), 0);
+    assert_eq!(summary["changed_files"], 1);
+}
