@@ -321,8 +321,19 @@ On resume:
 | **Agent retry attacks**: re-submitting near-identical approval requests (detected by similarity scoring) | **Kernel-level compromise**: root-level access to the host |
 | **Continuation tampering**: modifying `.gateway/continuations/<task_id>.json` on disk (detected by HMAC) | **Supply-chain attacks on LLM providers** |
 | **Approval fatigue**: operator approving without review (mitigated by similarity annotations, stats, and diff surface) | |
+| **Subtle capability misuse**: an agent using declared capabilities in unexpected ways (detected by auditor/evaluator agents during promotion, not by the gateway alone) | |
 
 The security boundary is **gateway vs agent**, not **gateway vs host**. The gateway trusts the local filesystem and its own key material; it does not trust any data produced or influenced by the agent.
+
+The gateway is not expected to catch every possible violation — no enforcement layer can anticipate every creative misuse of a declared capability. Instead, the system is designed so that **detection is collective**:
+
+- **Auditor and evaluator agents** review artifacts before promotion. They catch behavioral anomalies the gateway cannot detect mechanically.
+- **Static analysis** (`RemoteAccessAnalyzer`, `artifact_prepare`) flags network access patterns in source code even when the agent did not declare them.
+- **Similarity scoring** on approval requests detects when an agent is flooding or re-trying near-identical actions.
+- **The causal chain** makes every action attributable and reconstructable — an operator or agent can audit any session after the fact.
+- **Emergency stop** provides a circuit breaker to kill an entire root session when misbehavior is detected.
+
+Security of all is the responsibility of all. The gateway enforces hard boundaries; the ecosystem of agents watches for subtle violations; the causal chain ensures nothing is silent.
 
 ### Continuation Cleanup
 

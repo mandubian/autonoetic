@@ -266,6 +266,11 @@ pub struct AgentExecutor {
     /// from within the `NativeTool::execute` context. Drained after each tool
     /// batch by the lifecycle loop into `discovered_tools`.
     pub discovered_tools_writer: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+
+    /// When true, we already emitted a `context.pressure_high` workflow event at the current
+    /// pressure level. Cleared when estimated tokens drop below the threshold (85% of
+    /// effective_limit), so the TUI sees a fresh warning on each pressure buildup cycle.
+    pub pressure_high_warned: bool,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -329,6 +334,7 @@ impl AgentExecutor {
             tool_tier_escalated: false,
             discovered_tools: std::collections::HashSet::new(),
             discovered_tools_writer: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            pressure_high_warned: false,
         }
     }
 
@@ -1622,7 +1628,46 @@ impl AgentExecutor {
                             "ContextGovernor exhausted — all strategies failed"
                         );
                     }
-                    Ok(GovernorResult::WithinBudget) => {}
+                    Ok(GovernorResult::WithinBudget) => {
+                        // Emit a TUI-visible warning card when the estimated prompt
+                        // is still within the effective limit but close to overflowing.
+                        // Uses a dedup flag so it fires once per pressure buildup cycle.
+                        if effective_limit > 0 {
+                            let ratio = budget_breakdown.total_tokens as f64 / effective_limit as f64;
+                            if ratio >= 0.85 {
+                                if !self.pressure_high_warned {
+                                    self.pressure_high_warned = true;
+                                    if let (Some(config), Some(store), Some(wf_id)) =
+                                        (self.config.as_deref(), self.gateway_store.as_deref(), self.workflow_id.as_deref())
+                                    {
+                                        let pct = (ratio * 100.0) as u32;
+                                        let _ = crate::scheduler::append_workflow_event(
+                                            config,
+                                            Some(store),
+                                            &autonoetic_types::workflow::WorkflowEventRecord {
+                                                event_id: format!("ctxp-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                                                workflow_id: wf_id.to_string(),
+                                                task_id: self.task_id.clone(),
+                                                event_type: "context.pressure_high".to_string(),
+                                                agent_id: Some(self.manifest.agent.id.clone()),
+                                                payload: serde_json::json!({
+                                                    "status": "pressure_high",
+                                                    "estimated_tokens": budget_breakdown.total_tokens,
+                                                    "effective_limit": effective_limit,
+                                                    "utilization_pct": pct,
+                                                    "context_window": budget_breakdown.context_window,
+                                                    "margin_tokens": margin,
+                                                }),
+                                                occurred_at: chrono::Utc::now().to_rfc3339(),
+                                            },
+                                        );
+                                    }
+                                }
+                            } else if ratio < 0.70 {
+                                self.pressure_high_warned = false;
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(
                             target: "autonoetic::context_governor",

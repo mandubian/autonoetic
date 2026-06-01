@@ -280,6 +280,14 @@ When a workflow completes while active (unreconciled) workbenches still exist, t
 - **Active workbenches are protected**: The cleanup tool refuses active workbenches — operators must explicitly reconcile or discard first.
 - **Provenance is complete**: Every reconciliation records which files the operator modified, added, or deleted, plus the base and new artifact IDs.
 
+### Awareness and collective accountability
+
+The collaboration lifecycle is a concrete expression of autonoetic awareness — agents that know their past (artifact history, causal chain), present (workbench state, semantic summary, `self_describe`), and future (PlanFrame, scheduled tasks, evolution paths), and that operate in an ecosystem where other agents can observe and review their work.
+
+The security model does not rely solely on the gateway to prevent every possible violation. Every reconciliation produces an auditable record. Every workbench change is diffed, checkpointed, and classified. Auditor and evaluator agents review artifacts before promotion. The causal chain makes every action traceable. If something goes wrong — a bad edit, an unexpected change, a capability used oddly — the system detects it through the combination of mechanical enforcement, agent review, and complete auditability.
+
+See `docs/autonoetic-concepts-for-beginners.md` for the full conceptual framing.
+
 ## File Layout
 
 A projected workbench creates this structure:

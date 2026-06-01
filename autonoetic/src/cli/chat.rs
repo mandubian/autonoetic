@@ -3440,6 +3440,32 @@ fn format_workflow_event_card(
             format!("🔄 [{}] Task updated: {}{} ({})", ts_short, task, agent_suffix, status),
             MessageRole::SignalLow,
         )),
+        "context.pressure_high" => {
+            let pct = event
+                .payload
+                .get("utilization_pct")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let estimated = event
+                .payload
+                .get("estimated_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|t| format_tokens_compact(t))
+                .unwrap_or_else(|| "?".to_string());
+            let limit = event
+                .payload
+                .get("effective_limit")
+                .and_then(|v| v.as_u64())
+                .map(|t| format_tokens_compact(t))
+                .unwrap_or_else(|| "?".to_string());
+            Some((
+                format!(
+                    "⚠️ [{}] Context pressure: ~{}% of limit ({} / {} est. tok) — consider increasing margin_tokens or enabling compression",
+                    ts_short, pct, estimated, limit,
+                ),
+                MessageRole::Signal,
+            ))
+        }
         other => {
             Some((
                 format!("⚡ [{}] {} (task: {})", ts_short, other, task),
