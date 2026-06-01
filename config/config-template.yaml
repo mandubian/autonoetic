@@ -375,6 +375,15 @@ prompt_budget:
   # Root sessions start with Core + Workflow tools only (~40 for planner.default).
   # After the first Specialized tool call, all tiers unlock (~10 more; total ~50).
   progressive_tool_disclosure: true
+  # Chars-per-token ratio used by the prompt-budget estimator. The default
+  # (3.0) is conservative — it matches Qwen3 / Llama3 / GPT-4o on code/JSON
+  # content, which is typically 2.2–3.5 chars/token. The previous default
+  # of 4.0 systematically underestimated such prompts, letting the context
+  # governor stay silent until the LLM call returned a 400. Set this if
+  # your tokenizer behaves materially differently (e.g. quantized local
+  # models with aggressive BPE splitting). Out-of-range values are clamped
+  # to [0.5, 16.0]; non-finite values fall back to the default.
+  # chars_per_token: 3.0
 #
 # ── Tool Tier Registry (Constitution 4.7) ──────────────────────────────
 # Tier assignments are declarative in config/tools.yaml and loaded at gateway start.

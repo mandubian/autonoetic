@@ -480,6 +480,9 @@ Controls context window transparency and enforcement for prompt construction.
 | `prompt_budget.warn_at_pct` | float | `80.0` | Warn when total prompt utilization exceeds this percentage of context window. |
 | `prompt_budget.margin_tokens` | usize | `4096` | Reserve this many tokens at the end of the context window for LLM output. |
 | `prompt_budget.compress_tool_schemas_after_turn_0` | bool | `false` | Strip tool JSON schemas to `{}` after the first turn to save tokens. |
+| `prompt_budget.max_tool_definitions` | usize | `0` | Maximum number of tool definitions sent to the LLM per turn (`0` = unlimited). When the deduplicated list exceeds this cap, lower-tier tools are dropped first (Specialized → Workflow → Core). |
+| `prompt_budget.progressive_tool_disclosure` | bool | `false` | When `true`, root sessions start with Core + Workflow tools only and escalate to all tiers after the first Specialized tool call. |
+| `prompt_budget.chars_per_token` | float \| null | `null` | Override the chars-per-token ratio used by the prompt-budget estimator. `null` = use the built-in default of `3.0` (conservative; matches Qwen3 / Llama3 / GPT-4o on code/JSON content, typically 2.2–3.5 chars/token). The previous default of `4.0` systematically underestimated such prompts and let the context governor stay silent until the LLM call returned a 400. Out-of-range values are clamped to `[0.5, 16.0]`; non-finite values fall back to the default. |
 
 When utilization exceeds the budget, the context governor cascades reduction
 strategies (tool-schema compression → hierarchical capsule summarization →
@@ -494,6 +497,9 @@ prompt_budget:
   warn_at_pct: 80.0
   margin_tokens: 4096
   compress_tool_schemas_after_turn_0: false
+  max_tool_definitions: 40
+  progressive_tool_disclosure: true
+  # chars_per_token: 3.0   # only set if your tokenizer is materially different
 ```
 
 ---

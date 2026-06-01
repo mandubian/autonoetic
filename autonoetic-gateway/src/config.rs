@@ -16,10 +16,39 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
             .canonicalize()
             .unwrap_or_else(|_| config.agents_dir.clone());
         apply_role_mapping_fallbacks(&mut config);
+        apply_prompt_budget_overrides(&config);
         Ok(config)
     } else {
         tracing::warn!("Config not found at {}, using defaults", path.display());
-        Ok(GatewayConfig::default())
+        let config = GatewayConfig::default();
+        apply_prompt_budget_overrides(&config);
+        Ok(config)
+    }
+}
+
+/// Push the configured `chars_per_token` override (if any) into the
+/// process-wide atomic that the prompt-budget estimator reads. Called from
+/// `load_config` so every code path that consumes a `GatewayConfig` ends up
+/// with a consistent estimator calibration before the first LLM call.
+fn apply_prompt_budget_overrides(config: &GatewayConfig) {
+    if let Some(cpt) = config.prompt_budget.chars_per_token {
+        if cpt.is_finite() && cpt > 0.0 {
+            let stored = crate::runtime::prompt_budget::set_chars_per_token(cpt);
+            tracing::info!(
+                target: "autonoetic::prompt_budget",
+                requested = cpt,
+                applied = stored,
+                "Configured chars_per_token override applied"
+            );
+        } else {
+            // Malformed: log a warning and leave the default in place.
+            tracing::warn!(
+                target: "autonoetic::prompt_budget",
+                requested = cpt,
+                "Configured chars_per_token is not a positive finite number; using default ({})",
+                crate::runtime::prompt_budget::DEFAULT_CHARS_PER_TOKEN
+            );
+        }
     }
 }
 
