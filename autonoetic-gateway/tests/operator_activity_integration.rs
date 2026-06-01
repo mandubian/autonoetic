@@ -75,6 +75,7 @@ fn causal_event_dedup_on_insert() {
     store.insert_operator_activity(&first).unwrap();
 
     let mut duplicate = first.clone();
+    duplicate.activity_id = format!("oa-{}", uuid::Uuid::new_v4());
     duplicate.summary = "duplicate".to_string();
     store.insert_operator_activity(&duplicate).unwrap();
 

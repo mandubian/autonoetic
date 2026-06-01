@@ -3,9 +3,22 @@ use autonoetic_types::operator_activity::{
     OperatorActivityKind, OperatorActivityListResult, OperatorActivityRecord,
     OperatorActivityRefs, OperatorActivitySeverity,
 };
-use rusqlite::{params, Connection};
+use rusqlite::params;
 
 use super::GatewayStore;
+
+const SELECT_COLS: &str = "activity_id, root_session_id, session_id, agent_id,
+    workflow_id, task_id, turn_id, occurred_at,
+    kind, severity, summary, tool_name,
+    causal_event_id, workflow_event_id, refs_json";
+
+const SEVERITY_RANK_SQL: &str = "CASE severity
+    WHEN 'info' THEN 0
+    WHEN 'progress' THEN 1
+    WHEN 'attention' THEN 2
+    WHEN 'error' THEN 3
+    ELSE 0
+END";
 
 impl GatewayStore {
     pub fn insert_operator_activity(&self, record: &OperatorActivityRecord) -> Result<()> {
@@ -55,59 +68,64 @@ impl GatewayStore {
     ) -> Result<OperatorActivityListResult> {
         let conn = self.conn.lock().unwrap();
         let fetch_limit = (limit as i64).saturating_add(1);
+        let min_rank = severity_rank(min_severity);
+        let effective_after = resolve_effective_cursor(&conn, root_session_id, after_activity_id)?;
 
-        let rows: Vec<OperatorActivityRecord> = if let Some(after_id) = after_activity_id {
-            let mut stmt = conn.prepare(
-                "SELECT activity_id, root_session_id, session_id, agent_id,
-                        workflow_id, task_id, turn_id, occurred_at,
-                        kind, severity, summary, tool_name,
-                        causal_event_id, workflow_event_id, refs_json
+        let rows: Vec<OperatorActivityRecord> = if let Some(after_id) = effective_after {
+            let sql = format!(
+                "SELECT {SELECT_COLS}
                  FROM operator_activity
                  WHERE root_session_id = ?1
+                   AND {SEVERITY_RANK_SQL} >= ?2
                    AND (
-                     occurred_at > (SELECT occurred_at FROM operator_activity WHERE activity_id = ?2)
+                     occurred_at > (
+                       SELECT occurred_at FROM operator_activity
+                       WHERE activity_id = ?3 AND root_session_id = ?1
+                     )
                      OR (
-                       occurred_at = (SELECT occurred_at FROM operator_activity WHERE activity_id = ?2)
-                       AND activity_id > ?2
+                       occurred_at = (
+                         SELECT occurred_at FROM operator_activity
+                         WHERE activity_id = ?3 AND root_session_id = ?1
+                       )
+                       AND activity_id > ?3
                      )
                    )
                  ORDER BY occurred_at ASC, activity_id ASC
-                 LIMIT ?3",
+                 LIMIT ?4"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mapped = stmt.query_map(
+                params![root_session_id, min_rank, after_id, fetch_limit],
+                map_row,
             )?;
-            let mapped = stmt.query_map(params![root_session_id, after_id, fetch_limit], map_row)?;
             mapped.collect::<Result<Vec<_>, _>>()?
         } else {
-            let mut stmt = conn.prepare(
-                "SELECT activity_id, root_session_id, session_id, agent_id,
-                        workflow_id, task_id, turn_id, occurred_at,
-                        kind, severity, summary, tool_name,
-                        causal_event_id, workflow_event_id, refs_json
+            let sql = format!(
+                "SELECT {SELECT_COLS}
                  FROM operator_activity
                  WHERE root_session_id = ?1
+                   AND {SEVERITY_RANK_SQL} >= ?2
                  ORDER BY occurred_at ASC, activity_id ASC
-                 LIMIT ?2",
-            )?;
-            let mapped = stmt.query_map(params![root_session_id, fetch_limit], map_row)?;
+                 LIMIT ?3"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mapped = stmt.query_map(params![root_session_id, min_rank, fetch_limit], map_row)?;
             mapped.collect::<Result<Vec<_>, _>>()?
         };
 
-        let mut filtered: Vec<OperatorActivityRecord> = rows
+        let has_more = rows.len() > limit as usize;
+        let activities: Vec<OperatorActivityRecord> = rows
             .into_iter()
-            .filter(|r| severity_meets_min(r.severity, min_severity))
+            .take(limit as usize)
             .collect();
-
-        let has_more = filtered.len() > limit as usize;
-        if has_more {
-            filtered.truncate(limit as usize);
-        }
         let next_cursor = if has_more {
-            filtered.last().map(|r| r.activity_id.clone())
+            activities.last().map(|r| r.activity_id.clone())
         } else {
             None
         };
 
         Ok(OperatorActivityListResult {
-            activities: filtered,
+            activities,
             next_cursor,
             has_more,
         })
@@ -124,13 +142,34 @@ impl GatewayStore {
     }
 }
 
-fn severity_meets_min(
-    severity: OperatorActivitySeverity,
-    min: Option<OperatorActivitySeverity>,
-) -> bool {
+fn severity_rank(min: Option<OperatorActivitySeverity>) -> i64 {
     match min {
-        None => true,
-        Some(min) => severity >= min,
+        None => 0,
+        Some(OperatorActivitySeverity::Info) => 0,
+        Some(OperatorActivitySeverity::Progress) => 1,
+        Some(OperatorActivitySeverity::Attention) => 2,
+        Some(OperatorActivitySeverity::Error) => 3,
+    }
+}
+
+fn resolve_effective_cursor(
+    conn: &rusqlite::Connection,
+    root_session_id: &str,
+    after_activity_id: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(after_id) = after_activity_id else {
+        return Ok(None);
+    };
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM operator_activity
+         WHERE activity_id = ?1 AND root_session_id = ?2",
+        params![after_id, root_session_id],
+        |row| row.get(0),
+    )?;
+    if exists > 0 {
+        Ok(Some(after_id.to_string()))
+    } else {
+        Ok(None)
     }
 }
 
@@ -158,11 +197,7 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorActivityRecord> 
     };
 
     let severity = OperatorActivitySeverity::parse_str(&severity_str).ok_or_else(|| {
-        rusqlite::Error::InvalidColumnType(
-            9,
-            severity_str,
-            rusqlite::types::Type::Text,
-        )
+        rusqlite::Error::InvalidColumnType(9, severity_str, rusqlite::types::Type::Text)
     })?;
 
     let refs = refs_json
@@ -196,11 +231,10 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorActivityRecord> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autonoetic_types::operator_activity::OperatorActivitySeverity;
     use crate::runtime::operator_activity::classify_tool_activity;
     use tempfile::tempdir;
 
-    fn sample_record(root: &str, summary: &str) -> OperatorActivityRecord {
+    fn sample_record(root: &str) -> OperatorActivityRecord {
         classify_tool_activity(
             "content_write",
             r#"{"name":"a.py"}"#,
@@ -226,19 +260,17 @@ mod tests {
         let store = GatewayStore::open(dir.path()).unwrap();
         let root = "session-test";
 
-        let mut first = sample_record(root, "first");
+        let mut first = sample_record(root);
         first.summary = "wrote a.py".to_string();
         first.occurred_at = "2026-06-01T10:00:00Z".to_string();
         store.insert_operator_activity(&first).unwrap();
 
-        let mut second = sample_record(root, "second");
+        let mut second = sample_record(root);
         second.summary = "wrote b.py".to_string();
         second.occurred_at = "2026-06-01T10:00:01Z".to_string();
         store.insert_operator_activity(&second).unwrap();
 
-        let page1 = store
-            .list_operator_activity(root, None, 1, None)
-            .unwrap();
+        let page1 = store.list_operator_activity(root, None, 1, None).unwrap();
         assert_eq!(page1.activities.len(), 1);
         assert!(page1.has_more);
         assert_eq!(page1.activities[0].summary, "wrote a.py");
@@ -248,5 +280,47 @@ mod tests {
             .unwrap();
         assert_eq!(page2.activities.len(), 1);
         assert_eq!(page2.activities[0].summary, "wrote b.py");
+    }
+
+    #[test]
+    fn invalid_cursor_falls_back_to_first_page() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "session-invalid-cursor";
+
+        let mut row = sample_record(root);
+        row.summary = "visible".to_string();
+        store.insert_operator_activity(&row).unwrap();
+
+        let listed = store
+            .list_operator_activity(root, Some("oa-does-not-exist"), 10, None)
+            .unwrap();
+        assert_eq!(listed.activities.len(), 1);
+        assert_eq!(listed.activities[0].summary, "visible");
+    }
+
+    #[test]
+    fn min_severity_filtered_before_limit() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "session-severity";
+
+        let mut info = sample_record(root);
+        info.summary = "info row".to_string();
+        info.severity = OperatorActivitySeverity::Info;
+        info.occurred_at = "2026-06-01T10:00:00Z".to_string();
+        store.insert_operator_activity(&info).unwrap();
+
+        let mut progress = sample_record(root);
+        progress.summary = "progress row".to_string();
+        progress.severity = OperatorActivitySeverity::Progress;
+        progress.occurred_at = "2026-06-01T10:00:01Z".to_string();
+        store.insert_operator_activity(&progress).unwrap();
+
+        let listed = store
+            .list_operator_activity(root, None, 10, Some(OperatorActivitySeverity::Progress))
+            .unwrap();
+        assert_eq!(listed.activities.len(), 1);
+        assert_eq!(listed.activities[0].summary, "progress row");
     }
 }

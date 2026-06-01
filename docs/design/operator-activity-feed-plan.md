@@ -1,6 +1,6 @@
 # Operator Activity Feed (Channel-Agnostic Session Visibility)
 
-**Status:** Draft RFC — not implemented.
+**Status:** Partial — Phases 0–3 shipped in PR #358 (classifier, SQLite feed, JSON-RPC, chat TUI, HTTP SSE). Phase 4 hardening (#357) pending.
 
 **Problem surfaced by:** `session-46d65624` — planner wrote `news_fetcher.py`, `market_data.py`, and
 `sentiment.py`; `digest.md` and `session_overview.md` showed it; the chat TUI did not.
