@@ -5,6 +5,7 @@ use crate::runtime::context_governor::error::GovernorAction;
 use crate::runtime::prompt_budget::PromptBudgetBreakdown;
 use autonoetic_types::agent::CompressionConfig;
 use autonoetic_types::config::{ContextCompressionConfig, PromptBudgetConfig};
+use autonoetic_types::plan_frame::PlanFrameSummary;
 
 /// Shared mutable state passed through the reduction pipeline.
 pub struct GovernorContext {
@@ -19,6 +20,13 @@ pub struct GovernorContext {
     pub compression_config: Option<ContextCompressionConfig>,
     pub agent_compression: Option<CompressionConfig>,
     pub capsule_state: Option<StateCapsule>,
+    /// Active PlanFrame summary, used as a relevance lens by the capsule
+    /// strategy. `None` when the session has no plan or no active plan.
+    /// When set, the capsule strategy prepends an "Active Plan (...)"
+    /// block to its delta-extraction prompt so the LLM knows which
+    /// decisions, artifacts, and identifiers are plan-advancing (and
+    /// which detours can be compressed more aggressively).
+    pub plan_anchor: Option<PlanFrameSummary>,
 }
 
 impl GovernorContext {
@@ -34,6 +42,7 @@ impl GovernorContext {
         budget_config: PromptBudgetConfig,
         compression_config: Option<ContextCompressionConfig>,
         agent_compression: Option<CompressionConfig>,
+        plan_anchor: Option<PlanFrameSummary>,
     ) -> Self {
         Self {
             history,
@@ -47,6 +56,7 @@ impl GovernorContext {
             compression_config,
             agent_compression,
             capsule_state: None,
+            plan_anchor,
         }
     }
 }
@@ -140,6 +150,7 @@ mod tests {
             compression_config: None,
             agent_compression: None,
             capsule_state: None,
+            plan_anchor: None,
         }
     }
 

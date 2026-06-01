@@ -181,6 +181,13 @@ impl PlanFrame {
             .map(|s| s.step_id.clone())
             .collect();
 
+        let agent_steps: Vec<String> = self
+            .steps
+            .iter()
+            .filter(|s| s.owner == StepOwner::Agent)
+            .map(|s| s.step_id.clone())
+            .collect();
+
         let required_validations: Vec<String> = self
             .validation_policy
             .entries
@@ -205,6 +212,7 @@ impl PlanFrame {
             title: self.title.clone(),
             step_count: self.steps.len(),
             operator_steps,
+            agent_steps,
             required_validations,
             advisory_validations,
         }
@@ -220,6 +228,7 @@ pub struct PlanFrameSummary {
     pub title: String,
     pub step_count: usize,
     pub operator_steps: Vec<String>,
+    pub agent_steps: Vec<String>,
     pub required_validations: Vec<String>,
     pub advisory_validations: Vec<String>,
 }
