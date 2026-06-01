@@ -223,3 +223,15 @@ pub struct PlanFrameSummary {
     pub required_validations: Vec<String>,
     pub advisory_validations: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ValidationWaiver {
+    pub waiver_id: String,
+    pub workflow_id: String,
+    pub artifact_id: String,
+    pub validation_id: String,
+    pub validation_class: ValidationClass,
+    pub waived_by: String,
+    pub reason: String,
+    pub created_at: String,
+}

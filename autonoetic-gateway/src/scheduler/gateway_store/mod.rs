@@ -30,6 +30,7 @@ mod user_profiles;
 mod util;
 mod workflow;
 mod workbenches;
+mod validation_waivers;
 
 use anyhow::Result;
 use autonoetic_types::notification::NotificationStatus;
@@ -484,6 +485,30 @@ impl GatewayStore {
     ) -> Result<Vec<autonoetic_types::workbench::WorkbenchCheckpoint>> {
         let conn = self.conn.lock().unwrap();
         workbenches::list_checkpoints_for_workbench(&conn, workbench_id)
+    }
+
+    pub fn save_validation_waiver(
+        &self,
+        waiver: &autonoetic_types::plan_frame::ValidationWaiver,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        validation_waivers::save_waiver(&conn, waiver)
+    }
+
+    pub fn list_waivers_for_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::ValidationWaiver>> {
+        let conn = self.conn.lock().unwrap();
+        validation_waivers::list_waivers_for_artifact(&conn, artifact_id)
+    }
+
+    pub fn list_waivers_for_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::ValidationWaiver>> {
+        let conn = self.conn.lock().unwrap();
+        validation_waivers::list_waivers_for_workflow(&conn, workflow_id)
     }
 }
 

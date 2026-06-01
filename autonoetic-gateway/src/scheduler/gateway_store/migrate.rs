@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 43;
+const SCHEMA_VERSION_LATEST: i64 = 44;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -528,6 +528,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_memories_fts_v41(conn)?;
     apply_plan_frames_v42(conn)?;
     apply_workbenches_v43(conn)?;
+    apply_validation_waivers_v44(conn)?;
 
     Ok(())
 }
@@ -827,6 +828,40 @@ fn apply_workbenches_v43(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![43_i64, "workbenches", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_validation_waivers_v44(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 44 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS validation_waivers (
+            waiver_id         TEXT PRIMARY KEY,
+            workflow_id       TEXT NOT NULL,
+            artifact_id       TEXT NOT NULL,
+            validation_id     TEXT NOT NULL,
+            validation_class  TEXT NOT NULL DEFAULT 'correctness_check',
+            waived_by         TEXT NOT NULL,
+            reason            TEXT NOT NULL,
+            created_at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_waivers_workflow
+            ON validation_waivers(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_waivers_artifact
+            ON validation_waivers(artifact_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![44_i64, "validation_waivers", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
