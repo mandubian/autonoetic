@@ -1150,6 +1150,52 @@ pub fn try_complete_workflow(
         return Ok(false);
     }
 
+    // Issue #330: warn if the workflow has active workbenches with
+    // local edits that haven't been reconciled yet. The workflow still
+    // completes, but the warning event surfaces the unreconciled edits
+    // so the operator can decide whether to reconcile, discard, or
+    // archive before starting a new workflow.
+    if let Some(gw_store) = store {
+        if let Ok(workbenches) = gw_store.list_workbenches_for_workflow(&wf_id) {
+            let unreconciled: Vec<_> = workbenches
+                .iter()
+                .filter(|wb| wb.status == autonoetic_types::workbench::WorkbenchStatus::Active)
+                .map(|wb| wb.workbench_id.clone())
+                .collect();
+            if !unreconciled.is_empty() {
+                tracing::warn!(
+                    target: "workflow",
+                    workflow_id = %wf_id,
+                    count = unreconciled.len(),
+                    workbench_ids = ?unreconciled,
+                    "Workflow completing with {} unreconciled active workbench(es)",
+                    unreconciled.len()
+                );
+                let _ = append_workflow_event(
+                    config,
+                    Some(gw_store),
+                    &WorkflowEventRecord {
+                        event_id: new_event_id(),
+                        workflow_id: wf_id.clone(),
+                        task_id: None,
+                        event_type: "workflow.unreconciled_workbenches".to_string(),
+                        agent_id: None,
+                        payload: serde_json::json!({
+                            "root_session_id": root_session_id,
+                            "unreconciled_workbench_ids": unreconciled,
+                            "message": format!(
+                                "Workflow completed with {} unreconciled active workbench(es). \
+                                 Reconcile, discard, or archive before starting a new workflow.",
+                                unreconciled.len()
+                            ),
+                        }),
+                        occurred_at: now_rfc3339(),
+                    },
+                );
+            }
+        }
+    }
+
     let mut wf = run;
     wf.status = WorkflowRunStatus::Completed;
     wf.updated_at = now_rfc3339();

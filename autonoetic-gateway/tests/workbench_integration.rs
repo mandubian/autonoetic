@@ -483,7 +483,7 @@ fn workbench_checkpoints_lists_history() {
 
     let list_v: serde_json::Value = serde_json::from_str(&list_result).unwrap();
     assert_eq!(list_v["ok"], true);
-    assert_eq!(list_v["count"], 3);
+    assert_eq!(list_v["count"], 4, "expected 3 manual + 1 auto-projection checkpoint");
 }
 
 fn has_artifact_project_tool(
@@ -1107,4 +1107,409 @@ fn workbench_reconcile_semantic_summary_no_contract_changes_for_source_edit() {
     assert_eq!(summary["summarizer_id"], "rule_based_v1");
     assert_eq!(summary["contract_changes"].as_array().unwrap().len(), 0);
     assert_eq!(summary["changed_files"], 1);
+}
+
+// Issue #330 (a): auto-checkpoint on projection.
+#[test]
+fn artifact_project_creates_auto_checkpoint() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-auto-cp-001";
+
+    let artifact_id = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("x.txt", b"hello")],
+    );
+
+    let result = registry
+        .execute(
+            "artifact_project",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "artifact_ref": artifact_id })).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["ok"], true);
+    let wb_id = v["workbench_id"].as_str().unwrap();
+
+    // The auto-checkpoint should be listed.
+    let list_out = registry
+        .execute(
+            "workbench_checkpoints",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "workbench_id": wb_id })).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let list_v: serde_json::Value = serde_json::from_str(&list_out).unwrap();
+    assert_eq!(list_v["ok"], true);
+    assert!(list_v["count"].as_u64().unwrap() >= 1, "expected at least 1 auto-checkpoint");
+
+    let cps = list_v["checkpoints"].as_array().unwrap();
+    let labels: Vec<&str> = cps.iter()
+        .filter_map(|c| c["label"].as_str())
+        .collect();
+    assert!(labels.contains(&"auto: projection"), "expected auto: projection label");
+}
+
+// Issue #330 (b): auto-checkpoint before reconcile.
+#[test]
+fn workbench_reconcile_creates_auto_checkpoint_before_reconcile() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-auto-cp-002";
+
+    let artifact_id = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("hello.txt", b"hello world")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_id,
+    );
+
+    let wb = store.load_workbench(&wb_id).unwrap().unwrap();
+    let source_dir = std::path::Path::new(&wb.workspace_path);
+    std::fs::write(source_dir.join("hello.txt"), b"edited").unwrap();
+
+    let reconcile_args = json!({ "workbench_id": wb_id });
+    let out = registry
+        .execute(
+            "workbench_reconcile",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &reconcile_args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], true);
+
+    // After reconcile, the workbench should have the auto: pre-reconcile
+    // checkpoint in addition to the auto: projection checkpoint.
+    let list_out = registry
+        .execute(
+            "workbench_checkpoints",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "workbench_id": wb_id })).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let list_v: serde_json::Value = serde_json::from_str(&list_out).unwrap();
+    assert_eq!(list_v["ok"], true);
+    let cps = list_v["checkpoints"].as_array().unwrap();
+    let labels: Vec<&str> = cps.iter()
+        .filter_map(|c| c["label"].as_str())
+        .collect();
+    assert!(labels.contains(&"auto: pre-reconcile"), "expected auto: pre-reconcile label");
+    assert!(labels.contains(&"auto: projection"), "expected auto: projection label");
+}
+
+// Issue #330 (c): cleanup rejects active, cleans up reconciled.
+#[test]
+fn workbench_cleanup_rejects_active() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-cleanup-001";
+
+    let artifact_id = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("x.txt", b"hello")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_id,
+    );
+
+    let out = registry
+        .execute(
+            "workbench_cleanup",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "workbench_id": wb_id })).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(v["error"].as_str().unwrap().contains("Cannot clean up an active"));
+}
+
+// Issue #330 (c): cleanup succeeds on reconciled workbench.
+#[test]
+fn workbench_cleanup_succeeds_on_reconciled() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-cleanup-002";
+
+    let artifact_id = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("x.txt", b"hello")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_id,
+    );
+
+    let wb = store.load_workbench(&wb_id).unwrap().unwrap();
+    let source_dir = std::path::Path::new(&wb.workspace_path);
+
+    // Reconcile first.
+    let reconcile_args = json!({ "workbench_id": wb_id });
+    let out = registry
+        .execute(
+            "workbench_reconcile",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &reconcile_args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], true);
+
+    // Now cleanup.
+    let cleanup_out = registry
+        .execute(
+            "workbench_cleanup",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "workbench_id": wb_id })).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let cv: serde_json::Value = serde_json::from_str(&cleanup_out).unwrap();
+    assert_eq!(cv["ok"], true, "cleanup failed: {:?}", cv);
+    assert!(cv["message"].as_str().unwrap().contains("reconciled"));
+
+    // Workbench record should be gone.
+    let after = store.load_workbench(&wb_id).unwrap();
+    assert!(after.is_none(), "workbench record should be deleted after cleanup");
+
+    // Checkpoint records should be gone too.
+    let cps = store.list_checkpoints_for_workbench(&wb_id).unwrap();
+    assert!(cps.is_empty(), "checkpoint records should be deleted after cleanup");
+
+    // Disk artifacts should be removed.
+    let workspace_exists = source_dir.exists();
+    let checkpoints_dir = source_dir.parent().unwrap().join(".autonoetic").join("checkpoints");
+    assert!(!workspace_exists || !checkpoints_dir.exists(),
+        "workbench disk artifacts should be cleaned up");
+}
+
+// Issue #330 (c): cleanup succeeds on discarded workbench.
+#[test]
+fn workbench_cleanup_succeeds_on_discarded() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-cleanup-003";
+
+    let artifact_id = build_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &[("x.txt", b"hello")],
+    );
+
+    let wb_id = project_artifact(
+        &registry,
+        &manifest,
+        &policy,
+        &agent_dir,
+        &gateway_dir,
+        &config,
+        &store,
+        session_id,
+        &artifact_id,
+    );
+
+    // Discard first.
+    let discard_out = registry
+        .execute(
+            "workbench_discard",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "workbench_id": wb_id })).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let dv: serde_json::Value = serde_json::from_str(&discard_out).unwrap();
+    assert_eq!(dv["ok"], true, "discard should succeed: {:?}", dv);
+
+    // Now cleanup.
+    let cleanup_out = registry
+        .execute(
+            "workbench_cleanup",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({ "workbench_id": wb_id })).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let cv: serde_json::Value = serde_json::from_str(&cleanup_out).unwrap();
+    assert_eq!(cv["ok"], true, "cleanup failed: {:?}", cv);
+    assert!(cv["message"].as_str().unwrap().contains("discarded"));
+
+    let after = store.load_workbench(&wb_id).unwrap();
+    assert!(after.is_none(), "workbench record should be deleted after cleanup");
 }
