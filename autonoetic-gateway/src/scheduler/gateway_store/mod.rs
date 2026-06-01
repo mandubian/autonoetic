@@ -414,6 +414,14 @@ impl GatewayStore {
         plan_frames::list_plan_revisions(&conn, plan_id)
     }
 
+    pub fn list_pending_plan_frames_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::list_pending_plan_frames_for_root(&conn, root_session_id)
+    }
+
     // -------------------------------------------------------------------------
     // Workbenches
     // -------------------------------------------------------------------------
