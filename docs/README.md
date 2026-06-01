@@ -6,6 +6,7 @@ are in [`archived/`](archived/).
 
 ## Core Architecture
 
+- [`autonoetic-concepts-for-beginners.md`](./autonoetic-concepts-for-beginners.md) — Beginner-friendly conceptual guide: constitution, agent rights/rules, gateway authority, capabilities, artifacts, and how Autonoetic differs from direct-agent systems.
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — Full system architecture and runtime model.
 - [`architecture-summary.md`](./architecture-summary.md) — Short architecture overview.
 - [`gateway-architecture-principles.md`](./gateway-architecture-principles.md) — Gateway design principles.
@@ -19,6 +20,7 @@ are in [`archived/`](archived/).
 ## Workflow and Interaction
 
 - [`workflow-orchestration.md`](./workflow-orchestration.md) — Durable workflow/task lifecycle (live reference for mechanical orchestration).
+- [`human-agent-collaboration.md`](./human-agent-collaboration.md) — PlanFrame, workbench projection, reconciliation, semantic summaries, validation waivers, and the `/return` handoff.
 - [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) — GateService migration tracker (partial).
 - [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) — Unified gate constitutional rationale.
 - [`approval-notification-delivery.md`](./approval-notification-delivery.md) — Approval delivery paths.
