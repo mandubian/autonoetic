@@ -484,6 +484,31 @@ fn read_number(prompt: &str, max: usize) -> anyhow::Result<usize> {
     }
 }
 
+/// Like `read_number` but accepts `0` as "go back", returning `Ok(None)`.
+fn read_choice(prompt: &str, max: usize) -> anyhow::Result<Option<usize>> {
+    let stdin = io::stdin();
+    let mut stdout = io::stderr();
+    loop {
+        write!(stdout, "{prompt}")?;
+        stdout.flush()?;
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+        let trimmed = line.trim();
+        if trimmed == "0" {
+            return Ok(None);
+        }
+        if let Ok(n) = trimmed.parse::<usize>() {
+            if n >= 1 && n <= max {
+                return Ok(Some(n));
+            }
+        }
+        writeln!(
+            stdout,
+            "  Please enter a number between 1 and {max} (or 0 to go back)."
+        )?;
+    }
+}
+
 fn read_line_with_prompt(prompt: &str) -> anyhow::Result<String> {
     let stdin = io::stdin();
     let mut stdout = io::stderr();
@@ -496,230 +521,254 @@ fn read_line_with_prompt(prompt: &str) -> anyhow::Result<String> {
 
 /// Present detected providers, let user pick, fetch models, let user pick.
 ///
+/// Supports going back from model selection to provider selection.
 /// Returns `(provider_name, original_entry_name, model_id)` ready for config generation.
 pub async fn interactive_select(
     client: &reqwest::Client,
 ) -> anyhow::Result<(String, String, String, Option<String>)> {
     let mut stderr = io::stderr();
 
-    writeln!(stderr, "\n  Detecting available LLM providers...")?;
-    let detected = detect_available_providers(client).await;
+    'outer: loop {
+        writeln!(stderr, "\n  Detecting available LLM providers...")?;
+        let detected = detect_available_providers(client).await;
 
-    // Build the menu: detected providers first, then option to see all
-    if detected.is_empty() {
-        writeln!(
-            stderr,
-            "\n  No LLM providers detected automatically."
-        )?;
-        writeln!(stderr, "  For remote providers, set the API key env var (e.g. OPENROUTER_API_KEY).")?;
-        writeln!(stderr, "  For local providers, make sure the server is running.\n")?;
-    } else {
-        writeln!(stderr, "\n  Detected providers:\n")?;
-        for (i, dp) in detected.iter().enumerate() {
-            writeln!(stderr, "    {}) {dp}", i + 1)?;
+        // Build the menu: detected providers first, then option to see all
+        if detected.is_empty() {
+            writeln!(
+                stderr,
+                "\n  No LLM providers detected automatically."
+            )?;
+            writeln!(stderr, "  For remote providers, set the API key env var (e.g. OPENROUTER_API_KEY).")?;
+            writeln!(stderr, "  For local providers, make sure the server is running.\n")?;
+        } else {
+            writeln!(stderr, "\n  Detected providers:\n")?;
+            for (i, dp) in detected.iter().enumerate() {
+                writeln!(stderr, "    {}) {dp}", i + 1)?;
+            }
+            writeln!(stderr)?;
         }
+
+        // Always offer "all providers" and "manual entry" options
+        let detected_count = detected.len();
+        let all_opt = detected_count + 1;
+        let manual_opt = detected_count + 2;
+
+        writeln!(stderr, "    {all_opt}) Show all supported providers")?;
+        writeln!(stderr, "    {manual_opt}) Manual entry (provider + model)")?;
         writeln!(stderr)?;
-    }
 
-    // Always offer "all providers" and "manual entry" options
-    let detected_count = detected.len();
-    let all_opt = detected_count + 1;
-    let manual_opt = detected_count + 2;
+        let choice = read_number("  Select provider: ", manual_opt)?;
 
-    writeln!(stderr, "    {all_opt}) Show all supported providers")?;
-    writeln!(stderr, "    {manual_opt}) Manual entry (provider + model)")?;
-    writeln!(stderr)?;
+        if choice == manual_opt {
+            let result = manual_entry()?;
+            return Ok(result);
+        }
 
-    let choice = read_number("  Select provider: ", manual_opt)?;
-
-    if choice == manual_opt {
-        return manual_entry();
-    }
-
-    let provider_entry = if choice == all_opt {
-        // Show all providers
-        let all = all_providers();
-        writeln!(stderr, "\n  All supported providers:\n")?;
-        for (i, p) in all.iter().enumerate() {
-            let available = match &p.kind {
-                ProviderKind::Remote { api_key_env, .. } => {
-                    if std::env::var(api_key_env).is_ok() {
-                        " [key found]"
-                    } else {
-                        ""
-                    }
+        let provider_entry = if choice == all_opt {
+            // Show all providers with back support
+            let all = all_providers();
+            let chosen = 'all: loop {
+                writeln!(stderr, "\n  All supported providers:\n")?;
+                for (i, p) in all.iter().enumerate() {
+                    let available = match &p.kind {
+                        ProviderKind::Remote { api_key_env, .. } => {
+                            if std::env::var(api_key_env).is_ok() {
+                                " [key found]"
+                            } else {
+                                ""
+                            }
+                        }
+                        ProviderKind::Local { .. } => {
+                            if detected.iter().any(|d| d.entry.name == p.name) {
+                                " [running]"
+                            } else {
+                                ""
+                            }
+                        }
+                    };
+                    writeln!(stderr, "    {}) {}{available}", i + 1, p.display)?;
                 }
-                ProviderKind::Local { .. } => {
-                    if detected.iter().any(|d| d.entry.name == p.name) {
-                        " [running]"
-                    } else {
-                        ""
+                writeln!(stderr, "    0) Back to provider selection")?;
+                writeln!(stderr)?;
+
+                match read_choice("  Select provider: ", all.len())? {
+                    None => continue 'outer,
+                    Some(idx) => {
+                        let chosen = &all[idx - 1];
+
+                        // If it's a remote provider without a key, prompt for it
+                        if let ProviderKind::Remote { api_key_env, .. } = &chosen.kind {
+                            if std::env::var(api_key_env).is_err() {
+                                writeln!(
+                                    stderr,
+                                    "\n  {api_key_env} is not set. Please enter your API key."
+                                )?;
+                                let key = read_line_with_prompt(&format!("  {api_key_env}= "))?;
+                                if key.is_empty() {
+                                    anyhow::bail!("API key cannot be empty");
+                                }
+                                std::env::set_var(api_key_env, &key);
+                                writeln!(stderr, "  Key set for this session.")?;
+                            }
+                        }
+
+                        break 'all DetectedProvider {
+                            entry: chosen.clone(),
+                            source: match &chosen.kind {
+                                ProviderKind::Remote { api_key_env, .. } => {
+                                    DetectionSource::ApiKeyEnv((*api_key_env).to_string())
+                                }
+                                ProviderKind::Local { .. } => DetectionSource::LocalProbe,
+                            },
+                        };
                     }
                 }
             };
-            writeln!(stderr, "    {}) {}{available}", i + 1, p.display)?;
-        }
-        writeln!(stderr)?;
+            chosen
+        } else {
+            detected[choice - 1].clone()
+        };
 
-        let idx = read_number("  Select provider: ", all.len())?;
-        let chosen = &all[idx - 1];
+        // Fetch models
+        writeln!(
+            stderr,
+            "\n  Fetching models from {}...",
+            provider_entry.entry.display
+        )?;
 
-        // If it's a remote provider without a key, prompt for it
-        if let ProviderKind::Remote { api_key_env, .. } = &chosen.kind {
-            if std::env::var(api_key_env).is_err() {
-                writeln!(
-                    stderr,
-                    "\n  {api_key_env} is not set. Please enter your API key."
-                )?;
-                let key = read_line_with_prompt(&format!("  {api_key_env}= "))?;
-                if key.is_empty() {
-                    anyhow::bail!("API key cannot be empty");
-                }
-                std::env::set_var(api_key_env, &key);
-                writeln!(stderr, "  Key set for this session.")?;
+        let (models, chat_base_url) = match fetch_models(client, &provider_entry).await {
+            Ok(m) if !m.is_empty() => {
+                let base_url = prompt_base_url_if_local(&provider_entry.entry)?;
+                (m, base_url)
             }
-        }
-
-        DetectedProvider {
-            entry: chosen.clone(),
-            source: match &chosen.kind {
-                ProviderKind::Remote { api_key_env, .. } => {
-                    DetectionSource::ApiKeyEnv((*api_key_env).to_string())
-                }
-                ProviderKind::Local { .. } => DetectionSource::LocalProbe,
-            },
-        }
-    } else {
-        detected[choice - 1].clone()
-    };
-
-    // Fetch models
-    writeln!(
-        stderr,
-        "\n  Fetching models from {}...",
-        provider_entry.entry.display
-    )?;
-
-    let (models, chat_base_url) = match fetch_models(client, &provider_entry).await {
-        Ok(m) if !m.is_empty() => {
-            let base_url = prompt_base_url_if_local(&provider_entry.entry)?;
-            (m, base_url)
-        }
-        Ok(_) => {
-            writeln!(stderr, "  No models returned. You can enter a model ID manually.")?;
-            let model = read_line_with_prompt("  Model ID: ")?;
-            if model.is_empty() {
-                anyhow::bail!("Model ID cannot be empty");
-            }
-            let name = provider_entry.entry.name.to_string();
-            let base_url = prompt_base_url_if_local(&provider_entry.entry)?;
-            return Ok((name.clone(), name, model, base_url));
-        }
-        Err(first_err) => {
-            if let ProviderKind::Local { models_url } = &provider_entry.entry.kind {
-                let default_base = models_url
-                    .trim_end_matches("/models")
-                    .trim_end_matches("/tags");
-                writeln!(
-                    stderr,
-                    "  Could not fetch models ({first_err})."
-                )?;
-                writeln!(
-                    stderr,
-                    "  Default base URL: {}. Enter a different host/port to retry.",
-                    default_base
-                )?;
-                let custom = read_line_with_prompt(&format!(
-                    "  Base URL (Enter for {}): ", default_base
-                ))?;
-                let retry_base = if custom.trim().is_empty() {
-                    default_base.to_string()
-                } else {
-                    let trimmed = custom.trim().trim_end_matches('/');
-                    trimmed.to_string()
-                };
-                let retry_models_url = if provider_entry.entry.name == "ollama" {
-                    format!("{}/api/tags", retry_base)
-                } else {
-                    format!("{}/models", retry_base)
-                };
-                let retry_entry = ProviderEntry {
-                    name: provider_entry.entry.name,
-                    display: provider_entry.entry.display,
-                    kind: ProviderKind::Local { models_url: Box::leak(retry_models_url.into_boxed_str()) },
-                };
-                let retry_provider = DetectedProvider {
-                    entry: retry_entry,
-                    source: provider_entry.source.clone(),
-                };
-                match fetch_models(client, &retry_provider).await {
-                    Ok(m) if !m.is_empty() => {
-                        let chat_url = format!("{}/chat/completions", retry_base);
-                        eprintln!("  Found {} model(s).", m.len());
-                        (m, Some(chat_url))
-                    }
-                    Ok(_) => {
-                        writeln!(stderr, "  Still no models. Enter a model ID manually.")?;
-                        let model = read_line_with_prompt("  Model ID: ")?;
-                        if model.is_empty() {
-                            anyhow::bail!("Model ID cannot be empty");
-                        }
-                        let chat_url = format!("{}/chat/completions", retry_base);
-                        let name = provider_entry.entry.name.to_string();
-                        return Ok((name.clone(), name, model, Some(chat_url)));
-                    }
-                    Err(e2) => {
-                        writeln!(
-                            stderr,
-                            "  Retry also failed ({e2}). Enter a model ID manually."
-                        )?;
-                        let model = read_line_with_prompt("  Model ID: ")?;
-                        if model.is_empty() {
-                            anyhow::bail!("Model ID cannot be empty");
-                        }
-                        let chat_url = format!("{}/chat/completions", retry_base);
-                        let name = provider_entry.entry.name.to_string();
-                        return Ok((name.clone(), name, model, Some(chat_url)));
-                    }
-                }
-            } else {
-                writeln!(
-                    stderr,
-                    "  Could not fetch models ({first_err}). You can enter a model ID manually."
-                )?;
-                let model = read_line_with_prompt("  Model ID: ")?;
+            Ok(_) => {
+                writeln!(stderr, "  No models returned. You can enter a model ID manually.")?;
+                let model = read_line_with_prompt("  Model ID (or empty to go back): ")?;
                 if model.is_empty() {
-                    anyhow::bail!("Model ID cannot be empty");
+                    continue 'outer;
                 }
                 let name = provider_entry.entry.name.to_string();
-                return Ok((name.clone(), name, model, None));
+                let base_url = prompt_base_url_if_local(&provider_entry.entry)?;
+                return Ok((name.clone(), name, model, base_url));
+            }
+            Err(first_err) => {
+                if let ProviderKind::Local { models_url } = &provider_entry.entry.kind {
+                    let default_base = models_url
+                        .trim_end_matches("/models")
+                        .trim_end_matches("/tags");
+                    writeln!(
+                        stderr,
+                        "  Could not fetch models ({first_err})."
+                    )?;
+                    writeln!(
+                        stderr,
+                        "  Default base URL: {}. Enter a different host/port to retry.",
+                        default_base
+                    )?;
+                    let custom = read_line_with_prompt(&format!(
+                        "  Base URL (Enter for {}): ", default_base
+                    ))?;
+                    let retry_base = if custom.trim().is_empty() {
+                        default_base.to_string()
+                    } else {
+                        let trimmed = custom.trim().trim_end_matches('/');
+                        trimmed.to_string()
+                    };
+                    let retry_models_url = if provider_entry.entry.name == "ollama" {
+                        format!("{}/api/tags", retry_base)
+                    } else {
+                        format!("{}/models", retry_base)
+                    };
+                    let retry_entry = ProviderEntry {
+                        name: provider_entry.entry.name,
+                        display: provider_entry.entry.display,
+                        kind: ProviderKind::Local { models_url: Box::leak(retry_models_url.into_boxed_str()) },
+                    };
+                    let retry_provider = DetectedProvider {
+                        entry: retry_entry,
+                        source: provider_entry.source.clone(),
+                    };
+                    match fetch_models(client, &retry_provider).await {
+                        Ok(m) if !m.is_empty() => {
+                            let chat_url = format!("{}/chat/completions", retry_base);
+                            eprintln!("  Found {} model(s).", m.len());
+                            (m, Some(chat_url))
+                        }
+                        Ok(_) => {
+                            writeln!(stderr, "  Still no models. Enter a model ID manually.")?;
+                            let model = read_line_with_prompt("  Model ID (or empty to go back): ")?;
+                            if model.is_empty() {
+                                continue 'outer;
+                            }
+                            let chat_url = format!("{}/chat/completions", retry_base);
+                            let name = provider_entry.entry.name.to_string();
+                            return Ok((name.clone(), name, model, Some(chat_url)));
+                        }
+                        Err(e2) => {
+                            writeln!(
+                                stderr,
+                                "  Retry also failed ({e2}). Enter a model ID manually."
+                            )?;
+                            let model = read_line_with_prompt("  Model ID (or empty to go back): ")?;
+                            if model.is_empty() {
+                                continue 'outer;
+                            }
+                            let chat_url = format!("{}/chat/completions", retry_base);
+                            let name = provider_entry.entry.name.to_string();
+                            return Ok((name.clone(), name, model, Some(chat_url)));
+                        }
+                    }
+                } else {
+                    writeln!(
+                        stderr,
+                        "  Could not fetch models ({first_err}). You can enter a model ID manually."
+                    )?;
+                    let model = read_line_with_prompt("  Model ID (or empty to go back): ")?;
+                    if model.is_empty() {
+                        continue 'outer;
+                    }
+                    let name = provider_entry.entry.name.to_string();
+                    return Ok((name.clone(), name, model, None));
+                }
+            }
+        };
+
+        // Model selection with back support
+        display_model_menu(&models)?;
+
+        let manual_idx = models.len() + 1;
+        let prompt = format!(
+            "  Select model (0 to go back, {} to type manually): ",
+            manual_idx
+        );
+
+        match read_choice(&prompt, manual_idx)? {
+            None => continue 'outer,
+            Some(n) if n >= 1 && n <= models.len() => {
+                let model_id = models[n - 1].id.clone();
+                let provider_name = provider_entry.entry.name.to_string();
+                return Ok((
+                    provider_name,
+                    provider_entry.entry.name.to_string(),
+                    model_id,
+                    chat_base_url,
+                ));
+            }
+            _ => {
+                let manual = read_line_with_prompt("  Model ID: ")?;
+                if manual.is_empty() {
+                    anyhow::bail!("Model ID cannot be empty");
+                }
+                let provider_name = provider_entry.entry.name.to_string();
+                return Ok((
+                    provider_name,
+                    provider_entry.entry.name.to_string(),
+                    manual,
+                    chat_base_url,
+                ));
             }
         }
-    };
-
-    // Display with pagination for large catalogs
-    display_model_menu(&models)?;
-
-    let manual_idx = models.len() + 1;
-    let prompt = format!("  Select model (or {} to type manually): ", manual_idx);
-    let idx = read_number(&prompt, manual_idx);
-
-    // The read_number requires 1..=max, so handle manual entry via a separate prompt
-    // if the list is huge and user may want to type directly
-    let model_id = match idx {
-        Ok(n) if n >= 1 && n <= models.len() => models[n - 1].id.clone(),
-        _ => {
-            let manual = read_line_with_prompt("  Model ID: ")?;
-            if manual.is_empty() {
-                anyhow::bail!("Model ID cannot be empty");
-            }
-            manual
-        }
-    };
-
-    let provider_name = provider_entry.entry.name.to_string();
-
-    Ok((provider_name, provider_entry.entry.name.to_string(), model_id, chat_base_url))
+    }
 }
 
 fn prompt_base_url_if_local(entry: &ProviderEntry) -> anyhow::Result<Option<String>> {
