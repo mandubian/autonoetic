@@ -65,6 +65,7 @@ rules:
     tier: workflow
   # Cron scheduling for durable agents the planner installs.
   - prefix: scheduler_
+    tier: workflow
   - prefix: planframe_
     tier: workflow
   - prefix: workbench_

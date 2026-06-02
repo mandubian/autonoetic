@@ -21,7 +21,12 @@ struct ToolTierRegistryFile {
 #[serde(deny_unknown_fields)]
 struct ToolTierRule {
     prefix: String,
+    #[serde(default = "default_rule_tier")]
     tier: ToolTier,
+}
+
+fn default_rule_tier() -> ToolTier {
+    ToolTier::Core
 }
 
 #[derive(Debug, Clone)]
