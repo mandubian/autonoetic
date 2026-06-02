@@ -616,6 +616,28 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
     }
 }
 
+/// Derive the positive `message_format` hint for a roster entry from its
+/// declared `io.accepts` schema.
+///
+/// Roster tools (`agent_list`, `agent_inspect`, `agent_discover`) used to
+/// surface `io_accepts` as a bare schema-or-`null`. Models read a `null`
+/// `io_accepts` as "the input schema hasn't loaded yet" and re-listed in a
+/// loop, hunting for a schema that does not exist — reasoning agents simply
+/// take a free-form natural-language `message`. Returning an affirmative
+/// `"free_text"` vs `"json_schema"` signal closes that loop: it tells the
+/// caller *how* to shape the `agent.spawn` `message`, rather than leaving an
+/// absence to misinterpret.
+///
+/// `agent.spawn` only enforces a schema when the target declares an object
+/// `io.accepts` (see `SpawnAgentTool::execute`), so the rule is exactly:
+/// object schema → `"json_schema"`; anything else → `"free_text"`.
+pub(crate) fn message_format_hint(io_accepts: Option<&serde_json::Value>) -> &'static str {
+    match io_accepts {
+        Some(v) if v.is_object() => "json_schema",
+        _ => "free_text",
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct SandboxExecDependencies {
     #[serde(default)]

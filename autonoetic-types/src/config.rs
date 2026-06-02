@@ -761,11 +761,11 @@ impl Default for ConstitutionConfig {
 }
 
 fn default_constitution_source_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.30/constitution.md")
+    PathBuf::from("docs/constitution/versions/2026.06.02/constitution.md")
 }
 
 fn default_constitution_lock_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.05.30/gateway-constitution.lock.json")
+    PathBuf::from("docs/constitution/versions/2026.06.02/gateway-constitution.lock.json")
 }
 
 fn default_require_constitution_signature() -> bool {
@@ -1820,6 +1820,19 @@ pub struct LoopGuardConfig {
     /// 16 trips; healthy varied work with 7+ unique calls passes.
     #[serde(default = "default_rotation_distinct_floor")]
     pub rotation_distinct_floor: usize,
+
+    /// Fast-path trip for read-only roster polling. When a read-only roster
+    /// tool (`agent_list`, `agent_inspect`, `agent_discover`) is called this
+    /// many times consecutively with the same normalized arguments, the guard
+    /// trips with a corrective `RedundantRosterPolling` reason — without
+    /// waiting for the generic `rotation_window_size` (16) window to fill.
+    /// These directory reads are idempotent: re-listing never surfaces new
+    /// data, so a tight repeat is always a stuck spawn, not progress. The
+    /// trip message tells the agent to spawn directly with a free-text
+    /// message or end the turn. Set to 0 to disable the fast path (the
+    /// generic rotating-polling detector still applies).
+    #[serde(default = "default_roster_repeat_floor")]
+    pub roster_repeat_floor: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -1841,6 +1854,7 @@ impl Default for LoopGuardConfig {
             progress_budget_tools: default_progress_budget_tools(),
             rotation_window_size: default_rotation_window_size(),
             rotation_distinct_floor: default_rotation_distinct_floor(),
+            roster_repeat_floor: default_roster_repeat_floor(),
         }
     }
 }
@@ -1867,6 +1881,10 @@ fn default_rotation_window_size() -> usize {
 
 fn default_rotation_distinct_floor() -> usize {
     6
+}
+
+fn default_roster_repeat_floor() -> u32 {
+    3
 }
 
 /// Configuration for pluggable code analysis.

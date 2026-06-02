@@ -474,13 +474,15 @@ mod tests {
     #[test]
     fn loop_guard_reasons_agree_with_register() {
         use crate::runtime::guard::LoopGuardTripReason;
-        let reasons = [
+        // Canonical detectors: each owns a distinct P-7 register entry whose
+        // check_id equals the trip reason's code() (strict 1:1 bridge).
+        let canonical = [
             LoopGuardTripReason::ToolFailureBudget { tool: "x".into(), failures: 1 },
             LoopGuardTripReason::NoMeaningfulProgress { cycles: 1 },
             LoopGuardTripReason::RotatingPollingPattern { window_size: 16, distinct_count: 6, floor: 6 },
             LoopGuardTripReason::ChildFailureBudget { failures: 3 },
         ];
-        for r in &reasons {
+        for r in &canonical {
             let entry = enforcement_register()
                 .iter()
                 .find(|e| e.rule_id == r.rule_id())
@@ -492,6 +494,28 @@ mod tests {
                 "register check_id must match the trip reason code for {}",
                 r.rule_id()
             );
+        }
+
+        // Auxiliary detectors enforce an *existing* principle via a faster /
+        // narrower path and so share its register entry rather than owning a
+        // new one (rule_ids stay unique). We assert only that their rule_id is
+        // registered and attributes to the same clause — contract-health
+        // tallies by rule_id, so a shared entry is correct. RedundantRosterPolling
+        // is a fast path for P-7.19 (no semantic progress), canonically
+        // detected by rotating_polling_pattern.
+        let auxiliary = [
+            LoopGuardTripReason::RedundantRosterPolling {
+                tool: "agent_list".into(),
+                repeats: 3,
+                floor: 3,
+            },
+        ];
+        for r in &auxiliary {
+            let entry = enforcement_register()
+                .iter()
+                .find(|e| e.rule_id == r.rule_id())
+                .unwrap_or_else(|| panic!("no register entry for rule {}", r.rule_id()));
+            assert_eq!(entry.clause_id, "P-7", "auxiliary rule {} must serve P-7", r.rule_id());
         }
     }
 

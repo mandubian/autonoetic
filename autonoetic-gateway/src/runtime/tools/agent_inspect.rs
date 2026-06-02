@@ -90,7 +90,7 @@ impl NativeTool for AgentInspectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Inspect an installed agent's metadata, capabilities, and optionally its source code. Resolves the agent's current active revision. Source code is only returned for locally-trusted agents.".to_string(),
+            description: "Inspect an installed agent's metadata, capabilities, I/O contract, and optionally its source code. Resolves the agent's current active revision. The `skill` object includes `io_accepts` / `io_returns` (when declared) and a `message_format` hint: `\"free_text\"` means spawn it directly with a plain natural-language `message` (reasoning agents — `io_accepts` is null and that is expected); `\"json_schema\"` means pass `message` as a JSON string matching `io_accepts`. Source code is only returned for locally-trusted agents. One inspect call returns the full contract — re-inspecting the same agent will not reveal new fields.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -201,6 +201,16 @@ impl NativeTool for AgentInspectTool {
             files.sort();
 
             let meta = if let Some((ref m, _)) = parsed_manifest {
+                let io_accepts = m.io.as_ref().and_then(|io| io.accepts.clone());
+                let io_returns = m.io.as_ref().and_then(|io| io.returns.clone());
+                let script_input_mode = matches!(
+                    m.execution_mode,
+                    autonoetic_types::agent::ExecutionMode::Script
+                )
+                .then(|| match m.script_input_mode {
+                    autonoetic_types::agent::ScriptInputMode::Stdin => "stdin",
+                    autonoetic_types::agent::ScriptInputMode::Args => "args",
+                });
                 serde_json::json!({
                     "agent": {
                         "id": m.agent.id,
@@ -210,6 +220,10 @@ impl NativeTool for AgentInspectTool {
                     "capabilities": m.capabilities.iter().map(|c| serde_json::to_value(c).unwrap_or_default()).collect::<Vec<_>>(),
                     "execution_mode": serde_json::to_value(&m.execution_mode).unwrap_or_default(),
                     "script_entry": m.script_entry,
+                    "script_input_mode": script_input_mode,
+                    "io_accepts": io_accepts,
+                    "io_returns": io_returns,
+                    "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
                 })
             } else {
                 serde_json::json!(null)

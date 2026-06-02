@@ -133,12 +133,12 @@ impl NativeTool for AgentSpawnTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Delegate a task to a specialist agent. With async=false (default), blocks until the child completes and returns its reply. With async=true, returns immediately with a task_id — use workflow.wait to check status. Spawn multiple children in parallel with async=true, then wait for all of them.".to_string(),
+            description: "Delegate a task to a specialist agent. With async=false (default), blocks until the child completes and returns its reply. With async=true, returns immediately with a task_id — use workflow.wait to check status. Spawn multiple children in parallel with async=true, then wait for all of them. The `message` is free-form natural language for reasoning agents (researcher/architect/coder/etc. — the common case); you do NOT need to look up an input schema before spawning them. Only when the target declares an object `io.accepts` schema (agent.list reports `message_format: \"json_schema\"`) must `message` be a JSON string matching it.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "agent_id": { "type": "string" },
-                    "message": { "type": "string", "description": "The task to delegate. Should be self-contained; avoid dumping full conversation history." },
+                    "message": { "type": "string", "description": "The task to delegate, as free-form natural language. Should be self-contained; avoid dumping full conversation history. Pass a JSON string only if the target declares an object io.accepts schema (message_format: json_schema)." },
                     "context": { "type": "string", "description": "Optional bounded context summary. Include only what the child needs (goals, decisions, key facts, open items). The parent's full conversation history is NOT automatically shared." },
                     "metadata": { "type": "object" },
                     "session_id": { "type": "string" },
@@ -644,6 +644,11 @@ struct AgentDiscoveryResult {
     match_reasons: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     io: Option<serde_json::Value>,
+    /// Positive hint for shaping the `agent.spawn` `message`: `"free_text"`
+    /// (reasoning agents — spawn directly) or `"json_schema"` (pass JSON
+    /// matching `io.accepts`). Mirrors the `agent.list` field so a discovered
+    /// candidate can be spawned without a second roster lookup.
+    message_format: &'static str,
 }
 
 pub struct AgentDiscoverTool;
@@ -767,6 +772,7 @@ impl NativeTool for AgentDiscoverTool {
                     match_reasons.push("supports background execution".to_string());
                 }
 
+                let accepts = agent.manifest.io.as_ref().and_then(|io| io.accepts.clone());
                 let io_schema = agent.manifest.io.as_ref().map(|io| {
                     serde_json::json!({
                         "accepts": io.accepts,
@@ -782,6 +788,7 @@ impl NativeTool for AgentDiscoverTool {
                     capabilities: agent_cap_types,
                     match_reasons,
                     io: io_schema,
+                    message_format: crate::runtime::tools::message_format_hint(accepts.as_ref()),
                 }
             })
             .filter(|r| r.score > 0.0)
@@ -823,7 +830,7 @@ impl NativeTool for AgentListTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Enumerate installed agents with their metadata. Each entry includes agent_id, description, capabilities, execution_mode, script_input_mode (for script agents), and the io_accepts / io_returns JSON schemas when declared. Use io_accepts to shape the `message` you pass to agent.spawn: for targets that declare an object schema, emit `message` as a JSON string whose parsed value matches it. Returns a plain directory — no semantic scoring.".to_string(),
+            description: "Enumerate installed agents with their metadata. Each entry includes agent_id, description, capabilities, execution_mode, script_input_mode (for script agents), io_accepts / io_returns JSON schemas when declared, and a `message_format` hint. Use `message_format` to shape the `message` you pass to agent.spawn: `\"free_text\"` means the target is a reasoning agent that takes a plain natural-language task — spawn it directly, no schema needed (`io_accepts` is null for these and that is expected, not missing data); `\"json_schema\"` means emit `message` as a JSON string whose parsed value matches `io_accepts`. Returns a plain directory — no semantic scoring. This is a read-only directory: one call gives you everything; calling it repeatedly will not surface new fields. If you already know the agent_id (e.g. a foundational specialist or a plan step's agent_id), skip this and spawn directly.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -930,6 +937,7 @@ impl NativeTool for AgentListTool {
                                 "script_input_mode": script_input_mode,
                                 "io_accepts": io_accepts,
                                 "io_returns": io_returns,
+                                "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
                             }));
                         } else {
                             // Fallback: no manifest metadata in SQLite — try reading from
@@ -969,6 +977,7 @@ impl NativeTool for AgentListTool {
                                         "script_input_mode": script_input_mode,
                                         "io_accepts": io_accepts,
                                         "io_returns": io_returns,
+                                        "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
                                     }));
                                 }
                             }
@@ -1032,6 +1041,7 @@ impl NativeTool for AgentListTool {
                     "script_input_mode": script_input_mode,
                     "io_accepts": io_accepts,
                     "io_returns": io_returns,
+                    "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
                 }));
             }
         }

@@ -280,6 +280,7 @@ impl NativeTool for PlanFrameProposeTool {
                     "plan_id": plan_id,
                     "title": plan.title,
                     "step_count": plan.steps.len(),
+                    "step_titles": plan.steps.iter().map(|s| s.title.clone()).collect::<Vec<_>>(),
                 }),
                 occurred_at: now_rfc3339(),
             },
@@ -391,10 +392,14 @@ impl NativeTool for PlanFrameGetTool {
                         "summary": p.compact_summary(),
                     }))?)
                 } else {
-                    Ok(serde_json::to_string(&serde_json::json!({
+                    let mut body = serde_json::json!({
                         "ok": true,
                         "plan": p,
-                    }))?)
+                    });
+                    if let Some(hint) = p.execution_wake_hint() {
+                        body["execution_hint"] = serde_json::Value::String(hint);
+                    }
+                    Ok(serde_json::to_string(&body)?)
                 }
             }
             None => Ok(serde_json::to_string(&serde_json::json!({
@@ -747,22 +752,45 @@ impl NativeTool for PlanFrameAmendTool {
         let new_version = old_version + 1;
 
         let steps = match args.steps {
-            Some(steps) => steps
-                .into_iter()
-                .map(|s| PlanStep {
-                    step_id: s.step_id,
-                    title: s.title,
-                    owner: match s.owner.as_deref() {
-                        Some("agent") => StepOwner::Agent,
-                        Some("operator") => StepOwner::Operator,
-                        Some("shared") => StepOwner::Shared,
-                        _ => StepOwner::Planner,
-                    },
-                    depends_on: s.depends_on.unwrap_or_default(),
-                    agent_id: s.agent_id,
-                    notes: s.notes,
-                })
-                .collect(),
+            Some(steps) => {
+                let previous_by_id: std::collections::HashMap<&str, &PlanStep> = current
+                    .steps
+                    .iter()
+                    .map(|s| (s.step_id.as_str(), s))
+                    .collect();
+                steps
+                    .into_iter()
+                    .map(|s| {
+                        let prev = previous_by_id.get(s.step_id.as_str());
+                        let owner = match s.owner.as_deref() {
+                            Some("agent") => StepOwner::Agent,
+                            Some("operator") => StepOwner::Operator,
+                            Some("shared") => StepOwner::Shared,
+                            Some("planner") => StepOwner::Planner,
+                            _ => prev.map(|p| p.owner).unwrap_or(StepOwner::Agent),
+                        };
+                        let agent_id = s
+                            .agent_id
+                            .filter(|id| !id.trim().is_empty())
+                            .or_else(|| prev.and_then(|p| p.agent_id.clone()));
+                        let depends_on = match &s.depends_on {
+                            Some(d) if !d.is_empty() => d.clone(),
+                            _ => prev
+                                .map(|p| p.depends_on.clone())
+                                .unwrap_or_default(),
+                        };
+                        let notes = s.notes.or_else(|| prev.and_then(|p| p.notes.clone()));
+                        PlanStep {
+                            step_id: s.step_id,
+                            title: s.title,
+                            owner,
+                            depends_on,
+                            agent_id,
+                            notes,
+                        }
+                    })
+                    .collect()
+            }
             None => current.steps.clone(),
         };
 
@@ -846,6 +874,10 @@ impl NativeTool for PlanFrameAmendTool {
                         "plan_id": current.plan_id,
                         "old_version": old_version,
                         "new_version": new_version,
+                        "title": new_revision.title,
+                        "step_count": new_revision.steps.len(),
+                        "step_titles": new_revision.steps.iter().map(|s| s.title.clone()).collect::<Vec<_>>(),
+                        "reason": new_revision.reason,
                     }),
                     occurred_at: now_rfc3339(),
                 },

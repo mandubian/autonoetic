@@ -172,7 +172,81 @@ pub struct PlanFrame {
     pub created_at: String,
 }
 
+/// Suggest a foundational `agent_id` from step title when the plan omits one.
+pub fn infer_agent_id_from_step_title(title: &str) -> Option<String> {
+    let t = title.to_lowercase();
+    if t.contains("research")
+        || t.contains("data source")
+        || t.contains("market data")
+        || (t.contains("api") && (t.contains("source") || t.contains("survey")))
+    {
+        return Some("researcher.default".to_string());
+    }
+    if t.contains("architect")
+        || t.contains("architecture")
+        || t.contains("design")
+        || t.contains("data flow")
+    {
+        return Some("architect.default".to_string());
+    }
+    if t.contains("implement")
+        || t.contains("coding")
+        || t.contains("build")
+        || t.contains("develop")
+    {
+        return Some("coder.default".to_string());
+    }
+    if t.contains("federation")
+        || t.contains("audit")
+        || t.contains("evaluat")
+        || t.contains("promotion")
+    {
+        return Some("auditor.default".to_string());
+    }
+    None
+}
+
+impl PlanStep {
+    /// Explicit `agent_id` on the step, or a title-based foundational default.
+    pub fn resolved_agent_id(&self) -> Option<String> {
+        if let Some(id) = &self.agent_id {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if self.owner == StepOwner::Operator {
+            return None;
+        }
+        infer_agent_id_from_step_title(&self.title)
+    }
+}
+
 impl PlanFrame {
+    /// First agent-owned step in plan order (skips operator-only steps).
+    pub fn first_agent_step(&self) -> Option<&PlanStep> {
+        self.steps
+            .iter()
+            .find(|s| s.owner == StepOwner::Agent || s.owner == StepOwner::Shared)
+    }
+
+    /// Operator-facing hint after approval: what to spawn next without `agent_list`.
+    pub fn execution_wake_hint(&self) -> Option<String> {
+        if self.status != PlanStatus::Approved {
+            return None;
+        }
+        let step = self.first_agent_step()?;
+        let agent_id = step.resolved_agent_id()?;
+        Some(format!(
+            "Start approved plan {} v{} at step {} ({}): call agent_spawn on `{}` with a task message drawn from the plan objective. Do not call agent_list or agent_discover — agent_id is already known.",
+            self.plan_id,
+            self.version,
+            step.step_id,
+            step.title,
+            agent_id
+        ))
+    }
+
     pub fn compact_summary(&self) -> PlanFrameSummary {
         let operator_steps: Vec<String> = self
             .steps
@@ -243,4 +317,51 @@ pub struct ValidationWaiver {
     pub waived_by: String,
     pub reason: String,
     pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_agent_from_research_step_title() {
+        assert_eq!(
+            infer_agent_id_from_step_title("Research market data sources and APIs").as_deref(),
+            Some("researcher.default")
+        );
+    }
+
+    #[test]
+    fn execution_wake_hint_requires_approved_status() {
+        let mut plan = PlanFrame {
+            plan_id: "plan-x".into(),
+            version: 1,
+            parent_version: None,
+            workflow_id: "wf".into(),
+            root_session_id: "s".into(),
+            title: "T".into(),
+            objective: "O".into(),
+            status: PlanStatus::AwaitingApproval,
+            steps: vec![PlanStep {
+                step_id: "s1".into(),
+                title: "Research APIs".into(),
+                owner: StepOwner::Agent,
+                depends_on: vec![],
+                agent_id: None,
+                notes: None,
+            }],
+            validation_policy: ValidationPolicy::default(),
+            approved_by: None,
+            approved_at: None,
+            created_by_agent_id: "planner".into(),
+            reason: None,
+            created_at: "now".into(),
+        };
+        assert!(plan.execution_wake_hint().is_none());
+        plan.status = PlanStatus::Approved;
+        let hint = plan.execution_wake_hint().expect("hint");
+        assert!(hint.contains("researcher.default"));
+        assert!(hint.contains("agent_spawn"));
+        assert!(hint.contains("agent_list"));
+    }
 }

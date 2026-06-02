@@ -129,6 +129,11 @@ fn test_bootstrap_creates_agents_and_aliases() {
         stdout
     );
     assert!(
+        stdout.contains("planner.collaborative"),
+        "planner.collaborative alias should exist: {}",
+        stdout
+    );
+    assert!(
         stdout.contains("coder.default"),
         "coder.default alias should exist: {}",
         stdout

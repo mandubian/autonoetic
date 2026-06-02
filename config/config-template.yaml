@@ -26,14 +26,14 @@ node_name: "gateway"
 #   <agents_dir>/.gateway/constitution/
 # You can point source_path/lock_path there for fully runtime-local enforcement.
 constitution:
-  source_path: "docs/constitution/versions/2026.05.30/constitution.md"
-  lock_path: "docs/constitution/versions/2026.05.30/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.06.02/constitution.md"
+  lock_path: "docs/constitution/versions/2026.06.02/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 # constitution:
-#   source_path: ".gateway/constitution/versions/2026.05.30/constitution.md"
-#   lock_path: ".gateway/constitution/versions/2026.05.30/gateway-constitution.lock.json"
+#   source_path: ".gateway/constitution/versions/2026.06.02/constitution.md"
+#   lock_path: ".gateway/constitution/versions/2026.06.02/gateway-constitution.lock.json"
 #   require_signature: true
 #   trusted_signers:
 #     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -352,6 +352,12 @@ max_session_turns: 25
 #     read-only tools (workflow.wait → workflow.state → content.read → ...) that
 #     defeats `max_loops_without_progress` because each call has a fresh
 #     fingerprint. Set `rotation_window_size: 0` to disable.
+#   roster_repeat_floor: fast-path trip for idempotent read-only roster reads
+#     (agent_list / agent_inspect / agent_discover). Trips after this many
+#     consecutive identical calls — well before the rotation window fills —
+#     because re-listing never returns new data. The corrective trip message
+#     tells the agent to spawn directly with a free-text message or end the
+#     turn. Set to 0 to disable the fast path.
 #loop_guard:
 #  max_loops_without_progress: 10
 #  max_tool_failures: 8
@@ -359,6 +365,7 @@ max_session_turns: 25
 #  max_child_failures: 5
 #  rotation_window_size: 16
 #  rotation_distinct_floor: 6
+#  roster_repeat_floor: 3
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
@@ -519,6 +526,7 @@ llm_presets:
 
 llm_preset_mapping:
   planner: gemma4_31b             # routed
+  planner.collaborative: gemma4_31b  # PlanFrame lead; same preset as planner (merged at bootstrap)
   coder: gemma4_31b               # routed
   executor: gemma4_31b            # routed
   researcher: gemma4_31b         # fixed

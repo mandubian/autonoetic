@@ -102,10 +102,19 @@ pub fn resolve_llm_config(
         }
     }
 
-    // 3. Role-based preset mapping from config
+    // 3. Role-based preset mapping from config (same lookup order as gateway bootstrap)
     if let Some(template_name) = template {
-        if let Some(mapped_preset_name) = config.llm_preset_mapping.get(template_name) {
-            if let Some(preset) = config.llm_presets.get(mapped_preset_name) {
+        let mapped_preset_name = config
+            .llm_preset_mapping
+            .get(template_name)
+            .or_else(|| {
+                template_name
+                    .rsplit_once('.')
+                    .and_then(|(base, _)| config.llm_preset_mapping.get(base))
+            })
+            .or_else(|| config.llm_preset_mapping.get("default"));
+        if let Some(mapped_preset_name) = mapped_preset_name {
+            if let Some(preset) = config.llm_presets.get(mapped_preset_name.as_str()) {
                 return preset_to_config(mapped_preset_name, preset, &config.llm_presets);
             }
         }
@@ -995,12 +1004,8 @@ pub(crate) fn apply_llm_preset_to_skill(
     config: &GatewayConfig,
     agent_id: &str,
 ) -> Option<String> {
-    // Determine the template/role from agent_id
-    // Remove .default suffix but keep underscores to match llm_preset_mapping keys
-    let template = agent_id.trim_end_matches(".default").to_string();
-
-    // Try to resolve LLM config: preset mapping → hardcoded defaults
-    let llm = resolve_llm_config(config, Some(&template), None, None, None);
+    // Resolve via llm_preset_mapping using the full agent id (bootstrap uses the same order).
+    let llm = resolve_llm_config(config, Some(agent_id), None, None, None);
 
     // Check if current content already has the right LLM
     if content.contains(&format!("model: \"{}\"", llm.model))
@@ -2519,6 +2524,44 @@ Use tools when needed.
         assert_eq!(llm.provider, "openai");
         assert_eq!(llm.model, "gpt-4o-mini");
         assert_eq!(llm.temperature, 0.0);
+    }
+
+    #[test]
+    fn test_resolve_llm_config_planner_collaborative_uses_mapping() {
+        let mut config = GatewayConfig::default();
+        config.llm_presets.insert(
+            "local".to_string(),
+            autonoetic_types::config::LlmPreset {
+                provider: Some("llamacpp".to_string()),
+                model: Some("Qwen3.6-27B.gguf".to_string()),
+                temperature: Some(0.2),
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: Some("http://localhost:9878/v1/chat/completions".to_string()),
+                tier: None,
+                cost: None,
+                latency: None,
+                api_key_env: None,
+                thinking: None,
+                routing: None,
+            },
+        );
+        config
+            .llm_preset_mapping
+            .insert("planner.collaborative".to_string(), "local".to_string());
+
+        let llm = resolve_llm_config(&config, Some("planner.collaborative"), None, None, None);
+        assert_eq!(llm.provider, "llamacpp");
+        assert_eq!(llm.model, "Qwen3.6-27B.gguf");
+
+        config.llm_preset_mapping.remove("planner.collaborative");
+        config
+            .llm_preset_mapping
+            .insert("planner".to_string(), "local".to_string());
+        let llm = resolve_llm_config(&config, Some("planner.collaborative"), None, None, None);
+        assert_eq!(llm.provider, "llamacpp");
     }
 
     #[test]

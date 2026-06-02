@@ -427,7 +427,7 @@ struct App {
     pending_plan_ids: Vec<String>,
     /// (plan_id, title snippet) for status display.
     pending_plan_summaries: Vec<(String, String)>,
-    /// Plan IDs we already showed as rich cards this session.
+    /// Plan revisions we already showed as rich cards (`plan_id:v<version>`).
     announced_plan_ids: HashSet<String>,
     /// Gateway TCP JSON-RPC connection state.
     gateway_connected: bool,
@@ -3043,6 +3043,10 @@ fn render_approval_card(
     lines
 }
 
+fn plan_announcement_key(plan_id: &str, version: u32) -> String {
+    format!("{plan_id}:v{version}")
+}
+
 fn format_plan_frame_card(plan: &PlanFrame, approval_instructions: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
@@ -3228,6 +3232,14 @@ fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
             }
         }
         (Some(s), Some(r)) => format!("{}\n\n{}", s, r),
+        (Some(s), None) if is_fenced => {
+            let prose = strip_prose_around_json(reply);
+            if prose.is_empty() {
+                s.to_string()
+            } else {
+                format!("{}\n\n{}", prose, s)
+            }
+        }
         (Some(s), None) => s.to_string(),
         (None, Some(r)) => r.to_string(),
         (None, None) => source
@@ -3530,29 +3542,37 @@ fn format_workflow_event_card(
                 .get("step_count")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let approve_hint = if plan_id.is_empty() {
-                String::new()
+            let step_titles: Vec<&str> = event
+                .payload
+                .get("step_titles")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+
+            let display_name = if !title.is_empty() {
+                title.to_string()
+            } else if !plan_id.is_empty() {
+                plan_id.to_string()
             } else {
-                format!(
-                    "\n   → Approve: Ctrl+A or `/plan approve {}`",
-                    plan_id
-                )
+                "Unknown".to_string()
             };
-            Some((
-                format!(
-                    "📋 [{}] Plan proposed: {}{} ({} steps){}",
-                    ts_short,
-                    if title.is_empty() { plan_id } else { title },
-                    if plan_id.is_empty() || title.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", plan_id)
-                    },
-                    step_count,
-                    approve_hint
-                ),
-                MessageRole::Signal,
-            ))
+
+            let mut card = format!("📋 [{}] Plan proposed: {} ({} step", ts_short, display_name, step_count);
+            if step_count != 1 { card.push('s'); }
+            card.push(')');
+
+            for s in &step_titles {
+                card.push_str(&format!("\n   • {}", s));
+            }
+
+            if !plan_id.is_empty() {
+                card.push_str(&format!(
+                    "\n\n   → Approve: Ctrl+A or `/plan approve {}`",
+                    plan_id
+                ));
+            }
+
+            Some((card, MessageRole::Signal))
         }
         "planframe.approved" => {
             let plan_id = event
@@ -3564,6 +3584,76 @@ fn format_workflow_event_card(
                 format!("✅ [{}] Plan approved: {}", ts_short, plan_id),
                 MessageRole::Signal,
             ))
+        }
+        "planframe.amended" => {
+            let plan_id = event
+                .payload
+                .get("plan_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let title = event
+                .payload
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let old_version = event
+                .payload
+                .get("old_version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let new_version = event
+                .payload
+                .get("new_version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let step_count = event
+                .payload
+                .get("step_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let step_titles: Vec<&str> = event
+                .payload
+                .get("step_titles")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+
+            let display_name = if !title.is_empty() {
+                title.to_string()
+            } else if !plan_id.is_empty() {
+                plan_id.to_string()
+            } else {
+                "Unknown".to_string()
+            };
+
+            let mut card = format!(
+                "📋 [{}] Plan amended: {} (v{} → v{}, {} step",
+                ts_short, display_name, old_version, new_version, step_count
+            );
+            if step_count != 1 {
+                card.push('s');
+            }
+            card.push_str(") — re-approval required");
+
+            if let Some(r) = reason {
+                card.push_str(&format!("\n   Reason: {}", r));
+            }
+            for s in &step_titles {
+                card.push_str(&format!("\n   • {}", s));
+            }
+            if !plan_id.is_empty() {
+                card.push_str(&format!(
+                    "\n\n   → Approve: Ctrl+A or `/plan approve {}`",
+                    plan_id
+                ));
+            }
+
+            Some((card, MessageRole::Signal))
         }
         "workflow.escalated" => {
             let target = event
@@ -8039,7 +8129,10 @@ fn merge_pending_plan_frames(
 
     let mut announced = false;
     for plan in plans {
-        if app.announced_plan_ids.insert(plan.plan_id.clone()) {
+        if app
+            .announced_plan_ids
+            .insert(plan_announcement_key(&plan.plan_id, plan.version))
+        {
             let detail = if app.inline_approvals_enabled {
                 "Approve: Ctrl+A (after gate approvals), or `/plan approve`.".to_string()
             } else {
@@ -8086,10 +8179,12 @@ fn approve_plan_frame_in_chat(
             );
             if wake_planner {
                 if let Some(tx) = tx {
-                    let wake = format!(
-                        "[Operator approved plan {}] \"{}\" is approved. Proceed with execution per the plan.",
-                        plan.plan_id, plan.title
-                    );
+                    let wake = plan.execution_wake_hint().unwrap_or_else(|| {
+                        format!(
+                            "[Operator approved plan {}] \"{}\" (v{}) is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list.",
+                            plan.plan_id, plan.title, plan.version
+                        )
+                    });
                     let id = app.next_id();
                     app.add_pending(id);
                     app.add_message(MessageRole::User, wake.clone());
@@ -8390,7 +8485,9 @@ async fn check_signals(
                                     }
 
                                     // Track pending approval IDs for inline approval (Ctrl+A)
-                                    if event.event_type == "planframe.proposed" {
+                                    if event.event_type == "planframe.proposed"
+                                        || event.event_type == "planframe.amended"
+                                    {
                                         if let Some(plan_id) = event
                                             .payload
                                             .get("plan_id")
@@ -8399,6 +8496,17 @@ async fn check_signals(
                                             if !app.pending_plan_ids.contains(&plan_id.to_string())
                                             {
                                                 app.pending_plan_ids.push(plan_id.to_string());
+                                            }
+                                        }
+                                        if event.event_type == "planframe.amended" {
+                                            if let Some(st) = store {
+                                                if merge_pending_plan_frames(
+                                                    app,
+                                                    st,
+                                                    session_id,
+                                                ) {
+                                                    processed_any = true;
+                                                }
                                             }
                                         }
                                     } else if event.event_type == "planframe.approved" {
@@ -8761,15 +8869,65 @@ mod tests {
             serde_json::json!({
                 "plan_id": "plan-f3d403758844",
                 "title": "Build Improved Agent",
-                "step_count": 7
+                "step_count": 7,
+                "step_titles": [
+                    "Research APIs",
+                    "Design architecture",
+                    "Implement core",
+                ],
             }),
         );
         let line = format_workflow_event_card(&event)
             .map(|(s, _)| s)
             .expect("event should render");
-        assert!(line.contains("Plan proposed"));
-        assert!(line.contains("plan-f3d403758844"));
+        assert!(line.contains("Plan proposed: Build Improved Agent (7 steps)"));
+        assert!(line.contains("• Research APIs"));
+        assert!(line.contains("• Design architecture"));
+        assert!(line.contains("• Implement core"));
+        assert!(line.contains("/plan approve plan-f3d403758844"));
+    }
+
+    #[test]
+    fn test_format_workflow_event_card_planframe_proposed_no_steps() {
+        let event = workflow_event(
+            "planframe.proposed",
+            None,
+            serde_json::json!({
+                "plan_id": "plan-f3d403758844",
+                "title": "Build Improved Agent",
+                "step_count": 7,
+            }),
+        );
+        let line = format_workflow_event_card(&event)
+            .map(|(s, _)| s)
+            .expect("event should render");
+        assert!(line.contains("Plan proposed: Build Improved Agent (7 steps)"));
         assert!(line.contains("/plan approve"));
+    }
+
+    #[test]
+    fn test_format_workflow_event_card_planframe_amended() {
+        let event = workflow_event(
+            "planframe.amended",
+            None,
+            serde_json::json!({
+                "plan_id": "plan-abc",
+                "title": "Trading adviser",
+                "old_version": 1,
+                "new_version": 2,
+                "step_count": 3,
+                "step_titles": ["Research APIs", "Build core"],
+                "reason": "Scope expanded",
+            }),
+        );
+        let line = format_workflow_event_card(&event)
+            .map(|(s, _)| s)
+            .expect("event should render");
+        assert!(line.contains("Plan amended: Trading adviser (v1 → v2, 3 steps)"));
+        assert!(line.contains("re-approval required"));
+        assert!(line.contains("Scope expanded"));
+        assert!(line.contains("• Research APIs"));
+        assert!(line.contains("/plan approve plan-abc"));
     }
 
     #[test]
@@ -9334,5 +9492,21 @@ mod tests {
         assert!(card.contains("→ ship"));
         assert!(card.contains("--option <id>"));
         assert!(card.contains("--text"));
+    }
+
+    #[test]
+    fn format_assistant_reply_shows_prose_and_summary_when_both_present() {
+        let reply = "Here are the tools:\n- planframe_propose\n\n{\"status\":\"ok\",\"summary\":\"Listed tools.\"}";
+        let formatted = super::format_assistant_reply(reply);
+        assert!(formatted.display.contains("Here are the tools:"));
+        assert!(formatted.display.contains("planframe_propose"));
+        assert!(formatted.display.contains("Listed tools."));
+    }
+
+    #[test]
+    fn format_assistant_reply_summary_only_when_no_prose() {
+        let reply = "{\"status\":\"ok\",\"summary\":\"Echo only.\"}";
+        let formatted = super::format_assistant_reply(reply);
+        assert_eq!(formatted.display, "Echo only.");
     }
 }

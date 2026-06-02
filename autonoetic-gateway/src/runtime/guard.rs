@@ -50,6 +50,17 @@ pub enum LoopGuardTripReason {
     },
     /// Trip condition #4 — child task failures exceeded `max_child_failures`.
     ChildFailureBudget { failures: u32 },
+    /// Trip condition #5 — a read-only roster tool (`agent_list` /
+    /// `agent_inspect` / `agent_discover`) was called `repeats` times in a
+    /// row with identical normalized arguments, reaching `floor`. These
+    /// directory reads are idempotent, so a tight repeat means the agent is
+    /// stuck looking for an input schema instead of spawning. Fires fast,
+    /// before the generic rotating-polling window fills.
+    RedundantRosterPolling {
+        tool: String,
+        repeats: u32,
+        floor: u32,
+    },
 }
 
 impl LoopGuardTripReason {
@@ -60,6 +71,7 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::ToolFailureBudget { .. } => "tool_failure_budget",
             LoopGuardTripReason::RotatingPollingPattern { .. } => "rotating_polling_pattern",
             LoopGuardTripReason::ChildFailureBudget { .. } => "child_failure_budget",
+            LoopGuardTripReason::RedundantRosterPolling { .. } => "redundant_roster_polling",
         }
     }
 
@@ -72,12 +84,14 @@ impl LoopGuardTripReason {
     /// - `NoMeaningfulProgress`  → P-7.7 (consecutive steps w/o successful result)
     /// - `RotatingPollingPattern`→ P-7.19 (no semantic progress across successes)
     /// - `ChildFailureBudget`    → P-7.20 (child-failure delegation-loop budget)
+    /// - `RedundantRosterPolling`→ P-7.19 (no semantic progress across successes)
     pub fn rule_id(&self) -> &'static str {
         match self {
             LoopGuardTripReason::ToolFailureBudget { .. } => "P-7.5",
             LoopGuardTripReason::NoMeaningfulProgress { .. } => "P-7.7",
             LoopGuardTripReason::RotatingPollingPattern { .. } => "P-7.19",
             LoopGuardTripReason::ChildFailureBudget { .. } => "P-7.20",
+            LoopGuardTripReason::RedundantRosterPolling { .. } => "P-7.19",
         }
     }
 }
@@ -91,6 +105,9 @@ pub struct LoopGuard {
     max_window_size: usize,
     /// Trip condition #3 — minimum distinct fingerprints required to clear.
     max_distinct_floor: usize,
+    /// Trip condition #5 — consecutive identical read-only roster reads that
+    /// trigger the fast-path `RedundantRosterPolling` trip. 0 disables it.
+    roster_repeat_floor: u32,
     /// From gateway config — max loop resets attributable to each tool name.
     progress_budget_tools: HashMap<String, u32>,
     /// How many times each budgeted tool has reset `current_loops` this session.
@@ -119,6 +136,7 @@ impl LoopGuard {
             max_child_failures: 5,
             max_window_size: default_rotation_window_size(),
             max_distinct_floor: default_rotation_distinct_floor(),
+            roster_repeat_floor: default_roster_repeat_floor(),
             progress_budget_tools: HashMap::new(),
             progress_budget_used: HashMap::new(),
             current_loops: 0,
@@ -139,6 +157,7 @@ impl LoopGuard {
             max_child_failures: cfg.max_child_failures,
             max_window_size: cfg.rotation_window_size,
             max_distinct_floor: cfg.rotation_distinct_floor,
+            roster_repeat_floor: cfg.roster_repeat_floor,
             progress_budget_tools: cfg.progress_budget_tools.clone(),
             progress_budget_used: HashMap::new(),
             current_loops: 0,
@@ -312,6 +331,28 @@ impl LoopGuard {
             self.consecutive_progress_count += 1;
         }
 
+        // Trip condition #5: redundant roster polling (fast path).
+        //
+        // Read-only roster reads are idempotent — re-listing never returns new
+        // data. When the agent repeats the same one `roster_repeat_floor`
+        // times in a row it is stuck (typically hunting for an input schema
+        // that does not exist for reasoning agents). Trip immediately with a
+        // corrective reason rather than waiting for the 16-call rotating
+        // window. Only set on a *repeat* (not the first call) and don't
+        // overwrite a previously latched reason.
+        if self.roster_repeat_floor > 0
+            && !is_new
+            && is_roster_read_tool(tool_name)
+            && self.consecutive_progress_count >= self.roster_repeat_floor
+            && self.trip_reason.is_none()
+        {
+            self.trip_reason = Some(LoopGuardTripReason::RedundantRosterPolling {
+                tool: tool_name.to_string(),
+                repeats: self.consecutive_progress_count,
+                floor: self.roster_repeat_floor,
+            });
+        }
+
         let would_reset_loops = is_new
             || self.consecutive_progress_count <= self.max_consecutive_same_progress;
 
@@ -347,6 +388,7 @@ impl LoopGuard {
             max_child_failures: self.max_child_failures,
             max_window_size: self.max_window_size,
             max_distinct_floor: self.max_distinct_floor,
+            roster_repeat_floor: self.roster_repeat_floor,
             progress_budget_tools: self.progress_budget_tools.clone(),
             progress_budget_used: self.progress_budget_used.clone(),
             current_loops: self.current_loops,
@@ -366,6 +408,7 @@ impl LoopGuard {
             max_child_failures: state.max_child_failures,
             max_window_size: state.max_window_size,
             max_distinct_floor: state.max_distinct_floor,
+            roster_repeat_floor: state.roster_repeat_floor,
             progress_budget_tools: state.progress_budget_tools,
             progress_budget_used: state.progress_budget_used,
             current_loops: state.current_loops,
@@ -410,6 +453,23 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
              Breaking delegation loop — escalate to human or change strategy.",
             failures
         ),
+        LoopGuardTripReason::RedundantRosterPolling {
+            tool,
+            repeats,
+            floor,
+        } => anyhow::anyhow!(
+            "LoopGuard tripped: '{}' was called {} times in a row with the same \
+             arguments (floor {}). Roster directory reads are idempotent — you \
+             already have this information and re-listing will not add fields. \
+             Reasoning agents (researcher/architect/coder/etc.) take a free-form \
+             natural-language `message`: call agent.spawn directly with the \
+             agent_id and a plain-text task. A null `io_accepts` (message_format \
+             \"free_text\") is expected, not missing data. If you are missing an \
+             operator decision instead, use user.ask or end the turn.",
+            tool,
+            repeats,
+            floor
+        ),
     }
 }
 
@@ -419,6 +479,21 @@ fn default_rotation_window_size() -> usize {
 
 fn default_rotation_distinct_floor() -> usize {
     6
+}
+
+fn default_roster_repeat_floor() -> u32 {
+    3
+}
+
+/// Read-only roster directory tools whose results are idempotent: repeating
+/// the same call never surfaces new data. Used by the fast-path
+/// `RedundantRosterPolling` trip so a stuck spawn loop breaks in a few calls
+/// instead of waiting for the generic rotating-polling window to fill.
+fn is_roster_read_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "agent_list" | "agent_inspect" | "agent_discover"
+    )
 }
 
 /// Strips echoed / non-schema fields from tool `arguments_json` before progress
@@ -459,6 +534,10 @@ pub struct LoopGuardState {
     /// Rotating-polling detector distinct-count floor (issue #287).
     #[serde(default = "default_rotation_distinct_floor")]
     pub max_distinct_floor: usize,
+    /// Redundant-roster-polling fast-path floor. Legacy checkpoints without
+    /// this field default to the current build's floor.
+    #[serde(default = "default_roster_repeat_floor")]
+    pub roster_repeat_floor: u32,
     #[serde(default)]
     pub progress_budget_tools: HashMap<String, u32>,
     #[serde(default)]
@@ -484,6 +563,7 @@ impl Default for LoopGuardState {
             max_child_failures: 5,
             max_window_size: default_rotation_window_size(),
             max_distinct_floor: default_rotation_distinct_floor(),
+            roster_repeat_floor: default_roster_repeat_floor(),
             progress_budget_tools: HashMap::new(),
             progress_budget_used: HashMap::new(),
             current_loops: 0,
@@ -526,8 +606,14 @@ mod tests {
     /// never match → every call looks like fresh progress → the loop counter never climbs.
     #[test]
     fn repeating_same_tool_with_only_intent_varying_trips_guard() {
+        // Isolate the intent-normalization path from the roster fast-path
+        // (roster_repeat_floor: 0) so this test exercises the generic
+        // NoMeaningfulProgress accounting on a tool whose only varying field
+        // is the echoed `intent`. agent_inspect's roster fast-path is covered
+        // separately by `roster_polling_trips_fast`.
         let cfg = autonoetic_types::config::LoopGuardConfig {
             max_loops_without_progress: 5,
+            roster_repeat_floor: 0,
             ..Default::default()
         };
         let mut guard = LoopGuard::with_config(&cfg);
@@ -547,6 +633,57 @@ mod tests {
         unreachable!("check_loop did not trip");
     }
 
+    /// Fast-path trip (P-7.19): repeated read-only roster reads with the same
+    /// normalized arguments trip `RedundantRosterPolling` at
+    /// `roster_repeat_floor` (default 3) — well before the generic 16-call
+    /// rotating-polling window could fill. Regression for the
+    /// planner.collaborative `agent_list {}` spin observed after the move to
+    /// the collaborative tool tier.
+    #[test]
+    fn roster_polling_trips_fast() {
+        // High generic budgets so the roster fast-path is unambiguously the
+        // trip cause, not NoMeaningfulProgress.
+        let cfg = autonoetic_types::config::LoopGuardConfig {
+            max_loops_without_progress: 100,
+            ..Default::default()
+        };
+        let mut guard = LoopGuard::with_config(&cfg);
+
+        // Vary only the echoed intent — normalization collapses these to one
+        // fingerprint, mirroring the observed loop.
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress("agent_list", r#"{"intent":"find researcher"}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress("agent_list", r#"{"intent":"check io schema"}"#);
+        // Third identical call reaches the floor → next check_loop trips.
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress("agent_list", r#"{}"#);
+
+        let err = guard.check_loop().expect_err("roster polling should trip");
+        assert!(
+            err.to_string().contains("agent_list"),
+            "trip error should name the tool: {err}"
+        );
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(LoopGuardTripReason::RedundantRosterPolling { floor: 3, .. })
+        ));
+        assert_eq!(guard.last_trip_reason().unwrap().rule_id(), "P-7.19");
+    }
+
+    /// A single roster read followed by real work must NOT trip — the fast
+    /// path only fires on consecutive identical repeats.
+    #[test]
+    fn single_roster_read_then_spawn_does_not_trip() {
+        let mut guard = LoopGuard::new(100);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress("agent_list", r#"{}"#);
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress("agent_spawn", r#"{"agent_id":"researcher.default"}"#);
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.last_trip_reason().is_none());
+    }
+
     #[test]
     fn test_loop_guard_trips_on_tool_failure_budget() {
         let mut guard = LoopGuard::new(100);
@@ -563,16 +700,17 @@ mod tests {
 
     /// Child-failure budget trip (P-7.20). Child failures accumulate and do
     /// NOT reset on progress; the guard trips once `max_child_failures`
-    /// (default 3) is reached. Pinning test cited by the enforcement
-    /// register for P-7 / P-7.20.
+    /// (default 5, raised from 3 in ff87497) is reached. Pinning test cited by
+    /// the enforcement register for P-7 / P-7.20.
     #[test]
     fn test_loop_guard_trips_on_child_failures() {
         let mut guard = LoopGuard::new(100); // high loop budget so the child budget is the trip cause
-        guard.register_child_failure();
-        guard.register_child_failure();
-        assert!(guard.check_loop().is_ok(), "2 < default max_child_failures(3)");
-        guard.register_child_failure(); // now 3
-        let err = guard.check_loop().expect_err("3 >= max_child_failures must trip");
+        for _ in 0..4 {
+            guard.register_child_failure();
+        }
+        assert!(guard.check_loop().is_ok(), "4 < default max_child_failures(5)");
+        guard.register_child_failure(); // now 5
+        let err = guard.check_loop().expect_err("5 >= max_child_failures must trip");
         assert!(err.to_string().contains("child"), "unexpected error: {err}");
         assert!(matches!(
             guard.last_trip_reason(),
