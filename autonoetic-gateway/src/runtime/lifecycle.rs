@@ -2289,6 +2289,8 @@ impl AgentExecutor {
                             artifact_id: self.artifact_id.clone(),
                             sentinel_suppress_target: Some(self.suppress_until_turn.clone()),
                             discovered_tools: Some(self.discovered_tools_writer.clone()),
+                            wake_hint: None,
+                            wake_hints_map: None,
                         }
                     });
                     let mut processor = ToolCallProcessor::new(

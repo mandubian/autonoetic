@@ -477,6 +477,20 @@ pub struct SpawnResult {
     pub suspended_for_user_input: bool,
 }
 
+/// Per-root-session wake hint injected by the operator's TUI after plan approval.
+/// While active, `agent_list` returns a blocking error that directs the planner
+/// to the single agent identified by the wake message, preventing the
+/// post-approval roster loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeHintState {
+    pub plan_id: String,
+    pub plan_version: u64,
+    pub agent_id: String,
+    pub step_id: String,
+    pub delivered_at_turn: u32,
+    pub expires_at_turn: u32,
+}
+
 #[derive(Clone)]
 pub struct GatewayExecutionService {
     config: Arc<GatewayConfig>,
@@ -492,6 +506,7 @@ pub struct GatewayExecutionService {
     degraded_sessions: Arc<Mutex<std::collections::HashSet<String>>>,
     persona: Option<String>,
     local_model_context_cache: Arc<LocalModelContextCache>,
+    wake_hints: Arc<Mutex<HashMap<String, WakeHintState>>>,
 }
 
 impl GatewayExecutionService {
@@ -552,6 +567,7 @@ impl GatewayExecutionService {
             degraded_sessions: Arc::new(Mutex::new(std::collections::HashSet::new())),
             persona,
             local_model_context_cache: Arc::new(LocalModelContextCache::new()),
+            wake_hints: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Spawn the drain task that turns HookSpawnRequests into actual agent runs.
@@ -638,7 +654,34 @@ impl GatewayExecutionService {
     }
 
     pub fn config(&self) -> Arc<GatewayConfig> {
-        self.config.clone()
+        Arc::clone(&self.config)
+    }
+
+    /// Register a wake hint for the given root session.
+    /// While active, `agent_list` will return a blocking error directing the
+    /// planner to the single agent identified in the hint.
+    pub async fn register_wake_hint(&self, root_session_id: &str, wake_hint: WakeHintState) {
+        let mut map = self.wake_hints.lock().await;
+        map.insert(root_session_id.to_string(), wake_hint);
+    }
+
+    /// Look up the active wake hint for a root session at a given turn.
+    /// Returns `None` if no hint is registered or the hint has expired.
+    pub async fn active_wake_hint(&self, root_session_id: &str, current_turn: u32) -> Option<WakeHintState> {
+        let map = self.wake_hints.lock().await;
+        map.get(root_session_id).and_then(|hint| {
+            if current_turn <= hint.expires_at_turn {
+                Some(hint.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Clear the wake hint for the given root session.
+    pub async fn clear_wake_hint(&self, root_session_id: &str) {
+        let mut map = self.wake_hints.lock().await;
+        map.remove(root_session_id);
     }
 
     pub fn gateway_store(&self) -> Option<Arc<crate::scheduler::gateway_store::GatewayStore>> {

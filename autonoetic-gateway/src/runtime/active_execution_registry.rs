@@ -28,6 +28,13 @@ pub struct NativeToolRunContext {
     /// Shared discovered-tools set. `tool_discover` writes here; the lifecycle
     /// reads and drains after tool execution to update the session surface.
     pub discovered_tools: Option<Arc<Mutex<std::collections::HashSet<String>>>>,
+    /// Wake hint for the post-approval guardrail on `agent_list`.
+    /// Set by the TUI after a plan-approval wake message.
+    pub wake_hint: Option<crate::execution::WakeHintState>,
+    /// Shared map of root-session → wake hint, populated by
+    /// `GatewayExecutionService.register_wake_hint` and read by
+    /// `agent_list` to check whether the guardrail is active.
+    pub wake_hints_map: Option<Arc<Mutex<std::collections::HashMap<String, crate::execution::WakeHintState>>>>,
 }
 
 #[derive(Clone)]

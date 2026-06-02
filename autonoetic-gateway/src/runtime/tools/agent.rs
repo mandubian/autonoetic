@@ -875,6 +875,30 @@ impl NativeTool for AgentListTool {
             #[serde(default)]
             execution_mode: Option<String>,
         }
+        // Guardrail: block agent_list while a post-approval wake hint is
+        // active. The planner must use agent.spawn with the explicit agent_id
+        // from the wake message — calling agent_list here would waste a turn
+        // and risk LoopGuard degradation.
+        if let Some(ctx) = _run_context {
+            if let Some(ref hint) = ctx.wake_hint {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error": "post_approval_wake_active",
+                    "message": format!(
+                        "A plan approval wake is active for step '{}' (plan '{}', v{}). \
+                         Use agent.spawn with agent_id='{}' — do NOT call agent_list.",
+                        hint.step_id, hint.plan_id, hint.plan_version, hint.agent_id
+                    ),
+                    "hint": {
+                        "plan_id": hint.plan_id,
+                        "plan_version": hint.plan_version,
+                        "agent_id": hint.agent_id,
+                        "step_id": hint.step_id,
+                    }
+                }).to_string());
+            }
+        }
+
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
