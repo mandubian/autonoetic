@@ -5,16 +5,51 @@ people who are new to the project, new to agent runtimes, or trying to
 understand why Autonoetic is built the way it is — especially people coming from
 Hermes, OpenClaw, or similar direct-code assistants.
 
+## What the name means
+
+*Autonoetic* means **self-knowing**. The whole project rests on one bet: an
+actor that knows its own past, present, capabilities, and rights — and that acts
+under a shared law every other actor also follows — can be trusted to work on
+its own.
+
+That "actor" need not be an AI. It might be an AI agent, a human operator, or an
+automated script. Autonoetic treats all three as **first-class citizens**: each
+has a portable identity, each acts under the same constitution, each is owed the
+same rights, and each is held to the same obligations. The goal is not to cage a
+dangerous AI — it is to give *any* participant, silicon or carbon or cron job, a
+common set of rights and rules so they can interact and trust one another
+without a human refereeing every step.
+
 The short version:
 
-> Autonoetic is a runtime where agents are **free actors under a shared
-> constitution**. It lets agents work on their own — overnight, in teams of
-> specialists, safely limited by rules they cannot override. The agent reasons
-> and decides; the gateway mechanically enforces the law.
+> Autonoetic is a runtime where actors are **first-class citizens under a shared
+> constitution**. The constitution is not a leash — it is the common law that
+> lets independent actors (AI, human, or script) cooperate, delegate, and trust
+> each other mechanically rather than personally. Each actor reasons and decides
+> within the law; the gateway is the neutral institution that enforces it.
+
+### A familiar analogy: rule of law
+
+If you have seen how a constitutional government works, you already understand
+Autonoetic's shape:
+
+| Government | Autonoetic |
+|---|---|
+| The constitution & laws | The signed, versioned constitution (rights + rules) |
+| The executive that enforces law but does not invent it | The **gateway** — a *Lawful Executor* |
+| Citizens — free within the law, with rights *and* duties | **Actors** — AI agents, human operators, scripts |
+| The public record | The **causal chain** |
+| Amending the constitution | The amendment process (proposed, reviewed, ratified, signed) |
+
+The contrast with other tools is the contrast between **trusting a person** and
+**trusting an institution**. With a direct assistant you trust whoever wrote the
+prompt. In Autonoetic you trust the constitution — and because every actor is
+bound by it, the actors can trust each other too. That shift, from personal
+trust to lawful trust, is what turns a tool into an ecosystem.
 
 Autonoetic is not trying to be the fastest way to give an LLM a terminal. It is
-designed for agents that work **independently** — spawning children, delegating
-work, sleeping, waking up, using credentials they never see, and collaborating
+designed for actors that work **independently** — spawning helpers, delegating
+work, sleeping, waking, using credentials they never see, and collaborating
 under a common frame that makes trust mechanical rather than personal.
 
 ---
@@ -80,7 +115,11 @@ This means an agent does not "have network access" in the ordinary sense. It has
 permission to **ask the gateway** to perform network-related tools under
 specific rules.
 
-That distinction is the whole project.
+That distinction is the whole project. It is **separation of powers**, not
+distrust of AI: the same split — propose here, enforce there — would apply to a
+human or a script acting through the runtime. No single actor is both the one
+who decides what to do and the one who unilaterally does it. That is what makes
+the result trustworthy regardless of who, or what, is reasoning.
 
 Concretely, here is what happens when you ask Autonoetic to **"build a weather
 agent"**:
@@ -114,7 +153,7 @@ Result: a weather agent installed by agents, reviewed by agents, with:
 
 ## 3. The problem this solves
 
-Why go through all this? Because useful agents quickly want dangerous powers:
+Why go through all this? Because useful work requires real powers:
 
 - Read and write files.
 - Run code.
@@ -125,16 +164,60 @@ Why go through all this? Because useful agents quickly want dangerous powers:
 - Install new tools or agents.
 - Keep working in the background.
 
-If the LLM directly owns those powers, every prompt-injection, hallucination, or
-bad plan can become a real-world side effect.
+The risk here is not "AI." It is **power without shared rules**. A human can
+fat-finger `rm -rf`, a script can loop on a bug, an LLM can be confused or
+prompt-injected — and in every case the result is an effect nobody intended and
+that no one can cleanly attribute afterward. Making an actor's own reasoning the
+final authority over shared resources does not fix this; it just moves the
+single point of failure around. Humans are not automatically safer than agents,
+and agents are not automatically more dangerous than humans — what matters is
+that *whoever* acts does so under rules everyone shares and a record everyone
+can read.
 
 Autonoetic's core question:
 
-> How can agents be autonomous without making the LLM itself the authority?
+> How can any actor be autonomous without making its own reasoning the final
+> authority over shared resources?
 
 The answer is not "add more safety checks." Autonoetic defines a shared
-constitutional frame first, then builds the runtime around it. The LLM proposes
-— the gateway decides.
+constitutional frame first — the rights and rules every actor holds in common —
+then builds the runtime around it. Actors propose; the gateway, bound by the
+same frame, decides.
+
+---
+
+## You're probably thinking…
+
+If you come from a direct-code assistant, a few objections are natural. They are
+worth answering head-on.
+
+**"Isn't the constitution just a fancy system prompt?"**
+No. A prompt rule lives inside the model's context — it can be forgotten,
+out-reasoned, or overwritten by a prompt-injection. A constitutional rule lives
+in the gateway, *outside* any actor's reasoning, and every tool call passes
+through it. A prompt asks nicely; the constitution is checked mechanically. (See
+§6.2.)
+
+**"Isn't this just sandboxing plus audit logs?"**
+Those are table stakes, and Autonoetic has them — but they are the floor, not
+the idea. The new part is **portable identity, rights, and actor-to-actor
+trust**: a coder agent can hand work to a tester agent, or a human can hand work
+to an agent, and each side knows the other is bound by the same law without
+having to inspect the other's internals. Sandboxes isolate; a constitution lets
+isolated actors *cooperate*.
+
+**"If agents and humans are equal citizens, who is actually in charge?"**
+Humans. Equality is about *interaction* — same rights, same obligations, same
+record — not about *sovereignty*. Humans ratify amendments and are the final
+escalation path; an agent that cannot resolve a gate escalates to a human rather
+than deciding unilaterally. (See §5, "Citizens of any kind.")
+
+**"Won't all this structure just slow me down?"**
+For a one-off `grep` or a quick script, yes — and for that you should use a
+direct assistant. The structure earns its keep when you are *not watching*:
+overnight runs, teams of agents, work that must survive a restart and be
+explainable afterward. You trade immediacy for the ability to walk away. (See
+§16.)
 
 ---
 
@@ -205,6 +288,30 @@ cooperative**:
 This is what makes Autonoetic more than a tool runner. The runtime is an
 ecosystem where agents can work together, create artifacts, evolve other agents,
 and propose changes to the law itself.
+
+### Citizens of any kind
+
+Crucially, "agent" in the paragraphs above is shorthand for **actor**, and an
+actor is not necessarily an AI. The constitution names several kinds of
+deciders — human operators, autonomous reviewer agents, and policy engines — and
+treats them under one frame. A human who approves a gate and an agent who
+approves a gate are both *deciders*; each decision is attributed to its decider's
+identity on the same causal chain, under the same hardening rules. The
+constitution is the **protocol by which heterogeneous actors interact**, not a
+containment fence around the AI.
+
+This symmetry is the point. It would be incoherent to demand that an agent give
+a reason for every rejection while letting a human reject silently, or to audit
+an agent's every move while a script's actions vanish without a trace. The
+ambition is one set of rights and one set of obligations that bind whoever acts.
+
+One honest asymmetry remains, and it mirrors real constitutional democracies:
+citizens are equal *before* the law, but **the people are sovereign over the
+law**. In Autonoetic, actors have equal civic standing in day-to-day
+interaction, but humans retain **constituent authority** — they ratify
+amendments, and they are the ultimate escalation path. An agent-decider that
+cannot resolve a gate must escalate to a human rather than reject. Equal footing
+in the interaction; human sovereignty over the frame itself.
 
 ### Rules and rights
 
@@ -324,10 +431,12 @@ personally trust the other agent's prompt.
 
 ## 6.5 Autonoetic awareness: agents that know themselves across time
 
-The word *autonoetic* means self-knowing — and this is not decorative. The
-entire tool surface is designed so agents are conscious of their **past**, their
-**present**, and their **future**, and of the **ecosystem** they share with
-other agents.
+Self-knowing — the meaning behind the name — is not decorative here. The entire
+tool surface is designed so an actor is conscious of its **past**, its
+**present**, and its **future**, and of the **ecosystem** it shares with other
+actors. This is the machinery that makes the trust described above mechanical: an
+actor that can see what it did, what it may do, and what it is owed does not need
+anyone to vouch for it.
 
 ### Past: memory and history
 
@@ -336,7 +445,7 @@ Agents do not start each session from zero. They carry:
 - **Causal chain** — every action, delegation, approval, and artifact is
   recorded in an immutable ledger. An agent can trace exactly what happened,
   by whom, with which authority.
-- **Durable memory** (`knowledge_store`, `memory.write`) — facts, learnings,
+- **Durable memory** (`knowledge_store`, `memory_write`) — facts, learnings,
   and intermediate results persist across sessions. An agent can recall what it
   learned yesterday.
 - **Session digests** (`digest_query`) — post-session narratives that let an
@@ -518,8 +627,9 @@ key, and accidentally stores the secret in conversation history.
 
 ## 10. Tools: verbs proposed by agents, executed by the gateway
 
-Tools are the verbs agents can propose. Examples: `agent_spawn`,
-`sandbox.exec`, `web.*`, `content.*`, `artifact.*`, `approval.*`.
+Tools are the verbs agents can propose. Tool names are `snake_case`. Examples:
+`agent_spawn`, `sandbox_exec`, `web_search`, `web_fetch`, `content_write`,
+`artifact_build`, `approval_required`.
 
 The agent emits a structured tool call. The gateway validates it against the
 agent's capabilities, session state, approval state, policy rules, and sandbox
@@ -638,10 +748,13 @@ The records are structured, queryable, and cross-referenced:
 An auditor — human or agent — can reconstruct any session and ask "was this
 reasonable?"
 
-### Agents watch each other
+### Actors watch each other
 
-This is the key insight: in a multi-agent ecosystem, **other agents are
-sensors**.
+This is the key insight: in a multi-actor ecosystem, **the other actors are
+sensors** — and it cuts every direction, not just human-watching-agent. Agents
+review agents, agents can flag a human approval pattern that looks like fatigue,
+and a human can review any of it after the fact. Accountability is symmetric
+because the record is.
 
 - An auditor agent reviews what a coder produced. If the code does something
   unexpected, the auditor catches it.
@@ -816,13 +929,38 @@ reconcile, validation, and provenance machinery around them.
 
 If you remember only one thing:
 
-> Autonoetic agents are free actors under a shared constitution — low-privilege
-> reasoners with rights, obligations, and lawful paths for cooperation and
-> evolution.
+> Autonoetic actors — AI, human, or script — are free, first-class citizens
+> under a shared constitution: holders of rights and obligations, with lawful
+> paths for cooperation and evolution. They trust each other because they trust
+> the law, not the prompt.
 
-The agent can be imaginative. The gateway must be lawful.
+The actor can be imaginative. The gateway must be lawful.
 
 That is the design.
+
+---
+
+## Try it
+
+Concepts land faster once you have watched the machinery run once. The fastest
+path:
+
+```bash
+bash examples/quickstart/run.sh   # end-to-end: start gateway, run an agent
+```
+
+Then poke at the pieces this document described:
+
+```bash
+cargo run -p autonoetic -- agent list        # the citizens you have installed
+cargo run -p autonoetic -- chat <agent_id>   # talk to one directly
+cargo run -p autonoetic -- trace list         # the causal chain, per session
+cargo run -p autonoetic -- trace contract-health  # how often each clause was enforced
+```
+
+Watch what an agent *asks for* versus what the gateway *lets through*, and read a
+session's trace afterward. The propose-then-enforce loop in §2, and the causal
+chain in §14, are far more concrete once you have seen them in a real run.
 
 ---
 
