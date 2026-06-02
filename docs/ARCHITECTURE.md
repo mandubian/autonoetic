@@ -1452,16 +1452,17 @@ The LoopGuard uses `error_type` to distinguish recoverable from non-recoverable 
 
 #### Trip conditions
 
-The guard has four independent trip conditions, each attributed on the `loop_guard.tripped` causal event with a stable `reason` code and the constitutional rule whose text describes it:
+The guard has five independent trip conditions, each attributed on the `loop_guard.tripped` causal event with a stable `reason` code and the constitutional rule whose text describes it. Thresholds are configurable; current defaults live in `docs/config-reference.md`:
 
 | `reason` | Condition | Rule |
 |---|---|---|
-| `tool_failure_budget` | A single tool exceeds `max_tool_failures` (default 5) | P-7.5 |
+| `tool_failure_budget` | A single tool exceeds `max_tool_failures` | P-7.5 |
 | `no_meaningful_progress` | `current_loops` reaches `max_loops_without_progress` — consecutive LLM steps with no progress-resetting tool result | P-7.7 |
-| `rotating_polling_pattern` | The last `rotation_window_size` (default 16) successful calls hold ≤ `rotation_distinct_floor` (default 6) distinct fingerprints — an agent cycling a small set of read-only tools without semantic progress. A result carrying `side_effect_state: "committed"` clears the window. | P-7.19 |
-| `child_failure_budget` | Child-task failures reach `max_child_failures` (default 3); does not reset on progress | P-7.20 |
+| `rotating_polling_pattern` | The last `rotation_window_size` successful calls hold ≤ `rotation_distinct_floor` distinct fingerprints — an agent cycling a small set of read-only tools without semantic progress. A result carrying `side_effect_state: "committed"` clears the window. | P-7.19 |
+| `redundant_roster_polling` | An idempotent read-only roster tool (`agent_list` / `agent_inspect` / `agent_discover`) is called `roster_repeat_floor` times in a row with identical normalized arguments — a fast path that fires before the rotating-polling window fills, since re-listing a directory never yields new data. | P-7.19 |
+| `child_failure_budget` | Child-task failures reach `max_child_failures`; does not reset on progress | P-7.20 |
 
-`no_meaningful_progress` (P-7.7) and `rotating_polling_pattern` (P-7.19) are complementary: P-7.7 catches the absence of progress-making results; P-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset P-7.7's counter).
+`no_meaningful_progress` (P-7.7) and `rotating_polling_pattern` (P-7.19) are complementary: P-7.7 catches the absence of progress-making results; P-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset P-7.7's counter). `redundant_roster_polling` is a narrow, faster sibling of `rotating_polling_pattern` for the specific case of repeated idempotent roster reads.
 
 ### Design Rule
 
