@@ -56,6 +56,41 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
     }
 }
 
+fn spawn_redirect_http_server(
+    location: &str,
+    final_status: &str,
+    final_content_type: &str,
+    final_body: String,
+) -> (String, thread::JoinHandle<()>) {
+    let location = location.to_string();
+    let final_status = final_status.to_string();
+    let final_content_type = final_content_type.to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should expose local addr");
+    let handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request_buf = [0_u8; 2048];
+            let _ = stream.read(&mut request_buf);
+            let request = String::from_utf8_lossy(&request_buf);
+            let response = if request.contains("GET /redirect") {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 {final_status}\r\nContent-Type: {final_content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{final_body}",
+                    final_body.len()
+                )
+            };
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    (format!("http://{}", addr), handle)
+}
+
 fn spawn_one_shot_http_server(
     status: &str,
     content_type: &str,
@@ -313,6 +348,189 @@ fn test_web_fetch_tool_roundtrip_local_server() {
         .contains("hello web fetch"));
 
     handle.join().expect("server thread should join");
+}
+
+#[test]
+fn test_web_fetch_follows_same_host_redirect() {
+    let manifest = test_manifest(vec![Capability::NetworkAccess {
+        hosts: vec!["127.0.0.1".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
+
+    let (final_base, final_handle) = spawn_one_shot_http_server(
+        "200 OK",
+        "text/plain; charset=utf-8",
+        "after redirect".to_string(),
+    );
+    let final_url = format!("{final_base}/final");
+    let (redirect_base, redirect_handle) =
+        spawn_redirect_http_server(&final_url, "200 OK", "text/plain", String::new());
+
+    let args = serde_json::json!({
+        "url": format!("{redirect_base}/redirect"),
+        "timeout_secs": 10,
+        "max_chars": 4096
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "web_fetch",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::to_string(&args).expect("json should encode"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("web.fetch should follow same-host redirect");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("web.fetch result should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(true)));
+    assert_eq!(parsed.get("redirect_hops"), Some(&serde_json::json!(1)));
+    assert_eq!(parsed.get("final_url"), Some(&serde_json::json!(final_url)));
+    assert!(parsed
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .contains("after redirect"));
+
+    redirect_handle.join().expect("redirect server should join");
+    final_handle.join().expect("final server should join");
+}
+
+#[test]
+fn test_web_fetch_cross_domain_redirect_requires_approval() {
+    let manifest = test_manifest(vec![Capability::NetworkAccess {
+        hosts: vec!["127.0.0.1".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir should create");
+    let agent_dir = agents_dir.join(&manifest.agent.id);
+    std::fs::create_dir_all(&agent_dir).expect("agent dir should create");
+    write_remote_access_any(&agent_dir);
+
+    let gateway_store = Arc::new(GatewayStore::open(&gateway_dir).expect("gateway store should open"));
+    let mut config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    config.approval_dwell_multiplier = 0.0;
+
+    let (redirect_base, redirect_handle) = spawn_redirect_http_server(
+        "http://example.com/cross-domain-target",
+        "200 OK",
+        "text/plain",
+        String::new(),
+    );
+
+    let args = serde_json::json!({
+        "url": format!("{redirect_base}/redirect"),
+        "timeout_secs": 10
+    });
+
+    let result = registry
+        .execute(
+            "web_fetch",
+            &manifest,
+            &policy,
+            &agent_dir,
+            None,
+            &args.to_string(),
+            Some("root-test"),
+            None,
+            Some(&config),
+            Some(gateway_store),
+            None,
+        )
+        .expect("web.fetch should return approval payload");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("json should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(
+        parsed.get("redirect_cross_domain"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        parsed.get("redirect_url"),
+        Some(&serde_json::json!("http://example.com/cross-domain-target"))
+    );
+    assert_eq!(
+        parsed.get("approval_required"),
+        Some(&serde_json::json!(true))
+    );
+
+    redirect_handle.join().expect("redirect server should join");
+}
+
+#[test]
+fn test_web_fetch_cross_domain_redirect_follows_when_target_pre_approved() {
+    // Cross-domain redirect (127.0.0.1 → localhost) is followed transparently
+    // when the target host is already in the agent's allowed hosts.
+    let manifest = test_manifest(vec![Capability::NetworkAccess {
+        hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    write_remote_access_any(temp.path());
+
+    let (final_base, final_handle) = spawn_one_shot_http_server(
+        "200 OK",
+        "text/plain; charset=utf-8",
+        "cross-domain redirect followed".to_string(),
+    );
+    let final_url = format!("{final_base}/final");
+    let (redirect_base, redirect_handle) =
+        spawn_redirect_http_server(&final_url, "200 OK", "text/plain", String::new());
+
+    let args = serde_json::json!({
+        "url": format!("{redirect_base}/redirect"),
+        "timeout_secs": 10,
+        "max_chars": 4096
+    });
+
+    let registry = default_registry();
+    let result = registry
+        .execute(
+            "web_fetch",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::to_string(&args).expect("json should encode"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("web.fetch should follow cross-domain redirect when target is pre-approved");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("web.fetch result should decode");
+    assert_eq!(parsed.get("ok"), Some(&serde_json::json!(true)));
+    assert_eq!(parsed.get("redirect_hops"), Some(&serde_json::json!(1)));
+    assert!(parsed
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .contains("cross-domain redirect followed"));
+
+    redirect_handle.join().expect("redirect server should join");
+    final_handle.join().expect("final server should join");
 }
 
 #[test]

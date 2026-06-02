@@ -2,6 +2,10 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::network_policy::{self, DeclarationRequirement};
+use crate::runtime::tools::web_redirect::{
+    hosts_same_redirect_scope, is_redirect_status, resolve_redirect_location,
+    MAX_WEB_REDIRECT_HOPS,
+};
 use crate::runtime::tools::{block_on_http, extract_host, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
@@ -1209,6 +1213,331 @@ struct WebFetchArgs {
     approval_ref: Option<String>,
 }
 
+enum WebFetchHostGate {
+    Allowed,
+    ApprovalPayload(String),
+}
+
+enum WebFetchHttpOutcome {
+    Success {
+        status_code: u16,
+        content_type: Option<String>,
+        body: String,
+        final_url: String,
+        redirect_hops: u32,
+    },
+    NeedsApproval(String),
+}
+
+enum WebFetchHop {
+    Redirect(String),
+    Success {
+        status_code: u16,
+        content_type: Option<String>,
+        body: String,
+    },
+}
+
+fn gate_web_fetch_host(
+    manifest: &AgentManifest,
+    policy: &PolicyEngine,
+    agent_dir: &Path,
+    session_id: Option<&str>,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    run_context: Option<&NativeToolRunContext>,
+    args: &WebFetchArgs,
+    host: &str,
+    request_url: &str,
+    approval_validated: bool,
+    reason: &str,
+) -> anyhow::Result<WebFetchHostGate> {
+    enforce_remote_target_for_web(manifest, agent_dir, host, request_url)?;
+
+    let host_allowed = policy.can_connect_net(host).is_allowed()
+        || gateway_store
+            .as_ref()
+            .is_some_and(|s| session_grants_allow_host(s.as_ref(), session_id, host))
+        || approval_validated;
+
+    if host_allowed {
+        return Ok(WebFetchHostGate::Allowed);
+    }
+
+    let Some(store) = gateway_store else {
+        return Err(anyhow::Error::from(tagged::Tagged::permission(
+            anyhow::anyhow!(
+                "Permission Denied: NetworkAccess does not allow host '{}'",
+                host
+            ),
+        )));
+    };
+    let Some(cfg) = config else {
+        return Err(anyhow::Error::from(tagged::Tagged::permission(
+            anyhow::anyhow!(
+                "Permission Denied: NetworkAccess does not allow host '{}'",
+                host
+            ),
+        )));
+    };
+
+    let action = ScheduledAction::WebFetch {
+        url: request_url.to_string(),
+        timeout_secs: args.timeout_secs,
+        max_chars: args.max_chars,
+        detected_hosts: Some(vec![host.to_string()]),
+        payload: Some(serde_json::json!({
+            "host": host,
+            "retry_field": "approval_ref"
+        })),
+    };
+
+    let gate = crate::runtime::human_gate::GateService::new(store);
+    let gate_result = gate.check(crate::runtime::human_gate::GateRequest {
+        kind: crate::runtime::human_gate::GateKind::Approval {
+            action,
+            targets: vec![host.to_string()],
+            match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+        },
+        manifest,
+        session_id,
+        run_context,
+        config: Some(cfg),
+        reason: reason.to_string(),
+        summary: format!("web.fetch {}", host),
+        approval_ref: None,
+        pre_validated: false,
+        turn_id: None,
+    })?;
+    match gate_result {
+        crate::runtime::human_gate::GateResult::Cleared { .. } => Ok(WebFetchHostGate::Allowed),
+        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+            Ok(WebFetchHostGate::ApprovalPayload(
+                serde_json::json!({
+                    "ok": false,
+                    "approval_required": true,
+                    "approval_already_pending": true,
+                    "request_id": gate_id,
+                    "suspended": true,
+                    "reason": reason,
+                    "repair_hint": "Wait for the existing approval to be resolved.",
+                    "approval": {
+                        "kind": "web_fetch",
+                        "summary": format!("web.fetch {}", host),
+                        "retry_field": "approval_ref"
+                    }
+                })
+                .to_string(),
+            ))
+        }
+        crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+            Ok(WebFetchHostGate::ApprovalPayload(
+                serde_json::json!({
+                    "ok": false,
+                    "error_type": "permission",
+                    "message": format!(
+                        "Execution suspended pending operator approval ({}). Retry web.fetch with approval_ref after approval.",
+                        gate_id
+                    ),
+                    "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
+                    "error": format!("Network access denied for host: {}", host),
+                    "approval_required": true,
+                    "request_id": gate_id,
+                    "suspended": true,
+                    "reason": reason,
+                    "approval": {
+                        "kind": "web_fetch",
+                        "summary": format!("web.fetch {}", host),
+                        "reason": reason,
+                        "retry_field": "approval_ref"
+                    }
+                })
+                .to_string(),
+            ))
+        }
+        other => {
+            tracing::warn!(
+                target: "web",
+                gate_result = ?other,
+                "Unexpected gate result for web.fetch gate"
+            );
+            Ok(WebFetchHostGate::Allowed)
+        }
+    }
+}
+
+fn execute_web_fetch_http(
+    manifest: &AgentManifest,
+    policy: &PolicyEngine,
+    agent_dir: &Path,
+    session_id: Option<&str>,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    run_context: Option<&NativeToolRunContext>,
+    args: &WebFetchArgs,
+    approval_validated: bool,
+    timeout_secs: u64,
+) -> anyhow::Result<WebFetchHttpOutcome> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| anyhow::anyhow!("web.fetch client build failed: {}", e))?;
+
+    let mut current_url = args.url.clone();
+    let mut redirect_hops = 0u32;
+
+    loop {
+        let host = extract_host(&current_url)?;
+        let gate_reason = format!("web.fetch to {} requires approval", host);
+        match gate_web_fetch_host(
+            manifest,
+            policy,
+            agent_dir,
+            session_id,
+            config,
+            gateway_store.clone(),
+            run_context,
+            args,
+            &host,
+            &current_url,
+            approval_validated && current_url == args.url,
+            &gate_reason,
+        )? {
+            WebFetchHostGate::ApprovalPayload(payload) => {
+                return Ok(WebFetchHttpOutcome::NeedsApproval(payload));
+            }
+            WebFetchHostGate::Allowed => {}
+        }
+
+        let fetch_url = current_url.clone();
+        let hop = block_on_http({
+            let client = client.clone();
+            async move {
+                let response = client
+                    .get(&fetch_url)
+                    .timeout(StdDuration::from_secs(timeout_secs))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        anyhow::Error::from(tagged::Tagged::resource(anyhow::anyhow!(
+                            "web.fetch request failed: {}",
+                            e
+                        )))
+                    })?;
+
+                let status = response.status();
+                if is_redirect_status(status) {
+                    let location = response
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| {
+                            anyhow::Error::from(tagged::Tagged::resource(anyhow::anyhow!(
+                                "web.fetch redirect response missing Location header (status {})",
+                                status
+                            )))
+                        })?;
+                    return Ok(WebFetchHop::Redirect(location));
+                }
+                if !status.is_success() {
+                    return Err(anyhow::Error::from(tagged::Tagged::resource(
+                        anyhow::anyhow!("web.fetch request failed with status {}", status),
+                    )));
+                }
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.to_string());
+                let body = response.text().await.map_err(|e| {
+                    anyhow::Error::from(tagged::Tagged::execution(anyhow::anyhow!(
+                        "web.fetch could not decode text response: {}",
+                        e
+                    )))
+                })?;
+                Ok(WebFetchHop::Success {
+                    status_code: status.as_u16(),
+                    content_type,
+                    body,
+                })
+            }
+        })?;
+
+        match hop {
+            WebFetchHop::Redirect(location) => {
+                redirect_hops += 1;
+                if redirect_hops > MAX_WEB_REDIRECT_HOPS {
+                    return Err(anyhow::Error::from(tagged::Tagged::resource(
+                        anyhow::anyhow!(
+                            "web.fetch exceeded maximum of {} redirects",
+                            MAX_WEB_REDIRECT_HOPS
+                        ),
+                    )));
+                }
+                let next_url = resolve_redirect_location(&current_url, &location)
+                    .map_err(|e| anyhow::Error::from(tagged::Tagged::resource(e)))?;
+                if next_url == current_url {
+                    return Err(anyhow::Error::from(tagged::Tagged::resource(
+                        anyhow::anyhow!(
+                            "web.fetch redirect loop detected: {} redirects to itself",
+                            current_url
+                        ),
+                    )));
+                }
+                let next_host = extract_host(&next_url)?;
+                if !hosts_same_redirect_scope(&host, &next_host) {
+                    let reason = format!(
+                        "web.fetch redirect from {} to {} requires approval (cross-registrable-domain redirect)",
+                        host, next_host
+                    );
+                    match gate_web_fetch_host(
+                        manifest,
+                        policy,
+                        agent_dir,
+                        session_id,
+                        config,
+                        gateway_store.clone(),
+                        run_context,
+                        args,
+                        &next_host,
+                        &next_url,
+                        false,
+                        &reason,
+                    )? {
+                        WebFetchHostGate::Allowed => {
+                            // Cross-domain redirect target is already allowed — follow it.
+                        }
+                        WebFetchHostGate::ApprovalPayload(payload) => {
+                            let mut parsed: serde_json::Value =
+                                serde_json::from_str(&payload).unwrap_or(serde_json::json!({}));
+                            if let Some(obj) = parsed.as_object_mut() {
+                                obj.insert("redirect_cross_domain".into(), serde_json::json!(true));
+                                obj.insert("redirect_url".into(), serde_json::json!(next_url));
+                            }
+                            return Ok(WebFetchHttpOutcome::NeedsApproval(parsed.to_string()));
+                        }
+                    }
+                }
+                current_url = next_url;
+            }
+            WebFetchHop::Success {
+                status_code,
+                content_type,
+                body,
+            } => {
+                return Ok(WebFetchHttpOutcome::Success {
+                    status_code,
+                    content_type,
+                    body,
+                    final_url: current_url,
+                    redirect_hops,
+                });
+            }
+        }
+    }
+}
+
 pub struct WebFetchTool;
 
 impl NativeTool for WebFetchTool {
@@ -1321,169 +1650,51 @@ impl NativeTool for WebFetchTool {
             false
         };
 
-        let host_allowed = policy.can_connect_net(&host).is_allowed()
-            || _gateway_store
-                .as_ref()
-                .is_some_and(|s| session_grants_allow_host(s.as_ref(), _session_id, &host))
-            || approval_validated;
-
-        if !host_allowed {
-            let Some(store) = _gateway_store else {
-                return Err(anyhow::Error::from(tagged::Tagged::permission(
-                    anyhow::anyhow!(
-                        "Permission Denied: NetworkAccess does not allow host '{}'",
-                        host
-                    ),
-                )));
-            };
-            let Some(cfg) = _config else {
-                return Err(anyhow::Error::from(tagged::Tagged::permission(
-                    anyhow::anyhow!(
-                        "Permission Denied: NetworkAccess does not allow host '{}'",
-                        host
-                    ),
-                )));
-            };
-
-            let action = ScheduledAction::WebFetch {
-                url: args.url.clone(),
-                timeout_secs: args.timeout_secs,
-                max_chars: args.max_chars,
-                detected_hosts: Some(vec![host.clone()]),
-                payload: Some(serde_json::json!({
-                    "host": host.clone(),
-                    "retry_field": "approval_ref"
-                })),
-            };
-            let reason = format!("web.fetch to {} requires approval", host);
-
-            let gate = crate::runtime::human_gate::GateService::new(store);
-            let gate_result = gate.check(
-                crate::runtime::human_gate::GateRequest {
-                    kind: crate::runtime::human_gate::GateKind::Approval {
-                        action: action.clone(),
-                        targets: vec![host.clone()],
-                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
-                    },
-                    manifest,
-                    session_id: _session_id,
-                    run_context: _run_context,
-                    config: Some(cfg),
-                    reason: reason.clone(),
-                    summary: format!("web.fetch {}", host),
-                    approval_ref: None,
-                    pre_validated: false,
-                    turn_id: None,
-                },
-            )?;
-            match gate_result {
-                crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "approval_required": true,
-                        "approval_already_pending": true,
-                        "request_id": gate_id,
-                        "suspended": true,
-                        "reason": reason,
-                        "repair_hint": "Wait for the existing approval to be resolved.",
-                        "approval": {
-                            "kind": "web_fetch",
-                            "summary": format!("web.fetch {}", host),
-                            "retry_field": "approval_ref"
-                        }
-                    }).to_string());
-                }
-                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error_type": "permission",
-                        "message": format!(
-                            "Execution suspended pending operator approval ({}). Retry web.fetch with approval_ref after approval.",
-                            gate_id
-                        ),
-                        "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                        "error": format!("Network access denied for host: {}", host),
-                        "approval_required": true,
-                        "request_id": gate_id,
-                        "suspended": true,
-                        "reason": reason,
-                        "approval": {
-                            "kind": "web_fetch",
-                            "summary": format!("web.fetch {}", host),
-                            "reason": format!("web.fetch to {} requires approval", host),
-                            "retry_field": "approval_ref"
-                        }
-                    }).to_string());
-                }
-                other => {
-                    tracing::warn!(
-                        target: "web",
-                        gate_result = ?other,
-                        "Unexpected gate result for web.fetch gate"
-                    );
-                }
-            }
-        }
-
         let timeout_secs = args.timeout_secs.unwrap_or(20).clamp(5, 120);
         let max_chars = args.max_chars.unwrap_or(20_000).clamp(512, 200_000);
-        let fetch_url = args.url.clone();
-        let (status_code, content_type, body) = block_on_http(async move {
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| anyhow::anyhow!("web.fetch client build failed: {}", e))?;
-            let response = client
-                .get(&fetch_url)
-                .timeout(StdDuration::from_secs(timeout_secs))
-                .send()
-                .await
-                .map_err(|e| {
-                    anyhow::Error::from(tagged::Tagged::resource(anyhow::anyhow!(
-                        "web.fetch request failed: {}",
-                        e
-                    )))
-                })?;
 
-            let status = response.status();
-            if !status.is_success() {
-                return Err(anyhow::Error::from(tagged::Tagged::resource(
-                    anyhow::anyhow!("web.fetch request failed with status {}", status),
-                )));
+        match execute_web_fetch_http(
+            manifest,
+            policy,
+            agent_dir,
+            _session_id,
+            _config,
+            _gateway_store,
+            _run_context,
+            &args,
+            approval_validated,
+            timeout_secs,
+        )? {
+            WebFetchHttpOutcome::NeedsApproval(payload) => Ok(payload),
+            WebFetchHttpOutcome::Success {
+                status_code,
+                content_type,
+                body,
+                final_url,
+                redirect_hops,
+            } => {
+                let total_chars = body.chars().count();
+                let truncated = total_chars > max_chars;
+                let content = if truncated {
+                    body.chars().take(max_chars).collect::<String>()
+                } else {
+                    body
+                };
+
+                serde_json::to_string(&serde_json::json!({
+                    "ok": true,
+                    "url": args.url,
+                    "final_url": final_url,
+                    "redirect_hops": redirect_hops,
+                    "status_code": status_code,
+                    "content_type": content_type,
+                    "truncated": truncated,
+                    "total_chars": total_chars,
+                    "content": content
+                }))
+                .map_err(Into::into)
             }
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string());
-            let body = response.text().await.map_err(|e| {
-                anyhow::Error::from(tagged::Tagged::execution(anyhow::anyhow!(
-                    "web.fetch could not decode text response: {}",
-                    e
-                )))
-            })?;
-            Ok((status.as_u16(), content_type, body))
-        })?;
-
-        let total_chars = body.chars().count();
-        let truncated = total_chars > max_chars;
-        let content = if truncated {
-            body.chars().take(max_chars).collect::<String>()
-        } else {
-            body
-        };
-
-        serde_json::to_string(&serde_json::json!({
-            "ok": true,
-            "url": args.url,
-            "status_code": status_code,
-            "content_type": content_type,
-            "truncated": truncated,
-            "total_chars": total_chars,
-            "content": content
-        }))
-        .map_err(Into::into)
+        }
     }
 }
 

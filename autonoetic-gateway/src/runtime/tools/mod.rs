@@ -1010,6 +1010,7 @@ pub mod skill;
 pub mod user_interaction;
 pub mod tool_discover;
 pub mod user_profile;
+mod web_redirect;
 pub mod web;
 pub mod workflow;
 
