@@ -83,6 +83,21 @@ Accept: text/event-stream
 
 Each SSE `data` payload is the serialized `JsonRpcResponse` from `session.status`.
 
+### `GET /api/operator/activity/stream/{root_session_id}` (SSE)
+
+Streams **operator activity** rows for a root session — the channel-neutral feed used by the chat TUI and future messaging bridges (Discord, WhatsApp, etc.). Polls `operator.activity.list` on an interval until the client disconnects.
+
+- **Auth**: Bearer or `?token=` (same as session stream).
+- **Query**: `interval_ms` (100–10 000, default `500`), optional `after` activity cursor for reconnect.
+- **Events**: `operator.activity` (JSON batch `{ "activities": [...] }`), `operator.activity.heartbeat` when empty, `operator.activity.error` on RPC failure.
+
+```http
+GET /api/operator/activity/stream/session-46d65624?token=<AUTONOETIC_SHARED_SECRET>&interval_ms=1000
+Accept: text/event-stream
+```
+
+JSON-RPC equivalent: `operator.activity.list` with `{ "root_session_id", "after_activity_id", "limit", "min_severity" }`.
+
 ## HTTP Content API Endpoints
 
 All endpoints require Bearer token authentication.

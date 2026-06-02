@@ -882,6 +882,58 @@ impl JsonRpcRouter {
                 }
             }
 
+            "operator.activity.list" => {
+                let params: autonoetic_types::operator_activity::OperatorActivityListParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for operator.activity.list: {}", e),
+                            );
+                        }
+                    };
+                if params.root_session_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "root_session_id is required".to_string(),
+                    );
+                }
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let min_severity = params
+                    .min_severity
+                    .as_deref()
+                    .and_then(autonoetic_types::operator_activity::OperatorActivitySeverity::parse_str);
+                let limit = params.limit.clamp(1, 200);
+                match store.list_operator_activity(
+                    &params.root_session_id,
+                    params.after_activity_id.as_deref(),
+                    limit,
+                    min_severity,
+                ) {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("operator.activity.list failed: {}", e),
+                    ),
+                }
+            }
+
             "session.approval_resolved" => {
                 #[derive(Deserialize)]
                 struct ApprovalResolvedParams {

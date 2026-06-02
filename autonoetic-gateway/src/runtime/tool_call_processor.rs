@@ -183,8 +183,9 @@ impl<'a> ToolCallProcessor<'a> {
                         &res,
                         started_at.elapsed(),
                         None,
-                        Some(event_id),
+                        Some(event_id.clone()),
                     )?;
+                    self.record_operator_activity(tc, &res, Some(event_id));
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
                     res
@@ -217,8 +218,9 @@ impl<'a> ToolCallProcessor<'a> {
                         &error_json,
                         started_at.elapsed(),
                         Some(&tool_error),
-                        Some(event_id),
+                        Some(event_id.clone()),
                     )?;
+                    self.record_operator_activity(tc, &error_json, Some(event_id));
                     error_json
                 }
             };
@@ -306,6 +308,58 @@ impl<'a> ToolCallProcessor<'a> {
             result: Some(result_json.to_string()),
         };
         store.create_execution_trace(&trace)
+    }
+
+    fn record_operator_activity(
+        &self,
+        tc: &ToolCall,
+        result_json: &str,
+        causal_event_id: Option<String>,
+    ) {
+        let Some(store) = &self.gateway_store else {
+            return;
+        };
+        let Some(session_id) = &self.session_id else {
+            return;
+        };
+        let canonical_tool_name = Self::canonical_tool_name(&tc.name).to_string();
+        let Some(draft) = crate::runtime::operator_activity::classify_tool_activity(
+            &canonical_tool_name,
+            &tc.arguments,
+            result_json,
+        ) else {
+            return;
+        };
+
+        let root_session_id = self
+            .run_context
+            .as_ref()
+            .map(|c| c.root_session_id.clone())
+            .unwrap_or_else(|| {
+                crate::runtime::content_store::root_session_id(session_id).to_string()
+            });
+        let workflow_id = self.run_context.as_ref().and_then(|c| c.workflow_id.clone());
+        let task_id = self.run_context.as_ref().and_then(|c| c.task_id.clone());
+
+        let record = draft.into_record(
+            root_session_id,
+            session_id.clone(),
+            self.manifest.agent.id.clone(),
+            workflow_id,
+            task_id,
+            self.turn_id.clone(),
+            Some(canonical_tool_name),
+            causal_event_id,
+            None,
+        );
+        if let Err(e) = store.insert_operator_activity(&record) {
+            tracing::warn!(
+                target: "operator_activity",
+                error = %e,
+                session_id = %session_id,
+                "Failed to persist operator activity"
+            );
+        }
     }
 
     async fn execute_tool_call(
