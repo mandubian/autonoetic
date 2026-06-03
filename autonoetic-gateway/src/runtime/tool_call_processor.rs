@@ -363,6 +363,7 @@ impl<'a> ToolCallProcessor<'a> {
                 tracing::debug!(
                     target: "operator_activity",
                     session_id = %session_id,
+                    root_session_id = %record.root_session_id,
                     rate_limit_per_min,
                     "Operator activity dropped by per-root rate limit"
                 );

@@ -61,8 +61,10 @@ impl GatewayStore {
         // Notices don't consume budget — only real activity rows count.
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM operator_activity
-             WHERE root_session_id = ?1 AND occurred_at >= ?2 AND kind != 'rate_limited'",
-            params![record.root_session_id, window_start],
+             WHERE root_session_id = ?1
+               AND occurred_at >= ?2 AND occurred_at <= ?3
+               AND kind != 'rate_limited'",
+            params![record.root_session_id, window_start, record.occurred_at],
             |row| row.get(0),
         )?;
 
@@ -73,8 +75,10 @@ impl GatewayStore {
 
         let notice_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM operator_activity
-             WHERE root_session_id = ?1 AND occurred_at >= ?2 AND kind = 'rate_limited'",
-            params![record.root_session_id, window_start],
+             WHERE root_session_id = ?1
+               AND occurred_at >= ?2 AND occurred_at <= ?3
+               AND kind = 'rate_limited'",
+            params![record.root_session_id, window_start, record.occurred_at],
             |row| row.get(0),
         )?;
 
@@ -463,6 +467,30 @@ mod tests {
         later.occurred_at = "2026-06-01T10:02:00+00:00".to_string();
         assert_eq!(
             store.insert_operator_activity_throttled(&later, 1).unwrap(),
+            OperatorActivityInsert::Inserted
+        );
+    }
+
+    #[test]
+    fn rate_limit_window_has_upper_bound_for_out_of_order_inserts() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "session-out-of-order";
+
+        // A later-timestamped row lands first (e.g. concurrent emitter).
+        let mut later = sample_record(root);
+        later.occurred_at = "2026-06-01T10:02:00+00:00".to_string();
+        assert_eq!(
+            store.insert_operator_activity_throttled(&later, 1).unwrap(),
+            OperatorActivityInsert::Inserted
+        );
+
+        // An earlier row's window is [09:59:00, 10:00:00] — the later row sits
+        // past its upper bound and must NOT count against it, so it inserts.
+        let mut earlier = sample_record(root);
+        earlier.occurred_at = "2026-06-01T10:00:00+00:00".to_string();
+        assert_eq!(
+            store.insert_operator_activity_throttled(&earlier, 1).unwrap(),
             OperatorActivityInsert::Inserted
         );
     }
