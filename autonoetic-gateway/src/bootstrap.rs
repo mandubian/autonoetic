@@ -216,7 +216,7 @@ fn bootstrap_agent_inner(
         runtime_lock_hash,
         manifest_hash,
         created_at: now.clone(),
-        created_by_type: "bootstrap".to_string(),
+        created_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
         created_by_id: "cli".to_string(),
         source_kind: "bootstrap".to_string(),
         source_ref: None,

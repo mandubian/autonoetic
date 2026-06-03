@@ -158,6 +158,8 @@ pub struct AgentRevisionRecord {
     /// Actor kind that created this revision. Canonical values come from
     /// [`PrincipalKind::tag()`](crate::principal::PrincipalKind::tag):
     /// `"human"`, `"autonoetic_agent"`, `"script"`, `"foreign_agent"`.
+    /// Historical rows may contain legacy values (`"user"`, `"test"`,
+    /// `"agent"`, `"bootstrap"`, `"system"`, `"cli"`, `"tool"`).
     pub created_by_type: String,
     /// Actor ID that created this revision.
     pub created_by_id: String,
@@ -200,7 +202,7 @@ pub struct AgentAliasRecord {
     /// RFC3339 update timestamp.
     pub updated_at: String,
     /// Actor kind that updated this alias. See [`PrincipalKind::tag()`](crate::principal::PrincipalKind::tag)
-    /// for canonical values.
+    /// for canonical values. Historical rows may contain legacy values.
     pub updated_by_type: String,
     /// Actor ID that updated this alias.
     pub updated_by_id: String,
@@ -263,6 +265,7 @@ pub struct PromotionRecord {
     /// RFC3339 creation timestamp.
     pub created_at: String,
     /// Actor kind. See [`PrincipalKind::tag()`](crate::principal::PrincipalKind::tag) for canonical values.
+    /// Historical rows may contain legacy values.
     pub created_by_type: String,
     /// Actor ID.
     pub created_by_id: String,

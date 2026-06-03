@@ -574,7 +574,7 @@ fn create_temp_eval_suite(
         description: format!("Temporary A/B replay suite for {}", agent_id),
         spec_json,
         created_at: now,
-        created_by_type: "tool".to_string(),
+        created_by_type: autonoetic_types::principal::PrincipalKind::AutonoeticAgent.tag().to_string(),
         created_by_id: caller_agent_id.to_string(),
         origin_node_id: "gateway".to_string(),
         evaluated_targets: vec![agent_id.to_string()],
