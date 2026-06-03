@@ -194,6 +194,8 @@ chat:
 # notice is emitted (suppression stays visible). 0 disables. Default: 120.
 operator_activity:
   rate_limit_per_min: 120
+  # retention_days: maximum age (days) of operator activity rows before pruning. Default: 90.
+  retention_days: 90
 
 # ── Approval Levels ───────────────────────────────────────────────────
 # Escalation: require higher authority for sensitive actions.

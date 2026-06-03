@@ -1524,18 +1524,27 @@ pub struct OperatorActivityConfig {
     /// Default: 120.
     #[serde(default = "default_operator_activity_rate_limit_per_min")]
     pub rate_limit_per_min: u32,
+    /// Maximum age (in days) of operator activity rows before automatic
+    /// pruning. Default: 90.
+    #[serde(default = "default_operator_activity_retention_days")]
+    pub retention_days: i64,
 }
 
 impl Default for OperatorActivityConfig {
     fn default() -> Self {
         Self {
             rate_limit_per_min: default_operator_activity_rate_limit_per_min(),
+            retention_days: default_operator_activity_retention_days(),
         }
     }
 }
 
 fn default_operator_activity_rate_limit_per_min() -> u32 {
     120
+}
+
+fn default_operator_activity_retention_days() -> i64 {
+    90
 }
 
 /// Approval level / escalation configuration.

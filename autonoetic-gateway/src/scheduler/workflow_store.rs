@@ -560,6 +560,32 @@ pub fn append_workflow_event(
         event_type = %event.event_type,
         "append_workflow_event: appended to SQLite"
     );
+    if let Some(draft) = crate::runtime::operator_activity::classify_workflow_event(&event.event_type) {
+        let root_session_id = store
+            .resolve_root_session_id(&event.workflow_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let record = draft.into_record(
+            root_session_id.clone(),
+            String::new(),
+            event.agent_id.clone().unwrap_or_default(),
+            Some(event.workflow_id.clone()),
+            event.task_id.clone(),
+            None,
+            None,
+            None,
+            Some(event.event_id.clone()),
+        );
+        let rate_limit = config.operator_activity.rate_limit_per_min;
+        if let Err(e) = store.insert_operator_activity_throttled(&record, rate_limit) {
+            tracing::debug!(
+                target: "operator_activity",
+                error = %e,
+                "Failed to persist workflow event operator activity"
+            );
+        }
+    }
     if let Err(e) = refresh_workflow_graph_markdown(config, Some(store), &event.workflow_id) {
         tracing::warn!(
             target: "session_timeline",

@@ -411,6 +411,14 @@ so bridges recover session context without local state. v1: bridge stores mappin
   so suppression is never silent. Wired from `tool_call_processor`. The
   success denylist (`runtime/operator_activity.rs::SUCCESS_DENYLIST`) already
   covers the "tool denylist" half.
+- [x] Workflow event classification (`classify_workflow_event`) — mirrors
+  `planframe.proposed` → `PlanProposal` and `task.failed` → `ToolFailed` into
+  the operator activity feed from `workflow_store::append_workflow_event`.
+  Session lifecycle emission now also uses throttled insert.
+- [x] Retention pruning — `GatewayStore::prune_operator_activity(retention_days)`
+  deletes rows older than `operator_activity.retention_days` (default 90).
+- [x] Security redaction tests — verify summaries never contain AWS keys,
+  bearer tokens, or untruncated long content.
 - [ ] `operator.activity.subscribe` or webhook `operator.activity.push` for mobile.
   **Deferred — no consumer yet.** There is no mobile/push transport in the
   tree; the chat TUI and HTTP SSE already cover live delivery. Build this when

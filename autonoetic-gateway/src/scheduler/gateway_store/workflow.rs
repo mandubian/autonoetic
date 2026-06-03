@@ -112,6 +112,18 @@ impl GatewayStore {
         Ok(result)
     }
 
+    pub fn resolve_root_session_id(&self, workflow_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT root_session_id FROM workflow_index WHERE workflow_id = ?1",
+                params![workflow_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
     pub fn list_workflow_index(&self) -> Result<Vec<WorkflowIndexFile>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
