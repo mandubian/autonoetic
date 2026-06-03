@@ -86,6 +86,13 @@ impl NativeTool for DigestAnnotateTool {
                 }
             }
             if let Some(store) = _gateway_store.as_ref() {
+                let note_role = crate::runtime::session_timeline::derive_role(&ctx.agent_id);
+                let note_altitude = crate::runtime::session_timeline::altitude_for(
+                    "digest_annotate",
+                    &note_role,
+                );
+                let note_principal =
+                    autonoetic_types::principal::Principal::agent(ctx.agent_id.clone());
                 let _ = store.create_live_digest_event(
                     &crate::scheduler::gateway_store::LiveDigestEventRecord {
                         event_id: uuid::Uuid::new_v4().to_string(),
@@ -104,6 +111,11 @@ impl NativeTool for DigestAnnotateTool {
                             .to_string(),
                         ),
                         created_at: chrono::Utc::now().to_rfc3339(),
+                        principal_kind: Some(note_principal.kind_to_storage()),
+                        principal_id: Some(note_principal.id.clone()),
+                        role: Some(note_role.to_storage()),
+                        altitude: Some(note_altitude.as_str().to_string()),
+                        refs_json: None,
                     },
                 );
             }

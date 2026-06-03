@@ -296,6 +296,19 @@ impl NativeTool for UserAskTool {
                             );
                         }
                     }
+                    let ask_role =
+                        crate::runtime::session_timeline::derive_role(&_manifest.agent.id);
+                    let ask_altitude = crate::runtime::session_timeline::altitude_for(
+                        "user.ask.pending",
+                        &ask_role,
+                    );
+                    let ask_principal = autonoetic_types::principal::Principal::agent(
+                        _manifest.agent.id.clone(),
+                    );
+                    let ask_refs = autonoetic_types::session_timeline::TimelineRefs {
+                        interaction_id: Some(gate_id.clone()),
+                        ..Default::default()
+                    };
                     let _ = store.create_live_digest_event(
                         &crate::scheduler::gateway_store::LiveDigestEventRecord {
                             event_id: uuid::Uuid::new_v4().to_string(),
@@ -315,6 +328,11 @@ impl NativeTool for UserAskTool {
                                 .to_string(),
                             ),
                             created_at: chrono::Utc::now().to_rfc3339(),
+                            principal_kind: Some(ask_principal.kind_to_storage()),
+                            principal_id: Some(ask_principal.id.clone()),
+                            role: Some(ask_role.to_storage()),
+                            altitude: Some(ask_altitude.as_str().to_string()),
+                            refs_json: serde_json::to_string(&ask_refs).ok(),
                         },
                     );
                 }

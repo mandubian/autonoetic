@@ -16,6 +16,7 @@ mod migrate;
 mod notifications;
 mod operator_activity;
 mod observability;
+mod session_timeline;
 pub mod plan_frames;
 pub mod post_promotion_reviews;
 mod reclamation;
@@ -99,6 +100,13 @@ pub struct LiveDigestEventRecord {
     pub event_type: String,
     pub payload: Option<String>,
     pub created_at: String,
+    // Session Room canonical-timeline attribution (#363 P1). Optional so older
+    // call sites compile; the digest tracer populates them.
+    pub principal_kind: Option<String>,
+    pub principal_id: Option<String>,
+    pub role: Option<String>,
+    pub altitude: Option<String>,
+    pub refs_json: Option<String>,
 }
 
 /// Stable host/process identity for `active_executions.host_id` (override with `AUTONOETIC_HOST_ID`).

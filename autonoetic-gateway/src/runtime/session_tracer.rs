@@ -321,6 +321,11 @@ impl SessionTracer {
         let Some(store) = &self.gateway_store else {
             return;
         };
+        // Session Room attribution (#363 P1): seat derived from the agent id,
+        // principal = this autonoetic agent, altitude = max(base, role_floor).
+        let role = crate::runtime::session_timeline::derive_role(&self.agent_id);
+        let altitude = crate::runtime::session_timeline::altitude_for(event_type, &role);
+        let principal = autonoetic_types::principal::Principal::agent(self.agent_id.clone());
         let row = crate::scheduler::gateway_store::LiveDigestEventRecord {
             event_id: uuid::Uuid::new_v4().to_string(),
             root_session_id: base_session_id(&self.session_id).to_string(),
@@ -332,6 +337,11 @@ impl SessionTracer {
             event_type: event_type.to_string(),
             payload: payload.and_then(|v| serde_json::to_string(&v).ok()),
             created_at: chrono::Utc::now().to_rfc3339(),
+            principal_kind: Some(principal.kind_to_storage()),
+            principal_id: Some(principal.id.clone()),
+            role: Some(role.to_storage()),
+            altitude: Some(altitude.as_str().to_string()),
+            refs_json: None,
         };
         if let Err(e) = store.create_live_digest_event(&row) {
             tracing::debug!(
