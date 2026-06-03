@@ -379,6 +379,10 @@ async fn main() -> anyhow::Result<()> {
             }
         },
 
+        Commands::Room(args) => {
+            cli::room::handle_room(&config_path, args).await?;
+        }
+
         Commands::Skill(args) => match &args.command {
             cli::common::SkillCommands::Install { url_or_id, agent } => {
                 tracing::info!("Installing Skill {} (agent: {:?})", url_or_id, agent);

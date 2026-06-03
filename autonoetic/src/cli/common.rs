@@ -153,6 +153,8 @@ pub enum Commands {
     Chat(ChatArgs),
     /// Inspect causal chain traces
     Trace(TraceArgs),
+    /// Render a session's canonical activity timeline (Session Room, read-only)
+    Room(RoomArgs),
     /// Ecosystem and Skills management
     Skill(SkillArgs),
     /// Federation and Cluster management
@@ -942,6 +944,21 @@ pub struct ChatArgs {
 pub struct TraceArgs {
     #[command(subcommand)]
     pub command: TraceCommands,
+}
+
+#[derive(Args)]
+pub struct RoomArgs {
+    /// Root session id whose timeline to render.
+    pub root_session_id: String,
+    /// Altitude floor: detail | normal | attention | error. Default: normal.
+    #[arg(long, default_value = "normal")]
+    pub min_altitude: String,
+    /// Follow the timeline live (tail -f style) until Ctrl+C.
+    #[arg(long)]
+    pub follow: bool,
+    /// Max rows to fetch per read.
+    #[arg(long, default_value_t = 200)]
+    pub limit: u32,
 }
 
 #[derive(Subcommand)]
