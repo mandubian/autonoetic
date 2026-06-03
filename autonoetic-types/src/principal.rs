@@ -51,6 +51,34 @@ impl PrincipalKind {
 /// `kind` is flattened so the wire shape is flat — `{"kind":"human","id":...}`,
 /// or `{"kind":"foreign_agent","provider":"…","id":…}` — rather than the nested
 /// `{"kind":{"kind":"human"},…}` the internally-tagged enum would otherwise give.
+/// Best-effort principal kind of a gate *decider*, derived from the recorded
+/// `decided_by` string (#359 P1.b / #361). Deterministic and mechanically
+/// checkable, and **fail-safe**: an unrecognized token is never claimed as an
+/// accountable agent.
+///
+/// - `"operator"` ⇒ Human.
+/// - Mechanical / executor resolutions ⇒ `None` (no §O obligation attaches):
+///   empty, `"gateway"`, `"system"`, and the `"emergency_stop:<id>"` cascade.
+/// - An agent decider ⇒ AutonoeticAgent, recognized positively by an agent-id
+///   shape (contains `.`, e.g. `auditor.default`) or the `"agent:<id>"` form.
+/// - Anything else ⇒ `None` (fail-safe, not AutonoeticAgent).
+///
+/// Foreign agents never decide gates (they hold no authority), so they are not
+/// produced here.
+pub fn decider_principal_kind(decided_by: &str) -> Option<PrincipalKind> {
+    let s = decided_by.trim();
+    if s == "operator" {
+        return Some(PrincipalKind::Human);
+    }
+    if s.is_empty() || s == "gateway" || s == "system" || s.starts_with("emergency_stop:") {
+        return None;
+    }
+    if s.starts_with("agent:") || s.contains('.') {
+        return Some(PrincipalKind::AutonoeticAgent);
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
     #[serde(flatten)]
@@ -127,6 +155,28 @@ mod tests {
         // Round-trips back.
         let back: Principal = serde_json::from_value(foreign).unwrap();
         assert_eq!(back, Principal::foreign("claude-code", "fa-1"));
+    }
+
+    #[test]
+    fn decider_kind_derivation() {
+        assert_eq!(decider_principal_kind("operator"), Some(PrincipalKind::Human));
+        // Agent deciders, both shapes.
+        assert_eq!(
+            decider_principal_kind("auditor.default"),
+            Some(PrincipalKind::AutonoeticAgent)
+        );
+        assert_eq!(
+            decider_principal_kind("agent:auditor.default"),
+            Some(PrincipalKind::AutonoeticAgent)
+        );
+        // Executor mechanics are not principal decisions.
+        assert_eq!(decider_principal_kind("gateway"), None);
+        assert_eq!(decider_principal_kind("system"), None);
+        assert_eq!(decider_principal_kind("  "), None);
+        // Emergency-stop cascade is mechanical, not an agent (regression: #374 review).
+        assert_eq!(decider_principal_kind("emergency_stop:estop-1a2b3c4d"), None);
+        // Fail-safe: an unrecognized bare token is not claimed as an agent.
+        assert_eq!(decider_principal_kind("mystery"), None);
     }
 
     #[test]
