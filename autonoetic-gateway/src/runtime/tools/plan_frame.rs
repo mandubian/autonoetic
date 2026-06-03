@@ -596,6 +596,45 @@ impl NativeTool for PlanFrameApproveTool {
             Some(&now),
         )?;
 
+        // Canonical timeline: the plan gate closes (#363 P1), authored by the
+        // approver (Operator seat for a human, the agent's seat otherwise).
+        {
+            use autonoetic_types::principal::{Principal, PrincipalKind};
+            use autonoetic_types::session_timeline::{SessionRole, TimelineRefs};
+            let (principal, role) =
+                match autonoetic_types::principal::decider_principal_kind(&approver) {
+                    Some(PrincipalKind::Human) => {
+                        (Principal::human(approver.clone()), SessionRole::Operator)
+                    }
+                    _ => (
+                        Principal::agent(approver.clone()),
+                        crate::runtime::session_timeline::derive_role(&approver),
+                    ),
+                };
+            let refs = TimelineRefs {
+                plan_id: Some(plan.plan_id.clone()),
+                ..Default::default()
+            };
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                plan.root_session_id.clone(),
+                plan.root_session_id.clone(),
+                None,
+                &principal,
+                &role,
+                "plan.approved",
+                None,
+                Some(serde_json::json!({
+                    "plan_id": plan.plan_id,
+                    "version": plan.version,
+                    "approved_by": approver,
+                })),
+                refs,
+            );
+            if let Err(e) = store.create_live_digest_event(&event) {
+                tracing::debug!(target: "session_timeline", error = %e, "plan.approved timeline emit failed");
+            }
+        }
+
         if let Some(config) = config {
             crate::scheduler::workflow_store::append_workflow_event(
                 config,
