@@ -7,9 +7,18 @@
 
 use super::render::{self, RenderedRow, RowSource};
 use autonoetic_gateway::scheduler::GatewayStore;
+use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry};
+
+/// An in-flight operator decision on a pending approval gate — captures an
+/// optional motivation before committing (§3.5 conversational gate).
+struct GateInput {
+    approve: bool,
+    request_id: String,
+    buffer: String,
+}
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -30,6 +39,7 @@ impl Drop for TerminalRestore {
 }
 
 pub fn run(
+    config: &GatewayConfig,
     store: &GatewayStore,
     root_session_id: &str,
     initial_floor: Altitude,
@@ -49,6 +59,8 @@ pub fn run(
     let mut follow = true; // pin to newest
     let mut selected: usize = 0;
     let mut detail: Option<Vec<String>> = None; // drill-down pane content
+    let mut input: Option<GateInput> = None; // in-flight gate decision
+    let mut status: Option<String> = None; // last action result
 
     loop {
         // Fetch at most one page per tick so a large backlog drains across ticks
@@ -82,10 +94,60 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
-        terminal.draw(|f| draw(f, root_session_id, floor, squash, follow, &rows, selected, detail.as_deref()))?;
+        // Only offer resolution for an approval that is *still* pending in the
+        // store — a historical `approval.pending` row whose request was since
+        // decided must not show y/n (it would just hit the idempotency guard).
+        let pending_approval = pending_approval_id(&entries, indexed.get(selected)).filter(|id| {
+            store
+                .get_approval(id)
+                .ok()
+                .flatten()
+                .map(|a| a.status.is_none())
+                .unwrap_or(false)
+        });
+
+        terminal.draw(|f| {
+            draw(
+                f,
+                root_session_id,
+                floor,
+                squash,
+                follow,
+                &rows,
+                selected,
+                detail.as_deref(),
+                input.as_ref(),
+                status.as_deref(),
+                pending_approval.is_some(),
+            )
+        })?;
 
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                // Motivation-capture mode takes over all input while open.
+                if let Some(gi) = input.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => input = None,
+                        KeyCode::Enter => {
+                            let gi = input.take().unwrap();
+                            let reason = {
+                                let t = gi.buffer.trim();
+                                (!t.is_empty()).then(|| t.to_string())
+                            };
+                            status = Some(resolve_gate(config, store, &gi, reason));
+                        }
+                        KeyCode::Backspace => {
+                            gi.buffer.pop();
+                        }
+                        KeyCode::Char(c) => gi.buffer.push(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 let ctrl_c = key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL);
                 match key.code {
@@ -97,6 +159,22 @@ pub fn run(
                             detail = None;
                         } else {
                             break;
+                        }
+                    }
+                    // y/n: resolve the selected pending approval (captures an
+                    // optional motivation first — §3.5; recording-only, no
+                    // BLOCKING enforcement yet).
+                    KeyCode::Char('y') | KeyCode::Char('n') => {
+                        if let Some(request_id) = pending_approval.clone() {
+                            // Close the drill-down so the motivation prompt (footer)
+                            // is visible — otherwise input would be a hidden mode.
+                            detail = None;
+                            input = Some(GateInput {
+                                approve: key.code == KeyCode::Char('y'),
+                                request_id,
+                                buffer: String::new(),
+                            });
+                            status = None;
                         }
                     }
                     // Enter toggles drill-down on the selected row.
@@ -143,6 +221,62 @@ pub fn run(
     Ok(())
 }
 
+/// The approval request_id if the selected row is a single, still-`pending`
+/// approval gate (so it can be resolved in-flow).
+fn pending_approval_id(
+    entries: &[SessionTimelineEntry],
+    src: Option<&(RenderedRow, RowSource)>,
+) -> Option<String> {
+    if let Some((_, RowSource::Single(i))) = src {
+        let e = entries.get(*i)?;
+        if e.event_type == "approval.pending" {
+            return e.refs.approval_request_id.clone();
+        }
+    }
+    None
+}
+
+/// Resolve an approval through the sanctioned scheduler path (which records the
+/// decision — incl. decider kind via #361 — and queues the session-resume
+/// notification). Decider is the operator; the motivation is the optional reason.
+fn resolve_gate(
+    config: &GatewayConfig,
+    store: &GatewayStore,
+    gi: &GateInput,
+    reason: Option<String>,
+) -> String {
+    let result = if gi.approve {
+        autonoetic_gateway::scheduler::approve_request_with_options(
+            config,
+            Some(store),
+            &gi.request_id,
+            "operator",
+            reason,
+            None,
+            None,
+            None,
+            autonoetic_gateway::scheduler::ApproveOptions::default(),
+        )
+    } else {
+        autonoetic_gateway::scheduler::reject_request(
+            config,
+            Some(store),
+            &gi.request_id,
+            "operator",
+            reason,
+            None,
+        )
+    };
+    match result {
+        Ok(d) => format!(
+            "✓ {} {}",
+            if gi.approve { "approved" } else { "rejected" },
+            d.request_id
+        ),
+        Err(e) => format!("✗ {e}"),
+    }
+}
+
 /// Build the drill-down detail for a selected row's source. A single event
 /// shows its full metadata/payload; a collapsed run shows what it folds.
 fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
@@ -177,6 +311,47 @@ fn cycle_floor(floor: Altitude) -> Altitude {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn approval_entry(event_type: &str) -> SessionTimelineEntry {
+        use autonoetic_types::principal::Principal;
+        use autonoetic_types::session_timeline::{SessionRole, TimelineRefs};
+        SessionTimelineEntry {
+            event_id: "ev".into(),
+            root_session_id: "r".into(),
+            source_session_id: "r".into(),
+            turn_id: None,
+            principal: Principal::agent("planner.default"),
+            role: SessionRole::Planner,
+            event_type: event_type.into(),
+            altitude: Altitude::Attention,
+            occurred_at: "t".into(),
+            payload: None,
+            refs: TimelineRefs {
+                approval_request_id: Some("apr-1".into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn pending_approval_id_only_for_selected_pending_gate() {
+        let row = (
+            RenderedRow::Line { text: "x".into(), altitude: Altitude::Attention },
+            RowSource::Single(0),
+        );
+        // A selected approval.pending row → its request id is resolvable.
+        let pending = vec![approval_entry("approval.pending")];
+        assert_eq!(pending_approval_id(&pending, Some(&row)), Some("apr-1".into()));
+        // Any other event (incl. an already-resolved approval) → not resolvable.
+        let resolved = vec![approval_entry("approval.approved")];
+        assert_eq!(pending_approval_id(&resolved, Some(&row)), None);
+        // A collapsed run is never a single resolvable gate.
+        let run = (
+            RenderedRow::Collapsed { count: 2, summary: "x".into() },
+            RowSource::Run { start: 0, len: 2 },
+        );
+        assert_eq!(pending_approval_id(&pending, Some(&run)), None);
+    }
 
     #[test]
     fn floor_cycles_through_all_levels() {
@@ -218,6 +393,9 @@ fn draw(
     rows: &[RenderedRow],
     selected: usize,
     detail: Option<&[String]>,
+    input: Option<&GateInput>,
+    status: Option<&str>,
+    can_resolve: bool,
 ) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -227,11 +405,12 @@ fn draw(
     .split(f.area());
 
     let header = format!(
-        " Session Room — {root}   floor: {}   squash: {}   {} rows{}",
+        " Session Room — {root}   floor: {}   squash: {}   {} rows{}{}",
         floor.as_str(),
         if squash { "on" } else { "off" },
         rows.len(),
         if follow { "   (following)" } else { "" },
+        status.map(|s| format!("   {s}")).unwrap_or_default(),
     );
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
@@ -274,9 +453,19 @@ fn draw(
         &mut state,
     );
 
-    f.render_widget(
-        Paragraph::new(" q quit · j/k scroll · g/G top/bottom · a altitude · s squash · ⏎ detail")
-            .style(Style::default().fg(Color::DarkGray)),
-        chunks[2],
-    );
+    let footer = if let Some(gi) = input {
+        Paragraph::new(format!(
+            " {} — motivation (optional): {}▏   [Enter submit · Esc cancel]",
+            if gi.approve { "APPROVE" } else { "REJECT" },
+            gi.buffer,
+        ))
+        .style(Style::default().fg(Color::Cyan))
+    } else {
+        let resolve_hint = if can_resolve { " · y/n approve/reject" } else { "" };
+        Paragraph::new(format!(
+            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · ⏎ detail{resolve_hint}"
+        ))
+        .style(Style::default().fg(Color::DarkGray))
+    };
+    f.render_widget(footer, chunks[2]);
 }
