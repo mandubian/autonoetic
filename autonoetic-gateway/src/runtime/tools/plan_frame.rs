@@ -255,6 +255,35 @@ impl NativeTool for PlanFrameProposeTool {
 
         store.save_plan_frame(&plan)?;
 
+        // Canonical timeline: a plan proposal is an `attention` gate (#363 P1).
+        {
+            let role = crate::runtime::session_timeline::derive_role(&plan.created_by_agent_id);
+            let principal =
+                autonoetic_types::principal::Principal::agent(plan.created_by_agent_id.clone());
+            let refs = autonoetic_types::session_timeline::TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            };
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                root_session_id.to_string(),
+                session_id.to_string(),
+                None,
+                &principal,
+                &role,
+                "plan.pending",
+                None,
+                Some(serde_json::json!({
+                    "plan_id": plan_id,
+                    "version": plan.version,
+                    "title": plan.title,
+                })),
+                refs,
+            );
+            if let Err(e) = store.create_live_digest_event(&event) {
+                tracing::debug!(target: "session_timeline", error = %e, "plan.pending timeline emit failed");
+            }
+        }
+
         let mut updated_workflow = workflow;
         updated_workflow.active_plan_ref = Some(PlanRef {
             plan_id: plan_id.clone(),

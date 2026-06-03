@@ -119,6 +119,8 @@ pub struct TimelineRefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interaction_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workbench_id: Option<String>,
