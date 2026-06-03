@@ -29,10 +29,17 @@ impl Drop for TerminalRestore {
     }
 }
 
-pub fn run(store: &GatewayStore, root_session_id: &str, initial_floor: Altitude) -> anyhow::Result<()> {
+pub fn run(
+    store: &GatewayStore,
+    root_session_id: &str,
+    initial_floor: Altitude,
+    limit: u32,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    // Guard constructed before entering the alternate screen, so raw mode is
+    // restored even if `EnterAlternateScreen` (or anything after) fails.
     let _restore = TerminalRestore;
+    execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     let mut entries: Vec<SessionTimelineEntry> = Vec::new();
@@ -43,18 +50,13 @@ pub fn run(store: &GatewayStore, root_session_id: &str, initial_floor: Altitude)
     let mut selected: usize = 0;
 
     loop {
-        // Drain new events past the cursor (a floor change clears and refetches).
-        loop {
-            let page = store.list_session_timeline(root_session_id, cursor.as_deref(), 200, Some(floor), None)?;
-            if page.entries.is_empty() {
-                break;
-            }
-            cursor = page.entries.last().map(|e| e.event_id.clone());
-            entries.extend(page.entries);
-            if !page.has_more {
-                break;
-            }
+        // Fetch at most one page per tick so a large backlog drains across ticks
+        // without ever blocking input (incl. quit). The 250ms poll paces catch-up.
+        let page = store.list_session_timeline(root_session_id, cursor.as_deref(), limit, Some(floor), None)?;
+        if let Some(last) = page.entries.last() {
+            cursor = Some(last.event_id.clone());
         }
+        entries.extend(page.entries);
 
         let rows: Vec<RenderedRow> = if squash {
             render::coalesce(&entries)
@@ -185,7 +187,8 @@ fn draw(
         .iter()
         .map(|row| {
             let style = altitude_style(render::row_altitude(row));
-            ListItem::new(Line::from(Span::styled(render::row_text(row).into_owned(), style)))
+            // Pass the Cow through — borrows for `Line` rows, allocates only for collapsed.
+            ListItem::new(Line::from(Span::styled(render::row_text(row), style)))
         })
         .collect();
 

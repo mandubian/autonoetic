@@ -31,7 +31,7 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
 
     // Interactive shell — the Session Room proper.
     if args.tui {
-        return tui::run(&store, &args.root_session_id, min_altitude);
+        return tui::run(&store, &args.root_session_id, min_altitude, args.limit);
     }
 
     // Render the full timeline oldest-first, paging through *all* rows (not just
