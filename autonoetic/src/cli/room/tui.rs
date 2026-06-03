@@ -315,7 +315,7 @@ fn enrich_with_refs(store: &GatewayStore, entry: &SessionTimelineEntry, lines: &
             lines.push(format!("  level:   {}", a.approval_level.to_config()));
             lines.push(format!(
                 "  status:  {}",
-                a.status.map(|s| format!("{s:?}")).unwrap_or_else(|| "pending".into())
+                a.status.map(|s| s.as_str()).unwrap_or("pending")
             ));
             if let Some(r) = &a.reason {
                 lines.push(format!("  reason:  {r}"));
