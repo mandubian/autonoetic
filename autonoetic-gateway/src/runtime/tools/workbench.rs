@@ -1310,7 +1310,7 @@ impl NativeTool for WorkbenchDiscardTool {
             &_manifest.agent.id,
             &wb.workbench_id,
             "workbench.discarded",
-            Some(autonoetic_types::session_timeline::Altitude::Detail),
+            None,
         );
 
         Ok(serde_json::to_string(&serde_json::json!({

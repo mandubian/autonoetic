@@ -712,6 +712,19 @@ fn workbench_reconcile_creates_new_artifact() {
     let wb_after = store.load_workbench(&wb_id).unwrap().unwrap();
     assert_eq!(wb_after.status, autonoetic_types::workbench::WorkbenchStatus::Reconciled);
     assert!(wb_after.reconciled_at.is_some());
+
+    // Session Room P1: `workbench.reconciled` lands on the timeline at Detail
+    // altitude (min_altitude=None to include Detail), with the workbench ref.
+    let tl = store
+        .list_session_timeline("root-session-006", None, 100, None, None)
+        .unwrap();
+    let ev = tl
+        .entries
+        .iter()
+        .find(|e| e.event_type == "workbench.reconciled")
+        .expect("workbench.reconciled event on the canonical timeline");
+    assert_eq!(ev.refs.workbench_id.as_deref(), Some(wb_id.as_str()));
+    assert_eq!(ev.altitude, autonoetic_types::session_timeline::Altitude::Detail);
 }
 
 #[test]
@@ -856,6 +869,18 @@ fn workbench_discard_marks_discarded() {
     let wb = store.load_workbench(&wb_id).unwrap().unwrap();
     assert_eq!(wb.status, autonoetic_types::workbench::WorkbenchStatus::Discarded);
     assert!(wb.discarded_at.is_some());
+
+    // Session Room P1: `workbench.discarded` lands on the timeline at Detail.
+    let tl = store
+        .list_session_timeline("root-session-008", None, 100, None, None)
+        .unwrap();
+    let ev = tl
+        .entries
+        .iter()
+        .find(|e| e.event_type == "workbench.discarded")
+        .expect("workbench.discarded event on the canonical timeline");
+    assert_eq!(ev.refs.workbench_id.as_deref(), Some(wb_id.as_str()));
+    assert_eq!(ev.altitude, autonoetic_types::session_timeline::Altitude::Detail);
 }
 
 #[test]
