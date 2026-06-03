@@ -138,32 +138,35 @@ fn flush_run<'a>(run: &mut Vec<&'a SessionTimelineEntry>, out: &mut Vec<Rendered
     run.clear();
 }
 
-/// Brief breakdown of a collapsed run: the top event types by count.
+/// Brief breakdown of a collapsed run: the top event types by count. Sorted by
+/// count desc, then name asc for deterministic output.
 fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
-    let mut counts: Vec<(&str, usize)> = Vec::new();
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for e in run {
-        match counts.iter_mut().find(|(k, _)| *k == e.event_type) {
-            Some((_, c)) => *c += 1,
-            None => counts.push((e.event_type.as_str(), 1)),
-        }
+        *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
     }
-    counts.sort_by(|a, b| b.1.cmp(&a.1));
-    let parts: Vec<String> = counts
+    let mut ordered: Vec<(&str, usize)> = counts.into_iter().collect();
+    ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let parts: Vec<String> = ordered
         .iter()
         .take(3)
         .map(|(k, c)| format!("{k}×{c}"))
         .collect();
-    let more = if counts.len() > 3 { ", …" } else { "" };
+    let more = if ordered.len() > 3 { ", …" } else { "" };
     format!("routine events ({}{})", parts.join(", "), more)
 }
 
-/// Non-interactive rendering of a row (the collapsed form shows the count).
-pub fn row_text(row: &RenderedRow) -> String {
+/// Non-interactive rendering of a row. Borrows the existing line for `Line`
+/// (no allocation on the hot path); only the collapsed form allocates.
+pub fn row_text(row: &RenderedRow) -> std::borrow::Cow<'_, str> {
     match row {
-        RenderedRow::Line(s) => s.clone(),
-        RenderedRow::Collapsed { count, summary } => {
-            format!("{} ⟨{} {}⟩", altitude_glyph(Altitude::Detail), count, summary)
-        }
+        RenderedRow::Line(s) => std::borrow::Cow::Borrowed(s),
+        RenderedRow::Collapsed { count, summary } => std::borrow::Cow::Owned(format!(
+            "{} ⟨{} {}⟩",
+            altitude_glyph(Altitude::Detail),
+            count,
+            summary
+        )),
     }
 }
 
