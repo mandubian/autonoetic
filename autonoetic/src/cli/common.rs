@@ -956,6 +956,9 @@ pub struct RoomArgs {
     /// Follow the timeline live (tail -f style) until Ctrl+C.
     #[arg(long)]
     pub follow: bool,
+    /// Launch the interactive Session Room shell (scroll, altitude dial, squash).
+    #[arg(long)]
+    pub tui: bool,
     /// Max rows to fetch per read.
     #[arg(long, default_value_t = 200)]
     pub limit: u32,

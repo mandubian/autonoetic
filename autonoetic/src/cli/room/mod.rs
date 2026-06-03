@@ -7,6 +7,7 @@
 //! ([`render`]) before any interactive ratatui shell is built on top.
 
 mod render;
+mod tui;
 
 use crate::cli::common::RoomArgs;
 use autonoetic_types::session_timeline::Altitude;
@@ -27,6 +28,11 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
             args.min_altitude
         ),
     };
+
+    // Interactive shell — the Session Room proper.
+    if args.tui {
+        return tui::run(&store, &args.root_session_id, min_altitude);
+    }
 
     // Render the full timeline oldest-first, paging through *all* rows (not just
     // the first `limit`, which would silently truncate long sessions).

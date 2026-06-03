@@ -102,8 +102,17 @@ pub fn render_line(entry: &SessionTimelineEntry) -> String {
 /// non-interactive consumers render it via [`row_text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderedRow {
-    Line(String),
+    /// A single event line, carrying its altitude so consumers can style it.
+    Line { text: String, altitude: Altitude },
     Collapsed { count: usize, summary: String },
+}
+
+/// The altitude a row renders at (collapsed runs are Detail by definition).
+pub fn row_altitude(row: &RenderedRow) -> Altitude {
+    match row {
+        RenderedRow::Line { altitude, .. } => *altitude,
+        RenderedRow::Collapsed { .. } => Altitude::Detail,
+    }
 }
 
 /// Fold consecutive `Detail` events into a single collapsed row so routine
@@ -119,7 +128,10 @@ pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
             run.push(e);
         } else {
             flush_run(&mut run, &mut out);
-            out.push(RenderedRow::Line(render_line(e)));
+            out.push(RenderedRow::Line {
+                text: render_line(e),
+                altitude: e.altitude,
+            });
         }
     }
     flush_run(&mut run, &mut out);
@@ -129,7 +141,10 @@ pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
 fn flush_run<'a>(run: &mut Vec<&'a SessionTimelineEntry>, out: &mut Vec<RenderedRow>) {
     match run.len() {
         0 => {}
-        1 => out.push(RenderedRow::Line(render_line(run[0]))),
+        1 => out.push(RenderedRow::Line {
+            text: render_line(run[0]),
+            altitude: run[0].altitude,
+        }),
         n => out.push(RenderedRow::Collapsed {
             count: n,
             summary: collapsed_summary(run),
@@ -160,7 +175,7 @@ fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
 /// (no allocation on the hot path); only the collapsed form allocates.
 pub fn row_text(row: &RenderedRow) -> std::borrow::Cow<'_, str> {
     match row {
-        RenderedRow::Line(s) => std::borrow::Cow::Borrowed(s),
+        RenderedRow::Line { text, .. } => std::borrow::Cow::Borrowed(text),
         RenderedRow::Collapsed { count, summary } => std::borrow::Cow::Owned(format!(
             "{} ⟨{} {}⟩",
             altitude_glyph(Altitude::Detail),
@@ -256,9 +271,9 @@ mod tests {
             }
             other => panic!("expected collapsed run, got {other:?}"),
         }
-        assert!(matches!(&rows[1], RenderedRow::Line(s) if s.contains("approval requested")));
+        assert!(matches!(&rows[1], RenderedRow::Line { text, .. } if text.contains("approval requested")));
         // The trailing lone Detail event is a normal line, not collapsed.
-        assert!(matches!(&rows[2], RenderedRow::Line(_)));
+        assert!(matches!(&rows[2], RenderedRow::Line { .. }));
         assert!(row_text(&rows[0]).contains("⟨3 routine events"));
     }
 
