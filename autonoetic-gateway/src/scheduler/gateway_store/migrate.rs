@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 45;
+const SCHEMA_VERSION_LATEST: i64 = 46;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -530,7 +530,58 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_workbenches_v43(conn)?;
     apply_validation_waivers_v44(conn)?;
     apply_operator_activity_v45(conn)?;
+    apply_session_timeline_v46(conn)?;
 
+    Ok(())
+}
+
+/// #363 P1 — make `live_digest_events` the canonical Session Room timeline.
+/// Adds principal (kind + id), role (seat), altitude, and refs to the existing
+/// digest stream, plus an altitude-ordered index for the reader. Additive
+/// ALTERs; existing rows get NULLs which the reader maps to sensible defaults
+/// (altitude→normal, principal→autonoetic_agent on source_agent_id).
+fn apply_session_timeline_v46(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 46 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE live_digest_events ADD COLUMN principal_kind TEXT;
+         ALTER TABLE live_digest_events ADD COLUMN principal_id   TEXT;
+         ALTER TABLE live_digest_events ADD COLUMN role           TEXT;
+         ALTER TABLE live_digest_events ADD COLUMN altitude       TEXT;
+         ALTER TABLE live_digest_events ADD COLUMN refs_json       TEXT;
+         CREATE INDEX IF NOT EXISTS idx_live_digest_root_altitude
+             ON live_digest_events(root_session_id, altitude, created_at, event_id);",
+    )?;
+
+    // Backfill altitude for pre-v46 rows so SQL `min_altitude` filtering (which
+    // reads the column) classifies historical events correctly — failures as
+    // `error`, gates as `attention`, Sentinel-seat events floored at `attention`.
+    // Mirrors `runtime::session_timeline::{base_altitude, role_floor}`; the reader
+    // also recomputes on read as a defensive fallback. principal/role stay NULL —
+    // the reader derives those from source_agent_id.
+    conn.execute(
+        "UPDATE live_digest_events SET altitude = CASE
+            WHEN event_type IN ('llm.request_failed','tool.failed') THEN 'error'
+            WHEN event_type IN ('user.ask.pending','approval.pending','plan.pending','divergence.intervention') THEN 'attention'
+            WHEN COALESCE(source_agent_id,'') LIKE 'sentinel%' THEN 'attention'
+            WHEN event_type IN ('turn.start','turn.end','llm.round','tool.requested') THEN 'detail'
+            ELSE 'normal'
+         END
+         WHERE altitude IS NULL",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![46_i64, "session_timeline", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 

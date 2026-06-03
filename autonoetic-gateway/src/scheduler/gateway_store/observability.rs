@@ -505,8 +505,9 @@ impl GatewayStore {
         conn.execute(
             "INSERT INTO live_digest_events (
                 event_id, root_session_id, source_session_id, turn_id, source_agent_id,
-                source_node_id, event_type, payload, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                source_node_id, event_type, payload, created_at,
+                principal_kind, principal_id, role, altitude, refs_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 &event.event_id,
                 &event.root_session_id,
@@ -517,6 +518,11 @@ impl GatewayStore {
                 &event.event_type,
                 event.payload.as_deref(),
                 &event.created_at,
+                event.principal_kind.as_deref(),
+                event.principal_id.as_deref(),
+                event.role.as_deref(),
+                event.altitude.as_deref(),
+                event.refs_json.as_deref(),
             ],
         )?;
         Ok(())

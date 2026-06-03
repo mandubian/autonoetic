@@ -177,6 +177,72 @@ The "actors watch each other, both directions" claim in the beginner doc (§15)
 becomes real: an agent's right to a reason (Ri-0.3) now has a counterpart duty
 on whoever decides (O-1), and reciprocal accountability stops being rhetorical.
 
+### B.4 Graduated motivation policy (operationalizing O-1)
+
+O-1 says a rejection "(and ideally an approval)" records a reason. "Ideally" is
+not mechanically checkable — so this section makes O-1 concrete as a **graduated**
+duty: *when* a reason is owed, never *whether it is good*. Motivated by the
+Session Room UX requirement (`docs/rfc/session-room-channel-agnostic-timeline.md`
+§3.5) that accountability must not become tedium: the obligation must bind hardest
+exactly where a "why" matters, and fall away where it would be busywork.
+
+Three obligation tiers on a gate decision:
+
+| Tier | Duty | Mechanism |
+|---|---|---|
+| **BLOCKING** | A non-empty motivation is required *at decision time* | The decision does not commit until a reason (free-text, or a labeled pre-digested choice carrying one) is attached. |
+| **DEFERRED** | A motivation is *owed* within a bounded window | Commits immediately; auto-discharged if the decider typed free-text; unmet by deadline ⇒ a recorded **obligation-gap** event (surfaced, not punitive — tracked like a discretion leak). |
+| **OPTIONAL** | None | Informational acks; answering an agent's clarification. |
+
+**Tier classifier — a pure function of facts the gateway already holds** (no
+judgment, Lawful Executor):
+
+```
+tier(decision, gate) =
+  BLOCKING  if decision.polarity ∈ {Reject, Deny, Abort}          // ← exact mirror of Ri-0.3
+         or decision.is_override                                   // bypasses default/safe choice — generalizes governor `force_reason`
+         or gate.required_authority != Operator                    // ApprovalLevel::Admin | Agent(id)
+         or action_class(gate.action) == ExternalOrIrreversible
+  DEFERRED  else if polarity == Approve and required_authority == Operator
+                 and action_class == Local
+  OPTIONAL  else
+```
+
+`action_class` is a small pure map over existing `ScheduledAction` variants:
+- **ExternalOrIrreversible:** `WebFetch`, `WebCall`, `CredentialRequest`,
+  `CredentialPrompt`, `AgentInstall`, non-workspace / destructive `WriteFile`.
+- **Local:** `SandboxExec` without network, workspace-scoped `WriteFile`.
+
+**Why these triggers.** Each reuses an existing accountability precedent rather
+than inventing one: rejection ⇒ the exact symmetric mirror of Ri-0.3; override ⇒
+the governor's `force_reason` already requires a justification on bypass
+(`agent_revision.rs`); elevated authority ⇒ `ApprovalLevel::Admin`; external /
+irreversible ⇒ where the audit trail most needs intent. The common path —
+approving a local, reversible, operator-level action — is DEFERRED/OPTIONAL, i.e.
+one tap, no reason.
+
+**Operator-as-AI corollary.** When an AI principal holds a deciding seat, reason
+cost is ≈0, so policy may collapse all tiers to BLOCKING for that decider (an AI
+decider always motivates now). This is a per-instance authority choice (Part D),
+not a constitutional constant.
+
+**Proposed §O addition.** O-1 is refined to name the graduated duty; the tiers
+and `action_class` membership are **config, not constitution** (the
+don't-pin-tunables rule — the constitution binds the *mechanism*; thresholds and
+the action map live in code + `config-reference.md`). The constitution change is
+**prepared unsigned**; the configured ratifying authority recomputes and signs
+the lock (Part C / `constitution-signing.md`). This RFC does not alter the lock.
+
+| Refined | Mirrors | Mechanically-checkable duty |
+|---|---|---|
+| `O-1a` Reason-on-reject | Ri-0.3 | A `Reject`/`Deny`/`Abort` decision carries a non-empty motivation at decision time. |
+| `O-1b` Reason-on-override | governor `force_reason` | A decision that bypasses a default/safe choice or a safety gate carries a motivation at decision time. |
+| `O-1c` Reason-on-stakes | approval-scope §2 | A decision on an elevated-authority or external/irreversible action carries a motivation at decision time. |
+| `O-1d` Deferred reason + debt | — | Approvals of local, reversible, operator-level actions may defer the motivation to a bounded window; unmet motivation is recorded as an obligation gap, not blocked. |
+
+These slot under the existing O-1 (Reasoned decision) and inherit O-2's
+attribution (`decider_kind`, #361) and O-3's rate discipline unchanged.
+
 ---
 
 ## Part C — Authored law: authorship, attestation, ratification
