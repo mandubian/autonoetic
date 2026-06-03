@@ -115,42 +115,73 @@ pub fn row_altitude(row: &RenderedRow) -> Altitude {
     }
 }
 
+/// Where a rendered row came from in the input slice — lets an interactive
+/// consumer map a selected row back to the underlying event(s) for drill-down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSource {
+    /// A single event at this index.
+    Single(usize),
+    /// A collapsed run covering `entries[start..start+len]`.
+    Run { start: usize, len: usize },
+}
+
 /// Fold consecutive `Detail` events into a single collapsed row so routine
 /// plumbing (turns, workbench bookkeeping, polls) doesn't flood the view when
 /// the floor is low. A lone Detail event renders normally — collapsing one is
 /// pointless. Higher altitudes always render individually. Coalescing is
 /// page-local; a run split across reads collapses per page.
 pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
+    coalesce_indexed(entries).into_iter().map(|(r, _)| r).collect()
+}
+
+/// Like [`coalesce`], but also returns each row's [`RowSource`] for drill-down.
+pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, RowSource)> {
     let mut out = Vec::new();
-    let mut run: Vec<&SessionTimelineEntry> = Vec::new();
-    for e in entries {
+    let mut run_start: Option<usize> = None;
+    let mut run_len: usize = 0;
+    for (i, e) in entries.iter().enumerate() {
         if e.altitude == Altitude::Detail {
-            run.push(e);
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+            run_len += 1;
         } else {
-            flush_run(&mut run, &mut out);
-            out.push(RenderedRow::Line {
-                text: render_line(e),
-                altitude: e.altitude,
-            });
+            flush_run(entries, &mut run_start, &mut run_len, &mut out);
+            out.push((
+                RenderedRow::Line { text: render_line(e), altitude: e.altitude },
+                RowSource::Single(i),
+            ));
         }
     }
-    flush_run(&mut run, &mut out);
+    flush_run(entries, &mut run_start, &mut run_len, &mut out);
     out
 }
 
-fn flush_run<'a>(run: &mut Vec<&'a SessionTimelineEntry>, out: &mut Vec<RenderedRow>) {
-    match run.len() {
+fn flush_run(
+    entries: &[SessionTimelineEntry],
+    run_start: &mut Option<usize>,
+    run_len: &mut usize,
+    out: &mut Vec<(RenderedRow, RowSource)>,
+) {
+    let Some(start) = run_start.take() else { return };
+    let len = std::mem::take(run_len);
+    match len {
         0 => {}
-        1 => out.push(RenderedRow::Line {
-            text: render_line(run[0]),
-            altitude: run[0].altitude,
-        }),
-        n => out.push(RenderedRow::Collapsed {
-            count: n,
-            summary: collapsed_summary(run),
-        }),
+        1 => out.push((
+            RenderedRow::Line {
+                text: render_line(&entries[start]),
+                altitude: entries[start].altitude,
+            },
+            RowSource::Single(start),
+        )),
+        n => {
+            let run: Vec<&SessionTimelineEntry> = entries[start..start + n].iter().collect();
+            out.push((
+                RenderedRow::Collapsed { count: n, summary: collapsed_summary(&run) },
+                RowSource::Run { start, len: n },
+            ));
+        }
     }
-    run.clear();
 }
 
 /// Brief breakdown of a collapsed run: the top event types by count. Sorted by
@@ -169,6 +200,58 @@ fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
         .collect();
     let more = if ordered.len() > 3 { ", …" } else { "" };
     format!("routine events ({}{})", parts.join(", "), more)
+}
+
+/// Multi-line detail view of a single event for the drill-down pane: metadata,
+/// refs, and the pretty-printed payload. Pure (no I/O) and channel-neutral.
+pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
+    let mut lines = vec![
+        format!("event:     {}", entry.event_type),
+        format!("at:        {}", entry.occurred_at),
+        format!("altitude:  {}", entry.altitude.as_str()),
+        format!(
+            "actor:     {} ({})",
+            entry.principal.id,
+            entry.principal.kind.tag()
+        ),
+        format!("seat:      {}", role_label(&entry.role)),
+    ];
+    if let Some(turn) = &entry.turn_id {
+        lines.push(format!("turn:      {turn}"));
+    }
+    lines.push(format!("event_id:  {}", entry.event_id));
+
+    let refs = &entry.refs;
+    let mut ref_parts: Vec<String> = Vec::new();
+    let mut add = |label: &str, v: &Option<String>| {
+        if let Some(s) = v {
+            ref_parts.push(format!("{label}={s}"));
+        }
+    };
+    add("causal", &refs.causal_event_id);
+    add("trace", &refs.execution_trace_id);
+    add("artifact", &refs.artifact_id);
+    add("interaction", &refs.interaction_id);
+    add("approval", &refs.approval_request_id);
+    add("plan", &refs.plan_id);
+    add("workbench", &refs.workbench_id);
+    if !ref_parts.is_empty() {
+        lines.push(format!("refs:      {}", ref_parts.join("  ")));
+    }
+
+    if let Some(payload) = &entry.payload {
+        lines.push(String::new());
+        lines.push("payload:".to_string());
+        // Pretty-print if it parses as JSON; otherwise show raw.
+        match serde_json::from_str::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        {
+            Some(pretty) => lines.extend(pretty.lines().map(|l| format!("  {l}"))),
+            None => lines.push(format!("  {payload}")),
+        }
+    }
+    lines
 }
 
 /// Non-interactive rendering of a row. Borrows the existing line for `Line`
@@ -275,6 +358,42 @@ mod tests {
         // The trailing lone Detail event is a normal line, not collapsed.
         assert!(matches!(&rows[2], RenderedRow::Line { .. }));
         assert!(row_text(&rows[0]).contains("⟨3 routine events"));
+    }
+
+    #[test]
+    fn coalesce_indexed_maps_rows_to_sources() {
+        let mk = |et: &str, alt: Altitude| {
+            entry(SessionRole::Planner, Principal::agent("planner.default"), et, alt, serde_json::json!({}))
+        };
+        let entries = vec![
+            mk("turn.start", Altitude::Detail),   // 0 ┐ run
+            mk("turn.end", Altitude::Detail),     // 1 ┘
+            mk("approval.pending", Altitude::Attention), // 2 single
+            mk("turn.start", Altitude::Detail),   // 3 lone detail → single
+        ];
+        let rows = coalesce_indexed(&entries);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].1, RowSource::Run { start: 0, len: 2 });
+        assert_eq!(rows[1].1, RowSource::Single(2));
+        assert_eq!(rows[2].1, RowSource::Single(3));
+    }
+
+    #[test]
+    fn format_detail_includes_meta_refs_and_pretty_payload() {
+        let mut e = entry(
+            SessionRole::Operator,
+            Principal::human("operator"),
+            "approval.rejected",
+            Altitude::Attention,
+            serde_json::json!({ "request_id": "apr-9", "decided_by": "operator" }),
+        );
+        e.refs = TimelineRefs { approval_request_id: Some("apr-9".into()), ..Default::default() };
+        let detail = format_detail(&e).join("\n");
+        assert!(detail.contains("event:     approval.rejected"));
+        assert!(detail.contains("actor:     operator (human)"));
+        assert!(detail.contains("seat:      operator"));
+        assert!(detail.contains("approval=apr-9"));
+        assert!(detail.contains("\"request_id\": \"apr-9\""));
     }
 
     #[test]
