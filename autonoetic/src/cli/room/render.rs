@@ -96,6 +96,77 @@ pub fn render_line(entry: &SessionTimelineEntry) -> String {
     )
 }
 
+/// A rendered timeline row: either a single event line, or a *collapsed* run of
+/// consecutive low-altitude (Detail) plumbing folded into one count row. The
+/// structured form lets the interactive shell expand a collapsed run on demand;
+/// non-interactive consumers render it via [`row_text`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderedRow {
+    Line(String),
+    Collapsed { count: usize, summary: String },
+}
+
+/// Fold consecutive `Detail` events into a single collapsed row so routine
+/// plumbing (turns, workbench bookkeeping, polls) doesn't flood the view when
+/// the floor is low. A lone Detail event renders normally — collapsing one is
+/// pointless. Higher altitudes always render individually. Coalescing is
+/// page-local; a run split across reads collapses per page.
+pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
+    let mut out = Vec::new();
+    let mut run: Vec<&SessionTimelineEntry> = Vec::new();
+    for e in entries {
+        if e.altitude == Altitude::Detail {
+            run.push(e);
+        } else {
+            flush_run(&mut run, &mut out);
+            out.push(RenderedRow::Line(render_line(e)));
+        }
+    }
+    flush_run(&mut run, &mut out);
+    out
+}
+
+fn flush_run<'a>(run: &mut Vec<&'a SessionTimelineEntry>, out: &mut Vec<RenderedRow>) {
+    match run.len() {
+        0 => {}
+        1 => out.push(RenderedRow::Line(render_line(run[0]))),
+        n => out.push(RenderedRow::Collapsed {
+            count: n,
+            summary: collapsed_summary(run),
+        }),
+    }
+    run.clear();
+}
+
+/// Brief breakdown of a collapsed run: the top event types by count.
+fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for e in run {
+        match counts.iter_mut().find(|(k, _)| *k == e.event_type) {
+            Some((_, c)) => *c += 1,
+            None => counts.push((e.event_type.as_str(), 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    let parts: Vec<String> = counts
+        .iter()
+        .take(3)
+        .map(|(k, c)| format!("{k}×{c}"))
+        .collect();
+    let more = if counts.len() > 3 { ", …" } else { "" };
+    format!("routine events ({}{})", parts.join(", "), more)
+}
+
+/// Non-interactive rendering of a row (the collapsed form shows the count).
+pub fn row_text(row: &RenderedRow) -> String {
+    match row {
+        RenderedRow::Line(s) => s.clone(),
+        RenderedRow::Collapsed { count, summary } => {
+            format!("{} ⟨{} {}⟩", altitude_glyph(Altitude::Detail), count, summary)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +224,39 @@ mod tests {
             serde_json::json!({ "tool": "edit" }),
         );
         assert!(render_line(&f).contains("🌐 coder·claude-code"));
+    }
+
+    #[test]
+    fn coalesce_folds_detail_runs_but_keeps_higher_altitudes() {
+        let mk = |et: &str, alt: Altitude| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                alt,
+                serde_json::json!({}),
+            )
+        };
+        let entries = vec![
+            mk("turn.start", Altitude::Detail),
+            mk("workbench.created", Altitude::Detail),
+            mk("turn.start", Altitude::Detail),
+            mk("approval.pending", Altitude::Attention), // breaks the run
+            mk("turn.end", Altitude::Detail),            // lone detail ⇒ normal line
+        ];
+        let rows = coalesce(&entries);
+        assert_eq!(rows.len(), 3);
+        match &rows[0] {
+            RenderedRow::Collapsed { count, summary } => {
+                assert_eq!(*count, 3);
+                assert!(summary.contains("turn.start×2"));
+            }
+            other => panic!("expected collapsed run, got {other:?}"),
+        }
+        assert!(matches!(&rows[1], RenderedRow::Line(s) if s.contains("approval requested")));
+        // The trailing lone Detail event is a normal line, not collapsed.
+        assert!(matches!(&rows[2], RenderedRow::Line(_)));
+        assert!(row_text(&rows[0]).contains("⟨3 routine events"));
     }
 
     #[test]

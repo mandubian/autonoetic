@@ -76,11 +76,12 @@ fn drain_new(
         if page.entries.is_empty() {
             break;
         }
-        for entry in &page.entries {
-            println!("{}", render::render_line(entry));
-            *cursor = Some(entry.event_id.clone());
-            rendered_any = true;
+        // Fold low-altitude plumbing into collapsed rows (page-local).
+        for row in render::coalesce(&page.entries) {
+            println!("{}", render::row_text(&row));
         }
+        *cursor = page.entries.last().map(|e| e.event_id.clone());
+        rendered_any = true;
         if !page.has_more {
             break;
         }
