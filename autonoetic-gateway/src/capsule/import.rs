@@ -572,7 +572,7 @@ fn bind_alias(
         agent_id: agent_id.to_string(),
         revision_id: revision_id.to_string(),
         updated_at: now,
-        updated_by_type: "system".to_string(),
+        updated_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
         updated_by_id: "capsule.import".to_string(),
         reason: Some("capsule import --activate".to_string()),
     };

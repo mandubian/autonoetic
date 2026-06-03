@@ -22,10 +22,17 @@ impl std::fmt::Display for EntryStatus {
 }
 
 /// A single entry in the append-only `.jsonl` Causal Chain log.
+///
+/// **Principal identity**: `actor_id` *is* the principal identity — it is
+/// bound into the entry hash alongside `session_id`, `turn_id`, and
+/// `event_seq`. No `agent_id` → `principal_id` rename is planned; the
+/// generic identity already lives at the ledger layer. See
+/// [`crate::principal`] for the typed principal model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CausalChainEntry {
     pub timestamp: String,
     pub log_id: String,
+    /// Principal identity — bound into the entry hash. See module doc.
     pub actor_id: String,
     #[serde(default)]
     pub session_id: String,
