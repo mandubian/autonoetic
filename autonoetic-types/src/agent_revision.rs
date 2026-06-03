@@ -155,7 +155,11 @@ pub struct AgentRevisionRecord {
     pub manifest_hash: String,
     /// RFC3339 creation timestamp.
     pub created_at: String,
-    /// Actor kind that created this revision (`agent`, `user`, `system`, `peer`).
+    /// Actor kind that created this revision. Canonical values come from
+    /// [`PrincipalKind::tag()`](crate::principal::PrincipalKind::tag):
+    /// `"human"`, `"autonoetic_agent"`, `"script"`, `"foreign_agent"`.
+    /// Historical rows may contain legacy values (`"user"`, `"test"`,
+    /// `"agent"`, `"bootstrap"`, `"system"`, `"cli"`, `"tool"`).
     pub created_by_type: String,
     /// Actor ID that created this revision.
     pub created_by_id: String,
@@ -197,7 +201,8 @@ pub struct AgentAliasRecord {
     pub revision_id: String,
     /// RFC3339 update timestamp.
     pub updated_at: String,
-    /// Actor kind that updated this alias.
+    /// Actor kind that updated this alias. See [`PrincipalKind::tag()`](crate::principal::PrincipalKind::tag)
+    /// for canonical values. Historical rows may contain legacy values.
     pub updated_by_type: String,
     /// Actor ID that updated this alias.
     pub updated_by_id: String,
@@ -259,7 +264,8 @@ pub struct PromotionRecord {
     pub reason: Option<String>,
     /// RFC3339 creation timestamp.
     pub created_at: String,
-    /// Actor kind.
+    /// Actor kind. See [`PrincipalKind::tag()`](crate::principal::PrincipalKind::tag) for canonical values.
+    /// Historical rows may contain legacy values.
     pub created_by_type: String,
     /// Actor ID.
     pub created_by_id: String,
@@ -434,6 +440,7 @@ mod short_id_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::principal::PrincipalKind;
 
     #[test]
     fn test_agent_ref_parse_valid() {
@@ -510,7 +517,7 @@ mod tests {
                 "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
                     .to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
-            updated_by_type: "user".to_string(),
+            updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "admin".to_string(),
             reason: Some("initial promotion".to_string()),
         };

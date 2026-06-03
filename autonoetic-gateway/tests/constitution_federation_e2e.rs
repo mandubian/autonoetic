@@ -18,6 +18,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus};
 use autonoetic_types::artifact::ArtifactKind;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::escalation::{EscalationMessage, EscalationStatus, RoleVerdictSummary};
 use autonoetic_types::promotion::PromotionRole;
@@ -494,7 +495,7 @@ fn setup_test_with_manual_revision(
         runtime_lock_hash: "sha256:test_lock".to_string(),
         manifest_hash: "sha256:test_manifest".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: created_by_id.to_string(),
         source_kind: "test".to_string(),
         source_ref: None,

@@ -520,7 +520,7 @@ fn propose_improvement(
         runtime_lock_hash: current_rev.runtime_lock_hash.clone(),
         manifest_hash: current_rev.manifest_hash.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "cli".to_string(),
+        created_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
         created_by_id: "autonoetic improve".to_string(),
         source_kind: "improvement_proposal".to_string(),
         source_ref: Some(format!("sessions:{}", session_ids.join(","))),

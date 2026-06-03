@@ -24,6 +24,7 @@ use autonoetic_types::agent_revision::{
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::{GatewayConfig, ProtectedAgentsConfig};
 use autonoetic_types::evaluation::{EvalRunRecord, EvalRunStatus};
+use autonoetic_types::principal::PrincipalKind;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -99,7 +100,7 @@ fn make_revision_record(agent_id: &str, revision_id: &str) -> AgentRevisionRecor
         runtime_lock_hash: "sha256:lock".to_string(),
         manifest_hash: "sha256:manifest".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "user".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
         source_kind: "artifact".to_string(),
         source_ref: None,
@@ -168,7 +169,7 @@ fn setup_harness(agent_id: &str) -> PromoteHarness {
         agent_id: agent_id.to_string(),
         revision_id: OUTGOING_REVISION.to_string(),
         updated_at: chrono::Utc::now().to_rfc3339(),
-        updated_by_type: "user".to_string(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
     };

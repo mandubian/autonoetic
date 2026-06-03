@@ -1381,7 +1381,8 @@ fn hydrate_session_history(
             }
             autonoetic_gateway::llm::Role::Assistant => {
                 if !msg.content.trim().is_empty() {
-                    app.add_message(MessageRole::Assistant, msg.content);
+                    let formatted = format_assistant_reply(&msg.content);
+                    app.add_message(MessageRole::Assistant, formatted.display);
                     restored += 1;
                 }
             }
@@ -3162,12 +3163,11 @@ struct AssistantReplyDisplay {
     goal_status: Option<String>,
 }
 
-/// Parse an assistant_reply JSON string and extract summary, result, intent, goal_status.
-/// Try to extract a JSON object from a reply that has prose + JSON code fence.
-fn extract_fenced_json(text: &str) -> Option<serde_json::Value> {
-    // Find the first `{` that starts a JSON object. Bracket-match to find the end.
-    let brace_start = text.find('{')?;
-    let json_text = &text[brace_start..];
+const UNPARSEABLE_ASSISTANT_REPLY: &str = "Structured reply could not be parsed.";
+
+/// Bracket-match a JSON object starting at `brace_start` (must point at `{`).
+fn json_object_end(text: &str, brace_start: usize) -> Option<usize> {
+    let json_text = text.get(brace_start..)?;
     let mut depth = 0;
     let mut end_pos = 0;
     for (i, ch) in json_text.char_indices() {
@@ -3186,54 +3186,182 @@ fn extract_fenced_json(text: &str) -> Option<serde_json::Value> {
     if end_pos == 0 {
         return None;
     }
-    let json_str = &json_text[..end_pos];
+    Some(brace_start + end_pos)
+}
+
+/// Extract inner text from the first markdown code fence (tolerates a lone `` ` `` close).
+fn extract_markdown_fence_content(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let open = trimmed.find("```")?;
+    let after_open = &trimmed[open + 3..];
+    let lang_end = after_open.find('\n').unwrap_or(after_open.len());
+    let content_start = open + 3 + lang_end + if after_open.contains('\n') { 1 } else { 0 };
+    let remainder = trimmed.get(content_start..)?.trim();
+    if let Some(end) = remainder.rfind("```") {
+        return Some(remainder[..end].trim().to_string());
+    }
+    if let Some(end) = remainder.rfind('\n') {
+        let tail = remainder[end..].trim();
+        if tail == "`" || tail.starts_with("```") {
+            return Some(remainder[..end].trim().to_string());
+        }
+    }
+    if remainder.ends_with('`') {
+        return Some(remainder.trim_end_matches('`').trim().to_string());
+    }
+    None
+}
+
+/// Strip markdown code fence lines from prose-only text.
+fn strip_fence_markers_from_text(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let t = line.trim();
+            !t.starts_with("```") && t != "`"
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// True when leftover prose is likely a broken JSON fragment, not human text.
+fn prose_is_json_fragment(prose: &str) -> bool {
+    let t = prose.trim();
+    t.starts_with(',')
+        || t.starts_with('"')
+        || t.starts_with('{')
+        || t.contains("\"status\"")
+        || t.contains("\"summary\"")
+        || t.contains("\"result\"")
+}
+
+/// Repair common LLM truncation: object body without opening `{` (often after a fence).
+fn try_wrap_truncated_json_object(text: &str) -> Option<serde_json::Value> {
+    let body = strip_fence_markers_from_text(text);
+    if body.is_empty() || body.starts_with('{') {
+        return None;
+    }
+    if !body.contains('"') || !body.contains('}') {
+        return None;
+    }
+    let body = body
+        .lines()
+        .filter(|line| line.trim() != ",")
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .trim_start_matches(',')
+        .trim()
+        .to_string();
+    let wrapped = format!("{{{body}");
+    serde_json::from_str(&wrapped).ok()
+}
+
+/// Try to parse assistant reply JSON from bare text, fenced blocks, or truncated objects.
+fn parse_assistant_reply_json(text: &str) -> (Option<serde_json::Value>, bool) {
+    let trimmed = text.trim();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return (Some(v), false);
+    }
+    if let Some(fenced) = extract_markdown_fence_content(trimmed) {
+        if let Ok(v) = serde_json::from_str(&fenced) {
+            return (Some(v), true);
+        }
+        if let Some(v) = try_wrap_truncated_json_object(&fenced) {
+            return (Some(v), true);
+        }
+    }
+    if let Some(v) = extract_fenced_json(trimmed) {
+        return (Some(v), true);
+    }
+    if let Some(v) = try_wrap_truncated_json_object(trimmed) {
+        return (Some(v), true);
+    }
+    (None, trimmed.contains("```") || trimmed.contains('`'))
+}
+
+/// Best-effort scan for a JSON string field when strict parsing failed.
+fn extract_json_string_field_loose(text: &str, field: &str) -> Option<String> {
+    let needle = format!(r#""{field}""#);
+    let field_pos = text.find(&needle)?;
+    let mut rest = text[field_pos + needle.len()..].trim_start();
+    if !rest.starts_with(':') {
+        return None;
+    }
+    rest = rest[1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let mut out = String::new();
+    let mut escape = false;
+    for ch in rest.chars() {
+        if escape {
+            out.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' => escape = true,
+            '"' => return Some(out),
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// Try to extract a JSON object from a reply that has prose + JSON code fence.
+fn extract_fenced_json(text: &str) -> Option<serde_json::Value> {
+    let brace_start = text.find('{')?;
+    let end = json_object_end(text, brace_start)?;
+    let json_str = &text[brace_start..end];
     serde_json::from_str(json_str).ok()
 }
 
 /// Strip leading prose and trailing text/code-fences from a reply, keeping just the prose.
 fn strip_prose_around_json(text: &str) -> String {
-    let brace_start = text.find('{').unwrap_or(text.len());
-    let prefix = text[..brace_start].trim();
-    let json_end = text[brace_start..]
-        .find('}')
-        .map(|i| brace_start + i + '}'.len_utf8())
-        .unwrap_or(text.len());
+    let Some(brace_start) = text.find('{') else {
+        return strip_fence_markers_from_text(text);
+    };
+    let prefix = strip_fence_markers_from_text(text[..brace_start].trim());
+    let json_end = json_object_end(text, brace_start).unwrap_or(text.len());
     let suffix = text[json_end..].trim();
-    // Remove trailing code fence markers
     let suffix = suffix.trim_start_matches('`').trim();
     if prefix.is_empty() {
         suffix.to_string()
     } else if suffix.is_empty() {
-        prefix.to_string()
+        prefix
     } else {
         format!("{prefix}\n{suffix}")
     }
 }
 
-fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
-    let parsed = serde_json::from_str::<serde_json::Value>(reply).ok();
-
-    // If the full reply isn't JSON, try to extract a JSON block from markdown fences.
-    let is_fenced = parsed.is_none();
-    let fenced_json = if is_fenced { extract_fenced_json(reply) } else { None };
-    let source = parsed.or_else(|| fenced_json);
-
-    let summary = source
+fn loose_field_from_reply(
+    reply: &str,
+    field: &str,
+    source: &Option<serde_json::Value>,
+) -> Option<String> {
+    source
         .as_ref()
-        .and_then(|v| v.get("summary").and_then(|s| s.as_str()))
+        .and_then(|v| v.get(field).and_then(|s| s.as_str()))
         .filter(|s| !s.trim().is_empty())
-        .map(|s| s.to_owned());
+        .map(|s| s.to_owned())
+        .or_else(|| extract_json_string_field_loose(reply, field))
+}
+
+fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
+    let (source, is_fenced) = parse_assistant_reply_json(reply);
+
+    let summary = loose_field_from_reply(reply, "summary", &source);
     let result_str = source
         .as_ref()
         .and_then(|v| v.get("result").map(|r| format_json_value_as_text(r)));
 
-    // When the full reply wasn't JSON but we extracted a fenced block,
-    // show the prose text (excluding the JSON block) as the display
-    // and extract summary/result from the fenced JSON.
     let display = match (summary.as_deref(), result_str.as_deref()) {
         (Some(s), Some(r)) if is_fenced => {
             let prose = strip_prose_around_json(reply);
-            if prose.is_empty() {
+            if prose.is_empty() || prose_is_json_fragment(&prose) {
                 format!("{}\n\n{}", s, r)
             } else {
                 format!("{}\n\n{}\n\n{}", prose, s, r)
@@ -3242,7 +3370,7 @@ fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
         (Some(s), Some(r)) => format!("{}\n\n{}", s, r),
         (Some(s), None) if is_fenced => {
             let prose = strip_prose_around_json(reply);
-            if prose.is_empty() {
+            if prose.is_empty() || prose_is_json_fragment(&prose) {
                 s.to_string()
             } else {
                 format!("{}\n\n{}", prose, s)
@@ -3250,20 +3378,29 @@ fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
         }
         (Some(s), None) => s.to_string(),
         (None, Some(r)) => r.to_string(),
-        (None, None) => source
-            .as_ref()
-            .filter(|v| v.is_object() || v.is_array())
-            .map(|_v| strip_prose_around_json(reply))
-            .unwrap_or_else(|| strip_prose_around_json(reply)),
+        (None, None) => {
+            if let Some(s) = extract_json_string_field_loose(reply, "summary") {
+                s
+            } else if let Some(err) = extract_json_string_field_loose(reply, "error") {
+                err
+            } else if let Some(v) = source.as_ref().filter(|v| v.is_object() || v.is_array()) {
+                format_json_value_as_text(v)
+            } else {
+                let prose = strip_prose_around_json(reply);
+                if is_fenced
+                    || prose.is_empty()
+                    || prose.contains("```")
+                    || prose_is_json_fragment(&prose)
+                {
+                    UNPARSEABLE_ASSISTANT_REPLY.to_string()
+                } else {
+                    prose
+                }
+            }
+        }
     };
-    let intent = source
-        .as_ref()
-        .and_then(|v| v.get("intent").and_then(|s| s.as_str()))
-        .map(|s| s.to_owned());
-    let goal_status = source
-        .as_ref()
-        .and_then(|v| v.get("goal_status").and_then(|s| s.as_str()))
-        .map(|s| s.to_owned());
+    let intent = loose_field_from_reply(reply, "intent", &source);
+    let goal_status = loose_field_from_reply(reply, "goal_status", &source);
     AssistantReplyDisplay {
         display,
         intent,
@@ -8288,7 +8425,15 @@ fn format_operator_activity_card(
         OperatorActivitySeverity::Progress => "▸",
         OperatorActivitySeverity::Info => "·",
     };
-    format!("{} [{}] {}", icon, record.agent_id, record.summary)
+    format!(
+        "{} [{}] {}",
+        icon,
+        record.agent_id,
+        autonoetic_gateway::runtime::operator_activity::display_operator_activity_summary(
+            record.tool_name.as_deref(),
+            &record.summary,
+        )
+    )
 }
 
 fn merge_operator_activity(
@@ -9571,5 +9716,36 @@ mod tests {
         let reply = "{\"status\":\"ok\",\"summary\":\"Echo only.\"}";
         let formatted = super::format_assistant_reply(reply);
         assert_eq!(formatted.display, "Echo only.");
+    }
+
+    #[test]
+    fn format_assistant_reply_fenced_json_summary_only() {
+        let reply = "```json\n{\"status\":\"ok\",\"summary\":\"Listed tools.\"}\n```";
+        let formatted = super::format_assistant_reply(reply);
+        assert_eq!(formatted.display, "Listed tools.");
+    }
+
+    #[test]
+    fn format_assistant_reply_truncated_object_missing_open_brace() {
+        let reply = "```json\n  ,\n    \"status\": \"ok\",\n    \"summary\": \"Summarized capabilities.\"\n  }\n`";
+        let formatted = super::format_assistant_reply(reply);
+        assert_eq!(formatted.display, "Summarized capabilities.");
+    }
+
+    #[test]
+    fn format_assistant_reply_loose_summary_when_unparseable() {
+        let reply = "```json\n  \"status\": \"ok\"\n  ,\n    \"summary\": \"Listed agents.\"\n  }\n```";
+        let formatted = super::format_assistant_reply(reply);
+        assert_eq!(formatted.display, "Listed agents.");
+    }
+
+    #[test]
+    fn format_assistant_reply_unparseable_fallback() {
+        let reply = "```json\nnot json at all\n```";
+        let formatted = super::format_assistant_reply(reply);
+        assert_eq!(
+            formatted.display,
+            super::UNPARSEABLE_ASSISTANT_REPLY
+        );
     }
 }

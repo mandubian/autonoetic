@@ -276,6 +276,75 @@ fn summarize_approval(parsed: Option<&Value>) -> String {
     )
 }
 
+fn summarize_self_describe(parsed: Option<&Value>) -> String {
+    let Some(v) = parsed else {
+        return "introspected self".to_string();
+    };
+    let name = v
+        .get("identity")
+        .and_then(|i| i.get("name").or_else(|| i.get("agent_id")))
+        .and_then(|x| x.as_str())
+        .unwrap_or("self");
+    let cap_count = v
+        .get("may_do")
+        .and_then(|m| m.get("capabilities"))
+        .and_then(|c| c.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let rights_count = v
+        .get("guaranteed")
+        .and_then(|g| g.get("rights"))
+        .and_then(|r| r.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let tier_count = v
+        .get("may_do")
+        .and_then(|m| m.get("allowed_tool_tiers"))
+        .and_then(|t| t.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    format!(
+        "introspected {} — {} capabilities, {} rights, {} tool tiers",
+        name, cap_count, rights_count, tier_count
+    )
+}
+
+fn looks_like_self_describe_json(v: &Value) -> bool {
+    v.get("evolution").is_some()
+        && (v.get("identity").is_some()
+            || v.get("may_do").is_some()
+            || v.get("guaranteed").is_some()
+            || v.get("ok") == Some(&Value::Bool(true)))
+}
+
+fn looks_like_self_describe_summary(summary: &str) -> bool {
+    summary.contains("\"evolution\"")
+        && summary.contains("may_propose_amendments")
+        && (summary.contains("\"identity\"")
+            || summary.contains("\"may_do\"")
+            || summary.contains("\"guaranteed\"")
+            || summary.starts_with('{'))
+}
+
+/// Format a stored operator-activity summary for TUI display (handles legacy raw JSON rows).
+pub fn display_operator_activity_summary(tool_name: Option<&str>, summary: &str) -> String {
+    if summary.starts_with("introspected ") {
+        return summary.to_string();
+    }
+    if tool_name == Some("self_describe") || looks_like_self_describe_summary(summary) {
+        if let Ok(v) = serde_json::from_str::<Value>(summary) {
+            return summarize_self_describe(Some(&v));
+        }
+        return "introspected self".to_string();
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(summary) {
+        if looks_like_self_describe_json(&v) {
+            return summarize_self_describe(Some(&v));
+        }
+    }
+    summary.to_string()
+}
+
 fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> String {
     let summary = match tool_name {
         "workflow_wait" => summarize_workflow_wait(parsed),
@@ -309,6 +378,7 @@ fn summarize_tool_result(tool_name: &str, parsed: Option<&Value>, raw: &str) -> 
                 .unwrap_or(-1);
             format!("command exit={}", exit)
         }
+        "self_describe" => summarize_self_describe(parsed),
         _ => {
             if let Some(v) = parsed {
                 if let Some(msg) = v.get("message").and_then(|x| x.as_str()) {
@@ -513,5 +583,30 @@ mod tests {
         )
         .expect("should emit");
         assert!(draft.summary.len() <= 241);
+    }
+
+    #[test]
+    fn self_describe_emits_compact_summary() {
+        let raw = r#"{"ok":true,"identity":{"agent_id":"planner.collaborative","name":"Collaborative Planner"},"may_do":{"capabilities":[{"type":"AgentSpawn"}],"allowed_tool_tiers":["Core","Standard"]},"guaranteed":{"rights":[{"id":"Ri-0.1"},{"id":"Ri-0.2"}]},"evolution":{"may_propose_amendments":false,"paths":["skill promotion"]}}"#;
+        let draft = classify_tool_activity("self_describe", "{}", raw).expect("self_describe should emit");
+        assert!(draft.summary.starts_with("introspected Collaborative Planner"));
+        assert!(draft.summary.contains("1 capabilities"));
+        assert!(draft.summary.contains("2 rights"));
+        assert!(draft.summary.contains("2 tool tiers"));
+        assert!(!draft.summary.contains("evolution"));
+    }
+
+    #[test]
+    fn display_operator_activity_summary_reformats_legacy_self_describe_json() {
+        let legacy = r#"{"evolution":{"may_propose_amendments":false,"paths":["skill promotion"]}"#;
+        let shown = display_operator_activity_summary(Some("self_describe"), legacy);
+        assert_eq!(shown, "introspected self");
+    }
+
+    #[test]
+    fn display_operator_activity_summary_reformats_full_self_describe_json() {
+        let raw = r#"{"ok":true,"identity":{"name":"Planner"},"may_do":{"capabilities":[{},{}],"allowed_tool_tiers":["Core"]},"guaranteed":{"rights":[{}]},"evolution":{}}"#;
+        let shown = display_operator_activity_summary(None, raw);
+        assert_eq!(shown, "introspected Planner — 2 capabilities, 1 rights, 1 tool tiers");
     }
 }

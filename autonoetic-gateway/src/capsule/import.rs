@@ -223,7 +223,7 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
             runtime_lock_hash,
             manifest_hash,
             created_at: now,
-            created_by_type: "system".to_string(),
+            created_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
             created_by_id: "capsule.import".to_string(),
             source_kind: "capsule_import".to_string(),
             source_ref: Some(manifest.capsule_id.clone()),

@@ -30,6 +30,7 @@ use autonoetic_types::background::{
 };
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::principal::PrincipalKind;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -108,7 +109,7 @@ fn make_revision_record(revision_id: &str) -> AgentRevisionRecord {
         runtime_lock_hash: "sha256:lock".to_string(),
         manifest_hash: "sha256:manifest".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "user".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
         source_kind: "artifact".to_string(),
         source_ref: None,
@@ -147,7 +148,7 @@ fn setup_promote_harness(outgoing_caps_yaml: &str, incoming_caps_yaml: &str) -> 
         agent_id: AGENT_ID.to_string(),
         revision_id: OUTGOING_REVISION.to_string(),
         updated_at: chrono::Utc::now().to_rfc3339(),
-        updated_by_type: "user".to_string(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
     };
@@ -579,7 +580,7 @@ fn approval_ref_bypass_is_invalidated_when_alias_moves() {
             agent_id: AGENT_ID.to_string(),
             revision_id: third_revision.to_string(),
             updated_at: chrono::Utc::now().to_rfc3339(),
-            updated_by_type: "user".to_string(),
+            updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "test".to_string(),
             reason: None,
         })

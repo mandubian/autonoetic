@@ -1,8 +1,9 @@
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent_revision::{
-    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus, SessionAgentBinding,
+    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
 use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
+use autonoetic_types::principal::PrincipalKind;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -23,7 +24,7 @@ fn seed_revision(store: &GatewayStore, agent_id: &str, revision_id: &str) {
             runtime_lock_hash: "sha256:test-lock".to_string(),
             manifest_hash: "sha256:test-manifest".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
-            created_by_type: "test".to_string(),
+            created_by_type: PrincipalKind::Human.tag().to_string(),
             created_by_id: "test".to_string(),
             source_kind: "test".to_string(),
             source_ref: None,
@@ -45,7 +46,7 @@ fn seed_alias(store: &GatewayStore, agent_id: &str, revision_id: &str) {
             agent_id: agent_id.to_string(),
             revision_id: revision_id.to_string(),
             updated_at: chrono::Utc::now().to_rfc3339(),
-            updated_by_type: "test".to_string(),
+            updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "test".to_string(),
             reason: Some("test".to_string()),
         })

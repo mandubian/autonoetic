@@ -14,6 +14,7 @@ use autonoetic_types::agent_revision::{
 use autonoetic_types::background::{ApprovalDecision, ApprovalRequest};
 use autonoetic_types::causal_chain::CausalChainEntry;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::principal::PrincipalKind;
 use serde::de::DeserializeOwned;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -336,7 +337,7 @@ pub fn seed_agent_revision(
         runtime_lock_hash: "sha256:seed-lock".to_string(),
         manifest_hash: "sha256:seed-manifest".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "support".to_string(),
         source_kind: "test".to_string(),
         source_ref: None,
@@ -354,7 +355,7 @@ pub fn seed_agent_revision(
         agent_id: agent_id.to_string(),
         revision_id: revision_id.clone(),
         updated_at: chrono::Utc::now().to_rfc3339(),
-        updated_by_type: "test".to_string(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "support".to_string(),
         reason: Some("test seed".to_string()),
     };

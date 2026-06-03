@@ -7,6 +7,7 @@ use autonoetic_types::agent_revision::{
 };
 use autonoetic_types::capsule::CapsuleMode;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::principal::PrincipalKind;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -51,7 +52,7 @@ fn make_fixture(agent_id: &str, revision_id: &str) -> Fixture {
         runtime_lock_hash: format!("sha256:{}", "y".repeat(64)),
         manifest_hash: format!("sha256:{}", "z".repeat(64)),
         created_at: "2026-05-28T00:00:00Z".to_string(),
-        created_by_type: "user".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
         source_kind: "artifact".to_string(),
         source_ref: Some("art_test".to_string()),
@@ -69,7 +70,7 @@ fn make_fixture(agent_id: &str, revision_id: &str) -> Fixture {
         agent_id: agent_id.to_string(),
         revision_id: revision_id.to_string(),
         updated_at: "2026-05-28T00:00:00Z".to_string(),
-        updated_by_type: "user".to_string(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
     };
