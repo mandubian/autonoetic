@@ -145,8 +145,9 @@ enum SessionRole {          // the seat, occupant-agnostic
     ExternalSurface { surface }, // IDE, editor
     Runtime,                // the executor's own voice (lifecycle, mechanical rulings)
 }
-struct EventRefs { causal_event_id, execution_trace, artifact_id,
-                   interaction_id, plan_id, workbench_id }
+struct TimelineRefs { causal_event_id, execution_trace_id, artifact_id,
+                      interaction_id, approval_request_id, plan_id, workbench_id }
+                      // P5 adds provider_id, transcript_ref (#343 provenance)
 ```
 
 Two consequences that matter:
@@ -409,7 +410,8 @@ but external agents stay exactly as bounded as #343 specifies.
   artifact mutation, secrets, network, capability/PlanFrame change) is denied to
   it and gated at **elevated authority** (`ApprovalLevel::Admin`+), which is
   BLOCKING in the motivation policy (§3.5). Foreign output is sandboxed and
-  quarantined until reconciliation + a strong-authority decision admit it.
+  quarantined until reconciliation completes and a strong-authority decision
+  admits it.
 - **Timeline provenance mirrors #343.** A `ForeignAgent` timeline event carries
   #343's provenance — `provider_id`, `mode` (interactive/non-interactive),
   `plan_id`, `step_id`, `checkpoint_before`, `changed_files`, `transcript_ref` —
