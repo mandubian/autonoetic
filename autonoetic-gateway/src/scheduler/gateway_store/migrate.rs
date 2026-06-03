@@ -552,6 +552,23 @@ fn apply_decided_by_kind_v47(conn: &mut Connection) -> Result<()> {
 
     conn.execute("ALTER TABLE approvals ADD COLUMN decided_by_kind TEXT", [])?;
 
+    // Backfill already-decided rows so SQL accountability queries cover history.
+    // Mirrors `principal::decider_principal_kind` exactly: operator⇒human,
+    // agent-id-shaped (`agent:` or contains `.`)⇒autonoetic_agent, and
+    // gateway/system/emergency_stop/unknown⇒NULL (mechanical, no obligation).
+    conn.execute(
+        "UPDATE approvals SET decided_by_kind = CASE
+            WHEN trim(decided_by) = 'operator' THEN 'human'
+            WHEN decided_by LIKE 'agent:%' OR decided_by LIKE '%.%' THEN 'autonoetic_agent'
+            ELSE NULL
+         END
+         WHERE decided_by IS NOT NULL
+           AND trim(decided_by) <> ''
+           AND trim(decided_by) NOT IN ('gateway', 'system')
+           AND decided_by NOT LIKE 'emergency_stop:%'",
+        [],
+    )?;
+
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![47_i64, "decided_by_kind", chrono::Utc::now().to_rfc3339()],
