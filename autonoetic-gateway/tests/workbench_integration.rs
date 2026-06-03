@@ -176,6 +176,18 @@ fn artifact_project_creates_editable_workbench() {
     assert!(wb.base_artifact_id.starts_with("art_"), "base_artifact_id should be art_*: {}", wb.base_artifact_id);
     assert_eq!(wb.status.as_str(), "active");
 
+    // Session Room P1: projecting a workbench lands a `workbench.created` event
+    // on the canonical timeline, referencing the workbench surface.
+    let tl = store
+        .list_session_timeline("root-session-001", None, 100, None, None)
+        .unwrap();
+    let created = tl
+        .entries
+        .iter()
+        .find(|e| e.event_type == "workbench.created")
+        .expect("workbench.created event on the canonical timeline");
+    assert_eq!(created.refs.workbench_id.as_deref(), Some(workbench_id));
+
     std::fs::write(&main_py, "print('modified')").unwrap();
     let content_after = std::fs::read_to_string(&main_py).unwrap();
     assert_eq!(content_after, "print('modified')");
