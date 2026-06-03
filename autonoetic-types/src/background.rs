@@ -638,6 +638,15 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
+    /// Principal kind of whoever decided this gate (#359 P1.b / #361), derived
+    /// from `decided_by`. `None` while pending or for executor-mechanical
+    /// resolutions. Mirrors the persisted `decided_by_kind` column.
+    pub fn decided_by_kind(&self) -> Option<crate::principal::PrincipalKind> {
+        self.decided_by
+            .as_deref()
+            .and_then(crate::principal::decider_principal_kind)
+    }
+
     pub fn into_decision(self) -> anyhow::Result<ApprovalDecision> {
         let status = self
             .status

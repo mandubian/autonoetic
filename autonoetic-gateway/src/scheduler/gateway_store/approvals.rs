@@ -174,9 +174,13 @@ impl GatewayStore {
         decision_reason: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        // #361: record the decider's principal kind (derived from decided_by) so
+        // §O symmetric-obligation checks are mechanically queryable in SQL.
+        let decided_by_kind =
+            autonoetic_types::principal::decider_principal_kind(decided_by).map(|k| k.tag());
         let rows = conn.execute(
-            "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_reason = ?4 WHERE request_id = ?5 AND status = 'pending'",
-            params![status, decided_by, decided_at, decision_reason, request_id],
+            "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_reason = ?4, decided_by_kind = ?5 WHERE request_id = ?6 AND status = 'pending'",
+            params![status, decided_by, decided_at, decision_reason, decided_by_kind, request_id],
         )?;
         if rows == 0 {
             anyhow::bail!(
@@ -194,9 +198,11 @@ impl GatewayStore {
         cancelled_at: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        let decided_by_kind =
+            autonoetic_types::principal::decider_principal_kind(cancelled_by).map(|k| k.tag());
         let rows = conn.execute(
-            "UPDATE approvals SET status = 'cancelled', decided_by = ?1, decided_at = ?2 WHERE request_id = ?3 AND status = 'pending'",
-            params![cancelled_by, cancelled_at, request_id],
+            "UPDATE approvals SET status = 'cancelled', decided_by = ?1, decided_at = ?2, decided_by_kind = ?3 WHERE request_id = ?4 AND status = 'pending'",
+            params![cancelled_by, cancelled_at, decided_by_kind, request_id],
         )?;
         if rows == 0 {
             anyhow::bail!(
@@ -844,5 +850,89 @@ impl GatewayStore {
             "rejection_rate": if total > 0 { format!("{:.1}%", (rejected as f64 / total as f64) * 100.0) } else { "N/A".to_string() },
             "top_agents": top_agents,
         }))
+    }
+}
+
+#[cfg(test)]
+mod decided_by_kind_tests {
+    use super::GatewayStore;
+    use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+    use tempfile::tempdir;
+
+    fn pending(id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            request_id: id.to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "s1".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "echo hi".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+                detected_hosts: None,
+            },
+            approval_level: ApprovalLevel::Operator,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            similar_to_request_id: None,
+            similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+        }
+    }
+
+    fn stored_kind(store: &GatewayStore, id: &str) -> Option<String> {
+        store
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT decided_by_kind FROM approvals WHERE request_id = ?1",
+                    [id],
+                    |r| r.get::<_, Option<String>>(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn record_decision_persists_derived_decider_kind() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // Operator (human) decision.
+        let mut a = pending("apr-h");
+        store.create_approval(&mut a).unwrap();
+        store
+            .record_decision("apr-h", "approved", "operator", "2026-06-01T01:00:00Z", None)
+            .unwrap();
+        assert_eq!(stored_kind(&store, "apr-h").as_deref(), Some("human"));
+
+        // Agent-decider decision.
+        let mut b = pending("apr-a");
+        store.create_approval(&mut b).unwrap();
+        store
+            .record_decision("apr-a", "approved", "auditor.default", "2026-06-01T01:00:00Z", None)
+            .unwrap();
+        assert_eq!(
+            stored_kind(&store, "apr-a").as_deref(),
+            Some("autonoetic_agent")
+        );
+
+        // Mechanical cancel ⇒ no principal kind.
+        let mut c = pending("apr-g");
+        store.create_approval(&mut c).unwrap();
+        store
+            .cancel_approval("apr-g", "gateway", "2026-06-01T01:00:00Z")
+            .unwrap();
+        assert_eq!(stored_kind(&store, "apr-g"), None);
     }
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 46;
+const SCHEMA_VERSION_LATEST: i64 = 47;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -531,7 +531,31 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_validation_waivers_v44(conn)?;
     apply_operator_activity_v45(conn)?;
     apply_session_timeline_v46(conn)?;
+    apply_decided_by_kind_v47(conn)?;
 
+    Ok(())
+}
+
+/// #361 / #359 P1.b — record the decider's principal kind on gate decisions so
+/// symmetric-obligation (§O) checks can be made mechanically in SQL. Derived
+/// from `decided_by` at decision time (`operator`⇒human, agent id⇒autonoetic_agent,
+/// gateway/system⇒NULL). Additive column.
+fn apply_decided_by_kind_v47(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 47 {
+        return Ok(());
+    }
+
+    conn.execute("ALTER TABLE approvals ADD COLUMN decided_by_kind TEXT", [])?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![47_i64, "decided_by_kind", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 

@@ -51,6 +51,20 @@ impl PrincipalKind {
 /// `kind` is flattened so the wire shape is flat — `{"kind":"human","id":...}`,
 /// or `{"kind":"foreign_agent","provider":"…","id":…}` — rather than the nested
 /// `{"kind":{"kind":"human"},…}` the internally-tagged enum would otherwise give.
+/// Best-effort principal kind of a gate *decider*, derived from the recorded
+/// `decided_by` string (#359 P1.b / #361). Deterministic and mechanically
+/// checkable: `"operator"` ⇒ Human; `"gateway"`/`"system"`/empty ⇒ `None`
+/// (executor mechanics — not a principal decision, so no §O obligation attaches);
+/// anything else (an agent id) ⇒ AutonoeticAgent. Foreign agents never decide
+/// gates (they hold no authority), so they are not produced here.
+pub fn decider_principal_kind(decided_by: &str) -> Option<PrincipalKind> {
+    match decided_by.trim() {
+        "" | "gateway" | "system" => None,
+        "operator" => Some(PrincipalKind::Human),
+        _ => Some(PrincipalKind::AutonoeticAgent),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
     #[serde(flatten)]
@@ -127,6 +141,19 @@ mod tests {
         // Round-trips back.
         let back: Principal = serde_json::from_value(foreign).unwrap();
         assert_eq!(back, Principal::foreign("claude-code", "fa-1"));
+    }
+
+    #[test]
+    fn decider_kind_derivation() {
+        assert_eq!(decider_principal_kind("operator"), Some(PrincipalKind::Human));
+        assert_eq!(
+            decider_principal_kind("auditor.default"),
+            Some(PrincipalKind::AutonoeticAgent)
+        );
+        // Executor mechanics are not principal decisions.
+        assert_eq!(decider_principal_kind("gateway"), None);
+        assert_eq!(decider_principal_kind("system"), None);
+        assert_eq!(decider_principal_kind("  "), None);
     }
 
     #[test]
