@@ -18,29 +18,23 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
     let gateway_dir = config.agents_dir.join(".gateway");
     let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
 
-    let min_altitude = Altitude::parse_str(&args.min_altitude);
-    if min_altitude.is_none() && args.min_altitude != "detail" {
-        anyhow::bail!(
+    // `parse_str` returns `Some` for every valid floor (detail/normal/attention/
+    // error), so `None` here means the input was invalid.
+    let min_altitude = match Altitude::parse_str(&args.min_altitude) {
+        Some(a) => a,
+        None => anyhow::bail!(
             "invalid --min-altitude '{}': expected detail | normal | attention | error",
             args.min_altitude
-        );
-    }
+        ),
+    };
 
-    // Initial window: most recent `limit` rows at/above the floor.
-    let first = store.list_session_timeline(
-        &args.root_session_id,
-        None,
-        args.limit,
-        min_altitude,
-        None,
-    )?;
-    for entry in &first.entries {
-        println!("{}", render::render_line(entry));
-    }
-    let mut cursor = first.entries.last().map(|e| e.event_id.clone());
+    // Render the full timeline oldest-first, paging through *all* rows (not just
+    // the first `limit`, which would silently truncate long sessions).
+    let mut cursor: Option<String> = None;
+    let rendered_any = drain_new(&store, &args.root_session_id, &mut cursor, args.limit, min_altitude)?;
 
     if !args.follow {
-        if first.entries.is_empty() {
+        if !rendered_any {
             eprintln!(
                 "(no activity at or above '{}' for session '{}')",
                 args.min_altitude, args.root_session_id
@@ -56,25 +50,40 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
     let mut interval = tokio::time::interval(Duration::from_millis(800));
     loop {
         interval.tick().await;
-        // Drain everything newer than the cursor (page until caught up).
-        loop {
-            let page = store.list_session_timeline(
-                &args.root_session_id,
-                cursor.as_deref(),
-                args.limit,
-                min_altitude,
-                None,
-            )?;
-            if page.entries.is_empty() {
-                break;
-            }
-            for entry in &page.entries {
-                println!("{}", render::render_line(entry));
-                cursor = Some(entry.event_id.clone());
-            }
-            if !page.has_more {
-                break;
-            }
+        drain_new(&store, &args.root_session_id, &mut cursor, args.limit, min_altitude)?;
+    }
+}
+
+/// Render every timeline entry newer than `cursor`, paging (in `limit`-sized
+/// reads) until caught up, advancing `cursor`. Returns whether anything was
+/// rendered. Used for both the initial dump and each follow tick.
+fn drain_new(
+    store: &autonoetic_gateway::scheduler::GatewayStore,
+    root_session_id: &str,
+    cursor: &mut Option<String>,
+    limit: u32,
+    min_altitude: Altitude,
+) -> anyhow::Result<bool> {
+    let mut rendered_any = false;
+    loop {
+        let page = store.list_session_timeline(
+            root_session_id,
+            cursor.as_deref(),
+            limit,
+            Some(min_altitude),
+            None,
+        )?;
+        if page.entries.is_empty() {
+            break;
+        }
+        for entry in &page.entries {
+            println!("{}", render::render_line(entry));
+            *cursor = Some(entry.event_id.clone());
+            rendered_any = true;
+        }
+        if !page.has_more {
+            break;
         }
     }
+    Ok(rendered_any)
 }
