@@ -2888,7 +2888,7 @@ metadata:
                 agent_id: "planner.default".to_string(),
                 revision_id: revision.revision_id.clone(),
                 updated_at: "2026-01-01T00:00:01Z".to_string(),
-                updated_by_type: "human".to_string(),
+                updated_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
                 updated_by_id: "operator".to_string(),
                 reason: Some("initial seed".to_string()),
             })
@@ -2976,7 +2976,7 @@ metadata:
                 agent_id: "list.agent".to_string(),
                 revision_id: "rev_sha256:list123".to_string(),
                 updated_at: "2026-01-01T00:00:01Z".to_string(),
-                updated_by_type: "human".to_string(),
+                updated_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
                 updated_by_id: "operator".to_string(),
                 reason: Some("seed".to_string()),
             })
