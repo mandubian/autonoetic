@@ -94,7 +94,17 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
-        let pending_approval = pending_approval_id(&entries, indexed.get(selected));
+        // Only offer resolution for an approval that is *still* pending in the
+        // store — a historical `approval.pending` row whose request was since
+        // decided must not show y/n (it would just hit the idempotency guard).
+        let pending_approval = pending_approval_id(&entries, indexed.get(selected)).filter(|id| {
+            store
+                .get_approval(id)
+                .ok()
+                .flatten()
+                .map(|a| a.status.is_none())
+                .unwrap_or(false)
+        });
 
         terminal.draw(|f| {
             draw(
@@ -156,6 +166,9 @@ pub fn run(
                     // BLOCKING enforcement yet).
                     KeyCode::Char('y') | KeyCode::Char('n') => {
                         if let Some(request_id) = pending_approval.clone() {
+                            // Close the drill-down so the motivation prompt (footer)
+                            // is visible — otherwise input would be a hidden mode.
+                            detail = None;
                             input = Some(GateInput {
                                 approve: key.code == KeyCode::Char('y'),
                                 request_id,
