@@ -20,43 +20,71 @@ const SEVERITY_RANK_SQL: &str = "CASE severity
     ELSE 0
 END";
 
+/// Outcome of a rate-limited operator-activity insert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorActivityInsert {
+    /// The record was persisted.
+    Inserted,
+    /// The record was dropped, but a single `rate_limited` notice was emitted
+    /// for this window so the suppression is visible.
+    ThrottleNoticeEmitted,
+    /// The record was dropped; a notice for this window already existed.
+    Dropped,
+}
+
 impl GatewayStore {
     pub fn insert_operator_activity(&self, record: &OperatorActivityRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let kind = record.kind.as_str();
-        let severity = record.severity.as_str();
-        let refs_json = if record.refs == OperatorActivityRefs::default() {
-            None
-        } else {
-            Some(serde_json::to_string(&record.refs)?)
-        };
+        write_operator_activity(&conn, record)
+    }
 
-        conn.execute(
-            "INSERT OR IGNORE INTO operator_activity (
-                activity_id, root_session_id, session_id, agent_id,
-                workflow_id, task_id, turn_id, occurred_at,
-                kind, severity, summary, tool_name,
-                causal_event_id, workflow_event_id, refs_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                record.activity_id,
-                record.root_session_id,
-                record.session_id,
-                record.agent_id,
-                record.workflow_id,
-                record.task_id,
-                record.turn_id,
-                record.occurred_at,
-                kind,
-                severity,
-                record.summary,
-                record.tool_name,
-                record.causal_event_id,
-                record.workflow_event_id,
-                refs_json,
-            ],
+    /// Insert an operator activity subject to a per-root rolling-window rate
+    /// limit. At most `rate_limit_per_min` real rows are persisted per root
+    /// session per 60 seconds; once the cap is reached a single
+    /// `rate_limited` notice is emitted and further rows in the window are
+    /// dropped. `rate_limit_per_min == 0` disables the limit. The count and
+    /// notice check run under the same connection lock as the insert, so the
+    /// cap holds even with concurrent emitters.
+    pub fn insert_operator_activity_throttled(
+        &self,
+        record: &OperatorActivityRecord,
+        rate_limit_per_min: u32,
+    ) -> Result<OperatorActivityInsert> {
+        if rate_limit_per_min == 0 {
+            self.insert_operator_activity(record)?;
+            return Ok(OperatorActivityInsert::Inserted);
+        }
+
+        let window_start = window_start_rfc3339(&record.occurred_at)?;
+        let conn = self.conn.lock().unwrap();
+
+        // Notices don't consume budget — only real activity rows count.
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM operator_activity
+             WHERE root_session_id = ?1 AND occurred_at >= ?2 AND kind != 'rate_limited'",
+            params![record.root_session_id, window_start],
+            |row| row.get(0),
         )?;
-        Ok(())
+
+        if (count as u64) < rate_limit_per_min as u64 {
+            write_operator_activity(&conn, record)?;
+            return Ok(OperatorActivityInsert::Inserted);
+        }
+
+        let notice_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM operator_activity
+             WHERE root_session_id = ?1 AND occurred_at >= ?2 AND kind = 'rate_limited'",
+            params![record.root_session_id, window_start],
+            |row| row.get(0),
+        )?;
+
+        if notice_count == 0 {
+            let notice = rate_limit_notice(record, rate_limit_per_min);
+            write_operator_activity(&conn, &notice)?;
+            return Ok(OperatorActivityInsert::ThrottleNoticeEmitted);
+        }
+
+        Ok(OperatorActivityInsert::Dropped)
     }
 
     pub fn list_operator_activity(
@@ -142,6 +170,76 @@ impl GatewayStore {
     }
 }
 
+fn write_operator_activity(
+    conn: &rusqlite::Connection,
+    record: &OperatorActivityRecord,
+) -> Result<()> {
+    let refs_json = if record.refs == OperatorActivityRefs::default() {
+        None
+    } else {
+        Some(serde_json::to_string(&record.refs)?)
+    };
+
+    conn.execute(
+        "INSERT OR IGNORE INTO operator_activity (
+            activity_id, root_session_id, session_id, agent_id,
+            workflow_id, task_id, turn_id, occurred_at,
+            kind, severity, summary, tool_name,
+            causal_event_id, workflow_event_id, refs_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            record.activity_id,
+            record.root_session_id,
+            record.session_id,
+            record.agent_id,
+            record.workflow_id,
+            record.task_id,
+            record.turn_id,
+            record.occurred_at,
+            record.kind.as_str(),
+            record.severity.as_str(),
+            record.summary,
+            record.tool_name,
+            record.causal_event_id,
+            record.workflow_event_id,
+            refs_json,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Start of the 60-second rate-limit window ending at `occurred_at`, as an
+/// RFC3339 string comparable (lexicographically) with stored `occurred_at`.
+fn window_start_rfc3339(occurred_at: &str) -> Result<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(occurred_at)
+        .map_err(|e| anyhow::anyhow!("invalid occurred_at `{occurred_at}`: {e}"))?;
+    Ok((parsed - chrono::Duration::seconds(60)).to_rfc3339())
+}
+
+/// Build the synthetic `rate_limited` notice that stands in for dropped rows,
+/// inheriting the source record's session/agent context.
+fn rate_limit_notice(src: &OperatorActivityRecord, cap: u32) -> OperatorActivityRecord {
+    OperatorActivityRecord {
+        activity_id: format!("oa-{}", uuid::Uuid::new_v4()),
+        root_session_id: src.root_session_id.clone(),
+        session_id: src.session_id.clone(),
+        agent_id: src.agent_id.clone(),
+        workflow_id: src.workflow_id.clone(),
+        task_id: src.task_id.clone(),
+        turn_id: src.turn_id.clone(),
+        occurred_at: src.occurred_at.clone(),
+        kind: OperatorActivityKind::RateLimited,
+        severity: OperatorActivitySeverity::Attention,
+        summary: format!(
+            "activity rate limit reached ({cap}/min) — further updates this minute are suppressed"
+        ),
+        tool_name: None,
+        causal_event_id: None,
+        workflow_event_id: None,
+        refs: OperatorActivityRefs::default(),
+    }
+}
+
 fn severity_rank(min: Option<OperatorActivitySeverity>) -> i64 {
     match min {
         None => 0,
@@ -187,6 +285,7 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorActivityRecord> 
         "plan_proposal" => OperatorActivityKind::PlanProposal,
         "human_gate" => OperatorActivityKind::HumanGate,
         "session_lifecycle" => OperatorActivityKind::SessionLifecycle,
+        "rate_limited" => OperatorActivityKind::RateLimited,
         other => {
             return Err(rusqlite::Error::InvalidColumnType(
                 8,
@@ -297,6 +396,94 @@ mod tests {
             .unwrap();
         assert_eq!(listed.activities.len(), 1);
         assert_eq!(listed.activities[0].summary, "visible");
+    }
+
+    #[test]
+    fn rate_limit_emits_single_notice_then_drops() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "session-rate-limit";
+        let at = "2026-06-01T10:00:00+00:00";
+
+        // Cap of 2: the first two real rows go through.
+        for i in 0..2 {
+            let mut r = sample_record(root);
+            r.summary = format!("row {i}");
+            r.occurred_at = at.to_string();
+            assert_eq!(
+                store.insert_operator_activity_throttled(&r, 2).unwrap(),
+                OperatorActivityInsert::Inserted
+            );
+        }
+
+        // The third row in the window is dropped but emits one notice.
+        let mut third = sample_record(root);
+        third.summary = "row 2".to_string();
+        third.occurred_at = at.to_string();
+        assert_eq!(
+            store.insert_operator_activity_throttled(&third, 2).unwrap(),
+            OperatorActivityInsert::ThrottleNoticeEmitted
+        );
+
+        // Subsequent rows in the same window are dropped with no extra notice.
+        let mut fourth = sample_record(root);
+        fourth.summary = "row 3".to_string();
+        fourth.occurred_at = at.to_string();
+        assert_eq!(
+            store.insert_operator_activity_throttled(&fourth, 2).unwrap(),
+            OperatorActivityInsert::Dropped
+        );
+
+        let listed = store.list_operator_activity(root, None, 50, None).unwrap();
+        // 2 real rows + exactly 1 notice.
+        assert_eq!(listed.activities.len(), 3);
+        let notices = listed
+            .activities
+            .iter()
+            .filter(|a| a.kind == OperatorActivityKind::RateLimited)
+            .count();
+        assert_eq!(notices, 1);
+    }
+
+    #[test]
+    fn rate_limit_window_resets_for_later_activity() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "session-rate-window";
+
+        let mut first = sample_record(root);
+        first.occurred_at = "2026-06-01T10:00:00+00:00".to_string();
+        assert_eq!(
+            store.insert_operator_activity_throttled(&first, 1).unwrap(),
+            OperatorActivityInsert::Inserted
+        );
+
+        // Two minutes later the window no longer contains the first row.
+        let mut later = sample_record(root);
+        later.occurred_at = "2026-06-01T10:02:00+00:00".to_string();
+        assert_eq!(
+            store.insert_operator_activity_throttled(&later, 1).unwrap(),
+            OperatorActivityInsert::Inserted
+        );
+    }
+
+    #[test]
+    fn rate_limit_zero_disables_throttle() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "session-rate-unlimited";
+
+        for i in 0..5 {
+            let mut r = sample_record(root);
+            r.summary = format!("row {i}");
+            r.occurred_at = "2026-06-01T10:00:00+00:00".to_string();
+            assert_eq!(
+                store.insert_operator_activity_throttled(&r, 0).unwrap(),
+                OperatorActivityInsert::Inserted
+            );
+        }
+        let listed = store.list_operator_activity(root, None, 50, None).unwrap();
+        assert_eq!(listed.activities.len(), 5);
     }
 
     #[test]

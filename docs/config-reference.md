@@ -721,6 +721,23 @@ retention:
 
 ---
 
+## Operator Activity Feed
+
+Controls the channel-neutral operator activity feed (see [`docs/design/operator-activity-feed-plan.md`](design/operator-activity-feed-plan.md)). The gateway owns visibility rules once; every consumer (chat TUI, HTTP SSE, future bridges) reads the same feed.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `operator_activity.rate_limit_per_min` | u32 | `120` | Max activity rows persisted per root session per rolling 60s window. On reaching the cap, further rows in the window are dropped and a single `rate_limited` notice (severity `attention`) is emitted so the suppression is visible. `0` disables the limit. |
+
+Example:
+
+```yaml
+operator_activity:
+  rate_limit_per_min: 120
+```
+
+---
+
 ## Cognitive Capsules
 
 Controls export/import of portable agent snapshots. A Cognitive Capsule pins a specific `AgentRevisionRecord` together with its `runtime.lock`, layer references (or embedded layer content in hermetic mode), and optional memory / checkpoint snapshots. See [`docs/cognitive-capsule.md`](cognitive-capsule.md).

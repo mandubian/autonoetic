@@ -43,6 +43,9 @@ pub enum OperatorActivityKind {
     PlanProposal,
     HumanGate,
     SessionLifecycle,
+    /// Synthetic marker emitted when the per-root activity rate limit is hit,
+    /// so suppression of subsequent rows in the window is visible.
+    RateLimited,
 }
 
 impl OperatorActivityKind {
@@ -56,6 +59,7 @@ impl OperatorActivityKind {
             Self::PlanProposal => "plan_proposal",
             Self::HumanGate => "human_gate",
             Self::SessionLifecycle => "session_lifecycle",
+            Self::RateLimited => "rate_limited",
         }
     }
 }

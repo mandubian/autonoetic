@@ -1092,6 +1092,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub chat: ChatConfig,
 
+    /// Operator activity feed settings (rate limiting). See the operator
+    /// activity feed design (`docs/design/operator-activity-feed-plan.md`).
+    #[serde(default)]
+    pub operator_activity: OperatorActivityConfig,
+
     /// Approval level / escalation settings.
     #[serde(default)]
     pub approval_levels: ApprovalLevelConfig,
@@ -1507,6 +1512,30 @@ impl Default for ChatConfig {
             inline_approvals: default_chat_inline_approvals(),
         }
     }
+}
+
+/// Configuration for the operator activity feed (Phase 4 hardening).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorActivityConfig {
+    /// Maximum operator activity rows persisted per root session per rolling
+    /// 60-second window. When the cap is reached the gateway drops further
+    /// rows in that window but emits a single `rate_limited` notice so the
+    /// suppression is always visible (never silent). `0` disables the limit.
+    /// Default: 120.
+    #[serde(default = "default_operator_activity_rate_limit_per_min")]
+    pub rate_limit_per_min: u32,
+}
+
+impl Default for OperatorActivityConfig {
+    fn default() -> Self {
+        Self {
+            rate_limit_per_min: default_operator_activity_rate_limit_per_min(),
+        }
+    }
+}
+
+fn default_operator_activity_rate_limit_per_min() -> u32 {
+    120
 }
 
 /// Approval level / escalation configuration.
@@ -2557,6 +2586,7 @@ impl Default for GatewayConfig {
             trajectory: TrajectoryConfig::default(),
             llm_routing: None,
             chat: ChatConfig::default(),
+            operator_activity: OperatorActivityConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
