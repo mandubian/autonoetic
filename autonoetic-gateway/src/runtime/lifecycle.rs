@@ -2731,6 +2731,36 @@ impl AgentExecutor {
                                             &self.suppress_until_turn,
                                             cfg.map(|c| c.trajectory.notify_planner).unwrap_or(true),
                                         );
+
+                                        // The Sentinel is a participant in the room, not
+                                        // chrome: its intervention lands on the canonical
+                                        // timeline under the Sentinel seat (#363 P1, RFC §3.2).
+                                        let is_critical =
+                                            matches!(result.health, TrajectoryHealth::Critical { .. });
+                                        let principal =
+                                            autonoetic_types::principal::Principal::agent("sentinel");
+                                        let event = crate::runtime::session_timeline::build_timeline_event(
+                                            root_sid.clone(),
+                                            session_id.to_string(),
+                                            Some(turn_id.clone()),
+                                            &principal,
+                                            &autonoetic_types::session_timeline::SessionRole::Sentinel,
+                                            "divergence.intervention",
+                                            Some(if is_critical {
+                                                autonoetic_types::session_timeline::Altitude::Error
+                                            } else {
+                                                autonoetic_types::session_timeline::Altitude::Attention
+                                            }),
+                                            Some(serde_json::json!({
+                                                "monitored_agent": self.manifest.agent.id,
+                                                "level": result.health.level_str(),
+                                                "turn": self.turn_counter,
+                                            })),
+                                            autonoetic_types::session_timeline::TimelineRefs::default(),
+                                        );
+                                        if let Err(e) = store.create_live_digest_event(&event) {
+                                            tracing::debug!(target: "session_timeline", error = %e, "divergence timeline emit failed");
+                                        }
                                     }
 
                                     // Critical also escalates to the operator via the
