@@ -53,8 +53,11 @@ pub fn build_timeline_event(
 /// Base importance of a digest event type, before any role refinement.
 pub fn base_altitude(event_type: &str) -> Altitude {
     match event_type {
-        // Mechanics / poll-ish — hidden at the normal floor.
-        "turn.start" | "turn.end" | "llm.round" | "tool.requested" => Altitude::Detail,
+        // Mechanics / poll-ish / infra — hidden at the normal floor. Workbench
+        // lifecycle is plumbing around the real work (edits/artifacts), so it
+        // stays Detail and surfaces only when the operator dials down.
+        "turn.start" | "turn.end" | "llm.round" | "tool.requested"
+        | "workbench.created" | "workbench.reconciled" | "workbench.discarded" => Altitude::Detail,
         // Failures always surface.
         "llm.request_failed" | "tool.failed" => Altitude::Error,
         // Gates awaiting the operator (conversational asks, RFC §3.5).

@@ -38,6 +38,39 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Emit a `workbench.{created,reconciled,discarded}` event onto the canonical
+/// Session Room timeline (#363 P1), attributed to the acting agent's seat and
+/// referencing the workbench surface. Best-effort — never fails the operation.
+fn emit_workbench_timeline_event(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+    workbench_id: &str,
+    event_type: &str,
+    altitude: Option<autonoetic_types::session_timeline::Altitude>,
+) {
+    let role = crate::runtime::session_timeline::derive_role(agent_id);
+    let principal = autonoetic_types::principal::Principal::agent(agent_id);
+    let refs = autonoetic_types::session_timeline::TimelineRefs {
+        workbench_id: Some(workbench_id.to_string()),
+        ..Default::default()
+    };
+    let event = crate::runtime::session_timeline::build_timeline_event(
+        root_session_id.to_string(),
+        root_session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        event_type,
+        altitude,
+        Some(serde_json::json!({ "workbench_id": workbench_id })),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(target: "session_timeline", error = %e, "workbench timeline emit failed");
+    }
+}
+
 fn new_workbench_id() -> String {
     let bytes = uuid::Uuid::new_v4();
     format!("wb-{}", hex::encode(&bytes.as_bytes()[..6]))
@@ -373,6 +406,14 @@ impl NativeTool for ArtifactProjectTool {
         };
 
         store.save_workbench(&wb)?;
+        emit_workbench_timeline_event(
+            &store,
+            &wb.root_session_id,
+            &manifest.agent.id,
+            &wb.workbench_id,
+            "workbench.created",
+            None,
+        );
 
         // Issue #330: auto-checkpoint on projection so the operator has
         // a clean restore point before any edits. Best-effort — failure
@@ -1049,6 +1090,14 @@ impl NativeTool for WorkbenchReconcileTool {
 
         let now = now_rfc3339();
         store.update_workbench_status(&wb.workbench_id, WorkbenchStatus::Reconciled, &now)?;
+        emit_workbench_timeline_event(
+            &store,
+            &wb.root_session_id,
+            &manifest.agent.id,
+            &wb.workbench_id,
+            "workbench.reconciled",
+            None,
+        );
 
         let semantic_summary = build_semantic_summary(
             &store,
@@ -1255,6 +1304,14 @@ impl NativeTool for WorkbenchDiscardTool {
 
         let now = now_rfc3339();
         store.update_workbench_status(&wb.workbench_id, WorkbenchStatus::Discarded, &now)?;
+        emit_workbench_timeline_event(
+            &store,
+            &wb.root_session_id,
+            &_manifest.agent.id,
+            &wb.workbench_id,
+            "workbench.discarded",
+            None,
+        );
 
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
