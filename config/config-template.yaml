@@ -187,6 +187,14 @@ approval_timeout_secs: 3600
 chat:
   inline_approvals: true
 
+# ── Operator Activity Feed ────────────────────────────────────────────
+# Channel-neutral live session visibility (chat TUI, HTTP SSE, future bridges).
+# rate_limit_per_min: max activity rows persisted per root session per rolling
+# 60s window. On the cap, further rows are dropped and one `rate_limited`
+# notice is emitted (suppression stays visible). 0 disables. Default: 120.
+operator_activity:
+  rate_limit_per_min: 120
+
 # ── Approval Levels ───────────────────────────────────────────────────
 # Escalation: require higher authority for sensitive actions.
 # Levels: operator (default) | admin | agent:<agent_id>

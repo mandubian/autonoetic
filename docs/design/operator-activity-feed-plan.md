@@ -1,6 +1,6 @@
 # Operator Activity Feed (Channel-Agnostic Session Visibility)
 
-**Status:** Partial — Phases 0–3 shipped in PR #358 (classifier, SQLite feed, JSON-RPC, chat TUI, HTTP SSE). Phase 4 hardening (#357) pending.
+**Status:** Phases 0–3 shipped in PR #358 (classifier, SQLite feed, JSON-RPC, chat TUI, HTTP SSE). Phase 4 (#357): per-root rate limit shipped; subscribe/webhook push and channel-binding table deferred until a push/external-channel bridge exists.
 
 **Problem surfaced by:** `session-46d65624` — planner wrote `news_fetcher.py`, `market_data.py`, and
 `sentiment.py`; `digest.md` and `session_overview.md` showed it; the chat TUI did not.
@@ -403,9 +403,24 @@ so bridges recover session context without local state. v1: bridge stores mappin
 
 ### Phase 4 — Hardening
 
-- [ ] Tool denylist / rate limit per root session (max N activities per minute).
+- [x] Tool denylist / rate limit per root session (max N activities per minute).
+  Shipped: `operator_activity.rate_limit_per_min` (default 120, `0` disables).
+  Enforced in `GatewayStore::insert_operator_activity_throttled` under the
+  connection lock (race-safe per-root 60s rolling window); on cap a single
+  `rate_limited` notice (kind `RateLimited`, severity `attention`) is emitted
+  so suppression is never silent. Wired from `tool_call_processor`. The
+  success denylist (`runtime/operator_activity.rs::SUCCESS_DENYLIST`) already
+  covers the "tool denylist" half.
 - [ ] `operator.activity.subscribe` or webhook `operator.activity.push` for mobile.
+  **Deferred — no consumer yet.** There is no mobile/push transport in the
+  tree; the chat TUI and HTTP SSE already cover live delivery. Build this when
+  a push-capable bridge lands, so the wire format is designed against a real
+  consumer rather than speculatively.
 - [ ] Channel binding table + `interaction.resolve_and_answer` correlation helpers.
+  **Deferred — no Discord/WhatsApp bridge yet.** An `operator_channel_bindings`
+  table would recover bridge sessions; with no such bridge in the tree it would
+  be unused scaffolding. `interaction_answer.rs` already correlates answers by
+  `interaction_id`. Revisit alongside the first external channel bridge.
 
 ---
 

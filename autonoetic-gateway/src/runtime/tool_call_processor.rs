@@ -352,13 +352,31 @@ impl<'a> ToolCallProcessor<'a> {
             causal_event_id,
             None,
         );
-        if let Err(e) = store.insert_operator_activity(&record) {
-            tracing::warn!(
-                target: "operator_activity",
-                error = %e,
-                session_id = %session_id,
-                "Failed to persist operator activity"
-            );
+        let rate_limit_per_min = self
+            .config
+            .map(|c| c.operator_activity.rate_limit_per_min)
+            .unwrap_or_else(|| {
+                autonoetic_types::config::OperatorActivityConfig::default().rate_limit_per_min
+            });
+        match store.insert_operator_activity_throttled(&record, rate_limit_per_min) {
+            Ok(crate::scheduler::gateway_store::OperatorActivityInsert::Dropped) => {
+                tracing::debug!(
+                    target: "operator_activity",
+                    session_id = %session_id,
+                    root_session_id = %record.root_session_id,
+                    rate_limit_per_min,
+                    "Operator activity dropped by per-root rate limit"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "operator_activity",
+                    error = %e,
+                    session_id = %session_id,
+                    "Failed to persist operator activity"
+                );
+            }
         }
     }
 

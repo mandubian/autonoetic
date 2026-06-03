@@ -15,6 +15,7 @@ mod messages;
 mod migrate;
 mod notifications;
 mod operator_activity;
+pub use operator_activity::OperatorActivityInsert;
 mod observability;
 pub mod plan_frames;
 pub mod post_promotion_reviews;
