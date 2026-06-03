@@ -2559,12 +2559,23 @@ impl GatewayExecutionService {
                                 None,
                                 None,
                             );
-                            if let Err(e) = store.insert_operator_activity(&record) {
-                                tracing::warn!(
-                                    target: "operator_activity",
-                                    error = %e,
-                                    "Failed to persist session lifecycle operator activity"
-                                );
+                            let rate_limit_per_min = self.config.operator_activity.rate_limit_per_min;
+                            match store.insert_operator_activity_throttled(&record, rate_limit_per_min) {
+                                Ok(crate::scheduler::gateway_store::OperatorActivityInsert::Dropped) => {
+                                    tracing::debug!(
+                                        target: "operator_activity",
+                                        rate_limit_per_min,
+                                        "Session lifecycle operator activity dropped by per-root rate limit"
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "operator_activity",
+                                        error = %e,
+                                        "Failed to persist session lifecycle operator activity"
+                                    );
+                                }
                             }
                         }
                     }

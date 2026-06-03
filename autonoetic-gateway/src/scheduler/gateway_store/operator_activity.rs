@@ -163,6 +163,16 @@ impl GatewayStore {
         })
     }
 
+    pub fn prune_operator_activity(&self, retention_days: i64) -> Result<usize> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM operator_activity WHERE occurred_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(count)
+    }
+
     pub fn count_execution_traces_for_session(&self, session_id: &str) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(

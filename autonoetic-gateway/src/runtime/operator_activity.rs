@@ -175,6 +175,24 @@ pub fn classify_session_lifecycle(
     })
 }
 
+pub fn classify_workflow_event(event_type: &str) -> Option<OperatorActivityDraft> {
+    match event_type {
+        "planframe.proposed" => Some(OperatorActivityDraft {
+            kind: OperatorActivityKind::PlanProposal,
+            severity: OperatorActivitySeverity::Attention,
+            summary: "plan awaiting operator approval".to_string(),
+            refs: OperatorActivityRefs::default(),
+        }),
+        "task.failed" => Some(OperatorActivityDraft {
+            kind: OperatorActivityKind::ToolFailed,
+            severity: OperatorActivitySeverity::Error,
+            summary: "workflow task failed".to_string(),
+            refs: OperatorActivityRefs::default(),
+        }),
+        _ => None,
+    }
+}
+
 pub fn is_poll_tool(tool_name: &str) -> bool {
     matches!(tool_name, "workflow_wait" | "workflow_state")
 }
@@ -440,5 +458,59 @@ mod tests {
         )
         .expect("failed wait should emit");
         assert_eq!(draft.severity, OperatorActivitySeverity::Error);
+    }
+
+    #[test]
+    fn classify_workflow_event_plan_proposal() {
+        let draft = classify_workflow_event("planframe.proposed").expect("should emit");
+        assert_eq!(draft.kind, OperatorActivityKind::PlanProposal);
+        assert_eq!(draft.severity, OperatorActivitySeverity::Attention);
+    }
+
+    #[test]
+    fn classify_workflow_event_task_failed() {
+        let draft = classify_workflow_event("task.failed").expect("should emit");
+        assert_eq!(draft.kind, OperatorActivityKind::ToolFailed);
+        assert_eq!(draft.severity, OperatorActivitySeverity::Error);
+    }
+
+    #[test]
+    fn classify_workflow_event_unknown_returns_none() {
+        assert!(classify_workflow_event("task.succeeded").is_none());
+    }
+
+    #[test]
+    fn summaries_redact_aws_keys() {
+        let draft = classify_tool_activity(
+            "content_write",
+            r#"{"name":"config.py"}"#,
+            r#"{"ok":true,"name":"config.py","message":"wrote AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE"}"#,
+        )
+        .expect("should emit");
+        assert!(!draft.summary.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!draft.summary.contains("AWS_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn summaries_redact_bearer_tokens() {
+        let draft = classify_tool_activity(
+            "web_fetch",
+            r#"{"url":"https://api.example.com"}"#,
+            r#"{"ok":true,"url":"https://api.example.com","message":"fetched with Bearer eyJhbGciOiJIUzI1NiJ9.test.sig"}"#,
+        )
+        .expect("should emit");
+        assert!(!draft.summary.contains("eyJhbGciOiJIUzI1NiJ9"));
+    }
+
+    #[test]
+    fn summaries_truncate_long_content() {
+        let long_msg = "a".repeat(500);
+        let draft = classify_tool_activity(
+            "content_write",
+            r#"{"name":"big.txt"}"#,
+            &format!(r#"{{"ok":true,"name":"big.txt","message":"{}"}}"#, long_msg),
+        )
+        .expect("should emit");
+        assert!(draft.summary.len() <= 241);
     }
 }
