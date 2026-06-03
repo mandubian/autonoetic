@@ -233,8 +233,7 @@ impl GatewayStore {
         decided_by: &str,
         ctx: Option<(Option<String>, String, String)>,
     ) {
-        use autonoetic_types::principal::{Principal, PrincipalKind};
-        use autonoetic_types::session_timeline::{Altitude, SessionRole, TimelineRefs};
+        use autonoetic_types::session_timeline::{Altitude, TimelineRefs};
 
         let Some((root, session, _agent)) = ctx else {
             return;
@@ -245,19 +244,9 @@ impl GatewayStore {
             "cancelled" => ("approval.cancelled", Altitude::Detail),
             _ => return,
         };
-        // Author = the decider. Operator seat for a human; the agent's seat for an
-        // agent-decider; Runtime (hidable) for mechanical resolutions.
-        let (principal, role) = match autonoetic_types::principal::decider_principal_kind(decided_by) {
-            Some(PrincipalKind::Human) => (Principal::human(decided_by), SessionRole::Operator),
-            Some(PrincipalKind::AutonoeticAgent) => (
-                Principal::agent(decided_by),
-                crate::runtime::session_timeline::derive_role(decided_by),
-            ),
-            _ => (
-                Principal { kind: PrincipalKind::Script, id: decided_by.to_string() },
-                SessionRole::Runtime,
-            ),
-        };
+        // Author = the decider: Operator seat (human), the agent's seat (stripping
+        // any `agent:` prefix), or Runtime (hidable) for mechanical resolutions.
+        let (principal, role) = crate::runtime::session_timeline::decider_seat(decided_by);
         let refs = TimelineRefs {
             approval_request_id: Some(request_id.to_string()),
             ..Default::default()
@@ -1066,5 +1055,39 @@ mod decided_by_kind_tests {
             autonoetic_types::session_timeline::Altitude::Attention
         );
         assert_eq!(ev.refs.approval_request_id.as_deref(), Some("apr-r"));
+    }
+
+    #[test]
+    fn resolution_attribution_for_agent_and_mechanical_branches() {
+        use autonoetic_types::principal::PrincipalKind;
+        use autonoetic_types::session_timeline::{Altitude, SessionRole};
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // Agent-decider (agent: prefix) approval.
+        let mut a = pending("apr-ag");
+        store.create_approval(&mut a).unwrap();
+        store
+            .record_decision("apr-ag", "approved", "agent:auditor.default", "2026-06-01T01:00:00Z", None)
+            .unwrap();
+
+        // Mechanical emergency-stop cancel via record_decision.
+        let mut m = pending("apr-mech");
+        store.create_approval(&mut m).unwrap();
+        store
+            .record_decision("apr-mech", "cancelled", "emergency_stop:estop-1a2b3c4d", "2026-06-01T01:00:01Z", None)
+            .unwrap();
+
+        let tl = store.list_session_timeline("s1", None, 50, None, None).unwrap();
+
+        let agent_ev = tl.entries.iter().find(|e| e.event_type == "approval.approved").unwrap();
+        assert_eq!(agent_ev.principal.kind, PrincipalKind::AutonoeticAgent);
+        assert_eq!(agent_ev.principal.id, "auditor.default"); // prefix stripped
+        assert_eq!(agent_ev.role, SessionRole::Auditor);
+
+        let mech_ev = tl.entries.iter().find(|e| e.event_type == "approval.cancelled").unwrap();
+        assert_eq!(mech_ev.role, SessionRole::Runtime);
+        assert_eq!(mech_ev.altitude, Altitude::Detail); // hidable
     }
 }

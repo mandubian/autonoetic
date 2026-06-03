@@ -338,6 +338,22 @@ fn planframe_approve_transitions_status() {
     let plan = store.load_plan_frame(&plan_id).unwrap().unwrap();
     assert_eq!(plan.status, PlanStatus::Approved);
     assert_eq!(plan.approved_by.as_deref(), Some("operator"));
+
+    // Session Room P1: the approval lands on the canonical timeline as a
+    // `plan.approved` event with the plan_id ref, authored by the Operator seat.
+    let tl = store
+        .list_session_timeline("root-session-003", None, 100, None, None)
+        .unwrap();
+    let approved = tl
+        .entries
+        .iter()
+        .find(|e| e.event_type == "plan.approved")
+        .expect("plan.approved event on the canonical timeline");
+    assert_eq!(approved.refs.plan_id.as_deref(), Some(plan_id.as_str()));
+    assert_eq!(
+        approved.role,
+        autonoetic_types::session_timeline::SessionRole::Operator
+    );
 }
 
 #[test]

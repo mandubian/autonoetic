@@ -599,18 +599,8 @@ impl NativeTool for PlanFrameApproveTool {
         // Canonical timeline: the plan gate closes (#363 P1), authored by the
         // approver (Operator seat for a human, the agent's seat otherwise).
         {
-            use autonoetic_types::principal::{Principal, PrincipalKind};
-            use autonoetic_types::session_timeline::{SessionRole, TimelineRefs};
-            let (principal, role) =
-                match autonoetic_types::principal::decider_principal_kind(&approver) {
-                    Some(PrincipalKind::Human) => {
-                        (Principal::human(approver.clone()), SessionRole::Operator)
-                    }
-                    _ => (
-                        Principal::agent(approver.clone()),
-                        crate::runtime::session_timeline::derive_role(&approver),
-                    ),
-                };
+            use autonoetic_types::session_timeline::TimelineRefs;
+            let (principal, role) = crate::runtime::session_timeline::decider_seat(&approver);
             let refs = TimelineRefs {
                 plan_id: Some(plan.plan_id.clone()),
                 ..Default::default()
