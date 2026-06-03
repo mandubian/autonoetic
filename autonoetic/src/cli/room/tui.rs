@@ -182,7 +182,7 @@ pub fn run(
                         detail = if detail.is_some() {
                             None
                         } else {
-                            indexed.get(selected).map(|(_, src)| detail_for(&entries, *src))
+                            indexed.get(selected).map(|(_, src)| detail_for(store, &entries, *src))
                         };
                     }
                     KeyCode::Char('a') => {
@@ -279,12 +279,16 @@ fn resolve_gate(
 
 /// Build the drill-down detail for a selected row's source. A single event
 /// shows its full metadata/payload; a collapsed run shows what it folds.
-fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
+fn detail_for(store: &GatewayStore, entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
     match src {
-        RowSource::Single(i) => entries
-            .get(i)
-            .map(render::format_detail)
-            .unwrap_or_default(),
+        RowSource::Single(i) => {
+            let Some(e) = entries.get(i) else {
+                return Vec::new();
+            };
+            let mut lines = render::format_detail(e);
+            enrich_with_refs(store, e, &mut lines);
+            lines
+        }
         RowSource::Run { start, len } => {
             let mut lines = vec![
                 format!("collapsed run — {len} routine events"),
@@ -295,6 +299,44 @@ fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
                 lines.push(format!("  · {}", render::render_line(e)));
             }
             lines
+        }
+    }
+}
+
+/// Deep ref-following: fetch the object a gate event points at and append a
+/// summary, so drilling into a gate shows *what* it is about (the action you'd
+/// approve, the plan's shape, the workbench state). Best-effort/read-only.
+fn enrich_with_refs(store: &GatewayStore, entry: &SessionTimelineEntry, lines: &mut Vec<String>) {
+    if let Some(id) = &entry.refs.approval_request_id {
+        if let Ok(Some(a)) = store.get_approval(id) {
+            lines.push(String::new());
+            lines.push("approval request:".to_string());
+            lines.push(format!("  action:  {}", a.action.kind()));
+            lines.push(format!("  level:   {}", a.approval_level.to_config()));
+            lines.push(format!(
+                "  status:  {}",
+                a.status.map(|s| s.as_str()).unwrap_or("pending")
+            ));
+            if let Some(r) = &a.reason {
+                lines.push(format!("  reason:  {r}"));
+            }
+        }
+    }
+    if let Some(id) = &entry.refs.plan_id {
+        if let Ok(Some(p)) = store.load_plan_frame(id) {
+            lines.push(String::new());
+            lines.push("plan frame:".to_string());
+            lines.push(format!("  title:   {}", p.title));
+            lines.push(format!("  status:  {}  (v{})", p.status.as_str(), p.version));
+            lines.push(format!("  steps:   {}", p.steps.len()));
+        }
+    }
+    if let Some(id) = &entry.refs.workbench_id {
+        if let Ok(Some(w)) = store.load_workbench(id) {
+            lines.push(String::new());
+            lines.push("workbench:".to_string());
+            lines.push(format!("  status:  {}", w.status.as_str()));
+            lines.push(format!("  base:    {}", w.base_artifact_id));
         }
     }
 }
