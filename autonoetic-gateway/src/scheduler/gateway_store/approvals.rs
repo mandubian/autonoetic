@@ -934,5 +934,20 @@ mod decided_by_kind_tests {
             .cancel_approval("apr-g", "gateway", "2026-06-01T01:00:00Z")
             .unwrap();
         assert_eq!(stored_kind(&store, "apr-g"), None);
+
+        // Production emergency-stop cascade resolves via record_decision with a
+        // "emergency_stop:<id>" decider — mechanical, must NOT be an agent (#374 review).
+        let mut d = pending("apr-es");
+        store.create_approval(&mut d).unwrap();
+        store
+            .record_decision(
+                "apr-es",
+                "cancelled",
+                "emergency_stop:estop-1a2b3c4d",
+                "2026-06-01T01:00:00Z",
+                None,
+            )
+            .unwrap();
+        assert_eq!(stored_kind(&store, "apr-es"), None);
     }
 }
