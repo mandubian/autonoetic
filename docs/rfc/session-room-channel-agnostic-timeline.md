@@ -131,7 +131,7 @@ enum PrincipalKind {        // #359 / #360 — the citizen's nature
     Human,
     AutonoeticAgent,        // planner, specialists, sentinel, curator, auditor…
     Script,
-    ForeignAgent { provider },   // claude-code, codex, opencode (via MCP/OFP)
+    ForeignAgent { provider },   // claude-code, codex, opencode — bounded local providers (#343); attribution, not authority
 }
 struct Principal { kind: PrincipalKind, id: String /* = causal-chain actor_id */ }
 
@@ -145,8 +145,9 @@ enum SessionRole {          // the seat, occupant-agnostic
     ExternalSurface { surface }, // IDE, editor
     Runtime,                // the executor's own voice (lifecycle, mechanical rulings)
 }
-struct EventRefs { causal_event_id, execution_trace, artifact_id,
-                   interaction_id, plan_id, workbench_id }
+struct TimelineRefs { causal_event_id, execution_trace_id, artifact_id,
+                      interaction_id, approval_request_id, plan_id, workbench_id }
+                      // P5 adds provider_id, transcript_ref (#343 provenance)
 ```
 
 Two consequences that matter:
@@ -378,32 +379,57 @@ new one is at parity, then retired. Design:
 
 ## 5. Federation frontier (the ambitious part)
 
-The actor model makes the room **federated** without special cases:
+> **Authoritative mechanism: #343** (External CLI agent delegation,
+> `docs/design/external-cli-agent-delegation-plan.md`; parent track #325). P5
+> does **not** invent a federation system — it is the **room's rendering +
+> attribution layer over #343**. Where this section and #343 disagree on
+> mechanism, **#343 governs**; the Session Room only *shows* what #343 runs.
 
-- **External AI agents as `ForeignAgent` citizens.** Claude Code / Codex /
-  opencode join a session via `autonoetic-mcp` (tool/capability bridge) or
-  `autonoetic-ofp` (node federation). They are low-privilege actors under
-  Separation of Powers — they *propose intents*, the gateway validates and
-  executes, their actions stream into the room with `ForeignAgent` attribution.
-  The human sees a foreign coding agent working alongside autonoetic specialists
-  in the same timeline, can delegate to it, and can gate its actions.
-- **Trust posture (DECIDED): nothing external is introduced inside without strong
-  authority approval.** A `ForeignAgent` carries **no privilege by default** — it
-  may observe and propose, but any effect it would introduce (code, artifacts,
-  capabilities, network/credential access, agent installs) is gated at
-  **elevated authority** (`ApprovalLevel::Admin` or above), which is BLOCKING in
-  the motivation policy (§3.5). Foreign output is sandboxed and quarantined until
-  a strong-authority decision admits it. The room shows foreign work transparently
-  *because* the trust boundary is explicit, not despite it.
+The actor model lets external work appear in the room **without special cases** —
+but external agents stay exactly as bounded as #343 specifies.
+
+- **External AI agents as bounded local providers (per #343).** Claude Code /
+  Codex / opencode are **local execution providers the gateway launches** against
+  a bounded workbench (`cwd = workbench/source`), under a configured provider
+  profile — **not** child Autonoetic agents in the capability sense (#343 §3, §6).
+  They are *not* joined as MCP/OFP peers in the MVP; `autonoetic-mcp` /
+  `autonoetic-ofp` are a *possible later transport*, not the model. The gateway
+  captures their transcript, exit status, and diff, then reconciles/validates —
+  per #343's flow.
+- **`ForeignAgent` is attribution + trust, NOT a capability grant.** The
+  `PrincipalKind::ForeignAgent { provider }` tag exists so timeline events read
+  *"who produced this diff"* (`provider` = #343's `provider_id`). It confers **no
+  authority and no agent-like powers** — it does not make the provider a
+  delegatable citizen. This is the room's reading of #343's core rule:
+  > External-agent output is an **artifact mutation proposal, not an authority
+  > decision.**
+- **Trust posture (DECIDED, consistent with #343 §6): nothing external is
+  introduced inside without strong-authority approval.** A `ForeignAgent` carries
+  **no privilege by default** — it edits only inside the workbench and proposes
+  diffs. Any effect that would *leave* the workbench (promotion, install,
+  artifact mutation, secrets, network, capability/PlanFrame change) is denied to
+  it and gated at **elevated authority** (`ApprovalLevel::Admin`+), which is
+  BLOCKING in the motivation policy (§3.5). Foreign output is sandboxed and
+  quarantined until reconciliation completes and a strong-authority decision
+  admits it.
+- **Timeline provenance mirrors #343.** A `ForeignAgent` timeline event carries
+  #343's provenance — `provider_id`, `mode` (interactive/non-interactive),
+  `plan_id`, `step_id`, `checkpoint_before`, `changed_files`, `transcript_ref` —
+  so the room can drill from a foreign-work line into its diff/transcript.
+  (Requires extending `TimelineRefs` with `provider_id` + `transcript_ref`;
+  `plan_id`/`workbench_id` already exist.)
 - **The IDE as both renderer and actor.** An IDE extension renders the timeline
-  *and* emits `ExternalTool` events (file edits ↔ workbench), so editor activity
-  appears in the room and the room's plan/workbench reflects into the editor.
+  *and* emits `ExternalSurface` events (file edits ↔ workbench), so editor
+  activity appears in the room and the room's plan/workbench reflects into the
+  editor — within the same workbench boundary.
 - **Workbench & plan as participating surfaces.** Edits to the shared plan or
-  workbench — by human, agent, or foreign agent — are timeline events against a
+  workbench — by human, agent, or foreign provider — are timeline events against a
   shared surface, so "who changed the plan and why" is always legible.
 
-This is autonoetic-idiomatic: federation + separation of powers + actors-as-
-citizens, expressed as one timeline of attributed events feeding many channels.
+This is autonoetic-idiomatic: Separation of Powers holds (the provider proposes,
+the gateway reconciles/validates/admits), expressed as one timeline of attributed
+events feeding many channels. **P5 ships only after #343's delegation mechanism
+lands** — it renders #343, it does not precede it.
 
 ---
 
@@ -445,8 +471,10 @@ Kept as a parallel gateway track; respects P-8.7 (real-time, append-only).
    per channel (reaction = quick-pick, reply = elaboration).
 4. **P4 — Digest enrichment** (parallel to P2/P3): reasoning capture, turn intent,
    failure context.
-5. **P5 — Federation**: `ForeignAgent` actors (Claude/Codex/opencode via MCP/OFP),
-   IDE renderer+actor binding.
+5. **P5 — Render external delegation (#343)**: surface #343's bounded local CLI
+   providers (Claude/Codex/opencode) as `ForeignAgent`-attributed timeline events
+   with #343 provenance; IDE renderer+actor binding. **Ships after #343 lands** —
+   P5 renders that mechanism, it does not invent one. See §5.
 6. **P6 — Documentation**: architecture doc + user guide (see §9).
 
 Risk is low because P1 is server-side and independent, and the TUI is greenfield
