@@ -482,13 +482,14 @@ mod tests {
     #[test]
     fn summaries_redact_aws_keys() {
         let draft = classify_tool_activity(
-            "content_write",
-            r#"{"name":"config.py"}"#,
-            r#"{"ok":true,"name":"config.py","message":"wrote AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE"}"#,
+            "unknown_tool",
+            r#"{}"#,
+            r#"{"ok":true,"message":"wrote AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE"}"#,
         )
         .expect("should emit");
         assert!(!draft.summary.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!draft.summary.contains("AWS_ACCESS_KEY"));
+        assert!(draft.summary.contains("AWS_ACCESS_KEY="));
+        assert!(draft.summary.contains("***REDACTED***"));
     }
 
     #[test]

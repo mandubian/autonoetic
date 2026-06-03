@@ -105,6 +105,16 @@ impl GatewayServer {
             );
         }
 
+        if self.config.operator_activity.retention_days > 0 {
+            if let Err(e) = gateway_store.prune_operator_activity(self.config.operator_activity.retention_days) {
+                tracing::warn!(
+                    target: "operator_activity",
+                    error = %e,
+                    "Failed to prune operator activity on startup"
+                );
+            }
+        }
+
         // Reap orphaned continuation files from crash/restart
         match crate::runtime::continuation::reap_orphaned_continuations(
             &self.config,
