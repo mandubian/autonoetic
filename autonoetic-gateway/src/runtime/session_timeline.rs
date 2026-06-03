@@ -97,6 +97,26 @@ pub fn derive_role(agent_id: &str) -> SessionRole {
     }
 }
 
+/// Attribute a gate decision to a `(principal, seat)` from its recorded
+/// `decided_by` string. Operator (human) ⇒ Operator seat; an agent decider
+/// (`auditor.default` or `agent:auditor.default`) ⇒ that agent's seat (the
+/// `agent:` prefix is stripped first); a mechanical/unknown decider
+/// (`gateway`, `emergency_stop:<id>`, …) ⇒ the hidable Runtime seat.
+pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal, SessionRole) {
+    use autonoetic_types::principal::{Principal, PrincipalKind};
+    match autonoetic_types::principal::decider_principal_kind(decided_by) {
+        Some(PrincipalKind::Human) => (Principal::human(decided_by), SessionRole::Operator),
+        Some(PrincipalKind::AutonoeticAgent) => {
+            let id = decided_by.strip_prefix("agent:").unwrap_or(decided_by);
+            (Principal::agent(id), derive_role(id))
+        }
+        _ => (
+            Principal { kind: PrincipalKind::Script, id: decided_by.to_string() },
+            SessionRole::Runtime,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +169,30 @@ mod tests {
             altitude_for("llm.request_failed", &SessionRole::Planner),
             Altitude::Error
         );
+    }
+
+    #[test]
+    fn decider_seat_attribution() {
+        use autonoetic_types::principal::PrincipalKind;
+
+        let (p, r) = decider_seat("operator");
+        assert_eq!(p.kind, PrincipalKind::Human);
+        assert_eq!(r, SessionRole::Operator);
+
+        // `agent:` prefix is stripped before deriving the seat (regression: #375 review).
+        let (p, r) = decider_seat("agent:auditor.default");
+        assert_eq!(p.kind, PrincipalKind::AutonoeticAgent);
+        assert_eq!(p.id, "auditor.default");
+        assert_eq!(r, SessionRole::Auditor);
+
+        let (_p, r) = decider_seat("coder.default");
+        assert_eq!(r, SessionRole::Specialist { kind: "coder".to_string() });
+
+        // Mechanical resolutions ⇒ hidable Runtime seat, never Specialist{emergency_stop:..}.
+        let (_p, r) = decider_seat("emergency_stop:estop-1a2b3c4d");
+        assert_eq!(r, SessionRole::Runtime);
+        let (_p, r) = decider_seat("gateway");
+        assert_eq!(r, SessionRole::Runtime);
     }
 
     #[test]

@@ -173,21 +173,26 @@ impl GatewayStore {
         decided_at: &str,
         decision_reason: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
         // #361: record the decider's principal kind (derived from decided_by) so
         // §O symmetric-obligation checks are mechanically queryable in SQL.
         let decided_by_kind =
             autonoetic_types::principal::decider_principal_kind(decided_by).map(|k| k.tag());
-        let rows = conn.execute(
-            "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_reason = ?4, decided_by_kind = ?5 WHERE request_id = ?6 AND status = 'pending'",
-            params![status, decided_by, decided_at, decision_reason, decided_by_kind, request_id],
-        )?;
-        if rows == 0 {
-            anyhow::bail!(
-                "Approval {} is no longer pending (already decided or not found)",
-                request_id
-            );
-        }
+        let ctx = {
+            let conn = self.conn.lock().unwrap();
+            let rows = conn.execute(
+                "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_reason = ?4, decided_by_kind = ?5 WHERE request_id = ?6 AND status = 'pending'",
+                params![status, decided_by, decided_at, decision_reason, decided_by_kind, request_id],
+            )?;
+            if rows == 0 {
+                anyhow::bail!(
+                    "Approval {} is no longer pending (already decided or not found)",
+                    request_id
+                );
+            }
+            resolution_context(&conn, request_id)
+        };
+        // Session Room: the gate *closes* on the canonical timeline (#363 P1).
+        self.emit_gate_resolution(request_id, status, decided_by, ctx);
         Ok(())
     }
 
@@ -197,20 +202,69 @@ impl GatewayStore {
         cancelled_by: &str,
         cancelled_at: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
         let decided_by_kind =
             autonoetic_types::principal::decider_principal_kind(cancelled_by).map(|k| k.tag());
-        let rows = conn.execute(
-            "UPDATE approvals SET status = 'cancelled', decided_by = ?1, decided_at = ?2, decided_by_kind = ?3 WHERE request_id = ?4 AND status = 'pending'",
-            params![cancelled_by, cancelled_at, decided_by_kind, request_id],
-        )?;
-        if rows == 0 {
-            anyhow::bail!(
-                "Approval {} is no longer pending (already decided or not found)",
-                request_id
-            );
-        }
+        let ctx = {
+            let conn = self.conn.lock().unwrap();
+            let rows = conn.execute(
+                "UPDATE approvals SET status = 'cancelled', decided_by = ?1, decided_at = ?2, decided_by_kind = ?3 WHERE request_id = ?4 AND status = 'pending'",
+                params![cancelled_by, cancelled_at, decided_by_kind, request_id],
+            )?;
+            if rows == 0 {
+                anyhow::bail!(
+                    "Approval {} is no longer pending (already decided or not found)",
+                    request_id
+                );
+            }
+            resolution_context(&conn, request_id)
+        };
+        self.emit_gate_resolution(request_id, "cancelled", cancelled_by, ctx);
         Ok(())
+    }
+
+    /// Emit an `approval.{approved,rejected,cancelled}` event onto the canonical
+    /// timeline, authored by the decider (#363 P1). Best-effort: a failure here
+    /// never affects the recorded decision. `ctx` is `(root_session_id,
+    /// session_id, agent_id)` of the original request.
+    fn emit_gate_resolution(
+        &self,
+        request_id: &str,
+        status: &str,
+        decided_by: &str,
+        ctx: Option<(Option<String>, String, String)>,
+    ) {
+        use autonoetic_types::session_timeline::{Altitude, TimelineRefs};
+
+        let Some((root, session, _agent)) = ctx else {
+            return;
+        };
+        let (event_type, altitude) = match status {
+            "approved" => ("approval.approved", Altitude::Normal),
+            "rejected" | "denied" => ("approval.rejected", Altitude::Attention),
+            "cancelled" => ("approval.cancelled", Altitude::Detail),
+            _ => return,
+        };
+        // Author = the decider: Operator seat (human), the agent's seat (stripping
+        // any `agent:` prefix), or Runtime (hidable) for mechanical resolutions.
+        let (principal, role) = crate::runtime::session_timeline::decider_seat(decided_by);
+        let refs = TimelineRefs {
+            approval_request_id: Some(request_id.to_string()),
+            ..Default::default()
+        };
+        let event = crate::runtime::session_timeline::build_timeline_event(
+            root.unwrap_or_else(|| session.clone()),
+            session,
+            None,
+            &principal,
+            &role,
+            event_type,
+            Some(altitude),
+            Some(serde_json::json!({ "request_id": request_id, "decided_by": decided_by })),
+            refs,
+        );
+        if let Err(e) = self.create_live_digest_event(&event) {
+            tracing::debug!(target: "session_timeline", error = %e, "gate resolution timeline emit failed");
+        }
     }
 
     pub fn get_pending_approvals(&self) -> Result<Vec<ApprovalRequest>> {
@@ -853,6 +907,27 @@ impl GatewayStore {
     }
 }
 
+/// Fetch `(root_session_id, session_id, agent_id)` for a resolved approval so
+/// the timeline event can be attributed to the requesting session. Returns
+/// `None` (skipping emission) if the row can't be read.
+fn resolution_context(
+    conn: &rusqlite::Connection,
+    request_id: &str,
+) -> Option<(Option<String>, String, String)> {
+    conn.query_row(
+        "SELECT root_session_id, session_id, agent_id FROM approvals WHERE request_id = ?1",
+        params![request_id],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod decided_by_kind_tests {
     use super::GatewayStore;
@@ -949,5 +1024,70 @@ mod decided_by_kind_tests {
             )
             .unwrap();
         assert_eq!(stored_kind(&store, "apr-es"), None);
+    }
+
+    #[test]
+    fn record_decision_emits_resolution_onto_timeline() {
+        use autonoetic_types::principal::PrincipalKind;
+        use autonoetic_types::session_timeline::SessionRole;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        let mut a = pending("apr-r");
+        store.create_approval(&mut a).unwrap();
+        store
+            .record_decision("apr-r", "rejected", "operator", "2026-06-01T01:00:00Z", Some("out of scope"))
+            .unwrap();
+
+        // session_id "s1" is the root (pending() leaves root_session_id None).
+        let tl = store.list_session_timeline("s1", None, 50, None, None).unwrap();
+        let ev = tl
+            .entries
+            .iter()
+            .find(|e| e.event_type == "approval.rejected")
+            .expect("resolution event on timeline");
+        assert_eq!(ev.principal.kind, PrincipalKind::Human);
+        assert_eq!(ev.role, SessionRole::Operator);
+        // A rejection draws attention.
+        assert_eq!(
+            ev.altitude,
+            autonoetic_types::session_timeline::Altitude::Attention
+        );
+        assert_eq!(ev.refs.approval_request_id.as_deref(), Some("apr-r"));
+    }
+
+    #[test]
+    fn resolution_attribution_for_agent_and_mechanical_branches() {
+        use autonoetic_types::principal::PrincipalKind;
+        use autonoetic_types::session_timeline::{Altitude, SessionRole};
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // Agent-decider (agent: prefix) approval.
+        let mut a = pending("apr-ag");
+        store.create_approval(&mut a).unwrap();
+        store
+            .record_decision("apr-ag", "approved", "agent:auditor.default", "2026-06-01T01:00:00Z", None)
+            .unwrap();
+
+        // Mechanical emergency-stop cancel via record_decision.
+        let mut m = pending("apr-mech");
+        store.create_approval(&mut m).unwrap();
+        store
+            .record_decision("apr-mech", "cancelled", "emergency_stop:estop-1a2b3c4d", "2026-06-01T01:00:01Z", None)
+            .unwrap();
+
+        let tl = store.list_session_timeline("s1", None, 50, None, None).unwrap();
+
+        let agent_ev = tl.entries.iter().find(|e| e.event_type == "approval.approved").unwrap();
+        assert_eq!(agent_ev.principal.kind, PrincipalKind::AutonoeticAgent);
+        assert_eq!(agent_ev.principal.id, "auditor.default"); // prefix stripped
+        assert_eq!(agent_ev.role, SessionRole::Auditor);
+
+        let mech_ev = tl.entries.iter().find(|e| e.event_type == "approval.cancelled").unwrap();
+        assert_eq!(mech_ev.role, SessionRole::Runtime);
+        assert_eq!(mech_ev.altitude, Altitude::Detail); // hidable
     }
 }
