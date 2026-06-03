@@ -13,6 +13,11 @@ artifacts, approvals, and validation.
 - `docs/workflow-orchestration.md` — workflow/task lifecycle and child wake-ups.
 - `docs/separation-of-powers.md` — gateway-owned enforcement boundary.
 - `docs/credential-management.md` — secrets stay in gateway vault.
+- `docs/rfc/session-room-channel-agnostic-timeline.md` §5 — the Session Room
+  **renders** this delegation: external-provider work surfaces as
+  `ForeignAgent`-attributed timeline events carrying the provenance below.
+  This plan governs the *mechanism* and authority boundary; the Session Room is
+  only its presentation/attribution layer and must not relax these bounds.
 
 ---
 
