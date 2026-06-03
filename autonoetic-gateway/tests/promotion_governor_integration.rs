@@ -16,6 +16,7 @@ use autonoetic_types::agent_revision::{
     AgentRevisionRecord, AgentRevisionStatus, PromotionKind, PromotionRecord as HistoryRecord,
 };
 use autonoetic_types::config::PromotionGovernorConfig;
+use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::promotion::{Finding, FindingSeverity, PromotionRole};
 use chrono::{Duration, Utc};
 
@@ -54,7 +55,7 @@ fn seed_promotion(
         source_eval_run_id: None,
         reason: None,
         created_at: created_at.to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "promotion_governor_integration".to_string(),
         origin_node_id: "gateway".to_string(),
     };
@@ -71,7 +72,7 @@ fn seed_revision_with_artifact(store: &GatewayStore, agent_id: &str, revision_id
         runtime_lock_hash: format!("sha256:lock-{}", revision_id),
         manifest_hash: format!("sha256:manifest-{}", revision_id),
         created_at: Utc::now().to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "promotion_governor_integration".to_string(),
         source_kind: "test".to_string(),
         source_ref: None,

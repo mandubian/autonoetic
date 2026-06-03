@@ -27,6 +27,7 @@ use autonoetic_gateway::scheduler::{
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
+use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRun, WorkflowRunStatus};
 use sha2::{Digest, Sha256};
 use support::{EnvGuard, OpenAiStub};
@@ -100,7 +101,7 @@ fn seed_present_test_agents(
             runtime_lock_hash: "sha256:test-runtime-lock".to_string(),
             manifest_hash: "sha256:test-manifest".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
-            created_by_type: "test".to_string(),
+            created_by_type: PrincipalKind::Human.tag().to_string(),
             created_by_id: "turn_continuation_approval_integration".to_string(),
             source_kind: "test_seed".to_string(),
             source_ref: None,
@@ -118,7 +119,7 @@ fn seed_present_test_agents(
             agent_id: name.clone(),
             revision_id,
             updated_at: chrono::Utc::now().to_rfc3339(),
-            updated_by_type: "test".to_string(),
+            updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "turn_continuation_approval_integration".to_string(),
             reason: Some("seed test alias".to_string()),
         })?;

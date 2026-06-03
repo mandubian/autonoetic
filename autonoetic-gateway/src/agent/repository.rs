@@ -453,6 +453,7 @@ pub fn cached(agents_dir: PathBuf) -> Arc<AgentRepository> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autonoetic_types::principal::PrincipalKind;
     use tempfile::tempdir;
 
     fn create_test_agent(temp_dir: &Path, agent_id: &str) -> anyhow::Result<PathBuf> {
@@ -714,7 +715,7 @@ Test instructions.
             runtime_lock_hash: "sha256:lock".to_string(),
             manifest_hash: "sha256:manifest".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
-            created_by_type: "user".to_string(),
+            created_by_type: PrincipalKind::Human.tag().to_string(),
             created_by_id: "admin".to_string(),
             source_kind: "artifact".to_string(),
             source_ref: None,

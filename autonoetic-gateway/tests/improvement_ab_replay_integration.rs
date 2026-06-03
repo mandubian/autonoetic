@@ -6,6 +6,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::agent_revision::{AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::principal::PrincipalKind;
 use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
@@ -61,7 +62,7 @@ fn seed_revision(
         runtime_lock_hash: "sha256:seed-lock".to_string(),
         manifest_hash: "sha256:seed-manifest".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "improvement_ab_replay_test".to_string(),
         source_kind: "test".to_string(),
         source_ref: None,
@@ -83,7 +84,7 @@ fn seed_alias(store: &GatewayStore, agent_id: &str, revision_id: &str) -> anyhow
         agent_id: agent_id.to_string(),
         revision_id: revision_id.to_string(),
         updated_at: chrono::Utc::now().to_rfc3339(),
-        updated_by_type: "test".to_string(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "improvement_ab_replay_test".to_string(),
         reason: Some("test seed".to_string()),
     };
@@ -400,7 +401,7 @@ fn test_ab_replay_completed_comparison_with_divergent_revisions() {
         description: "E2E test suite".to_string(),
         spec_json,
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
         origin_node_id: "gateway".to_string(),
         evaluated_targets: vec![TARGET_AGENT.to_string()],

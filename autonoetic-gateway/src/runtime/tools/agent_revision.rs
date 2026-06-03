@@ -8,6 +8,7 @@ use autonoetic_types::agent::{
 use autonoetic_types::artifact::{ArtifactBundle, ArtifactKind};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::{CapabilityDeltaGateMode, GatewayConfig};
+use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::runtime_lock::{
     LockedArtifact, LockedDependencySet, LockedLayerMount, RuntimeLock,
 };
@@ -675,7 +676,7 @@ fn create_revision_from_files(
         runtime_lock_hash,
         manifest_hash,
         created_at: now,
-        created_by_type: "agent".to_string(),
+        created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
         created_by_id: created_by_id.to_string(),
         source_kind: common.source_kind.clone(),
         source_ref: common.source_ref.clone(),

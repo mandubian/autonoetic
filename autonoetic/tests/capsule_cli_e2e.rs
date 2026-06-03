@@ -7,6 +7,7 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
+use autonoetic_types::principal::PrincipalKind;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
@@ -53,7 +54,7 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
         runtime_lock_hash: format!("sha256:{}", "b".repeat(64)),
         manifest_hash: format!("sha256:{}", "c".repeat(64)),
         created_at: "2026-05-28T00:00:00Z".to_string(),
-        created_by_type: "user".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
         source_kind: "artifact".to_string(),
         source_ref: None,
@@ -71,7 +72,7 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
         agent_id: agent_id.to_string(),
         revision_id: revision_id.to_string(),
         updated_at: "2026-05-28T00:00:00Z".to_string(),
-        updated_by_type: "user".to_string(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
     };

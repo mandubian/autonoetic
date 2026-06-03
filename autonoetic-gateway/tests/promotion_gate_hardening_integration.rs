@@ -18,6 +18,7 @@ use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus}
 use autonoetic_types::artifact::ArtifactKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::promotion::PromotionRole;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -679,7 +680,7 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
         runtime_lock_hash: "sha256:test_lock".to_string(),
         manifest_hash: "sha256:test_manifest".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test_harness".to_string(),
         source_kind: "test".to_string(),
         source_ref: None,
@@ -821,7 +822,7 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
         runtime_lock_hash: "sha256:test_lock".to_string(),
         manifest_hash: "sha256:test_manifest".to_string(),
         created_at: future_ts,
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test_harness".to_string(),
         source_kind: "test".to_string(),
         source_ref: None,

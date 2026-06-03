@@ -9,6 +9,7 @@ use autonoetic_types::background::{
     BackgroundState, ReevaluationState, ScheduledAction, WakeReason,
 };
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::principal::PrincipalKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -110,7 +111,7 @@ fn register_revision_mirror(
         runtime_lock_hash: "sha256:bg-test".to_string(),
         manifest_hash: "sha256:bg-manifest".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "test".to_string(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "background_scheduler_integration".to_string(),
         source_kind: "test".to_string(),
         source_ref: None,
@@ -128,7 +129,7 @@ fn register_revision_mirror(
         agent_id: agent_id.to_string(),
         revision_id: revision_id.to_string(),
         updated_at: chrono::Utc::now().to_rfc3339(),
-        updated_by_type: "test".to_string(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "background_scheduler_integration".to_string(),
         reason: Some("integration test seed".to_string()),
     };

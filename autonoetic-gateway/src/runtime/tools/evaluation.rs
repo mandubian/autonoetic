@@ -5,6 +5,7 @@ use crate::runtime::eval_stats::{self, CompareConfig, VariantSamples};
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::tool_error::tagged;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -154,7 +155,7 @@ impl NativeTool for EvalSuitePublishTool {
             description: args.description.clone(),
             spec_json,
             created_at: now.clone(),
-            created_by_type: "agent".to_string(),
+            created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
             created_by_id: manifest.agent.id.clone(),
             origin_node_id: "gateway".to_string(),
             evaluated_targets: args.evaluated_targets.clone(),
@@ -309,7 +310,7 @@ impl NativeTool for EvalSuiteUpdateTool {
             description: args.description.clone(),
             spec_json,
             created_at: now,
-            created_by_type: "agent".to_string(),
+            created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
             created_by_id: manifest.agent.id.clone(),
             origin_node_id: "gateway".to_string(),
             evaluated_targets: args.evaluated_targets.clone(),

@@ -18,6 +18,7 @@ use autonoetic_gateway::runtime::tools::{
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::security::AttackPatternStatus;
 use serde_json::json;
 use std::path::Path;
@@ -251,7 +252,7 @@ llm_config:
         description: "self-referencing".into(),
         spec_json: json!({"cases":[]}),
         created_at: chrono::Utc::now().to_rfc3339(),
-        created_by_type: "agent".into(),
+        created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
         created_by_id: "confused-agent".into(),
         origin_node_id: "gateway".into(),
         evaluated_targets: vec!["confused-agent".into()],
