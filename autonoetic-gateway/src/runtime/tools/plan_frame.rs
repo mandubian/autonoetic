@@ -267,7 +267,7 @@ impl NativeTool for PlanFrameProposeTool {
             let event = crate::runtime::session_timeline::build_timeline_event(
                 root_session_id.to_string(),
                 session_id.to_string(),
-                None,
+                _turn_id.map(str::to_string),
                 &principal,
                 &role,
                 "plan.pending",

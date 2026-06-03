@@ -2742,7 +2742,7 @@ impl AgentExecutor {
                                         let event = crate::runtime::session_timeline::build_timeline_event(
                                             root_sid.clone(),
                                             session_id.to_string(),
-                                            None,
+                                            Some(turn_id.clone()),
                                             &principal,
                                             &autonoetic_types::session_timeline::SessionRole::Sentinel,
                                             "divergence.intervention",
