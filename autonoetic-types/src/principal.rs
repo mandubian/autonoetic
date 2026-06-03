@@ -47,8 +47,13 @@ impl PrincipalKind {
 }
 
 /// A citizen: identity + kind. `id` equals the causal-chain `actor_id`.
+///
+/// `kind` is flattened so the wire shape is flat — `{"kind":"human","id":...}`,
+/// or `{"kind":"foreign_agent","provider":"…","id":…}` — rather than the nested
+/// `{"kind":{"kind":"human"},…}` the internally-tagged enum would otherwise give.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
+    #[serde(flatten)]
     pub kind: PrincipalKind,
     pub id: String,
 }
@@ -106,6 +111,22 @@ mod tests {
             Principal::kind_from_storage(&p.kind_to_storage()),
             PrincipalKind::ForeignAgent { provider: "claude-code".to_string() }
         );
+    }
+
+    #[test]
+    fn principal_serializes_to_flat_shape() {
+        let human = serde_json::to_value(Principal::human("op-1")).unwrap();
+        assert_eq!(human, serde_json::json!({ "kind": "human", "id": "op-1" }));
+
+        let foreign = serde_json::to_value(Principal::foreign("claude-code", "fa-1")).unwrap();
+        assert_eq!(
+            foreign,
+            serde_json::json!({ "kind": "foreign_agent", "provider": "claude-code", "id": "fa-1" })
+        );
+
+        // Round-trips back.
+        let back: Principal = serde_json::from_value(foreign).unwrap();
+        assert_eq!(back, Principal::foreign("claude-code", "fa-1"));
     }
 
     #[test]

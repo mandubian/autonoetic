@@ -560,6 +560,24 @@ fn apply_session_timeline_v46(conn: &mut Connection) -> Result<()> {
              ON live_digest_events(root_session_id, altitude, created_at, event_id);",
     )?;
 
+    // Backfill altitude for pre-v46 rows so SQL `min_altitude` filtering (which
+    // reads the column) classifies historical events correctly — failures as
+    // `error`, gates as `attention`, Sentinel-seat events floored at `attention`.
+    // Mirrors `runtime::session_timeline::{base_altitude, role_floor}`; the reader
+    // also recomputes on read as a defensive fallback. principal/role stay NULL —
+    // the reader derives those from source_agent_id.
+    conn.execute(
+        "UPDATE live_digest_events SET altitude = CASE
+            WHEN event_type IN ('llm.request_failed','tool.failed') THEN 'error'
+            WHEN event_type IN ('user.ask.pending','approval.pending','plan.pending','divergence.intervention') THEN 'attention'
+            WHEN COALESCE(source_agent_id,'') LIKE 'sentinel%' THEN 'attention'
+            WHEN event_type IN ('turn.start','turn.end','llm.round','tool.requested') THEN 'detail'
+            ELSE 'normal'
+         END
+         WHERE altitude IS NULL",
+        [],
+    )?;
+
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![46_i64, "session_timeline", chrono::Utc::now().to_rfc3339()],

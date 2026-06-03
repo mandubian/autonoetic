@@ -156,10 +156,16 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionTimelineEntry> {
         ),
     };
 
+    let event_type: String = row.get(5)?;
+
+    // Pre-v46 rows (or producers not yet writing altitude) have NULL here.
+    // Recompute deterministically from (event_type, role) rather than defaulting
+    // to Normal, so historical failures/gates still surface and aren't dropped by
+    // a `min_altitude` filter.
     let altitude = altitude_str
         .as_deref()
         .and_then(Altitude::parse_str)
-        .unwrap_or(Altitude::Normal);
+        .unwrap_or_else(|| crate::runtime::session_timeline::altitude_for(&event_type, &role));
 
     let refs: TimelineRefs = refs_json
         .as_deref()
@@ -177,7 +183,7 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionTimelineEntry> {
         turn_id: row.get(3)?,
         principal,
         role,
-        event_type: row.get(5)?,
+        event_type,
         altitude,
         occurred_at: row.get(7)?,
         payload: row.get(6)?,
@@ -282,6 +288,27 @@ mod tests {
         assert_eq!(attention.entries.len(), 1);
         assert_eq!(attention.entries[0].role, SessionRole::Sentinel);
         assert_eq!(attention.entries[0].principal.id, "sentinel.divergence");
+    }
+
+    #[test]
+    fn null_altitude_is_recomputed_on_read() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "root-null-alt";
+
+        // A row written without attribution columns (pre-v46 shape / unenriched).
+        let mut row = record(root, "coder.default", "llm.request_failed", "2026-06-01T10:00:00+00:00");
+        row.altitude = None;
+        row.role = None;
+        row.principal_kind = None;
+        store.create_live_digest_event(&row).unwrap();
+
+        let listed = store.list_session_timeline(root, None, 10, None, None).unwrap();
+        assert_eq!(listed.entries.len(), 1);
+        // Recomputed from (event_type, role) rather than defaulting to Normal.
+        assert_eq!(listed.entries[0].altitude, Altitude::Error);
+        // Principal/role fall back from source_agent_id.
+        assert_eq!(listed.entries[0].principal.id, "coder.default");
     }
 
     #[test]
