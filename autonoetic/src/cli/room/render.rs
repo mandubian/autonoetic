@@ -148,6 +148,19 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 .or_else(|| field("tool"))
                 .unwrap_or_else(|| "completed".into())
         ),
+        // A promotion/governance escalation awaiting the operator's decision (#413).
+        // Revision ids are already prefixed (`rev-9`, `rev_sha256:…`), so show the
+        // id as-is and omit the suffix entirely when absent.
+        "escalation.pending" => {
+            let synthesis = one_line(
+                &field("synthesis").unwrap_or_else(|| "operator decision requested".into()),
+                120,
+            );
+            match field("revision_id").filter(|r| !r.is_empty()) {
+                Some(rev) => format!("escalation: {synthesis} ({rev})"),
+                None => format!("escalation: {synthesis}"),
+            }
+        }
         "llm.request_failed" => format!(
             "LLM error: {}{}",
             one_line(&field("error").unwrap_or_default(), 120),
@@ -633,6 +646,22 @@ mod tests {
         let overridden = render_line(&mk(true, Altitude::Attention));
         assert!(overridden.starts_with("⚠"));
         assert!(overridden.contains("overridden, running anyway"));
+    }
+
+    #[test]
+    fn escalation_pending_renders_synthesis_and_revision() {
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "escalation.pending",
+            Altitude::Attention,
+            serde_json::json!({ "synthesis": "recommend promote", "revision_id": "rev-9" }),
+        );
+        let line = render_line(&e);
+        assert!(line.starts_with("⚠"));
+        assert!(line.contains("[coder]"));
+        // Revision id shown as-is (already prefixed), not doubled to "rev rev-9".
+        assert!(line.contains("escalation: recommend promote (rev-9)"));
     }
 
     #[test]
