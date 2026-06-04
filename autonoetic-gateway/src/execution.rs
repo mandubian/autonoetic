@@ -1067,6 +1067,40 @@ impl GatewayExecutionService {
             details_json: None,
         })?;
 
+        // Surface the circuit breaker on the canonical timeline (#413) — the most
+        // important operator event; it was causal/record-only, so the room never
+        // showed it. Attributed to whoever requested it; always Error altitude.
+        {
+            let (principal, seat) = crate::runtime::session_timeline::actor_from_kind_id(
+                requested_by_type,
+                requested_by_id,
+            );
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                root_session_id.to_string(),
+                root_session_id.to_string(),
+                None,
+                &principal,
+                &seat,
+                "session.emergency_stop",
+                None, // base_altitude ⇒ Error
+                Some(serde_json::json!({
+                    "stop_id": stop_id,
+                    "reason": reason,
+                    "trigger_kind": trigger_kind,
+                    "requested_by_type": requested_by_type,
+                    "requested_by_id": requested_by_id,
+                })),
+                autonoetic_types::session_timeline::TimelineRefs::default(),
+            );
+            if let Err(e) = store.create_live_digest_event(&event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    "emergency_stop timeline emit failed"
+                );
+            }
+        }
+
         let mut details = serde_json::json!({
             "aborted_handles": 0u32,
             "workflow_tasks_aborted": 0u32,

@@ -166,6 +166,12 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 format!("runtime lock drift ({what}) — execution blocked")
             }
         }
+        // The root-session circuit breaker (#413) — kills processes, aborts tasks,
+        // cancels gates. The most important thing to surface.
+        "session.emergency_stop" => format!(
+            "EMERGENCY STOP — {}",
+            one_line(&field("reason").unwrap_or_else(|| "session halted".into()), 120)
+        ),
         other => other.to_string(),
     }
 }
@@ -592,6 +598,21 @@ mod tests {
             serde_json::json!({ "error": "boom" }),
         );
         assert!(!render_line(&bare).contains("after:"));
+    }
+
+    #[test]
+    fn emergency_stop_renders_prominently_with_operator_label() {
+        let e = entry(
+            SessionRole::Operator,
+            Principal::human("operator"),
+            "session.emergency_stop",
+            Altitude::Error,
+            serde_json::json!({ "reason": "runaway tool loop", "stop_id": "estop-1234" }),
+        );
+        let line = render_line(&e);
+        assert!(line.starts_with("✗"));
+        assert!(line.contains("🧑 operator"));
+        assert!(line.contains("EMERGENCY STOP — runaway tool loop"));
     }
 
     #[test]
