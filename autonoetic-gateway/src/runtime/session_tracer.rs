@@ -602,6 +602,37 @@ impl SessionTracer {
             }
         }
         self.log_event("llm", "completion", EntryStatus::Success, Some(llm_payload))?;
+
+        // P4 (#367) — the agent's *narrative* onto the canonical timeline so the
+        // room reads as a conversation (intent → actions → result), not just
+        // mechanical `llm.round` markers + tool calls. The full text/reasoning
+        // already live in the evidence store; here we surface a readable, capped,
+        // redacted copy. `agent.message` is the agent speaking (Normal, shown at
+        // the default floor, symmetric to `operator.message`); `agent.reasoning`
+        // is the hidable "why" (Detail). Empty text (a pure tool-call round) is
+        // skipped so we don't emit blank lines.
+        // Redact the *full* text first (so JSON-aware key redaction sees valid
+        // JSON), then hard-cap for the timeline row.
+        let message = text.trim();
+        if !message.is_empty() {
+            self.append_live_digest_event(
+                "agent.message",
+                Some(serde_json::json!({
+                    "message": cap_chars(&redact_text_for_logs(message), 2000),
+                })),
+            );
+        }
+        if let Some(rc) = reasoning_content {
+            let rc = rc.trim();
+            if !rc.is_empty() {
+                self.append_live_digest_event(
+                    "agent.reasoning",
+                    Some(serde_json::json!({
+                        "reasoning": cap_chars(&redact_text_for_logs(rc), 2000),
+                    })),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -970,6 +1001,20 @@ fn truncate_for_log(value: &str, max_len: usize) -> String {
     format!("{}...", truncated)
 }
 
+/// Hard cap to `max` chars, ellipsis included (so the result never exceeds
+/// `max` — unlike `truncate_for_log`, which appends `...` after the limit).
+/// Used for timeline rows after redaction.
+fn cap_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let truncated: String = value.chars().take(max - 1).collect();
+    format!("{truncated}…")
+}
+
 fn sanitize_token(value: &str) -> String {
     value
         .chars()
@@ -1082,6 +1127,16 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn cap_chars_is_a_hard_cap_including_ellipsis() {
+        let s = "abcdefghij"; // 10 chars
+        assert_eq!(cap_chars(s, 10), "abcdefghij"); // exactly fits, untouched
+        let out = cap_chars(s, 5);
+        assert_eq!(out.chars().count(), 5, "must not exceed max incl. ellipsis");
+        assert!(out.ends_with('…'));
+        assert_eq!(cap_chars(s, 0), "");
+    }
 
     #[test]
     fn test_force_tool_result_evidence_for_failures_and_approvals() {

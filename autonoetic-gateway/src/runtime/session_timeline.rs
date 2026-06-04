@@ -89,7 +89,8 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // Mechanics / poll-ish / infra — hidden at the normal floor. Workbench
         // lifecycle is plumbing around the real work (edits/artifacts), so it
         // stays Detail and surfaces only when the operator dials down.
-        "turn.start" | "turn.end" | "llm.round" | "tool.requested"
+        // Extended-thinking "why" is verbose; hidable by default, surfaced on dial-down.
+        "turn.start" | "turn.end" | "llm.round" | "tool.requested" | "agent.reasoning"
         | "workbench.created" | "workbench.reconciled" | "workbench.discarded" => Altitude::Detail,
         // Failures always surface.
         "llm.request_failed" | "tool.failed" => Altitude::Error,
@@ -228,6 +229,19 @@ mod tests {
         assert_eq!(ev.principal_kind.as_deref(), Some("autonoetic_agent"));
         assert_eq!(ev.principal_id.as_deref(), Some("planner.default"));
         assert!(ev.refs_json.as_deref().unwrap().contains("apr-abc"));
+    }
+
+    #[test]
+    fn agent_narrative_altitudes() {
+        // The agent speaking is first-class (Normal, default floor); its reasoning
+        // is hidable (Detail) until the operator dials down. (#367 P4)
+        assert_eq!(base_altitude("agent.message"), Altitude::Normal);
+        assert_eq!(base_altitude("agent.reasoning"), Altitude::Detail);
+        // A Sentinel still raises both to its floor.
+        assert_eq!(
+            altitude_for("agent.reasoning", &SessionRole::Sentinel),
+            Altitude::Attention
+        );
     }
 
     #[test]

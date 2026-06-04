@@ -117,6 +117,11 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         // The operator's (or any actor's) own message into the session (#405).
         // The actor label already shows who; here we just show the text.
         "operator.message" => one_line(&field("message").unwrap_or_default(), 120),
+        // The agent's own narrative (#367 P4): what it says, and (hidable) its
+        // reasoning — so a turn reads intent → actions → result. Actor label
+        // shows which agent; the 💭 marks reasoning as the "why".
+        "agent.message" => one_line(&field("message").unwrap_or_default(), 160),
+        "agent.reasoning" => format!("💭 {}", one_line(&field("reasoning").unwrap_or_default(), 160)),
         "user.ask.pending" => format!(
             "asks: {}{}",
             one_line(&field("question").unwrap_or_default(), 100),
@@ -477,6 +482,33 @@ mod tests {
         // Whitespace (incl. newlines) collapses to single spaces.
         assert_eq!(one_line("a\n\n  b\tc", 50), "a b c");
         assert_eq!(one_line("anything", 0), "");
+    }
+
+    #[test]
+    fn agent_narrative_renders_message_and_reasoning() {
+        let msg = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "I'll scan the repo,\nthen propose a plan." }),
+        );
+        let line = render_line(&msg);
+        assert!(line.starts_with("▸"));
+        assert!(line.contains("[planner]"));
+        // Flattened to one line.
+        assert!(line.contains("I'll scan the repo, then propose a plan."));
+
+        let reasoning = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.reasoning",
+            Altitude::Detail,
+            serde_json::json!({ "reasoning": "the user wants periodic analysis" }),
+        );
+        let rline = render_line(&reasoning);
+        assert!(rline.starts_with("·")); // Detail glyph — hidable
+        assert!(rline.contains("💭 the user wants periodic analysis"));
     }
 
     #[test]
