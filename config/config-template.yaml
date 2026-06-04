@@ -200,8 +200,9 @@ operator_activity:
 # ── Decider Obligations (symmetric obligations, #359 §O) ──────────────
 # When enabled, the gateway refuses a BLOCKING-tier gate decision with no
 # motivation: a principal's rejection/abort, or approval of an elevated-authority
-# or external/irreversible action. Mirrors the agent's Ri-0.3 duty. The gateway
-# checks only that a reason is present, never its quality. Default: enabled.
+# (any level above operator — admin or agent:<id>) or external/irreversible
+# action. Mirrors the agent's Ri-0.3 duty. The gateway checks only that a reason
+# is present, never its quality. Default: enabled.
 decider_obligations:
   enabled: true
 

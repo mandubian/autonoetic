@@ -742,7 +742,7 @@ operator_activity:
 
 Symmetric-obligation enforcement (#359 §O). When enabled, the gateway refuses a **BLOCKING-tier** gate decision that carries no motivation — mirroring how an agent owes a reason for every rejection (`Ri-0.3`). The gateway checks only that a reason is *present*, never its quality (Lawful Executor).
 
-A decision is BLOCKING when made by a *principal* (operator / agent — mechanical `gateway`/`system`/`emergency_stop:…` resolutions are exempt) **and** it is a rejection/abort, **or** an approval of an elevated-authority (`admin`+) or external/irreversible action. Approvals of reversible operator-level actions are DEFERRED (not enforced).
+A decision is BLOCKING when made by a *principal* (operator / agent — mechanical `gateway`/`system`/`emergency_stop:…` resolutions are exempt) **and** it is a rejection/abort, **or** an approval of an **elevated-authority** (any level above `operator` — i.e. `admin` or `agent:<id>`) or **external/irreversible** action (install, credential, web fetch/call/search, profile-share, layer-mount, revision-promote). Approvals of reversible operator-level actions are DEFERRED (not enforced).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

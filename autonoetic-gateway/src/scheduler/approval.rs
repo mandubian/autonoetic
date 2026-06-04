@@ -1062,6 +1062,7 @@ fn action_is_external_or_irreversible(action: &ScheduledAction) -> bool {
             | CredentialRequest { .. }
             | WebFetch { .. }
             | WebCall { .. }
+            | WebSearch { .. }
             | ProfileShare { .. }
             | LayerMount { .. }
             | RevisionPromote { .. }
@@ -1109,11 +1110,11 @@ fn enforce_decider_motivation(
         let has_reason = reason.map(|r| !r.trim().is_empty()).unwrap_or(false);
         if !has_reason {
             anyhow::bail!(
-                "§O decider obligation: a {} of approval '{}' (level {}) must record a \
+                "§O decider obligation: recording approval '{}' (level {}) as '{}' requires a \
                  motivation. Provide a non-empty reason and retry.",
-                status.as_str(),
                 request.request_id,
-                request.approval_level.to_config()
+                request.approval_level.to_config(),
+                status.as_str()
             );
         }
     }
