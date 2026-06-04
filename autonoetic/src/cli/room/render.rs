@@ -114,6 +114,9 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "workbench.created" => "workbench projected".into(),
         "workbench.reconciled" => "workbench reconciled".into(),
         "workbench.discarded" => "workbench discarded".into(),
+        // The operator's (or any actor's) own message into the session (#405).
+        // The actor label already shows who; here we just show the text.
+        "operator.message" => one_line(&field("message").unwrap_or_default(), 120),
         "user.ask.pending" => format!(
             "asks: {}{}",
             one_line(&field("question").unwrap_or_default(), 100),
@@ -474,6 +477,22 @@ mod tests {
         // Whitespace (incl. newlines) collapses to single spaces.
         assert_eq!(one_line("a\n\n  b\tc", 50), "a b c");
         assert_eq!(one_line("anything", 0), "");
+    }
+
+    #[test]
+    fn operator_message_renders_with_human_label() {
+        let e = entry(
+            SessionRole::Operator,
+            Principal::human("operator"),
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "focus on US equities\nand crypto" }),
+        );
+        let line = render_line(&e);
+        assert!(line.contains("🧑 operator"));
+        // Flattened to one line, no embedded newline.
+        assert!(line.contains("focus on US equities and crypto"));
+        assert!(!line.contains('\n'));
     }
 
     #[test]

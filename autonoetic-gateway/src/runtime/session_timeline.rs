@@ -50,6 +50,36 @@ pub fn build_timeline_event(
     }
 }
 
+/// Build the `operator.message` timeline event for an operator-originated chat
+/// message into a session (#405) — so channels show both sides of the
+/// conversation, not just agent replies. Attribution: a human chat (no
+/// `source_agent_id`) is the **Operator seat / Human** principal; an
+/// agent-originated ingest is attributed to that agent's seat. Altitude is
+/// `Normal` (first-class conversation, visible at the default floor). The
+/// caller redacts the message text before passing it in.
+pub fn operator_message_event(
+    session_id: &str,
+    source_agent_id: Option<&str>,
+    redacted_message: &str,
+) -> LiveDigestEventRecord {
+    let (principal, role) = match source_agent_id {
+        None | Some("") => (Principal::human("operator"), SessionRole::Operator),
+        Some(agent_id) => (Principal::agent(agent_id), derive_role(agent_id)),
+    };
+    let root = crate::runtime::content_store::root_session_id(session_id);
+    build_timeline_event(
+        root.to_string(),
+        session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        "operator.message",
+        Some(Altitude::Normal),
+        Some(serde_json::json!({ "message": redacted_message })),
+        TimelineRefs::default(),
+    )
+}
+
 /// Base importance of a digest event type, before any role refinement.
 pub fn base_altitude(event_type: &str) -> Altitude {
     match event_type {
@@ -123,6 +153,31 @@ pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_message_event_attributes_human_and_agent() {
+        // A human chat (no source_agent_id) ⇒ Operator seat / Human principal.
+        let human = operator_message_event("session-1", None, "hello there");
+        assert_eq!(human.event_type, "operator.message");
+        assert_eq!(human.altitude.as_deref(), Some("normal"));
+        assert_eq!(human.role, Some(SessionRole::Operator.to_storage()));
+        assert_eq!(
+            human.principal_kind,
+            Some(Principal::human("operator").kind_to_storage())
+        );
+        assert_eq!(human.principal_id.as_deref(), Some("operator"));
+        let payload: serde_json::Value =
+            serde_json::from_str(human.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["message"], "hello there");
+
+        // An agent-originated ingest is attributed to that agent, not the operator.
+        let agent = operator_message_event("session-1", Some("planner.default"), "ping");
+        assert_eq!(agent.principal_id.as_deref(), Some("planner.default"));
+        assert_ne!(
+            agent.principal_kind,
+            Some(Principal::human("operator").kind_to_storage())
+        );
+    }
 
     #[test]
     fn sentinel_floor_raises_mild_events() {

@@ -120,6 +120,7 @@ pub fn run(
     let mut selected: usize = 0;
     let mut detail: Option<Vec<String>> = None; // drill-down pane content
     let mut input: Option<GateInput> = None; // in-flight gate decision
+    let mut compose: Option<String> = None; // in-flight free-form message to the session
     let mut status: Option<String> = None; // last action / connection result
     // Gates no longer offerable: approvals resolved on the timeline, plus
     // anything the operator just acted on (covers interactions, which have no
@@ -201,7 +202,7 @@ pub fn run(
         let gate = selectable_gate(&visible, indexed.get(selected), &resolved, &acted);
 
         terminal.draw(|f| {
-            draw(f, root_session_id, floor, squash, follow, &rows, selected, detail.as_deref(), input.as_ref(), status.as_deref(), gate.as_ref())
+            draw(f, root_session_id, floor, squash, follow, &rows, selected, detail.as_deref(), input.as_ref(), compose.as_deref(), status.as_deref(), gate.as_ref())
         })?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -209,6 +210,31 @@ pub fn run(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                // Compose mode: capturing a free-form message to the session (#405).
+                if let Some(buf) = compose.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => compose = None,
+                        KeyCode::Enter => {
+                            let text = buf.trim().to_string();
+                            if text.is_empty() {
+                                compose = None; // nothing to send
+                            } else {
+                                // Async so the sync loop never blocks on the agent
+                                // turn; the operator line + reply stream in via polling.
+                                status = Some(send_message(client, root_session_id, &text));
+                                compose = None;
+                                follow = true; // jump to newest to watch the exchange
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            buf.pop();
+                        }
+                        KeyCode::Char(c) => buf.push(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Text-capture mode takes over all input while open.
                 if let Some(gi) = input.as_mut() {
                     // Instant single-digit pick — only when it's unambiguous: a
@@ -320,6 +346,12 @@ pub fn run(
                         detail = None;
                     }
                     KeyCode::Char('s') => squash = !squash,
+                    // i: compose a free-form message into the session (#405).
+                    KeyCode::Char('i') => {
+                        detail = None;
+                        compose = Some(String::new());
+                        status = None;
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
                         follow = false;
                         detail = None;
@@ -453,6 +485,27 @@ fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>
     }
 }
 
+/// Send a free-form operator message into the session over the gateway API
+/// (#405) — the same `event.ingest` ingress `chat` uses. Async (`async_mode`)
+/// so the sync TUI loop never blocks on the agent turn; the operator's line
+/// (recorded gateway-side) and the agent's reply then stream in via polling.
+fn send_message(client: &RoomClient, root_session_id: &str, text: &str) -> String {
+    match rpc(
+        client,
+        "event.ingest",
+        serde_json::json!({
+            "event_type": "chat",
+            "message": text,
+            "session_id": root_session_id,
+            "async_mode": true,
+            "metadata": { "source": "session_room" },
+        }),
+    ) {
+        Ok(_) => "✓ sent".to_string(),
+        Err(e) => format!("✗ {e}"),
+    }
+}
+
 /// Drill-down detail for a selected row's source: a single event's full
 /// metadata/payload/refs, or what a collapsed run folds. (Deep ref-following —
 /// fetching the referenced approval/plan/workbench object — needs RPC read
@@ -503,6 +556,7 @@ fn draw(
     selected: usize,
     detail: Option<&[String]>,
     input: Option<&GateInput>,
+    compose: Option<&str>,
     status: Option<&str>,
     gate: Option<&GateRef>,
 ) {
@@ -560,7 +614,10 @@ fn draw(
         &mut state,
     );
 
-    let footer = if let Some(gi) = input {
+    let footer = if let Some(buf) = compose {
+        Paragraph::new(format!(" MESSAGE: {buf}▏   [Enter send · Esc cancel]"))
+            .style(Style::default().fg(Color::Green))
+    } else if let Some(gi) = input {
         let label = match gi.action {
             GateAction::Approve => "APPROVE — motivation (optional)",
             GateAction::Reject => "REJECT — motivation (optional)",
@@ -592,7 +649,7 @@ fn draw(
         // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         Paragraph::new(format!(
-            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · ⏎ detail{gate_hint}"
+            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · i message · ⏎ detail{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };
