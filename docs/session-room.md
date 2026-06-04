@@ -1,5 +1,8 @@
 # The Session Room
 
+> Looking for *how it works* rather than how to use it? See the
+> [Session Room architecture](session-room-architecture.md).
+
 The **Session Room** is a live, channel-agnostic view of everything happening in
 a session — every actor (the planner, specialists, the divergence sentinel, you)
 appears in one timeline, like a chat room. From it you can **watch** a session

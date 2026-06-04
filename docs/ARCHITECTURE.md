@@ -873,6 +873,15 @@ Agent: {agent_id} | Started: {timestamp}
 - **`digest_annotate`** — Agent adds reasoning/decision notes
 - **`digest_query`** — Search past session digests
 
+### Session Room
+
+The **canonical timeline** (`live_digest_events`) built from the live digest is
+the spine of the **Session Room** — a channel-agnostic, importance-ranked,
+multi-actor view of a session that channels (the terminal TUI, and external
+bridges) consume as gateway API clients. See
+[Session Room — Architecture](session-room-architecture.md) and the
+[user guide](session-room.md).
+
 ---
 
 ## Session Read Cache
