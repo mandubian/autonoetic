@@ -44,6 +44,40 @@ fn role_label(role: &SessionRole) -> String {
     }
 }
 
+/// Collapse a possibly multi-line string into a single timeline line: runs of
+/// whitespace (incl. newlines) become one space, then truncate with an ellipsis.
+/// Keeps a rich `user.ask` question or any prose from breaking the one-line feed.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let truncated: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+/// Render embedded pre-digested choices as a compact inline hint, e.g.
+/// ` — [1] Yes · [2] No`. Reads the `options` array (objects with a `label`)
+/// the gateway embeds in the `user.ask.pending` payload (#393). Empty ⇒ "".
+fn choices_hint(payload: Option<&serde_json::Value>) -> String {
+    let Some(opts) = payload.and_then(|v| v.get("options")).and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+    let parts: Vec<String> = opts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| o.get("label").and_then(|l| l.as_str()).map(|l| (i, l)))
+        .map(|(i, label)| format!("[{}] {}", i + 1, one_line(label, 24)))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", parts.join(" · "))
+    }
+}
+
 /// Human summary of an event, from its type + payload. Keeps the most useful
 /// field per known event type; falls back to the bare event type.
 pub fn summarize(entry: &SessionTimelineEntry) -> String {
@@ -77,10 +111,17 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "workbench.reconciled" => "workbench reconciled".into(),
         "workbench.discarded" => "workbench discarded".into(),
         "user.ask.pending" => format!(
-            "asks: {}",
-            field("question").unwrap_or_default()
+            "asks: {}{}",
+            one_line(&field("question").unwrap_or_default(), 100),
+            choices_hint(p.as_ref()),
         ),
-        "tool.completed" => format!("tool {}", field("tool").unwrap_or_else(|| "completed".into())),
+        // Payload key is `tool_name`; keep `tool` as a fallback for older rows.
+        "tool.completed" => format!(
+            "tool {}",
+            field("tool_name")
+                .or_else(|| field("tool"))
+                .unwrap_or_else(|| "completed".into())
+        ),
         "llm.request_failed" => format!("LLM error: {}", field("error").unwrap_or_default()),
         other => other.to_string(),
     }
@@ -394,6 +435,40 @@ mod tests {
         assert!(detail.contains("seat:      operator"));
         assert!(detail.contains("approval=apr-9"));
         assert!(detail.contains("\"request_id\": \"apr-9\""));
+    }
+
+    #[test]
+    fn multiline_question_flattens_and_truncates_with_choices() {
+        let long_q = "Pick a market:\n\n1. US equities\n2. Crypto\n".to_string() + &"x".repeat(200);
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "user.ask.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "question": long_q,
+                "options": [{"id": "o1", "label": "US equities"}, {"id": "o2", "label": "Crypto"}],
+            }),
+        );
+        let line = render_line(&e);
+        // One physical line: no embedded newlines, truncated with an ellipsis.
+        assert!(!line.contains('\n'));
+        assert!(line.contains('…'));
+        // Pre-digested choices rendered inline and numbered.
+        assert!(line.contains("[1] US equities"));
+        assert!(line.contains("[2] Crypto"));
+    }
+
+    #[test]
+    fn tool_completed_uses_tool_name_field() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "Edit", "result": "ok" }),
+        );
+        assert!(render_line(&e).contains("tool Edit"));
     }
 
     #[test]
