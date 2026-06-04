@@ -1084,7 +1084,7 @@ impl GatewayExecutionService {
                 "session.emergency_stop",
                 None, // base_altitude ⇒ Error
                 Some(serde_json::json!({
-                    "stop_id": stop_id,
+                    "stop_id": stop_id.clone(),
                     "reason": reason,
                     "trigger_kind": trigger_kind,
                     "requested_by_type": requested_by_type,

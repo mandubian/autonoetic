@@ -138,12 +138,13 @@ pub fn derive_role(agent_id: &str) -> SessionRole {
 
 /// Map an explicit `(kind, id)` pair to a `(principal, seat)` — for producers
 /// that already know who acted (emergency stop, escalations) rather than parsing
-/// a `decided_by` string. `operator`/`human` ⇒ Operator seat; `agent` ⇒ that
-/// agent's seat; anything else (`system`, `security_policy`, …) ⇒ Runtime.
+/// a `decided_by` string. `user`/`operator`/`human` ⇒ Operator seat (the
+/// emergency-stop API/CLI uses `"user"`); `agent` ⇒ that agent's seat; anything
+/// else (`system`, `security_policy`, …) ⇒ Runtime.
 pub fn actor_from_kind_id(kind: &str, id: &str) -> (autonoetic_types::principal::Principal, SessionRole) {
     use autonoetic_types::principal::{Principal, PrincipalKind};
     match kind {
-        "operator" | "human" => (Principal::human(id), SessionRole::Operator),
+        "user" | "operator" | "human" => (Principal::human(id), SessionRole::Operator),
         "agent" | "autonoetic_agent" => (Principal::agent(id), derive_role(id)),
         _ => (
             Principal { kind: PrincipalKind::Script, id: id.to_string() },
@@ -268,9 +269,15 @@ mod tests {
         // Always Error — the circuit breaker must surface at the top floor.
         assert_eq!(base_altitude("session.emergency_stop"), Altitude::Error);
 
-        // Attribution by explicit kind.
-        let (op, seat) = actor_from_kind_id("operator", "operator");
-        assert!(matches!(op.kind, PrincipalKind::Human) && matches!(seat, SessionRole::Operator));
+        // Attribution by explicit kind. The emergency-stop API/CLI uses "user";
+        // it (and "operator"/"human") must read as a human in the Operator seat.
+        for human_kind in ["user", "operator", "human"] {
+            let (op, seat) = actor_from_kind_id(human_kind, "operator");
+            assert!(
+                matches!(op.kind, PrincipalKind::Human) && matches!(seat, SessionRole::Operator),
+                "kind {human_kind:?} should map to Human/Operator"
+            );
+        }
         let (agent, seat) = actor_from_kind_id("agent", "auditor.default");
         assert!(matches!(agent.kind, PrincipalKind::AutonoeticAgent));
         assert!(matches!(seat, SessionRole::Auditor));
