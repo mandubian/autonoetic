@@ -211,9 +211,16 @@ pub fn run(
                 }
                 // Text-capture mode takes over all input while open.
                 if let Some(gi) = input.as_mut() {
-                    // A number key picks a pre-digested choice (interaction answer)
-                    // while the free-text buffer is still empty.
-                    let chosen = if gi.action == GateAction::Answer && gi.buffer.is_empty() {
+                    // Instant single-digit pick — only when it's unambiguous: a
+                    // pure-choice question (no free-text) with ≤9 options and an
+                    // empty buffer. Otherwise digits go into the buffer so multi-
+                    // digit ordinals (>9 options) and free-text starting with a
+                    // digit still work; Enter then resolves the ordinal.
+                    let chosen = if gi.action == GateAction::Answer
+                        && gi.buffer.is_empty()
+                        && !gi.allow_freeform
+                        && gi.options.len() <= 9
+                    {
                         if let KeyCode::Char(c @ '1'..='9') = key.code {
                             gi.options.get((c as usize) - ('1' as usize)).cloned()
                         } else {
@@ -371,6 +378,41 @@ fn selectable_gate(
     }
 }
 
+/// Decide the `interaction.resolve_and_answer` params for an interaction, or a
+/// local-rejection message. Pure (no RPC) so the branching is unit-testable.
+///
+/// A typed number selects the matching pre-digested option — so >9 options and
+/// the "type 2 ⏎" flow both work, even when free-text is disallowed. Falls back
+/// to a hotkey-`chosen` option, then to free-text (when the question allows it).
+/// Rejects locally rather than round-trip a guaranteed rejection (so a gate is
+/// never marked acted on a doomed submission).
+fn answer_params(gi: &GateInput, chosen: Option<&GateOption>) -> Result<serde_json::Value, String> {
+    let text = gi.buffer.trim();
+    let by_number = (!gi.options.is_empty())
+        .then(|| text.parse::<usize>().ok())
+        .flatten()
+        .filter(|n| (1..=gi.options.len()).contains(n))
+        .map(|n| &gi.options[n - 1]);
+    if let Some(opt) = chosen.or(by_number) {
+        return Ok(serde_json::json!({
+            "interaction_id": gi.id, "answer_option_id": opt.id, "answered_by": "operator"
+        }));
+    }
+    if text.is_empty() {
+        return Err(if gi.options.is_empty() {
+            "✗ answer cannot be empty".to_string()
+        } else {
+            "✗ type a number to choose, or type a reply".to_string()
+        });
+    }
+    if !gi.allow_freeform {
+        return Err("✗ this question requires choosing a numbered option".to_string());
+    }
+    Ok(serde_json::json!({
+        "interaction_id": gi.id, "answer_text": text, "answered_by": "operator"
+    }))
+}
+
 /// Resolve a gate over the gateway API (the sanctioned path that unblocks the
 /// waiting agent + records the decision incl. decider kind, #361). Decider is
 /// the operator; `buffer` is the motivation (approvals) or free-text answer
@@ -400,30 +442,10 @@ fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>
             ),
             "rejected",
         ),
-        GateAction::Answer => {
-            // Exactly one of answer_option_id / answer_text, per the gateway.
-            let params = if let Some(opt) = chosen {
-                serde_json::json!({ "interaction_id": gi.id, "answer_option_id": opt.id, "answered_by": "operator" })
-            } else {
-                // Reject locally rather than round-trip a guaranteed rejection
-                // (and so we never mark the gate acted on a doomed submission).
-                if text.is_empty() {
-                    return Err(if gi.options.is_empty() {
-                        "✗ answer cannot be empty".to_string()
-                    } else {
-                        "✗ press a number to choose, or type a reply".to_string()
-                    });
-                }
-                if !gi.allow_freeform {
-                    return Err("✗ this question requires choosing a numbered option".to_string());
-                }
-                serde_json::json!({ "interaction_id": gi.id, "answer_text": text, "answered_by": "operator" })
-            };
-            (
-                rpc(client, "interaction.resolve_and_answer", params),
-                "answered",
-            )
-        }
+        GateAction::Answer => (
+            rpc(client, "interaction.resolve_and_answer", answer_params(gi, chosen)?),
+            "answered",
+        ),
     };
     match result {
         Ok(_) => Ok(format!("✓ {verb} {}", gi.id)),
@@ -551,7 +573,9 @@ fn draw(
             .options
             .iter()
             .enumerate()
-            .map(|(i, o)| format!("[{}] {}", i + 1, o.label))
+            // Flatten/truncate labels so a multi-line or long label can't break
+            // the one-line footer.
+            .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 24)))
             .collect::<Vec<_>>()
             .join(" · ");
         let hint = if gi.options.is_empty() {
@@ -658,27 +682,46 @@ mod tests {
     }
 
     #[test]
-    fn answer_validation_respects_options_and_freeform_policy() {
-        let client = RoomClient::for_test();
-        // Empty answer with options present ⇒ guidance to choose a number.
-        let with_opts = GateInput {
+    fn answer_params_handles_numbers_options_and_freeform() {
+        let opts = || vec![
+            GateOption { id: "o1".into(), label: "Yes".into() },
+            GateOption { id: "o2".into(), label: "No".into() },
+        ];
+        let mk = |buffer: &str, options: Vec<GateOption>, allow_freeform: bool| GateInput {
             action: GateAction::Answer,
             id: "int-1".into(),
-            buffer: String::new(),
-            options: vec![GateOption { id: "o1".into(), label: "Yes".into() }],
-            allow_freeform: true,
+            buffer: buffer.into(),
+            options,
+            allow_freeform,
         };
-        assert!(resolve_gate(&client, &with_opts, None).unwrap_err().contains("number"));
 
-        // Free-text typed where only options are allowed ⇒ rejected locally.
-        let no_freeform = GateInput {
-            action: GateAction::Answer,
-            id: "int-1".into(),
-            buffer: "typed answer".into(),
-            options: vec![GateOption { id: "o1".into(), label: "Yes".into() }],
-            allow_freeform: false,
-        };
-        assert!(resolve_gate(&client, &no_freeform, None).unwrap_err().contains("numbered option"));
+        // A typed number selects the matching option — even when free-text is
+        // disallowed (the "type 2 ⏎" / >9-options flow the reviewer flagged).
+        let p = answer_params(&mk("2", opts(), false), None).unwrap();
+        assert_eq!(p["answer_option_id"], "o2");
+        assert!(p.get("answer_text").is_none());
+
+        // An out-of-range number is treated as free-text (when allowed).
+        let p = answer_params(&mk("99", opts(), true), None).unwrap();
+        assert_eq!(p["answer_text"], "99");
+
+        // A hotkey-chosen option wins regardless of buffer.
+        let chosen = GateOption { id: "o1".into(), label: "Yes".into() };
+        let p = answer_params(&mk("", opts(), false), Some(&chosen)).unwrap();
+        assert_eq!(p["answer_option_id"], "o1");
+
+        // Free-text where only options are allowed ⇒ rejected locally.
+        assert!(answer_params(&mk("maybe later", opts(), false), None)
+            .unwrap_err()
+            .contains("numbered option"));
+
+        // Empty with options ⇒ guidance to type a number; empty without ⇒ "empty".
+        assert!(answer_params(&mk("", opts(), true), None).unwrap_err().contains("number"));
+        assert!(answer_params(&mk("", Vec::new(), true), None).unwrap_err().contains("empty"));
+
+        // Plain free-text with no options ⇒ answer_text.
+        let p = answer_params(&mk("ship it", Vec::new(), true), None).unwrap();
+        assert_eq!(p["answer_text"], "ship it");
     }
 
     #[test]

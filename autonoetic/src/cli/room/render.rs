@@ -47,15 +47,19 @@ fn role_label(role: &SessionRole) -> String {
 /// Collapse a possibly multi-line string into a single timeline line: runs of
 /// whitespace (incl. newlines) become one space, then truncate with an ellipsis.
 /// Keeps a rich `user.ask` question or any prose from breaking the one-line feed.
-fn one_line(s: &str, max: usize) -> String {
+/// The result is a **hard cap** of `max` chars — the ellipsis counts toward it,
+/// so a truncated string keeps `max - 1` chars + `…`.
+pub(crate) fn one_line(s: &str, max: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = flat.chars();
-    let truncated: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        format!("{truncated}…")
-    } else {
-        truncated
+    if flat.chars().count() <= max {
+        return flat;
     }
+    if max == 0 {
+        return String::new();
+    }
+    // Reserve one char for the ellipsis so the total never exceeds `max`.
+    let truncated: String = flat.chars().take(max - 1).collect();
+    format!("{truncated}…")
 }
 
 /// Render embedded pre-digested choices as a compact inline hint, e.g.
@@ -457,6 +461,19 @@ mod tests {
         // Pre-digested choices rendered inline and numbered.
         assert!(line.contains("[1] US equities"));
         assert!(line.contains("[2] Crypto"));
+    }
+
+    #[test]
+    fn one_line_is_a_hard_cap_including_the_ellipsis() {
+        let long = "abcdefghijklmnopqrstuvwxyz";
+        let out = one_line(long, 10);
+        assert_eq!(out.chars().count(), 10, "must not exceed max incl. ellipsis");
+        assert!(out.ends_with('…'));
+        // A string within the cap is returned untouched (no ellipsis).
+        assert_eq!(one_line("short", 10), "short");
+        // Whitespace (incl. newlines) collapses to single spaces.
+        assert_eq!(one_line("a\n\n  b\tc", 50), "a b c");
+        assert_eq!(one_line("anything", 0), "");
     }
 
     #[test]
