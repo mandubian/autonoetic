@@ -28,6 +28,16 @@ impl RoomClient {
         })
     }
 
+    /// A non-connecting client for unit tests of pure call sites (paths that
+    /// return before any RPC). Calling `.call()` on it will fail to connect.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            addr: "127.0.0.1:0".to_string(),
+            token: "test".to_string(),
+        }
+    }
+
     /// One JSON-RPC round-trip. Returns the `result` value, or an error carrying
     /// the gateway's message (connect failure, auth, or method error).
     pub async fn call(

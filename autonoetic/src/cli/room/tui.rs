@@ -43,7 +43,7 @@ struct GateInput {
     buffer: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum GateAction {
     Approve,
     Reject,
@@ -107,7 +107,12 @@ pub fn run(
                 "root_session_id": root_session_id,
                 "after_event_id": cursor,
                 "limit": limit,
-                "min_altitude": floor.as_str(),
+                // Always fetch at `detail` and filter for display below. Approval
+                // resolution events are `Normal` altitude, so fetching at the
+                // display floor (e.g. Attention) would drop them and leave
+                // `resolved` unpopulated — making already-decided gates look
+                // re-decidable. Fetch everything; filter is purely a view concern.
+                "min_altitude": "detail",
             }),
         ) {
             Ok(value) => match serde_json::from_value::<SessionTimelineListResult>(value) {
@@ -135,11 +140,16 @@ pub fn run(
             Err(e) => status = Some(format!("✗ gateway: {e}")),
         }
 
+        // `entries` holds everything (fetched at `detail`); the display floor is
+        // applied here as a pure view filter. RowSource indices below therefore
+        // index into `visible`, so gate selection and drill-down use it too.
+        let visible: Vec<SessionTimelineEntry> =
+            entries.iter().filter(|e| e.altitude >= floor).cloned().collect();
         // Rows + their source mapping (lets Enter drill into the underlying event).
         let indexed: Vec<(RenderedRow, RowSource)> = if squash {
-            render::coalesce_indexed(&entries)
+            render::coalesce_indexed(&visible)
         } else {
-            entries
+            visible
                 .iter()
                 .enumerate()
                 .map(|(i, e)| {
@@ -158,7 +168,7 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
-        let gate = selectable_gate(&entries, indexed.get(selected), &resolved, &acted);
+        let gate = selectable_gate(&visible, indexed.get(selected), &resolved, &acted);
 
         terminal.draw(|f| {
             draw(f, root_session_id, floor, squash, follow, &rows, selected, detail.as_deref(), input.as_ref(), status.as_deref(), gate.as_ref())
@@ -175,8 +185,20 @@ pub fn run(
                         KeyCode::Esc => input = None,
                         KeyCode::Enter => {
                             let gi = input.take().unwrap();
-                            acted.insert(gi.id.clone());
-                            status = Some(resolve_gate(client, &gi));
+                            match resolve_gate(client, &gi) {
+                                // Mark acted only on success — a failed RPC or an
+                                // empty answer leaves the gate offerable.
+                                Ok(msg) => {
+                                    acted.insert(gi.id.clone());
+                                    status = Some(msg);
+                                }
+                                // Reopen capture with the buffer intact so the
+                                // operator can fix the input and resubmit.
+                                Err(msg) => {
+                                    status = Some(msg);
+                                    input = Some(gi);
+                                }
+                            }
                         }
                         KeyCode::Backspace => {
                             gi.buffer.pop();
@@ -231,13 +253,13 @@ pub fn run(
                         detail = if detail.is_some() {
                             None
                         } else {
-                            indexed.get(selected).map(|(_, src)| detail_for(&entries, *src))
+                            indexed.get(selected).map(|(_, src)| detail_for(&visible, *src))
                         };
                     }
                     KeyCode::Char('a') => {
+                        // Pure view change now (we always fetch at `detail`) — no
+                        // reload, so already-fetched history re-filters instantly.
                         floor = cycle_floor(floor);
-                        entries.clear();
-                        cursor = None;
                         detail = None;
                     }
                     KeyCode::Char('s') => squash = !squash,
@@ -302,9 +324,19 @@ fn selectable_gate(
 /// Resolve a gate over the gateway API (the sanctioned path that unblocks the
 /// waiting agent + records the decision incl. decider kind, #361). Decider is
 /// the operator; `buffer` is the motivation (approvals) or answer (interactions).
-fn resolve_gate(client: &RoomClient, gi: &GateInput) -> String {
+///
+/// Returns `Ok(msg)` only when the gateway accepted the decision (the caller
+/// uses this to mark the gate acted); `Err(msg)` on validation or transport
+/// failure, leaving the gate offerable so the operator can retry.
+fn resolve_gate(client: &RoomClient, gi: &GateInput) -> Result<String, String> {
     let text = gi.buffer.trim();
     let reason = (!text.is_empty()).then(|| text.to_string());
+    // The gateway requires a non-empty answer for interactions; reject locally
+    // rather than round-trip a guaranteed server rejection (and so we never mark
+    // the gate acted on an empty submission).
+    if gi.action == GateAction::Answer && text.is_empty() {
+        return Err("✗ answer cannot be empty".to_string());
+    }
     let (result, verb) = match gi.action {
         GateAction::Approve => (
             rpc(
@@ -332,8 +364,8 @@ fn resolve_gate(client: &RoomClient, gi: &GateInput) -> String {
         ),
     };
     match result {
-        Ok(_) => format!("✓ {verb} {}", gi.id),
-        Err(e) => format!("✗ {e}"),
+        Ok(_) => Ok(format!("✓ {verb} {}", gi.id)),
+        Err(e) => Err(format!("✗ {e}")),
     }
 }
 
@@ -532,6 +564,20 @@ mod tests {
         // A non-gate event is not resolvable.
         let other = vec![gate_entry("tool.completed")];
         assert!(selectable_gate(&other, Some(&single), &empty, &empty).is_none());
+    }
+
+    #[test]
+    fn empty_interaction_answer_is_rejected_before_any_rpc() {
+        // An empty answer is rejected locally (the gateway requires non-empty),
+        // so the caller never marks the gate acted on a doomed submission.
+        let client = RoomClient::for_test();
+        let gi = GateInput {
+            action: GateAction::Answer,
+            id: "int-1".into(),
+            buffer: "   ".into(), // whitespace-only ⇒ empty after trim
+        };
+        let err = resolve_gate(&client, &gi).unwrap_err();
+        assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
     }
 
     #[test]
