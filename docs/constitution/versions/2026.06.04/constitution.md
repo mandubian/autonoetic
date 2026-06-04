@@ -79,9 +79,9 @@ Corollaries:
   I-6: the causal chain references the rule or right that was
   enforced on every decision.
 
-The numbered sections below (§0 Bill of Rights, §1–§11 Rules, §13–§14
-cross-cutting invariants) cover what the gateway currently upholds or is
-expected to uphold. Each entry has an ID, a statement, source docs, an
+The sections below (§0 Bill of Rights, §1–§11 Rules, §O Decider
+Obligations, §13–§14 cross-cutting invariants) cover what the gateway
+currently upholds or is expected to uphold. Each entry has an ID, a statement, source docs, an
 enforcement citation, and a status: `ENFORCED`, `PARTIAL`, `MISSING`, or
 `DESIGN DEBT`.
 
@@ -432,7 +432,7 @@ not decider decisions and carry no §O obligation.
 
 | ID | Obligation on the decider | Mirrors | Enforcement | Status |
 |---|---|---|---|---|
-| O-1 | A decision owes a **motivation**, graduated by stakes. A **rejection/abort**, an **override** of a safe default, or an **approval** of an elevated-authority (any level above `operator`) or external/irreversible action is **BLOCKING**: it does not commit until a non-empty reason is recorded. Approvals of reversible, operator-level actions may **defer** the reason. Silent rejection by a decider is as illegitimate as a gateway "denied" with no rule ID (Ri-0.3). Tiers/thresholds are config, not constitution. | Ri-0.3 | `scheduler/approval.rs::enforce_decider_motivation` (classifier `decision_is_blocking`), at the `decide_request_with_options` chokepoint; `decider_obligations.enabled` config; `constitution_o_1_decider_motivation.rs` | ENFORCED |
+| O-1 | A decision owes a **motivation**, graduated by stakes. A **rejection/abort**, or an **approval** of an elevated-authority (any level above `operator`) or external/irreversible action is **BLOCKING**: it does not commit until a non-empty reason is recorded. Approvals of reversible, operator-level actions may **defer** the reason. Silent rejection by a decider is as illegitimate as a gateway "denied" with no rule ID (Ri-0.3). Tiers/thresholds are config, not constitution. (Override-of-a-safe-default as an additional BLOCKING trigger is proposed in §B.4 but not yet mechanically detected — a future refinement.) | Ri-0.3 | `scheduler/approval.rs::enforce_decider_motivation` (classifier `decision_is_blocking`), at the `decide_request_with_options` chokepoint; `decider_obligations.enabled` config; `constitution_o_1_decider_motivation.rs` | ENFORCED |
 | O-2 | Every decision is **attributed** to the deciding principal (id + kind) on the causal chain and cannot be reattributed. The agent under decision can always tell *who* decided and *what kind* of principal they are. | Ri-0.11 | `decided_by` + `decided_by_kind` recorded on the approval (`#361`, `principal::decider_principal_kind`); `actor_id` bound into the causal-chain entry hash (`causal_chain.rs`) | ENFORCED |
 
 > Further decider obligations proposed in `docs/design/principal-model-and-symmetric-obligations.md` (O-3 anti-fatigue / rate discipline, O-4 scope honesty, O-5 duty-to-escalate-not-reject) are **not yet enacted** — they enter §O by future amendment as each becomes mechanically enforced.
