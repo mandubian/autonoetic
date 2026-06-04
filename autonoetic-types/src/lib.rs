@@ -10,6 +10,7 @@ pub mod background;
 pub mod capability;
 pub mod capsule;
 pub mod causal_chain;
+pub mod channel;
 pub mod config;
 pub mod disclosure;
 pub mod escalation;

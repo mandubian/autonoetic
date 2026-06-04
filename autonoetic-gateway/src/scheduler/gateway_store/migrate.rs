@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 47;
+const SCHEMA_VERSION_LATEST: i64 = 48;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -532,7 +532,48 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_operator_activity_v45(conn)?;
     apply_session_timeline_v46(conn)?;
     apply_decided_by_kind_v47(conn)?;
+    apply_operator_channel_bindings_v48(conn)?;
 
+    Ok(())
+}
+
+/// #393 (P3.c) — map an external channel conversation to a room. A Discord
+/// thread / WhatsApp chat binds to a `root_session_id` so it survives
+/// reconnects and routes replies back as `Operator`-seat events. `(channel,
+/// external_id)` is the natural key (one conversation ⇒ one room); rebinding
+/// the same conversation upserts. Channels reach this over RPC — they are API
+/// clients, never direct store readers (Separation of Powers, #390).
+fn apply_operator_channel_bindings_v48(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 48 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS operator_channel_bindings (
+            channel          TEXT NOT NULL,
+            external_id      TEXT NOT NULL,
+            root_session_id  TEXT NOT NULL,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            PRIMARY KEY (channel, external_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_channel_bindings_root
+            ON operator_channel_bindings(root_session_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            48_i64,
+            "operator_channel_bindings",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

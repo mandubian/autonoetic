@@ -6,12 +6,14 @@
 //! `approvals.approve`/`reject` + `interaction.resolve_and_answer` — no
 //! `GatewayStore` access.
 
+mod channel;
 mod client;
 mod render;
 mod tui;
 
 use crate::cli::common::RoomArgs;
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineListResult};
+use channel::{Channel, CliChannel};
 use client::RoomClient;
 use std::path::Path;
 use std::time::Duration;
@@ -59,8 +61,10 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
     }
 
     eprintln!(
-        "Following room '{}' (floor: {}) via gateway API. Press Ctrl+C to stop.",
-        args.root_session_id, args.min_altitude
+        "Following room '{}' (floor: {}) via the {} channel. Press Ctrl+C to stop.",
+        args.root_session_id,
+        args.min_altitude,
+        CliChannel.kind(),
     );
     let mut interval = tokio::time::interval(Duration::from_millis(800));
     loop {
@@ -104,7 +108,7 @@ async fn drain_new_rpc(
             break;
         }
         for row in render::coalesce(&page.entries) {
-            println!("{}", render::row_text(&row));
+            println!("{}", CliChannel.format_row(&row));
         }
         *cursor = page.entries.last().map(|e| e.event_id.clone());
         rendered_any = true;
