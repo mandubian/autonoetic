@@ -293,6 +293,19 @@ struct OperatorActivityStreamQuery {
     after: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionTimelineStreamQuery {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    interval_ms: Option<u64>,
+    #[serde(default)]
+    after: Option<String>,
+    /// Altitude floor: detail | normal | attention | error. Default: normal.
+    #[serde(default)]
+    min_altitude: Option<String>,
+}
+
 /// Create the HTTP router for content API
 pub fn create_router(state: HttpState) -> Router {
     Router::new()
@@ -304,6 +317,10 @@ pub fn create_router(state: HttpState) -> Router {
         .route(
             "/api/operator/activity/stream/{root_session_id}",
             get(handle_operator_activity_stream_sse),
+        )
+        .route(
+            "/api/session/timeline/stream/{root_session_id}",
+            get(handle_session_timeline_stream_sse),
         )
         .route("/api/content/write", post(handle_write))
         .route(
@@ -505,6 +522,107 @@ async fn handle_operator_activity_stream_sse(
             Some((
                 Ok(Event::default()
                     .event("operator.activity")
+                    .data(batch.to_string())),
+                next_cursor,
+            ))
+        }
+    });
+
+    Ok(
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))),
+    )
+}
+
+async fn dispatch_session_timeline_list(
+    router: &JsonRpcRouter,
+    root_session_id: &str,
+    after_event_id: Option<&str>,
+    min_altitude: &str,
+    secret: &str,
+) -> JsonRpcResponse {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: format!("http-tl-{}", uuid::Uuid::new_v4()),
+        method: "session.timeline.list".to_string(),
+        params: serde_json::json!({
+            "root_session_id": root_session_id,
+            "after_event_id": after_event_id,
+            "limit": 100,
+            "min_altitude": min_altitude,
+        }),
+        auth_token: Some(secret.to_string()),
+    };
+    router.dispatch(req).await
+}
+
+/// GET /api/session/timeline/stream/{root_session_id} — SSE stream of the
+/// canonical Session Room timeline (#391). Cursor-bootstrap then tail; the
+/// gateway owns the data, channels render it.
+async fn handle_session_timeline_stream_sse(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Path(root_session_id): Path<String>,
+    Query(q): Query<SessionTimelineStreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ErrorResponse> {
+    validate_bearer_or_query(&headers, q.token.as_deref(), &state.shared_secret)?;
+    validate_session_id(&root_session_id)?;
+
+    let Some(router) = state.router.clone() else {
+        return Err(ErrorResponse {
+            error: "HTTP ingress router not configured".to_string(),
+            code: 503,
+        });
+    };
+
+    let interval_ms = q.interval_ms.unwrap_or(500).clamp(100, 10_000);
+    let min_altitude = q.min_altitude.unwrap_or_else(|| "normal".to_string());
+    let secret = state.shared_secret.clone();
+
+    let stream = stream::unfold(q.after, move |cursor_state| {
+        let router = router.clone();
+        let root_session_id = root_session_id.clone();
+        let min_altitude = min_altitude.clone();
+        let secret = secret.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+            let resp = dispatch_session_timeline_list(
+                router.as_ref(),
+                &root_session_id,
+                cursor_state.as_deref(),
+                &min_altitude,
+                &secret,
+            )
+            .await;
+            if resp.error.is_some() {
+                let json = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+                return Some((
+                    Ok(Event::default().event("session.timeline.error").data(json)),
+                    cursor_state,
+                ));
+            }
+            let entries = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("entries"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let next_cursor = entries
+                .last()
+                .and_then(|e| e.get("event_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or(cursor_state);
+            if entries.is_empty() {
+                return Some((
+                    Ok(Event::default().event("session.timeline.heartbeat").data("{}")),
+                    next_cursor,
+                ));
+            }
+            let batch = serde_json::json!({ "entries": entries });
+            Some((
+                Ok(Event::default()
+                    .event("session.timeline")
                     .data(batch.to_string())),
                 next_cursor,
             ))
