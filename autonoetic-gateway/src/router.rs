@@ -657,28 +657,6 @@ impl JsonRpcRouter {
                         }
                     }
                 }
-                // Operator's own message onto the canonical timeline (#405) — so
-                // any channel (room, Discord) shows both sides of the conversation,
-                // not just the agent's replies. Written here, gateway-side and once,
-                // before dispatch so the operator line precedes the agent's response
-                // even under async_mode.
-                if params.event_type.trim() == "chat" && !params.message.trim().is_empty() {
-                    if let Some(store) = self.execution.gateway_store() {
-                        let event = crate::runtime::session_timeline::operator_message_event(
-                            &session_id,
-                            params.source_agent_id.as_deref(),
-                            &crate::log_redaction::redact_text_for_logs(&params.message),
-                        );
-                        if let Err(e) = store.create_live_digest_event(&event) {
-                            tracing::debug!(
-                                target: "session_timeline",
-                                error = %e,
-                                "operator.message timeline emit failed"
-                            );
-                        }
-                    }
-                }
-
                 let explicit_target = if ingest_rerouted_from_child {
                     reroute_lead.as_deref()
                 } else {
@@ -695,6 +673,30 @@ impl JsonRpcRouter {
                             );
                         }
                     };
+
+                // Operator's own message onto the canonical timeline (#405) — so
+                // any channel (room, Discord) shows both sides of the conversation,
+                // not just the agent's replies. Written gateway-side and once,
+                // *after* routing is confirmed (so a routing failure leaves no
+                // "ghost" message that was never dispatched) but before dispatch,
+                // so the operator line precedes the agent's response even under
+                // async_mode.
+                if params.event_type.trim() == "chat" && !params.message.trim().is_empty() {
+                    if let Some(store) = self.execution.gateway_store() {
+                        let event = crate::runtime::session_timeline::operator_message_event(
+                            &session_id,
+                            params.source_agent_id.as_deref(),
+                            &crate::log_redaction::redact_text_for_logs(&params.message),
+                        );
+                        if let Err(e) = store.create_live_digest_event(&event) {
+                            tracing::debug!(
+                                target: "session_timeline",
+                                error = %e,
+                                "operator.message timeline emit failed"
+                            );
+                        }
+                    }
+                }
 
                 let ingress = IngressType::Ingest {
                     target_agent_id: target_agent_id.clone(),
