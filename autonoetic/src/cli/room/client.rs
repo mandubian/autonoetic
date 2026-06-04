@@ -60,6 +60,8 @@ impl RoomClient {
         if let Some(err) = response.error {
             anyhow::bail!("{method} failed: {}", err.message);
         }
-        Ok(response.result.unwrap_or_else(|| serde_json::json!({})))
+        // A JSON `null` result deserializes to `None`; preserve null-vs-empty-object
+        // semantics by returning `Value::Null` rather than substituting `{}`.
+        Ok(response.result.unwrap_or(serde_json::Value::Null))
     }
 }

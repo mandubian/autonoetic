@@ -93,7 +93,7 @@ async fn drain_new_rpc(
                 "session.timeline.list",
                 serde_json::json!({
                     "root_session_id": root_session_id,
-                    "after_event_id": *cursor,
+                    "after_event_id": cursor.clone(),
                     "limit": limit,
                     "min_altitude": min_altitude,
                 }),
