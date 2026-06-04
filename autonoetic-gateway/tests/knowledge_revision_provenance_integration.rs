@@ -1,6 +1,6 @@
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent_revision::{
-    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
+    AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus, SessionAgentBinding,
 };
 use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
 use autonoetic_types::principal::PrincipalKind;
