@@ -736,7 +736,12 @@ impl SessionTracer {
                 }
             }
         }
-        self.note_action(tool_name);
+        // `digest_annotate` is internal bookkeeping, excluded from the human-facing
+        // digest/report above; keep it out of the failure action-chain too so a
+        // failure doesn't render `after: digest_annotate → …`.
+        if tool_name != "digest_annotate" {
+            self.note_action(tool_name);
+        }
         self.append_live_digest_event(
             "tool.requested",
             Some(serde_json::json!({
@@ -1171,6 +1176,18 @@ mod tests {
         // A new turn starts a fresh chain.
         t.start_digest_turn().unwrap();
         assert!(t.recent_actions.is_empty());
+    }
+
+    #[test]
+    fn digest_annotate_is_excluded_from_action_chain() {
+        let mut t = SessionTracer::test_tracer();
+        // Internal bookkeeping must not leak into the operator-facing chain.
+        t.log_tool_requested("digest_annotate", "{}", None).unwrap();
+        t.log_tool_requested("read_file", "{}", None).unwrap();
+        assert_eq!(
+            Vec::from_iter(t.recent_actions.iter().cloned()),
+            vec!["read_file".to_string()]
+        );
     }
 
     #[test]
