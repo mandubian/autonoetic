@@ -576,6 +576,17 @@ async fn handle_session_timeline_stream_sse(
 
     let interval_ms = q.interval_ms.unwrap_or(500).clamp(100, 10_000);
     let min_altitude = q.min_altitude.unwrap_or_else(|| "normal".to_string());
+    // Validate the floor up front so an invalid value is a 400, not a silently
+    // unfiltered stream.
+    if autonoetic_types::session_timeline::Altitude::parse_str(&min_altitude).is_none() {
+        return Err(ErrorResponse {
+            error: format!(
+                "invalid min_altitude '{}': expected detail | normal | attention | error",
+                min_altitude
+            ),
+            code: 400,
+        });
+    }
     let secret = state.shared_secret.clone();
 
     let stream = stream::unfold(q.after, move |cursor_state| {

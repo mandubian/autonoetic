@@ -41,7 +41,12 @@ fn make_jsonrpc(method: &str, params: serde_json::Value) -> JsonRpcRequest {
     }
 }
 
-fn timeline_event(root: &str, event_type: &str, altitude: &str) -> LiveDigestEventRecord {
+fn timeline_event(
+    root: &str,
+    event_type: &str,
+    altitude: &str,
+    created_at: &str,
+) -> LiveDigestEventRecord {
     LiveDigestEventRecord {
         event_id: format!("ev-{}", uuid::Uuid::new_v4()),
         root_session_id: root.to_string(),
@@ -51,7 +56,8 @@ fn timeline_event(root: &str, event_type: &str, altitude: &str) -> LiveDigestEve
         source_node_id: "gateway".to_string(),
         event_type: event_type.to_string(),
         payload: Some(serde_json::json!({ "k": "v" }).to_string()),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        // Deterministic timestamps so ordering never falls back to random UUIDs.
+        created_at: created_at.to_string(),
         principal_kind: Some("autonoetic_agent".to_string()),
         principal_id: Some("planner.default".to_string()),
         role: Some("planner".to_string()),
@@ -66,24 +72,35 @@ async fn session_timeline_list_returns_seeded_events_above_floor() {
     // Distinct root keeps this test isolated from others sharing the store.
     let root = "root-tl-floor";
     env.store
-        .create_live_digest_event(&timeline_event(root, "approval.pending", "attention"))
+        .create_live_digest_event(&timeline_event(
+            root,
+            "approval.pending",
+            "attention",
+            "2026-06-01T10:00:00+00:00",
+        ))
         .unwrap();
     env.store
-        .create_live_digest_event(&timeline_event(root, "turn.start", "detail"))
+        .create_live_digest_event(&timeline_event(
+            root,
+            "turn.start",
+            "detail",
+            "2026-06-01T10:00:01+00:00",
+        ))
         .unwrap();
 
+    // Omit min_altitude → defaults to `normal` (the type contract).
     let resp = env
         .router
         .dispatch(make_jsonrpc(
             "session.timeline.list",
-            serde_json::json!({ "root_session_id": root, "min_altitude": "normal", "limit": 50 }),
+            serde_json::json!({ "root_session_id": root, "limit": 50 }),
         ))
         .await;
 
     assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
     let result = resp.result.expect("result");
     let entries = result["entries"].as_array().expect("entries array");
-    // Only the Attention event clears the normal floor; the Detail one is filtered.
+    // Only the Attention event clears the default (normal) floor; Detail is filtered.
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["event_type"], "approval.pending");
     assert_eq!(entries[0]["principal"]["kind"], "autonoetic_agent");
@@ -112,5 +129,19 @@ async fn session_timeline_list_requires_root_session_id() {
         ))
         .await;
     let err = resp.error.expect("missing root_session_id must error");
+    assert_eq!(err.code, -32602);
+}
+
+#[tokio::test]
+async fn session_timeline_list_rejects_invalid_min_altitude() {
+    let env = shared();
+    let resp = env
+        .router
+        .dispatch(make_jsonrpc(
+            "session.timeline.list",
+            serde_json::json!({ "root_session_id": "root-x", "min_altitude": "bogus" }),
+        ))
+        .await;
+    let err = resp.error.expect("invalid min_altitude must error, not silently disable filtering");
     assert_eq!(err.code, -32602);
 }
