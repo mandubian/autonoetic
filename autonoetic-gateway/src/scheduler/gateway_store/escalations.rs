@@ -134,7 +134,14 @@ impl GatewayStore {
                     "synthesis": escalation.planner_synthesis,
                     "escalation_type": escalation.escalation_type.as_str(),
                 })),
-                autonoetic_types::session_timeline::TimelineRefs::default(),
+                // Attach the artifact under review so detail views can show
+                // `refs: artifact=…` and consumers can drill down without parsing
+                // the payload.
+                autonoetic_types::session_timeline::TimelineRefs {
+                    artifact_id: (!escalation.artifact_id.is_empty())
+                        .then(|| escalation.artifact_id.clone()),
+                    ..Default::default()
+                },
             );
             if let Err(e) = self.create_live_digest_event(&event) {
                 tracing::debug!(
@@ -304,5 +311,7 @@ mod tests {
         assert!(matches!(ev.role, SessionRole::Specialist { .. }));
         assert_eq!(ev.principal.id, "coder.default");
         assert!(ev.payload.as_deref().unwrap().contains("recommend promote"));
+        // The artifact under review is attached as a ref for drill-down.
+        assert_eq!(ev.refs.artifact_id.as_deref(), Some("art-1"));
     }
 }

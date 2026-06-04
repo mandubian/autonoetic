@@ -149,11 +149,18 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 .unwrap_or_else(|| "completed".into())
         ),
         // A promotion/governance escalation awaiting the operator's decision (#413).
-        "escalation.pending" => format!(
-            "escalation: {} (rev {})",
-            one_line(&field("synthesis").unwrap_or_else(|| "operator decision requested".into()), 120),
-            field("revision_id").unwrap_or_default()
-        ),
+        // Revision ids are already prefixed (`rev-9`, `rev_sha256:…`), so show the
+        // id as-is and omit the suffix entirely when absent.
+        "escalation.pending" => {
+            let synthesis = one_line(
+                &field("synthesis").unwrap_or_else(|| "operator decision requested".into()),
+                120,
+            );
+            match field("revision_id").filter(|r| !r.is_empty()) {
+                Some(rev) => format!("escalation: {synthesis} ({rev})"),
+                None => format!("escalation: {synthesis}"),
+            }
+        }
         "llm.request_failed" => format!(
             "LLM error: {}{}",
             one_line(&field("error").unwrap_or_default(), 120),
@@ -632,7 +639,8 @@ mod tests {
         let line = render_line(&e);
         assert!(line.starts_with("⚠"));
         assert!(line.contains("[coder]"));
-        assert!(line.contains("escalation: recommend promote (rev rev-9)"));
+        // Revision id shown as-is (already prefixed), not doubled to "rev rev-9".
+        assert!(line.contains("escalation: recommend promote (rev-9)"));
     }
 
     #[test]
