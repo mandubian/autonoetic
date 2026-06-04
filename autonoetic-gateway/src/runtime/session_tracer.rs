@@ -311,6 +311,46 @@ impl SessionTracer {
         Ok(())
     }
 
+    /// Surface a runtime-lock drift on the canonical timeline (#367) — an
+    /// integrity event that was previously causal-only, so the room never showed
+    /// it. The runtime's own mechanical ruling, so it speaks from the `Runtime`
+    /// seat. A **rejected** drift (the session is about to fail) is `Error`; an
+    /// **override** (`allow_runtime_lock_drift`, running in a drifted environment
+    /// anyway) is `Attention` — a silently-weakened reproducibility guarantee
+    /// the operator should still see. `payload` mirrors the causal record.
+    pub fn record_runtime_lock_drift(&self, payload: serde_json::Value, allow: bool) {
+        let Some(store) = &self.gateway_store else {
+            return;
+        };
+        let principal = autonoetic_types::principal::Principal {
+            kind: autonoetic_types::principal::PrincipalKind::Script,
+            id: "gateway".to_string(),
+        };
+        let altitude = if allow {
+            autonoetic_types::session_timeline::Altitude::Attention
+        } else {
+            autonoetic_types::session_timeline::Altitude::Error
+        };
+        let event = crate::runtime::session_timeline::build_timeline_event(
+            base_session_id(&self.session_id).to_string(),
+            self.session_id.clone(),
+            self.turn_id.clone(),
+            &principal,
+            &autonoetic_types::session_timeline::SessionRole::Runtime,
+            "runtime.lock_drift",
+            Some(altitude),
+            Some(payload),
+            autonoetic_types::session_timeline::TimelineRefs::default(),
+        );
+        if let Err(e) = store.create_live_digest_event(&event) {
+            tracing::debug!(
+                target: "session_timeline",
+                error = %e,
+                "runtime.lock_drift timeline emit failed"
+            );
+        }
+    }
+
     pub fn with_turn_id(mut self, turn_id: impl Into<String>) -> Self {
         self.turn_id = Some(turn_id.into());
         self
@@ -1265,6 +1305,65 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("AUTONOETIC_EVIDENCE_MODE", value) },
             None => unsafe { std::env::remove_var("AUTONOETIC_EVIDENCE_MODE") },
         }
+    }
+
+    #[test]
+    fn record_runtime_lock_drift_surfaces_on_timeline() {
+        use autonoetic_types::session_timeline::{Altitude, SessionRole};
+        let temp = tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        let agent_dir = agents_dir.join("test-agent");
+        let gateway_dir = agents_dir.join(".gateway");
+        fs::create_dir_all(agent_dir.join("history")).unwrap();
+        fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+        let tracer = SessionTracer::test_tracer_with_store(&agent_dir, store.clone());
+
+        tracer.record_runtime_lock_drift(
+            serde_json::json!({ "drift_field": "binary_sha256", "override": false }),
+            false,
+        );
+        tracer.record_runtime_lock_drift(
+            serde_json::json!({ "drift_field": "build_sha256", "override": true }),
+            true,
+        );
+
+        let result = store
+            .list_session_timeline("test-session", None, 50, Some(Altitude::Detail), None)
+            .unwrap();
+        let drifts: Vec<_> = result
+            .entries
+            .iter()
+            .filter(|e| e.event_type == "runtime.lock_drift")
+            .collect();
+        assert_eq!(drifts.len(), 2, "both drifts must reach the timeline");
+        // Attributed to the Runtime seat (the executor's mechanical ruling).
+        assert!(drifts.iter().all(|e| matches!(e.role, SessionRole::Runtime)));
+        // Rejected ⇒ Error; override ⇒ Attention.
+        let rejected = drifts
+            .iter()
+            .find(|e| {
+                e.payload
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                    .and_then(|v| v.get("override").and_then(|o| o.as_bool()))
+                    == Some(false)
+            })
+            .unwrap();
+        assert_eq!(rejected.altitude, Altitude::Error);
+        let overridden = drifts
+            .iter()
+            .find(|e| {
+                e.payload
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                    .and_then(|v| v.get("override").and_then(|o| o.as_bool()))
+                    == Some(true)
+            })
+            .unwrap();
+        assert_eq!(overridden.altitude, Altitude::Attention);
     }
 
     #[test]

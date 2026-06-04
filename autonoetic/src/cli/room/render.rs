@@ -153,6 +153,19 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             one_line(&field("error").unwrap_or_default(), 120),
             preceding_chain(p.as_ref()),
         ),
+        "runtime.lock_drift" => {
+            let overridden = p
+                .as_ref()
+                .and_then(|v| v.get("override"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            let what = field("drift_field").unwrap_or_else(|| "binary".into());
+            if overridden {
+                format!("runtime lock drift ({what}) — overridden, running anyway")
+            } else {
+                format!("runtime lock drift ({what}) — execution blocked")
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -571,7 +584,6 @@ mod tests {
         assert!(line.contains("LLM error: rate limited"));
         assert!(line.contains("after: read_file → edit → run"));
 
-        // No preceding ⇒ just the error, no dangling "after:".
         let bare = entry(
             SessionRole::Planner,
             Principal::agent("planner.default"),
@@ -580,6 +592,26 @@ mod tests {
             serde_json::json!({ "error": "boom" }),
         );
         assert!(!render_line(&bare).contains("after:"));
+    }
+
+    #[test]
+    fn runtime_lock_drift_renders_blocked_and_overridden() {
+        let mk = |overridden: bool, alt: Altitude| {
+            entry(
+                SessionRole::Runtime,
+                Principal { kind: PrincipalKind::Script, id: "gateway".into() },
+                "runtime.lock_drift",
+                alt,
+                serde_json::json!({ "drift_field": "binary_sha256", "override": overridden }),
+            )
+        };
+        let blocked = render_line(&mk(false, Altitude::Error));
+        assert!(blocked.starts_with("✗"));
+        assert!(blocked.contains("runtime lock drift (binary_sha256) — execution blocked"));
+
+        let overridden = render_line(&mk(true, Altitude::Attention));
+        assert!(overridden.starts_with("⚠"));
+        assert!(overridden.contains("overridden, running anyway"));
     }
 
     #[test]

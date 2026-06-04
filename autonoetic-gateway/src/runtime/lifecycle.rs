@@ -1081,19 +1081,24 @@ impl AgentExecutor {
                     } else {
                         "build_sha256"
                     };
+                    let drift_payload = serde_json::json!({
+                        "drift_field": drift_field,
+                        "locked_build_sha256": drift.locked_build_sha256,
+                        "current_build_sha256": drift.current_build_sha256,
+                        "locked_binary_sha256": drift.locked_binary_sha256,
+                        "current_binary_sha256": drift.current_binary_sha256,
+                        "override": allow,
+                    });
                     let _ = tracer.log_event(
                         "runtime_lock_drift",
                         if allow { "override" } else { "rejected" },
                         status,
-                        Some(serde_json::json!({
-                            "drift_field": drift_field,
-                            "locked_build_sha256": drift.locked_build_sha256,
-                            "current_build_sha256": drift.current_build_sha256,
-                            "locked_binary_sha256": drift.locked_binary_sha256,
-                            "current_binary_sha256": drift.current_binary_sha256,
-                            "override": allow,
-                        })),
+                        Some(drift_payload.clone()),
                     );
+                    // Also surface it on the canonical timeline so the room shows
+                    // it (#367) — previously causal-only. Emitted before the
+                    // reject `bail!` below so a drift-killed session isn't silent.
+                    tracer.record_runtime_lock_drift(drift_payload, allow);
                     if !allow {
                         let mut msg = format!("runtime lock drift detected ({drift_field}): ");
                         if drift.locked_binary_sha256.is_some() {

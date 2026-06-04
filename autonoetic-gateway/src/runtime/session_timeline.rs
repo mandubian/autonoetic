@@ -94,10 +94,12 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "workbench.created" | "workbench.reconciled" | "workbench.discarded" => Altitude::Detail,
         // Failures always surface.
         "llm.request_failed" | "tool.failed" => Altitude::Error,
-        // Gates awaiting the operator (conversational asks, RFC §3.5).
-        "user.ask.pending" | "approval.pending" | "plan.pending" | "divergence.intervention" => {
-            Altitude::Attention
-        }
+        // Gates awaiting the operator (conversational asks, RFC §3.5) and
+        // integrity events. `runtime.lock_drift` stores an explicit altitude
+        // (Error when rejected, Attention when overridden); this is just the
+        // safe floor for any NULL-altitude fallback.
+        "user.ask.pending" | "approval.pending" | "plan.pending" | "divergence.intervention"
+        | "runtime.lock_drift" => Altitude::Attention,
         // Everything else is normal progress.
         _ => Altitude::Normal,
     }
