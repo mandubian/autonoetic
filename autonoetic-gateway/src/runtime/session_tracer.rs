@@ -602,6 +602,35 @@ impl SessionTracer {
             }
         }
         self.log_event("llm", "completion", EntryStatus::Success, Some(llm_payload))?;
+
+        // P4 (#367) — the agent's *narrative* onto the canonical timeline so the
+        // room reads as a conversation (intent → actions → result), not just
+        // mechanical `llm.round` markers + tool calls. The full text/reasoning
+        // already live in the evidence store; here we surface a readable, capped,
+        // redacted copy. `agent.message` is the agent speaking (Normal, shown at
+        // the default floor, symmetric to `operator.message`); `agent.reasoning`
+        // is the hidable "why" (Detail). Empty text (a pure tool-call round) is
+        // skipped so we don't emit blank lines.
+        let message = text.trim();
+        if !message.is_empty() {
+            self.append_live_digest_event(
+                "agent.message",
+                Some(serde_json::json!({
+                    "message": redact_text_for_logs(&truncate_for_log(message, 2000)),
+                })),
+            );
+        }
+        if let Some(rc) = reasoning_content {
+            let rc = rc.trim();
+            if !rc.is_empty() {
+                self.append_live_digest_event(
+                    "agent.reasoning",
+                    Some(serde_json::json!({
+                        "reasoning": redact_text_for_logs(&truncate_for_log(rc, 2000)),
+                    })),
+                );
+            }
+        }
         Ok(())
     }
 
