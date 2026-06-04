@@ -7,6 +7,7 @@ pub mod constitutional_proposals;
 mod credentials;
 mod escalations;
 mod evaluations;
+mod channel_bindings;
 mod gate_messages;
 mod hook_deliveries;
 mod improvement_cycles;

@@ -6,6 +6,7 @@
 //! via `approvals.approve`/`reject` and `interaction.resolve_and_answer`. No
 //! direct store access. chat.rs untouched.
 
+use super::channel::{Channel, GateAction, GateKind, GateRef, TuiChannel};
 use super::client::RoomClient;
 use super::render::{self, RenderedRow, RowSource};
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
@@ -22,32 +23,14 @@ use std::collections::HashSet;
 use std::io;
 use std::time::Duration;
 
-/// A still-resolvable gate at the current selection.
-#[derive(Clone)]
-struct GateRef {
-    kind: GateKind,
-    id: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GateKind {
-    Approval,
-    Interaction,
-}
-
 /// An in-flight operator decision — captures an optional motivation (approvals,
-/// §3.5) or the answer text (interactions) before committing.
+/// §3.5) or the answer text (interactions) before committing. `GateRef`,
+/// `GateKind`, and `GateAction` are the channel-neutral primitives, shared from
+/// [`super::channel`].
 struct GateInput {
     action: GateAction,
     id: String,
     buffer: String,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum GateAction {
-    Approve,
-    Reject,
-    Answer,
 }
 
 /// Restores the terminal on drop, even on early return / panic-unwind.
@@ -430,7 +413,8 @@ fn draw(
     .split(f.area());
 
     let header = format!(
-        " Session Room — {root}   floor: {}   squash: {}   {} rows{}{}",
+        " Session Room [{}] — {root}   floor: {}   squash: {}   {} rows{}{}",
+        TuiChannel.kind(),
         floor.as_str(),
         if squash { "on" } else { "off" },
         rows.len(),
@@ -487,11 +471,9 @@ fn draw(
         ))
         .style(Style::default().fg(Color::Cyan))
     } else {
-        let gate_hint = match gate.map(|g| g.kind) {
-            Some(GateKind::Approval) => " · y/n approve/reject",
-            Some(GateKind::Interaction) => " · r reply",
-            None => "",
-        };
+        // The gate affordance hint is the channel's concern (#393) — route it
+        // through the channel so a Discord/WhatsApp bridge can render its own.
+        let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         Paragraph::new(format!(
             " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · ⏎ detail{gate_hint}"
         ))

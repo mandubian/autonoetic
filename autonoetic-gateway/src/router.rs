@@ -1003,6 +1003,105 @@ impl JsonRpcRouter {
                 }
             }
 
+            "channel.bind" => {
+                // #393 (P3.c): bind an external conversation (Discord thread,
+                // WhatsApp chat) to a room so it survives reconnects and routes
+                // replies back as Operator-seat events. Channels are API clients,
+                // not direct store readers (#390).
+                let params: autonoetic_types::channel::ChannelBindParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for channel.bind: {}", e),
+                            );
+                        }
+                    };
+                if params.channel.trim().is_empty()
+                    || params.external_id.trim().is_empty()
+                    || params.root_session_id.trim().is_empty()
+                {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "channel, external_id, and root_session_id are required".to_string(),
+                    );
+                }
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match store.bind_channel(
+                    &params.channel,
+                    &params.external_id,
+                    &params.root_session_id,
+                ) {
+                    Ok(binding) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(binding).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("channel.bind failed: {}", e),
+                    ),
+                }
+            }
+
+            "channel.resolve" => {
+                // #393 (P3.c): look up which room a conversation is bound to.
+                let params: autonoetic_types::channel::ChannelResolveParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for channel.resolve: {}", e),
+                            );
+                        }
+                    };
+                if params.channel.trim().is_empty() || params.external_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "channel and external_id are required".to_string(),
+                    );
+                }
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match store.resolve_channel_binding(&params.channel, &params.external_id) {
+                    Ok(binding) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(
+                            autonoetic_types::channel::ChannelResolveResult { binding },
+                        )
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("channel.resolve failed: {}", e),
+                    ),
+                }
+            }
+
             "session.approval_resolved" => {
                 #[derive(Deserialize)]
                 struct ApprovalResolvedParams {
