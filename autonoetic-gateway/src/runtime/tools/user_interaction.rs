@@ -222,6 +222,16 @@ impl NativeTool for UserAskTool {
             )
         };
         let options_count = options.len();
+        // Embed the pre-digested choices (id + label) in the timeline event so
+        // every channel can render one-tap options inline without an extra
+        // round-trip — the room is store-free and reads only the timeline (#393).
+        // Labels only (not `value`, which may be sensitive); freeform-allowed
+        // travels too so a channel knows whether to offer a text fallback.
+        let options_for_event: Vec<serde_json::Value> = options
+            .iter()
+            .map(|o| serde_json::json!({ "id": o.id, "label": o.label }))
+            .collect();
+        let allow_freeform_for_event = args.allow_freeform;
 
         let store = match gateway_store {
             Some(ref s) => s.clone(),
@@ -324,6 +334,8 @@ impl NativeTool for UserAskTool {
                                     "interaction_id": gate_id,
                                     "question": crate::log_redaction::redact_text_for_logs(&question_for_side_effects),
                                     "options_count": options_count,
+                                    "options": options_for_event,
+                                    "allow_freeform": allow_freeform_for_event,
                                 })
                                 .to_string(),
                             ),

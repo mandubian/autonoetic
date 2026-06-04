@@ -24,13 +24,60 @@ use std::io;
 use std::time::Duration;
 
 /// An in-flight operator decision — captures an optional motivation (approvals,
-/// §3.5) or the answer text (interactions) before committing. `GateRef`,
-/// `GateKind`, and `GateAction` are the channel-neutral primitives, shared from
+/// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
+/// and `GateAction` are the channel-neutral primitives, shared from
 /// [`super::channel`].
 struct GateInput {
     action: GateAction,
     id: String,
     buffer: String,
+    /// Pre-digested choices for an interaction answer (empty for approvals and
+    /// option-less asks). A number key picks one → `answer_option_id`.
+    options: Vec<GateOption>,
+    /// Whether free-text is accepted alongside any options (interactions).
+    allow_freeform: bool,
+}
+
+/// One pre-digested choice surfaced from a `user.ask.pending` event payload.
+#[derive(Clone)]
+struct GateOption {
+    id: String,
+    label: String,
+}
+
+/// Read the pre-digested choices + freeform policy for an interaction from its
+/// `user.ask.pending` timeline entry (the gateway embeds them, #393). Returns
+/// `(options, allow_freeform)`; missing `allow_freeform` defaults to permissive.
+fn interaction_choices(entries: &[SessionTimelineEntry], interaction_id: &str) -> (Vec<GateOption>, bool) {
+    let entry = entries.iter().find(|e| {
+        e.event_type == "user.ask.pending"
+            && e.refs.interaction_id.as_deref() == Some(interaction_id)
+    });
+    let Some(payload) = entry
+        .and_then(|e| e.payload.as_deref())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    else {
+        return (Vec::new(), true);
+    };
+    let options = payload
+        .get("options")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|o| {
+                    Some(GateOption {
+                        id: o.get("id")?.as_str()?.to_string(),
+                        label: o.get("label")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let allow_freeform = payload
+        .get("allow_freeform")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    (options, allow_freeform)
 }
 
 /// Restores the terminal on drop, even on early return / panic-unwind.
@@ -73,6 +120,7 @@ pub fn run(
     let mut selected: usize = 0;
     let mut detail: Option<Vec<String>> = None; // drill-down pane content
     let mut input: Option<GateInput> = None; // in-flight gate decision
+    let mut compose: Option<String> = None; // in-flight free-form message to the session
     let mut status: Option<String> = None; // last action / connection result
     // Gates no longer offerable: approvals resolved on the timeline, plus
     // anything the operator just acted on (covers interactions, which have no
@@ -154,7 +202,7 @@ pub fn run(
         let gate = selectable_gate(&visible, indexed.get(selected), &resolved, &acted);
 
         terminal.draw(|f| {
-            draw(f, root_session_id, floor, squash, follow, &rows, selected, detail.as_deref(), input.as_ref(), status.as_deref(), gate.as_ref())
+            draw(f, root_session_id, floor, squash, follow, &rows, selected, detail.as_deref(), input.as_ref(), compose.as_deref(), status.as_deref(), gate.as_ref())
         })?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -162,27 +210,73 @@ pub fn run(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Text-capture mode takes over all input while open.
-                if let Some(gi) = input.as_mut() {
+                // Compose mode: capturing a free-form message to the session (#405).
+                if let Some(buf) = compose.as_mut() {
                     match key.code {
-                        KeyCode::Esc => input = None,
+                        KeyCode::Esc => compose = None,
                         KeyCode::Enter => {
-                            let gi = input.take().unwrap();
-                            match resolve_gate(client, &gi) {
-                                // Mark acted only on success — a failed RPC or an
-                                // empty answer leaves the gate offerable.
-                                Ok(msg) => {
-                                    acted.insert(gi.id.clone());
-                                    status = Some(msg);
-                                }
-                                // Reopen capture with the buffer intact so the
-                                // operator can fix the input and resubmit.
-                                Err(msg) => {
-                                    status = Some(msg);
-                                    input = Some(gi);
-                                }
+                            let text = buf.trim().to_string();
+                            if text.is_empty() {
+                                compose = None; // nothing to send
+                            } else {
+                                // Async so the sync loop never blocks on the agent
+                                // turn; the operator line + reply stream in via polling.
+                                status = Some(send_message(client, root_session_id, &text));
+                                compose = None;
+                                follow = true; // jump to newest to watch the exchange
                             }
                         }
+                        KeyCode::Backspace => {
+                            buf.pop();
+                        }
+                        KeyCode::Char(c) => buf.push(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Text-capture mode takes over all input while open.
+                if let Some(gi) = input.as_mut() {
+                    // Instant single-digit pick — only when it's unambiguous: a
+                    // pure-choice question (no free-text) with ≤9 options and an
+                    // empty buffer. Otherwise digits go into the buffer so multi-
+                    // digit ordinals (>9 options) and free-text starting with a
+                    // digit still work; Enter then resolves the ordinal.
+                    let chosen = if gi.action == GateAction::Answer
+                        && gi.buffer.is_empty()
+                        && !gi.allow_freeform
+                        && gi.options.len() <= 9
+                    {
+                        if let KeyCode::Char(c @ '1'..='9') = key.code {
+                            gi.options.get((c as usize) - ('1' as usize)).cloned()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    // Number selection and Enter both commit; share the resolve path.
+                    let commit = chosen.is_some() || key.code == KeyCode::Enter;
+                    if commit {
+                        let gi = input.take().unwrap();
+                        match resolve_gate(client, &gi, chosen.as_ref()) {
+                            // Mark acted only on success — a failed RPC or an
+                            // invalid answer leaves the gate offerable.
+                            Ok(msg) => {
+                                acted.insert(gi.id.clone());
+                                status = Some(msg);
+                            }
+                            // Reopen capture with the buffer intact so the operator
+                            // can fix the input and resubmit.
+                            Err(msg) => {
+                                status = Some(msg);
+                                input = Some(gi);
+                            }
+                        }
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Esc => input = None,
                         KeyCode::Backspace => {
                             gi.buffer.pop();
                         }
@@ -216,18 +310,24 @@ pub fn run(
                                 },
                                 id: g.id.clone(),
                                 buffer: String::new(),
+                                options: Vec::new(),
+                                allow_freeform: true,
                             });
                             status = None;
                         }
                     }
-                    // r: reply to the selected pending interaction (user.ask).
+                    // r: reply to the selected pending interaction (user.ask) —
+                    // load its pre-digested choices so a number key picks one.
                     KeyCode::Char('r') => {
                         if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Interaction) {
                             detail = None;
+                            let (options, allow_freeform) = interaction_choices(&visible, &g.id);
                             input = Some(GateInput {
                                 action: GateAction::Answer,
                                 id: g.id.clone(),
                                 buffer: String::new(),
+                                options,
+                                allow_freeform,
                             });
                             status = None;
                         }
@@ -246,6 +346,12 @@ pub fn run(
                         detail = None;
                     }
                     KeyCode::Char('s') => squash = !squash,
+                    // i: compose a free-form message into the session (#405).
+                    KeyCode::Char('i') => {
+                        detail = None;
+                        compose = Some(String::new());
+                        status = None;
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
                         follow = false;
                         detail = None;
@@ -304,22 +410,53 @@ fn selectable_gate(
     }
 }
 
+/// Decide the `interaction.resolve_and_answer` params for an interaction, or a
+/// local-rejection message. Pure (no RPC) so the branching is unit-testable.
+///
+/// A typed number selects the matching pre-digested option — so >9 options and
+/// the "type 2 ⏎" flow both work, even when free-text is disallowed. Falls back
+/// to a hotkey-`chosen` option, then to free-text (when the question allows it).
+/// Rejects locally rather than round-trip a guaranteed rejection (so a gate is
+/// never marked acted on a doomed submission).
+fn answer_params(gi: &GateInput, chosen: Option<&GateOption>) -> Result<serde_json::Value, String> {
+    let text = gi.buffer.trim();
+    let by_number = (!gi.options.is_empty())
+        .then(|| text.parse::<usize>().ok())
+        .flatten()
+        .filter(|n| (1..=gi.options.len()).contains(n))
+        .map(|n| &gi.options[n - 1]);
+    if let Some(opt) = chosen.or(by_number) {
+        return Ok(serde_json::json!({
+            "interaction_id": gi.id, "answer_option_id": opt.id, "answered_by": "operator"
+        }));
+    }
+    if text.is_empty() {
+        return Err(if gi.options.is_empty() {
+            "✗ answer cannot be empty".to_string()
+        } else {
+            "✗ type a number to choose, or type a reply".to_string()
+        });
+    }
+    if !gi.allow_freeform {
+        return Err("✗ this question requires choosing a numbered option".to_string());
+    }
+    Ok(serde_json::json!({
+        "interaction_id": gi.id, "answer_text": text, "answered_by": "operator"
+    }))
+}
+
 /// Resolve a gate over the gateway API (the sanctioned path that unblocks the
 /// waiting agent + records the decision incl. decider kind, #361). Decider is
-/// the operator; `buffer` is the motivation (approvals) or answer (interactions).
+/// the operator; `buffer` is the motivation (approvals) or free-text answer
+/// (interactions). `chosen` is a pre-digested choice picked by number, which
+/// resolves an interaction via `answer_option_id` instead of free text.
 ///
 /// Returns `Ok(msg)` only when the gateway accepted the decision (the caller
 /// uses this to mark the gate acted); `Err(msg)` on validation or transport
 /// failure, leaving the gate offerable so the operator can retry.
-fn resolve_gate(client: &RoomClient, gi: &GateInput) -> Result<String, String> {
+fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>) -> Result<String, String> {
     let text = gi.buffer.trim();
     let reason = (!text.is_empty()).then(|| text.to_string());
-    // The gateway requires a non-empty answer for interactions; reject locally
-    // rather than round-trip a guaranteed server rejection (and so we never mark
-    // the gate acted on an empty submission).
-    if gi.action == GateAction::Answer && text.is_empty() {
-        return Err("✗ answer cannot be empty".to_string());
-    }
     let (result, verb) = match gi.action {
         GateAction::Approve => (
             rpc(
@@ -338,17 +475,34 @@ fn resolve_gate(client: &RoomClient, gi: &GateInput) -> Result<String, String> {
             "rejected",
         ),
         GateAction::Answer => (
-            rpc(
-                client,
-                "interaction.resolve_and_answer",
-                serde_json::json!({ "interaction_id": gi.id, "answer_text": text, "answered_by": "operator" }),
-            ),
+            rpc(client, "interaction.resolve_and_answer", answer_params(gi, chosen)?),
             "answered",
         ),
     };
     match result {
         Ok(_) => Ok(format!("✓ {verb} {}", gi.id)),
         Err(e) => Err(format!("✗ {e}")),
+    }
+}
+
+/// Send a free-form operator message into the session over the gateway API
+/// (#405) — the same `event.ingest` ingress `chat` uses. Async (`async_mode`)
+/// so the sync TUI loop never blocks on the agent turn; the operator's line
+/// (recorded gateway-side) and the agent's reply then stream in via polling.
+fn send_message(client: &RoomClient, root_session_id: &str, text: &str) -> String {
+    match rpc(
+        client,
+        "event.ingest",
+        serde_json::json!({
+            "event_type": "chat",
+            "message": text,
+            "session_id": root_session_id,
+            "async_mode": true,
+            "metadata": { "source": "session_room" },
+        }),
+    ) {
+        Ok(_) => "✓ sent".to_string(),
+        Err(e) => format!("✗ {e}"),
     }
 }
 
@@ -402,6 +556,7 @@ fn draw(
     selected: usize,
     detail: Option<&[String]>,
     input: Option<&GateInput>,
+    compose: Option<&str>,
     status: Option<&str>,
     gate: Option<&GateRef>,
 ) {
@@ -459,23 +614,42 @@ fn draw(
         &mut state,
     );
 
-    let footer = if let Some(gi) = input {
+    let footer = if let Some(buf) = compose {
+        Paragraph::new(format!(" MESSAGE: {buf}▏   [Enter send · Esc cancel]"))
+            .style(Style::default().fg(Color::Green))
+    } else if let Some(gi) = input {
         let label = match gi.action {
             GateAction::Approve => "APPROVE — motivation (optional)",
             GateAction::Reject => "REJECT — motivation (optional)",
             GateAction::Answer => "ANSWER",
         };
-        Paragraph::new(format!(
-            " {label}: {}▏   [Enter submit · Esc cancel]",
-            gi.buffer
-        ))
-        .style(Style::default().fg(Color::Cyan))
+        // For an interaction with pre-digested choices, list them so a number
+        // key picks one (the §3.5 one-tap path); free-text stays available when
+        // the question allows it.
+        let choices = gi
+            .options
+            .iter()
+            .enumerate()
+            // Flatten/truncate labels so a multi-line or long label can't break
+            // the one-line footer.
+            .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 24)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let hint = if gi.options.is_empty() {
+            "[Enter submit · Esc cancel]".to_string()
+        } else if gi.allow_freeform {
+            format!("{choices}   [number choose · or type a reply · Esc cancel]")
+        } else {
+            format!("{choices}   [number choose · Esc cancel]")
+        };
+        Paragraph::new(format!(" {label}: {}▏   {hint}", gi.buffer))
+            .style(Style::default().fg(Color::Cyan))
     } else {
         // The gate affordance hint is the channel's concern (#393) — route it
         // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         Paragraph::new(format!(
-            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · ⏎ detail{gate_hint}"
+            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · i message · ⏎ detail{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };
@@ -557,9 +731,75 @@ mod tests {
             action: GateAction::Answer,
             id: "int-1".into(),
             buffer: "   ".into(), // whitespace-only ⇒ empty after trim
+            options: Vec::new(),
+            allow_freeform: true,
         };
-        let err = resolve_gate(&client, &gi).unwrap_err();
+        let err = resolve_gate(&client, &gi, None).unwrap_err();
         assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
+    }
+
+    #[test]
+    fn answer_params_handles_numbers_options_and_freeform() {
+        let opts = || vec![
+            GateOption { id: "o1".into(), label: "Yes".into() },
+            GateOption { id: "o2".into(), label: "No".into() },
+        ];
+        let mk = |buffer: &str, options: Vec<GateOption>, allow_freeform: bool| GateInput {
+            action: GateAction::Answer,
+            id: "int-1".into(),
+            buffer: buffer.into(),
+            options,
+            allow_freeform,
+        };
+
+        // A typed number selects the matching option — even when free-text is
+        // disallowed (the "type 2 ⏎" / >9-options flow the reviewer flagged).
+        let p = answer_params(&mk("2", opts(), false), None).unwrap();
+        assert_eq!(p["answer_option_id"], "o2");
+        assert!(p.get("answer_text").is_none());
+
+        // An out-of-range number is treated as free-text (when allowed).
+        let p = answer_params(&mk("99", opts(), true), None).unwrap();
+        assert_eq!(p["answer_text"], "99");
+
+        // A hotkey-chosen option wins regardless of buffer.
+        let chosen = GateOption { id: "o1".into(), label: "Yes".into() };
+        let p = answer_params(&mk("", opts(), false), Some(&chosen)).unwrap();
+        assert_eq!(p["answer_option_id"], "o1");
+
+        // Free-text where only options are allowed ⇒ rejected locally.
+        assert!(answer_params(&mk("maybe later", opts(), false), None)
+            .unwrap_err()
+            .contains("numbered option"));
+
+        // Empty with options ⇒ guidance to type a number; empty without ⇒ "empty".
+        assert!(answer_params(&mk("", opts(), true), None).unwrap_err().contains("number"));
+        assert!(answer_params(&mk("", Vec::new(), true), None).unwrap_err().contains("empty"));
+
+        // Plain free-text with no options ⇒ answer_text.
+        let p = answer_params(&mk("ship it", Vec::new(), true), None).unwrap();
+        assert_eq!(p["answer_text"], "ship it");
+    }
+
+    #[test]
+    fn interaction_choices_reads_options_from_payload() {
+        let mut e = gate_entry("user.ask.pending");
+        e.payload = Some(
+            serde_json::json!({
+                "interaction_id": "int-1",
+                "options": [{"id": "o1", "label": "Yes"}, {"id": "o2", "label": "No"}],
+                "allow_freeform": false
+            })
+            .to_string(),
+        );
+        let (opts, freeform) = interaction_choices(std::slice::from_ref(&e), "int-1");
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "o1");
+        assert_eq!(opts[1].label, "No");
+        assert!(!freeform);
+        // Unknown interaction ⇒ permissive default, no options.
+        let (none, ff) = interaction_choices(std::slice::from_ref(&e), "other");
+        assert!(none.is_empty() && ff);
     }
 
     #[test]
