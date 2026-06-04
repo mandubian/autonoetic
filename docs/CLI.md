@@ -453,6 +453,36 @@ Workbench and `/return` commands are available when the active agent has `PlanFr
 
 ---
 
+## Room Command
+
+The **Session Room** is a live, channel-agnostic, importance-ranked view of a
+session — every actor (planner, specialists, sentinel, you) in one timeline. From
+it you can watch a session, resolve approvals/clarifications, and send messages.
+Like `chat`, it's a gateway API client and needs `AUTONOETIC_SHARED_SECRET`.
+
+```bash
+autonoetic room <ROOT_SESSION_ID> [OPTIONS]
+
+Options:
+  --min-altitude <LEVEL>  Lowest importance to show: detail | normal | attention | error  (default: normal)
+  --follow                Tail the timeline live until Ctrl+C (read-only)
+  --tui                   Interactive shell: scroll, drill-down, resolve gates, send messages
+  --limit <N>             Max rows fetched per read (default: 200)
+```
+
+```bash
+autonoetic room session-abc123                      # one-shot snapshot
+autonoetic room session-abc123 --follow             # live tail (read-only)
+autonoetic room session-abc123 --tui                # interactive
+```
+
+Interactive keys (abridged): `j`/`k` scroll · `a` altitude floor · `s` squash ·
+`Enter` drill-down · `y`/`n` approve/reject · `r` reply to a question · `i`
+message the session · `q` quit. Full guide, glyphs, and gate/answer details:
+**[The Session Room](session-room.md)**.
+
+---
+
 ## Trace Commands
 
 ### `autonoetic trace sessions`
