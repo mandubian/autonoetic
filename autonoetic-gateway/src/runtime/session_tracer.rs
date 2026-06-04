@@ -173,7 +173,13 @@ pub struct SessionTracer {
     live_report: Option<Arc<Mutex<SessionReportWriter>>>,
     /// Optional GatewayStore for dual-write to causal_events table.
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    /// Turn-scoped ring of recent action labels (most recent last), so a failure
+    /// can carry the chain that led to it instead of a context-free error (#367).
+    recent_actions: std::collections::VecDeque<String>,
 }
+
+/// How many recent actions to keep for the error→action-chain link.
+const RECENT_ACTIONS_CAP: usize = 6;
 
 impl SessionTracer {
     pub fn new(agent_dir: &Path, agent_id: &str, session_id: &str) -> anyhow::Result<Self> {
@@ -208,6 +214,7 @@ impl SessionTracer {
             live_digest: None,
             live_report: None,
             gateway_store: None,
+            recent_actions: std::collections::VecDeque::new(),
         })
     }
 
@@ -229,8 +236,20 @@ impl SessionTracer {
         if let Some(w) = &self.live_report {
             w.lock().unwrap().start_turn(self.turn_id.as_deref())?;
         }
+        // The action chain is turn-scoped — a failure links to what happened in
+        // this turn, not stale actions from earlier ones (#367).
+        self.recent_actions.clear();
         self.append_live_digest_event("turn.start", None);
         Ok(())
+    }
+
+    /// Record a short action label in the turn-scoped ring (capped), so a later
+    /// failure can carry the chain that led to it.
+    fn note_action(&mut self, label: impl Into<String>) {
+        self.recent_actions.push_back(label.into());
+        while self.recent_actions.len() > RECENT_ACTIONS_CAP {
+            self.recent_actions.pop_front();
+        }
     }
 
     pub fn record_digest_llm_round(
@@ -661,9 +680,14 @@ impl SessionTracer {
                 );
             }
         }
+        // Link the preceding action chain so a failure isn't a context-free ✗
+        // (#367) — the room can show "after: a → b → c".
         self.append_live_digest_event(
             "llm.request_failed",
-            Some(serde_json::json!({ "error": msg })),
+            Some(serde_json::json!({
+                "error": msg,
+                "preceding": Vec::from_iter(self.recent_actions.iter().cloned()),
+            })),
         );
         Ok(())
     }
@@ -712,6 +736,7 @@ impl SessionTracer {
                 }
             }
         }
+        self.note_action(tool_name);
         self.append_live_digest_event(
             "tool.requested",
             Some(serde_json::json!({
@@ -1093,6 +1118,7 @@ impl SessionTracer {
             live_digest: None,
             live_report: None,
             gateway_store: None,
+            recent_actions: std::collections::VecDeque::new(),
         }
     }
 
@@ -1118,6 +1144,7 @@ impl SessionTracer {
             live_digest: None,
             live_report: None,
             gateway_store: Some(store),
+            recent_actions: std::collections::VecDeque::new(),
         }
     }
 }
@@ -1127,6 +1154,24 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn recent_actions_ring_caps_and_clears_on_turn_start() {
+        let mut t = SessionTracer::test_tracer();
+        for i in 0..(RECENT_ACTIONS_CAP + 3) {
+            t.note_action(format!("a{i}"));
+        }
+        // Capped to the most recent N; oldest dropped, newest kept.
+        assert_eq!(t.recent_actions.len(), RECENT_ACTIONS_CAP);
+        assert_eq!(
+            t.recent_actions.back().unwrap(),
+            &format!("a{}", RECENT_ACTIONS_CAP + 2)
+        );
+        assert_eq!(t.recent_actions.front().unwrap(), "a3");
+        // A new turn starts a fresh chain.
+        t.start_digest_turn().unwrap();
+        assert!(t.recent_actions.is_empty());
+    }
 
     #[test]
     fn cap_chars_is_a_hard_cap_including_ellipsis() {
