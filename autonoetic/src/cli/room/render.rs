@@ -161,6 +161,11 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 None => format!("escalation: {synthesis}"),
             }
         }
+        // A sandbox escape attempt during execution (#413) — security-critical.
+        "security.sandbox_escape" => format!(
+            "SANDBOX ESCAPE ATTEMPT — {}",
+            one_line(&field("indicator").unwrap_or_else(|| "blocked".into()), 120)
+        ),
         "llm.request_failed" => format!(
             "LLM error: {}{}",
             one_line(&field("error").unwrap_or_default(), 120),
@@ -662,6 +667,21 @@ mod tests {
         assert!(line.contains("[coder]"));
         // Revision id shown as-is (already prefixed), not doubled to "rev rev-9".
         assert!(line.contains("escalation: recommend promote (rev-9)"));
+    }
+
+    #[test]
+    fn sandbox_escape_renders_prominently() {
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "security.sandbox_escape",
+            Altitude::Error,
+            serde_json::json!({ "indicator": "ptrace syscall", "detail": "blocked" }),
+        );
+        let line = render_line(&e);
+        assert!(line.starts_with("✗"));
+        assert!(line.contains("[coder]"));
+        assert!(line.contains("SANDBOX ESCAPE ATTEMPT — ptrace syscall"));
     }
 
     #[test]

@@ -92,8 +92,10 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // Extended-thinking "why" is verbose; hidable by default, surfaced on dial-down.
         "turn.start" | "turn.end" | "llm.round" | "tool.requested" | "agent.reasoning"
         | "workbench.created" | "workbench.reconciled" | "workbench.discarded" => Altitude::Detail,
-        // Failures and the emergency-stop circuit breaker always surface.
-        "llm.request_failed" | "tool.failed" | "session.emergency_stop" => Altitude::Error,
+        // Failures, the emergency-stop circuit breaker, and security-critical
+        // events always surface.
+        "llm.request_failed" | "tool.failed" | "session.emergency_stop"
+        | "security.sandbox_escape" => Altitude::Error,
         // Gates awaiting the operator (conversational asks, RFC §3.5) and
         // integrity events. `runtime.lock_drift` stores an explicit altitude
         // (Error when rejected, Attention when overridden); this is just the

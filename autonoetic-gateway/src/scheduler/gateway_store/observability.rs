@@ -1190,6 +1190,47 @@ impl GatewayStore {
                 chrono::Utc::now().to_rfc3339(),
             ],
         )?;
+        // Release the conn lock before emitting — create_live_digest_event re-locks.
+        drop(conn);
+
+        // Surface the escape attempt on the canonical timeline (#413). It was
+        // store-only (sandbox_escape_attempts table), so a security-critical,
+        // session-scoped event was invisible in the room. Attributed to the agent
+        // whose sandbox tripped; always Error. Fall back to session_id as the
+        // timeline root if the caller passed an empty root (upstream fallback
+        // bug) — never silently drop a recorded security event from the room.
+        let timeline_root = if root_session_id.is_empty() {
+            session_id
+        } else {
+            root_session_id
+        };
+        if !timeline_root.is_empty() {
+            let principal = autonoetic_types::principal::Principal::agent(agent_id);
+            let seat = crate::runtime::session_timeline::derive_role(agent_id);
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                timeline_root.to_string(),
+                session_id.to_string(),
+                None,
+                &principal,
+                &seat,
+                "security.sandbox_escape",
+                None, // base_altitude ⇒ Error
+                Some(serde_json::json!({
+                    "indicator": indicator,
+                    "detail": crate::log_redaction::redact_text_for_logs(detail),
+                    "exit_code": exit_code,
+                    "agent_id": agent_id,
+                })),
+                autonoetic_types::session_timeline::TimelineRefs::default(),
+            );
+            if let Err(e) = self.create_live_digest_event(&event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    "sandbox_escape timeline emit failed"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1361,5 +1402,42 @@ mod fts_fallback_tests {
     fn test_should_fallback_false_on_other_error() {
         let err = rusqlite::Error::InvalidParameterName("test".into());
         assert!(!should_fallback_to_like(&err, "runtime.lock"));
+    }
+}
+
+#[cfg(test)]
+mod sandbox_escape_timeline_tests {
+    use super::*;
+    use autonoetic_types::session_timeline::{Altitude, SessionRole};
+    use tempfile::tempdir;
+
+    #[test]
+    fn record_sandbox_escape_surfaces_on_timeline() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        store
+            .record_sandbox_escape_attempt(
+                "root-1",
+                "root-1",
+                "coder.default",
+                "ptrace syscall",
+                "blocked by seccomp",
+                Some(159),
+            )
+            .unwrap();
+
+        let result = store
+            .list_session_timeline("root-1", None, 50, Some(Altitude::Detail), None)
+            .unwrap();
+        let ev = result
+            .entries
+            .iter()
+            .find(|e| e.event_type == "security.sandbox_escape")
+            .expect("sandbox escape must reach the timeline");
+        // Security-critical ⇒ Error; attributed to the agent whose sandbox tripped.
+        assert_eq!(ev.altitude, Altitude::Error);
+        assert!(matches!(ev.role, SessionRole::Specialist { .. }));
+        assert_eq!(ev.principal.id, "coder.default");
+        assert!(ev.payload.as_deref().unwrap().contains("ptrace syscall"));
     }
 }
