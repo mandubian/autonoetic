@@ -1,10 +1,10 @@
 //! Session Room (#363) — read-only viewer + interactive shell.
 //!
-//! P3.b (#392): the room is a *gateway API client*, not a direct store reader.
-//! The non-interactive viewer here reads the canonical timeline over the
-//! `session.timeline.list` JSON-RPC. The interactive TUI still reads the store
-//! directly (its sync event loop needs an async restructure) — P3.b-2 migrates
-//! it (reads via RPC, writes via `approvals.*` / `interaction.resolve_and_answer`).
+//! P3.b (#392): the room is a *gateway API client*, not a direct store reader
+//! (Separation of Powers). Both the viewer and the interactive TUI read the
+//! canonical timeline over `session.timeline.list` and resolve gates over
+//! `approvals.approve`/`reject` + `interaction.resolve_and_answer` — no
+//! `GatewayStore` access.
 
 mod client;
 mod render;
@@ -28,16 +28,16 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
         ),
     };
 
-    // Interactive shell — still a direct store reader for now; P3.b-2 migrates
-    // it to the RPC client (its sync event loop needs an async restructure).
+    // The whole room is a gateway API client (#392) — no store access.
+    let client = RoomClient::from_config(&config)?;
+
+    // Interactive shell — reads via session.timeline.list, resolves gates via
+    // approvals.* / interaction.resolve_and_answer.
     if args.tui {
-        let gateway_dir = config.agents_dir.join(".gateway");
-        let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
-        return tui::run(&config, &store, &args.root_session_id, min_altitude, args.limit);
+        return tui::run(&client, &args.root_session_id, min_altitude, args.limit);
     }
 
-    // Read-only viewer: a pure gateway API client (#392) — no store access.
-    let client = RoomClient::from_config(&config)?;
+    // Read-only viewer.
     let mut cursor: Option<String> = None;
     let rendered_any = drain_new_rpc(
         &client,
