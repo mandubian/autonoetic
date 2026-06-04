@@ -1049,6 +1049,78 @@ fn unblock_task_on_approval(
     }
 }
 
+/// Whether an approval's action introduces an external effect or is hard to
+/// undo — used by the §O classifier to make a principal's *approval* of such an
+/// action BLOCKING (must carry a reason). Non-exhaustive: unknown/new actions
+/// are treated as local (DEFERRED), failing toward less friction.
+fn action_is_external_or_irreversible(action: &ScheduledAction) -> bool {
+    use ScheduledAction::*;
+    matches!(
+        action,
+        AgentInstall { .. }
+            | CredentialPrompt { .. }
+            | CredentialRequest { .. }
+            | WebFetch { .. }
+            | WebCall { .. }
+            | WebSearch { .. }
+            | ProfileShare { .. }
+            | LayerMount { .. }
+            | RevisionPromote { .. }
+    )
+}
+
+/// §O motivation tier for a gate decision. `true` = BLOCKING (a motivation is
+/// required). A rejection/abort by a principal always blocks (the symmetric
+/// mirror of `Ri-0.3`); a principal's approval blocks only when the action is
+/// elevated-authority or external/irreversible. Mechanical resolutions (no
+/// principal — `gateway`/`system`/`emergency_stop:…`) never block. Reversible
+/// operator-level approvals are DEFERRED (not enforced here yet — "block now,
+/// refine later").
+fn decision_is_blocking(
+    request: &ApprovalRequest,
+    decided_by: &str,
+    status: &ApprovalStatus,
+) -> bool {
+    if autonoetic_types::principal::decider_principal_kind(decided_by).is_none() {
+        return false;
+    }
+    match status {
+        ApprovalStatus::Rejected | ApprovalStatus::Cancelled => true,
+        ApprovalStatus::Approved => {
+            request.approval_level != ApprovalLevel::Operator
+                || action_is_external_or_irreversible(&request.action)
+        }
+    }
+}
+
+/// Enforce the §O decider obligation: refuse a BLOCKING-tier decision with no
+/// motivation. Presence-only check (never judges the reason's quality —
+/// Lawful Executor). Disabled via `decider_obligations.enabled = false`.
+fn enforce_decider_motivation(
+    config: &GatewayConfig,
+    request: &ApprovalRequest,
+    decided_by: &str,
+    status: &ApprovalStatus,
+    reason: Option<&str>,
+) -> anyhow::Result<()> {
+    if !config.decider_obligations.enabled {
+        return Ok(());
+    }
+    if decision_is_blocking(request, decided_by, status) {
+        let has_reason = reason.map(|r| !r.trim().is_empty()).unwrap_or(false);
+        if !has_reason {
+            anyhow::bail!(
+                "§O decider obligation: recording approval '{}' (level {}) as '{}' requires a \
+                 motivation. Provide a non-empty reason and retry.",
+                request.request_id,
+                request.approval_level.to_config(),
+                status.as_str()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn decide_request(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -1095,6 +1167,11 @@ fn decide_request_with_options(
             request.decided_by.as_deref().unwrap_or("unknown")
         );
     }
+
+    // §O symmetric obligation (#359 / #395): a principal decider owes a
+    // motivation for a BLOCKING-tier decision (reject/abort, or approval of an
+    // elevated-authority / external-irreversible action). Checked before commit.
+    enforce_decider_motivation(config, &request, decided_by, &status, reason.as_deref())?;
 
     let decision = ApprovalDecision {
         request_id: request.request_id,
@@ -1314,6 +1391,76 @@ mod tests {
         let loaded = super::load_approval_requests(&cfg, Some(&store)).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].request_id, "apr-test1234");
+    }
+
+    #[test]
+    fn decider_obligation_blocks_unmotivated_blocking_decisions() {
+        use autonoetic_types::background::ApprovalStatus;
+
+        let mk = |level: ApprovalLevel, action: ScheduledAction| ApprovalRequest {
+            request_id: "apr".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "s".to_string(),
+            action,
+            created_at: "2020-01-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: level,
+            similar_to_request_id: None,
+            similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+        };
+        let sandbox = || ScheduledAction::SandboxExec {
+            command: "x".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: None,
+        };
+        let install = || ScheduledAction::AgentInstall {
+            agent_id: "a".to_string(),
+            summary: "s".to_string(),
+            requested_by_agent_id: "r".to_string(),
+            install_fingerprint: "fp".to_string(),
+            payload: None,
+        };
+        let cfg = GatewayConfig::default(); // decider_obligations.enabled = true
+        let local = mk(ApprovalLevel::Operator, sandbox());
+
+        // Operator rejection without a reason → blocked (mirror of Ri-0.3).
+        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, None).is_err());
+        // …with a reason → allowed.
+        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, Some("out of scope")).is_ok());
+        // Whitespace-only reason doesn't count.
+        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, Some("   ")).is_err());
+        // Approving a reversible, operator-level action without a reason → allowed (DEFERRED).
+        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Approved, None).is_ok());
+        // Mechanical decider (no principal) is exempt even on rejection.
+        assert!(super::enforce_decider_motivation(&cfg, &local, "gateway", &ApprovalStatus::Rejected, None).is_ok());
+        assert!(super::enforce_decider_motivation(&cfg, &local, "emergency_stop:estop-1", &ApprovalStatus::Cancelled, None).is_ok());
+        // Approving an external/irreversible action without a reason → blocked.
+        let ext = mk(ApprovalLevel::Operator, install());
+        assert!(super::enforce_decider_motivation(&cfg, &ext, "operator", &ApprovalStatus::Approved, None).is_err());
+        // Approving an elevated-authority gate without a reason → blocked.
+        let elevated = mk(ApprovalLevel::Admin, sandbox());
+        assert!(super::enforce_decider_motivation(&cfg, &elevated, "operator", &ApprovalStatus::Approved, None).is_err());
+
+        // Disabled config → no enforcement at all.
+        let cfg_off = GatewayConfig {
+            decider_obligations: autonoetic_types::config::DeciderObligationsConfig { enabled: false },
+            ..Default::default()
+        };
+        assert!(super::enforce_decider_motivation(&cfg_off, &local, "operator", &ApprovalStatus::Rejected, None).is_ok());
     }
 
     #[test]
