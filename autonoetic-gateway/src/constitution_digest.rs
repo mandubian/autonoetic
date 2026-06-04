@@ -657,7 +657,7 @@ mod tests {
         let agents_dir = tmp.path().join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
 
-        let rel = Path::new("docs/constitution/versions/2026.05.05");
+        let rel = Path::new("docs/constitution/versions/2026.06.04");
         let parent_docs = tmp.path().join(rel);
         std::fs::create_dir_all(&parent_docs).unwrap();
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -714,7 +714,7 @@ mod tests {
         );
         assert_eq!(
             lock.constitution_source,
-            "docs/constitution/versions/2026.05.30/constitution.md"
+            "docs/constitution/versions/2026.06.04/constitution.md"
         );
     }
 }
