@@ -934,6 +934,75 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.timeline.list" => {
+                // Canonical Session Room timeline over the gateway API (#391) so
+                // channels are clients, not direct store readers.
+                let params: autonoetic_types::session_timeline::SessionTimelineListParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for session.timeline.list: {}", e),
+                            );
+                        }
+                    };
+                if params.root_session_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "root_session_id is required".to_string(),
+                    );
+                }
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                // Per the type contract: omitted floor ⇒ Normal; an invalid floor
+                // is an error, not a silent "no filter".
+                let min_altitude = match params.min_altitude.as_deref() {
+                    None => autonoetic_types::session_timeline::Altitude::Normal,
+                    Some(s) => match autonoetic_types::session_timeline::Altitude::parse_str(s) {
+                        Some(a) => a,
+                        None => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!(
+                                    "invalid min_altitude '{}': expected detail | normal | attention | error",
+                                    s
+                                ),
+                            );
+                        }
+                    },
+                };
+                let limit = params.limit.clamp(1, 500);
+                match store.list_session_timeline(
+                    &params.root_session_id,
+                    params.after_event_id.as_deref(),
+                    limit,
+                    Some(min_altitude),
+                    params.principal_id.as_deref(),
+                ) {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.timeline.list failed: {}", e),
+                    ),
+                }
+            }
+
             "session.approval_resolved" => {
                 #[derive(Deserialize)]
                 struct ApprovalResolvedParams {
