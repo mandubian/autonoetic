@@ -9,6 +9,7 @@
 //! `operator_channel_bindings` to route an external conversation back to a room.
 
 use super::render::{self, RenderedRow};
+use std::borrow::Cow;
 
 /// A still-resolvable gate at a selection — the channel-neutral primitive every
 /// surface resolves the same way (over `approvals.*` / `interaction.*`).
@@ -40,10 +41,11 @@ pub trait Channel {
     fn kind(&self) -> &'static str;
 
     /// Format a rendered row into this channel's native line. Defaults to the
-    /// channel-neutral text; a richer surface (styled TUI, Discord markdown)
-    /// overrides.
-    fn format_row(&self, row: &RenderedRow) -> String {
-        render::row_text(row).into_owned()
+    /// channel-neutral text, borrowing the existing line for `RenderedRow::Line`
+    /// (no allocation on the hot path — mirrors [`render::row_text`]); a richer
+    /// surface (styled TUI, Discord markdown) overrides and allocates as needed.
+    fn format_row<'r>(&self, row: &'r RenderedRow) -> Cow<'r, str> {
+        render::row_text(row)
     }
 
     /// The affordance hint for resolving a pending gate in this surface (TUI

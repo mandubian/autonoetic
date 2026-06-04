@@ -24,15 +24,18 @@ pub struct ChannelBinding {
 }
 
 /// Params for `channel.bind` — upsert a binding (idempotent on the natural key).
-#[derive(Debug, Clone, Deserialize)]
+/// Derives `Serialize` too so channel clients can reuse it to *send* the request
+/// (not just the gateway to receive it).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelBindParams {
     pub channel: String,
     pub external_id: String,
     pub root_session_id: String,
 }
 
-/// Params for `channel.resolve` — look up the room for a conversation.
-#[derive(Debug, Clone, Deserialize)]
+/// Params for `channel.resolve` — look up the room for a conversation. Derives
+/// `Serialize` too so channel clients can reuse it to *send* the request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelResolveParams {
     pub channel: String,
     pub external_id: String,
