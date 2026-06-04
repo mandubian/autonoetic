@@ -738,6 +738,25 @@ operator_activity:
 
 ---
 
+## Decider Obligations
+
+Symmetric-obligation enforcement (#359 §O). When enabled, the gateway refuses a **BLOCKING-tier** gate decision that carries no motivation — mirroring how an agent owes a reason for every rejection (`Ri-0.3`). The gateway checks only that a reason is *present*, never its quality (Lawful Executor).
+
+A decision is BLOCKING when made by a *principal* (operator / agent — mechanical `gateway`/`system`/`emergency_stop:…` resolutions are exempt) **and** it is a rejection/abort, **or** an approval of an elevated-authority (`admin`+) or external/irreversible action. Approvals of reversible operator-level actions are DEFERRED (not enforced).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `decider_obligations.enabled` | bool | `true` | Require a motivation for BLOCKING-tier decisions. `false` disables enforcement (decisions may be recorded without a reason). |
+
+Example:
+
+```yaml
+decider_obligations:
+  enabled: true
+```
+
+---
+
 ## Cognitive Capsules
 
 Controls export/import of portable agent snapshots. A Cognitive Capsule pins a specific `AgentRevisionRecord` together with its `runtime.lock`, layer references (or embedded layer content in hermetic mode), and optional memory / checkpoint snapshots. See [`docs/cognitive-capsule.md`](cognitive-capsule.md).

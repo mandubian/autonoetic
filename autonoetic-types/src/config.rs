@@ -1097,6 +1097,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub operator_activity: OperatorActivityConfig,
 
+    /// Symmetric decider-obligation enforcement (#359 §O / #395).
+    #[serde(default)]
+    pub decider_obligations: DeciderObligationsConfig,
+
     /// Approval level / escalation settings.
     #[serde(default)]
     pub approval_levels: ApprovalLevelConfig,
@@ -1512,6 +1516,31 @@ impl Default for ChatConfig {
             inline_approvals: default_chat_inline_approvals(),
         }
     }
+}
+
+/// Symmetric decider obligations (#359 §O / #395). When enabled, the gateway
+/// refuses a BLOCKING-tier gate decision that carries no motivation — a
+/// rejection, or a principal's approval of an elevated-authority or
+/// external/irreversible action. Mechanical resolutions (no principal) and
+/// reversible operator-level approvals are exempt. The gateway checks only the
+/// *presence* of a reason, never its quality (Lawful Executor).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeciderObligationsConfig {
+    /// Require a motivation for BLOCKING-tier decisions. Default: true.
+    #[serde(default = "default_decider_obligations_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for DeciderObligationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_decider_obligations_enabled(),
+        }
+    }
+}
+
+fn default_decider_obligations_enabled() -> bool {
+    true
 }
 
 /// Configuration for the operator activity feed (Phase 4 hardening).
@@ -2596,6 +2625,7 @@ impl Default for GatewayConfig {
             llm_routing: None,
             chat: ChatConfig::default(),
             operator_activity: OperatorActivityConfig::default(),
+            decider_obligations: DeciderObligationsConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),

@@ -197,6 +197,14 @@ operator_activity:
   # retention_days: maximum age (days) of operator activity rows before pruning. Default: 90.
   retention_days: 90
 
+# ── Decider Obligations (symmetric obligations, #359 §O) ──────────────
+# When enabled, the gateway refuses a BLOCKING-tier gate decision with no
+# motivation: a principal's rejection/abort, or approval of an elevated-authority
+# or external/irreversible action. Mirrors the agent's Ri-0.3 duty. The gateway
+# checks only that a reason is present, never its quality. Default: enabled.
+decider_obligations:
+  enabled: true
+
 # ── Approval Levels ───────────────────────────────────────────────────
 # Escalation: require higher authority for sensitive actions.
 # Levels: operator (default) | admin | agent:<agent_id>
