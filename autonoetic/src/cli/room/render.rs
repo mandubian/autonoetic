@@ -82,6 +82,20 @@ fn choices_hint(payload: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Format the preceding action chain a failure carries (#367) as ` ⟵ after: a → b`.
+/// Reads the `preceding` array of action labels; empty/absent ⇒ "".
+fn preceding_chain(payload: Option<&serde_json::Value>) -> String {
+    let Some(arr) = payload.and_then(|v| v.get("preceding")).and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+    let parts: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  ⟵ after: {}", parts.join(" → "))
+    }
+}
+
 /// Human summary of an event, from its type + payload. Keeps the most useful
 /// field per known event type; falls back to the bare event type.
 pub fn summarize(entry: &SessionTimelineEntry) -> String {
@@ -134,7 +148,11 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 .or_else(|| field("tool"))
                 .unwrap_or_else(|| "completed".into())
         ),
-        "llm.request_failed" => format!("LLM error: {}", field("error").unwrap_or_default()),
+        "llm.request_failed" => format!(
+            "LLM error: {}{}",
+            one_line(&field("error").unwrap_or_default(), 120),
+            preceding_chain(p.as_ref()),
+        ),
         other => other.to_string(),
     }
 }
@@ -537,6 +555,31 @@ mod tests {
             serde_json::json!({ "tool_name": "Edit", "result": "ok" }),
         );
         assert!(render_line(&e).contains("tool Edit"));
+    }
+
+    #[test]
+    fn llm_failure_links_preceding_action_chain() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "llm.request_failed",
+            Altitude::Error,
+            serde_json::json!({ "error": "rate limited", "preceding": ["read_file", "edit", "run"] }),
+        );
+        let line = render_line(&e);
+        assert!(line.starts_with("✗"));
+        assert!(line.contains("LLM error: rate limited"));
+        assert!(line.contains("after: read_file → edit → run"));
+
+        // No preceding ⇒ just the error, no dangling "after:".
+        let bare = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "llm.request_failed",
+            Altitude::Error,
+            serde_json::json!({ "error": "boom" }),
+        );
+        assert!(!render_line(&bare).contains("after:"));
     }
 
     #[test]
