@@ -63,7 +63,8 @@ counterpart is the cheap way to keep the next gap from going unnoticed.
 
 ## The canonical timeline (`live_digest_events`)
 
-A single, append-only, hash-orderable log per root session. Migration **v46**
+A single, append-only log per root session, ordered by `(created_at, event_id)`
+(the `event_id` UUID is a deterministic tie-breaker, not a hash). Migration **v46**
 (`session_timeline`) extended the table in place with attribution + importance
 columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
 
@@ -74,8 +75,10 @@ columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
   (`scheduler/gateway_store/session_timeline.rs`) — cursor-paginated on
   `(created_at, event_id)`, filtered by a minimum altitude, mapping rows to the
   shared `SessionTimelineEntry` type. Rows written before v46 (NULL attribution)
-  fall back to sensible defaults (altitude → Normal, principal → the source
-  agent, role derived from its id), so old sessions still render.
+  fall back to derived values: principal → `AutonoeticAgent` on the source agent
+  id, role derived from it, and **altitude recomputed from `(event_type, role)`**
+  via `altitude_for` (not a flat default), so a historical failure/gate keeps its
+  true importance. (The `min_altitude` SQL filter treats a NULL as `Normal`.)
 - **Append-only:** events are never mutated; a *resolution* is a new event
   (e.g. `approval.approved`), not an edit. This respects the constitution's
   real-time / append-only digest rule (P-8.7).
@@ -85,7 +88,7 @@ columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
 | Event | Emitted by | Default altitude |
 |---|---|---|
 | `session.start` | session tracer | Normal |
-| `turn.start` / `turn.end` / `llm.round` / `llm.retry` | session tracer | Detail |
+| `turn.start` / `turn.end` / `llm.round` | session tracer | Detail |
 | `tool.requested` | session tracer | Detail |
 | `tool.completed` | session tracer | Normal |
 | `agent.message` | session tracer (LLM completion text) | Normal |
@@ -101,8 +104,9 @@ columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
 
 `agent.message` + `operator.message` are what make the room read as a
 *conversation*: both sides' prose on the timeline, not just mechanical markers.
-Free text is **redacted then hard-capped** before it's written to a row; full
-content stays in the evidence store.
+Free text is **redacted** before it's written to a row, and long agent prose
+(`agent.message` / `agent.reasoning`) is additionally **hard-capped** (~2 000
+chars); the full content stays in the evidence store.
 
 ## Importance: the altitude model
 
