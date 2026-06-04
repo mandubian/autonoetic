@@ -55,8 +55,11 @@ pub fn build_timeline_event(
 /// conversation, not just agent replies. Attribution: a human chat (no
 /// `source_agent_id`) is the **Operator seat / Human** principal; an
 /// agent-originated ingest is attributed to that agent's seat. Altitude is
-/// `Normal` (first-class conversation, visible at the default floor). The
-/// caller redacts the message text before passing it in.
+/// derived via `altitude_for` (`None` below): `operator.message` has a `Normal`
+/// base (first-class conversation, visible at the default floor) but the seat's
+/// `role_floor` can only *raise* it — e.g. a Sentinel-seat message surfaces at
+/// `Attention`, honoring the module's raise-only invariant. The caller redacts
+/// the message text before passing it in.
 pub fn operator_message_event(
     session_id: &str,
     source_agent_id: Option<&str>,
@@ -74,7 +77,7 @@ pub fn operator_message_event(
         &principal,
         &role,
         "operator.message",
-        Some(Altitude::Normal),
+        None, // derive: max(base=Normal, role_floor(role))
         Some(serde_json::json!({ "message": redacted_message })),
         TimelineRefs::default(),
     )
@@ -156,7 +159,8 @@ mod tests {
 
     #[test]
     fn operator_message_event_attributes_human_and_agent() {
-        // A human chat (no source_agent_id) ⇒ Operator seat / Human principal.
+        // A human chat (no source_agent_id) ⇒ Operator seat / Human principal,
+        // Normal altitude (Operator's role_floor is Detail ⇒ max stays Normal).
         let human = operator_message_event("session-1", None, "hello there");
         assert_eq!(human.event_type, "operator.message");
         assert_eq!(human.altitude.as_deref(), Some("normal"));
@@ -177,6 +181,11 @@ mod tests {
             agent.principal_kind,
             Some(Principal::human("operator").kind_to_storage())
         );
+
+        // role_floor must still raise altitude: a Sentinel-seat message surfaces
+        // at Attention, not Normal (the raise-only invariant — not hard-coded).
+        let sentinel = operator_message_event("session-1", Some("sentinel.divergence"), "halt");
+        assert_eq!(sentinel.altitude.as_deref(), Some("attention"));
     }
 
     #[test]
