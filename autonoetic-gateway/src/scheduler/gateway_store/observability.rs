@@ -1196,12 +1196,19 @@ impl GatewayStore {
         // Surface the escape attempt on the canonical timeline (#413). It was
         // store-only (sandbox_escape_attempts table), so a security-critical,
         // session-scoped event was invisible in the room. Attributed to the agent
-        // whose sandbox tripped; always Error.
-        if !root_session_id.is_empty() {
+        // whose sandbox tripped; always Error. Fall back to session_id as the
+        // timeline root if the caller passed an empty root (upstream fallback
+        // bug) — never silently drop a recorded security event from the room.
+        let timeline_root = if root_session_id.is_empty() {
+            session_id
+        } else {
+            root_session_id
+        };
+        if !timeline_root.is_empty() {
             let principal = autonoetic_types::principal::Principal::agent(agent_id);
             let seat = crate::runtime::session_timeline::derive_role(agent_id);
             let event = crate::runtime::session_timeline::build_timeline_event(
-                root_session_id.to_string(),
+                timeline_root.to_string(),
                 session_id.to_string(),
                 None,
                 &principal,
