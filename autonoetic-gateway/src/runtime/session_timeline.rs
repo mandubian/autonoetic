@@ -92,8 +92,8 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // Extended-thinking "why" is verbose; hidable by default, surfaced on dial-down.
         "turn.start" | "turn.end" | "llm.round" | "tool.requested" | "agent.reasoning"
         | "workbench.created" | "workbench.reconciled" | "workbench.discarded" => Altitude::Detail,
-        // Failures always surface.
-        "llm.request_failed" | "tool.failed" => Altitude::Error,
+        // Failures and the emergency-stop circuit breaker always surface.
+        "llm.request_failed" | "tool.failed" | "session.emergency_stop" => Altitude::Error,
         // Gates awaiting the operator (conversational asks, RFC §3.5) and
         // integrity events. `runtime.lock_drift` stores an explicit altitude
         // (Error when rejected, Attention when overridden); this is just the
@@ -133,6 +133,23 @@ pub fn derive_role(agent_id: &str) -> SessionRole {
         "auditor" => SessionRole::Auditor,
         "runtime" | "gateway" => SessionRole::Runtime,
         other => SessionRole::Specialist { kind: other.to_string() },
+    }
+}
+
+/// Map an explicit `(kind, id)` pair to a `(principal, seat)` — for producers
+/// that already know who acted (emergency stop, escalations) rather than parsing
+/// a `decided_by` string. `user`/`operator`/`human` ⇒ Operator seat (the
+/// emergency-stop API/CLI uses `"user"`); `agent` ⇒ that agent's seat; anything
+/// else (`system`, `security_policy`, …) ⇒ Runtime.
+pub fn actor_from_kind_id(kind: &str, id: &str) -> (autonoetic_types::principal::Principal, SessionRole) {
+    use autonoetic_types::principal::{Principal, PrincipalKind};
+    match kind {
+        "user" | "operator" | "human" => (Principal::human(id), SessionRole::Operator),
+        "agent" | "autonoetic_agent" => (Principal::agent(id), derive_role(id)),
+        _ => (
+            Principal { kind: PrincipalKind::Script, id: id.to_string() },
+            SessionRole::Runtime,
+        ),
     }
 }
 
@@ -244,6 +261,28 @@ mod tests {
             altitude_for("agent.reasoning", &SessionRole::Sentinel),
             Altitude::Attention
         );
+    }
+
+    #[test]
+    fn emergency_stop_is_error_and_attributed() {
+        use autonoetic_types::principal::PrincipalKind;
+        // Always Error — the circuit breaker must surface at the top floor.
+        assert_eq!(base_altitude("session.emergency_stop"), Altitude::Error);
+
+        // Attribution by explicit kind. The emergency-stop API/CLI uses "user";
+        // it (and "operator"/"human") must read as a human in the Operator seat.
+        for human_kind in ["user", "operator", "human"] {
+            let (op, seat) = actor_from_kind_id(human_kind, "operator");
+            assert!(
+                matches!(op.kind, PrincipalKind::Human) && matches!(seat, SessionRole::Operator),
+                "kind {human_kind:?} should map to Human/Operator"
+            );
+        }
+        let (agent, seat) = actor_from_kind_id("agent", "auditor.default");
+        assert!(matches!(agent.kind, PrincipalKind::AutonoeticAgent));
+        assert!(matches!(seat, SessionRole::Auditor));
+        let (sys, seat) = actor_from_kind_id("security_policy", "gateway");
+        assert!(matches!(sys.kind, PrincipalKind::Script) && matches!(seat, SessionRole::Runtime));
     }
 
     #[test]
