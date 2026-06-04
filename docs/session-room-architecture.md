@@ -33,6 +33,34 @@ presentation*, not the raw firehose (which would overwhelm a channel) nor the
 thin notification projection (which drops the narrative). Drill-down can descend
 into the causal chain; the timeline itself stays readable.
 
+### Why a separate timeline, not a view derived from the causal chain
+
+A reasonable question: the causal chain already records everything — why have
+producers write a *second* event to `live_digest_events` instead of deriving the
+timeline from the causal chain (one source of truth)? It's a deliberate tradeoff,
+and it's worth keeping in mind when adding new producers.
+
+The two stores are **different projections of "what happened," not a copy:**
+
+- **Different shape.** Causal events are `category/action/status` + payload, **hash-chained** and sequenced for tamper-evident audit/replay. Timeline events are presentation-shaped: `principal`/`seat`/`altitude`/`refs`, with text **redacted and hard-capped** for display.
+- **Different scope.** The causal chain is **per-agent**, hash-chained per source; the timeline is **merged per root session** across every participating actor. Deriving the merged view means reading and merging N hash-chained logs.
+- **Different sources.** The timeline has events that are **not** agent causal events — `operator.message` (emitted in the router on `event.ingest`) and gateway-side gate resolutions. Routing those *through* the causal chain just to derive them would pollute the tamper-evident audit log with presentation events and blur the integrity boundary.
+- **Different lifecycle.** The presentation schema evolves freely (altitude/principal were added in v46) without touching the integrity-critical audit substrate; retention windows differ.
+
+A pure "derive from causal" design would also still need the classification layer
+(event type → altitude/seat/summary) we already have in `base_altitude` +
+`summarize`, plus either a synchronous re-shaping (no write saved) or an async
+projector (lag, breaking the real-time / append-only guarantee, P-8.7).
+
+**The real cost — and the guardrail.** Because the overlap is maintained *by
+hand* (a producer calls both `log_event` and `append_live_digest_event`), it is
+possible to record a causal event and **forget** the timeline one — making an
+operator-meaningful event invisible in the room. `runtime_lock_drift` was exactly
+this gap (causal-only). When adding a producer for anything an operator should
+see, emit **both**, and prefer a shared helper so the timeline emit is one
+obvious call. A coverage test that flags causal categories with no timeline
+counterpart is the cheap way to keep the next gap from going unnoticed.
+
 ## The canonical timeline (`live_digest_events`)
 
 A single, append-only, hash-orderable log per root session. Migration **v46**
