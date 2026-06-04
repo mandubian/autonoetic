@@ -107,6 +107,43 @@ impl GatewayStore {
                 escalation.escalation_type.as_str(),
             ],
         )?;
+        // Release the conn lock before emitting — create_live_digest_event re-locks
+        // the same Mutex, which would deadlock.
+        drop(conn);
+
+        // Surface the operator-facing escalation on the canonical timeline (#413).
+        // It was store-only: the `apr-esc-*` approval it spawns is inserted
+        // directly (not via the gate service), so no `approval.pending` fires —
+        // the escalation was invisible in the room. Attributed to the agent under
+        // review; Attention altitude (an operator decision is pending).
+        if !escalation.root_session_id.is_empty() {
+            let principal = autonoetic_types::principal::Principal::agent(&escalation.agent_id);
+            let seat = crate::runtime::session_timeline::derive_role(&escalation.agent_id);
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                escalation.root_session_id.clone(),
+                escalation.root_session_id.clone(),
+                None,
+                &principal,
+                &seat,
+                "escalation.pending",
+                None, // base_altitude ⇒ Attention
+                Some(serde_json::json!({
+                    "escalation_id": escalation.escalation_id,
+                    "agent_id": escalation.agent_id,
+                    "revision_id": escalation.revision_id,
+                    "synthesis": escalation.planner_synthesis,
+                    "escalation_type": escalation.escalation_type.as_str(),
+                })),
+                autonoetic_types::session_timeline::TimelineRefs::default(),
+            );
+            if let Err(e) = self.create_live_digest_event(&event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    "escalation.pending timeline emit failed"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -230,5 +267,42 @@ impl GatewayStore {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autonoetic_types::session_timeline::{Altitude, SessionRole};
+    use tempfile::tempdir;
+
+    #[test]
+    fn create_escalation_surfaces_pending_on_timeline() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let esc = EscalationMessage::new(
+            "esc-abc12345".to_string(),
+            "art-1".to_string(),
+            "coder.default".to_string(),
+            "rev-9".to_string(),
+            vec![],
+            "looks good, recommend promote".to_string(),
+            "root-xyz".to_string(),
+        );
+        store.create_escalation(&esc).unwrap();
+
+        let result = store
+            .list_session_timeline("root-xyz", None, 50, Some(Altitude::Detail), None)
+            .unwrap();
+        let ev = result
+            .entries
+            .iter()
+            .find(|e| e.event_type == "escalation.pending")
+            .expect("escalation.pending must reach the timeline");
+        // Operator-decision-pending ⇒ Attention; attributed to the agent under review.
+        assert_eq!(ev.altitude, Altitude::Attention);
+        assert!(matches!(ev.role, SessionRole::Specialist { .. }));
+        assert_eq!(ev.principal.id, "coder.default");
+        assert!(ev.payload.as_deref().unwrap().contains("recommend promote"));
     }
 }

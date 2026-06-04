@@ -99,7 +99,7 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // (Error when rejected, Attention when overridden); this is just the
         // safe floor for any NULL-altitude fallback.
         "user.ask.pending" | "approval.pending" | "plan.pending" | "divergence.intervention"
-        | "runtime.lock_drift" => Altitude::Attention,
+        | "runtime.lock_drift" | "escalation.pending" => Altitude::Attention,
         // Everything else is normal progress.
         _ => Altitude::Normal,
     }
