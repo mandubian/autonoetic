@@ -89,6 +89,7 @@ columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
 |---|---|---|
 | `session.start` | session tracer | Normal |
 | `turn.start` / `turn.end` / `llm.round` | session tracer | Detail |
+| `llm.retry` | session tracer (LLM retry note) | Normal\* |
 | `tool.requested` | session tracer | Detail |
 | `tool.completed` | session tracer | Normal |
 | `agent.message` | session tracer (LLM completion text) | Normal |
@@ -101,6 +102,11 @@ columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
 | `divergence.intervention` | lifecycle (sentinel) | Attention |
 | `workbench.{created,reconciled,discarded}` | workbench tool | Detail |
 | `llm.request_failed` | session tracer | Error |
+| `runtime.lock_drift` | session tracer (Runtime seat) | Error / Attention† |
+
+\* `llm.retry` is not in `base_altitude` and falls through to Normal.
+
+† `runtime.lock_drift` uses Error when rejected (execution blocked) and Attention when overridden (`allow_runtime_lock_drift`).
 
 `agent.message` + `operator.message` are what make the room read as a
 *conversation*: both sides' prose on the timeline, not just mechanical markers.
