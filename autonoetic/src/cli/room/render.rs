@@ -564,18 +564,48 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
     if let Some(payload) = &entry.payload {
         lines.push(String::new());
         lines.push("payload:".to_string());
-        // Pretty-print if it parses as JSON; otherwise show raw.
-        match serde_json::from_str::<serde_json::Value>(payload)
-            .ok()
-            .and_then(|v| serde_json::to_string_pretty(&v).ok())
-        {
-            Some(pretty) => lines.extend(pretty.lines().map(|l| format!("  {l}"))),
+        match serde_json::from_str::<serde_json::Value>(payload).ok() {
+            Some(v) => {
+                let unfolded = unfold_stringified_json(&v);
+                match serde_json::to_string_pretty(&unfolded).ok() {
+                    Some(pretty) => lines.extend(pretty.lines().map(|l| format!("  {l}"))),
+                    None => lines.push(format!("  {payload}")),
+                }
+            }
             None => lines.push(format!("  {payload}")),
         }
     }
     lines
 }
 
+/// Recursively walk a JSON value and replace any string field that parses as
+/// valid JSON with the parsed value. This handles double-encoded payloads
+/// like `"result": "{\"any_failed\":false,...}"` so they pretty-print as
+/// structured objects instead of a single wrapped line.
+fn unfold_stringified_json(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let unfolded: serde_json::Map<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, child)| {
+                    let unrolled = match child.as_str() {
+                        Some(s) => serde_json::from_str::<serde_json::Value>(s)
+                            .ok()
+                            .map(|parsed| unfold_stringified_json(&parsed))
+                            .unwrap_or_else(|| child.clone()),
+                        None => unfold_stringified_json(child),
+                    };
+                    (k.clone(), unrolled)
+                })
+                .collect();
+            serde_json::Value::Object(unfolded)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(unfold_stringified_json).collect())
+        }
+        other => other.clone(),
+    }
+}
 /// Non-interactive rendering of a row. Always allocates: the `Line` variant
 /// stores a structured `RowSpec`, not a pre-rendered string, so there is no
 /// borrowed path. Multi-line rows (those with a `detail` preview) keep their
