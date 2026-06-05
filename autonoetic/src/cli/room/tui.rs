@@ -18,7 +18,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -131,6 +131,7 @@ pub fn run(
     let mut follow = true; // pin to newest
     let mut selected: usize = 0;
     let mut detail: Option<Vec<String>> = None; // drill-down pane content
+    let mut detail_scroll: u16 = 0; // vertical scroll offset for detail pane
     let mut input: Option<GateInput> = None; // in-flight gate decision
     let mut compose: Option<String> = None; // in-flight free-form message to the session
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
@@ -256,6 +257,7 @@ pub fn run(
                 &rows,
                 selected,
                 detail.as_deref(),
+                detail_scroll,
                 input.as_ref(),
                 compose.as_deref(),
                 slash.as_deref(),
@@ -454,6 +456,7 @@ pub fn run(
                     KeyCode::Esc => {
                         if detail.is_some() {
                             detail = None;
+                            detail_scroll = 0;
                             session_pick_list = None;
                         } else {
                             break;
@@ -526,11 +529,13 @@ pub fn run(
                         }
                     }
                     KeyCode::Enter => {
-                        detail = if detail.is_some() {
-                            None
+                        if detail.is_some() {
+                            detail = None;
+                            detail_scroll = 0;
                         } else {
-                            indexed.get(selected).map(|(_, src)| detail_for(&visible, *src))
-                        };
+                            detail = indexed.get(selected).map(|(_, src)| detail_for(&visible, *src));
+                            detail_scroll = 0;
+                        }
                     }
                     KeyCode::Char('a') => {
                         // Pure view change now (we always fetch at `detail`) — no
@@ -559,9 +564,20 @@ pub fn run(
                         status = None;
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        follow = false;
-                        detail = None;
-                        selected = (selected + 1).min(rows.len().saturating_sub(1));
+                        if detail.is_some() {
+                            detail_scroll = detail_scroll.saturating_add(1);
+                        } else {
+                            follow = false;
+                            selected = (selected + 1).min(rows.len().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if detail.is_some() {
+                            detail_scroll = detail_scroll.saturating_sub(1);
+                        } else {
+                            follow = false;
+                            selected = selected.saturating_sub(1);
+                        }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         follow = false;
@@ -1090,6 +1106,7 @@ fn draw(
     rows: &[RenderedRow],
     selected: usize,
     detail: Option<&[String]>,
+    detail_scroll: u16,
     input: Option<&GateInput>,
     compose: Option<&str>,
     slash: Option<&str>,
@@ -1123,12 +1140,23 @@ fn draw(
 
     if let Some(lines) = detail {
         let text: Vec<Line> = lines.iter().map(|l| Line::from(l.as_str())).collect();
+        let inner_height = chunks[1].height.saturating_sub(2) as usize; // minus borders
+        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+        let scroll = detail_scroll.min(max_scroll);
         f.render_widget(
-            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" event detail ")),
+            Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL).title(" event detail "))
+                .scroll((scroll, 0))
+                .wrap(Wrap { trim: false }),
             chunks[1],
         );
+        let scroll_hint = if max_scroll > 0 {
+            format!(" · j/k scroll ({}/{})", scroll, max_scroll)
+        } else {
+            String::new()
+        };
         f.render_widget(
-            Paragraph::new(" Esc/Enter close detail · q quit").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!(" Esc/Enter close · q quit{scroll_hint}")).style(Style::default().fg(Color::DarkGray)),
             chunks[2],
         );
         return;

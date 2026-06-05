@@ -616,11 +616,13 @@ fn unfold_stringified_json(v: &serde_json::Value) -> serde_json::Value {
                 .into_iter()
                 .map(|(k, child)| {
                     let unrolled = match child.as_str() {
-                        Some(s) => serde_json::from_str::<serde_json::Value>(s)
-                            .ok()
-                            .map(|parsed| unfold_stringified_json(&parsed))
-                            .unwrap_or_else(|| child.clone()),
-                        None => unfold_stringified_json(child),
+                        Some(s) if s.len() < 32_768 => {
+                            serde_json::from_str::<serde_json::Value>(s)
+                                .ok()
+                                .map(|parsed| unfold_stringified_json(&parsed))
+                                .unwrap_or_else(|| child.clone())
+                        }
+                        _ => unfold_stringified_json(child),
                     };
                     (k.clone(), unrolled)
                 })
