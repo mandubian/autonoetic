@@ -43,6 +43,8 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
 | `capability_delta_gate_mode` | string | `"strict"` | Capability delta gating during `agent.revision.promote`: `"strict"` (any broadening requires approval), `"evolving"` (broadening inside wildcard envelopes auto-allowed), `"bootstrap"` (gating disabled, dev only). |
+| `require_operator_approval_for_new_agents` | bool | `true` | Promotion-completeness cursor for **first admission of a brand-new agent** (no outgoing revision). `true`: a capability-bearing new agent requires operator approval (its whole capability set is "new"). `false`: a fully-audited new agent may self-promote — the completeness gate (auditor/evaluator pass, distinct identities, reviewable artifact) still applies and is always fail-closed. Re-promotion of an existing agent is unaffected. See `docs/design/promotion-completeness-invariant.md`. |
+| `allow_zero_capability_direct_promote` | bool | `true` | Promotion-completeness cursor: when `true`, a revision declaring **zero capabilities** may promote directly (it cannot invoke any privileged tool — runtime enforcement bounds its blast radius). Set `false` to require the full review gate even for zero-capability agents. Capability-bearing revisions are always gated regardless. |
 | `interaction_answer_orchestration` | bool | `true` | When `true`, JSON-RPC `interaction.answer` / `interaction.resolve_and_answer` persist answers and orchestrate workflow task or session resume. When `false`, the method fails fast (legacy detection). |
 | `allow_runtime_lock_drift` | bool | `false` | Allow sessions to start when `runtime.lock` gateway section disagrees with the running binary (P-8.12). Drift is still logged as a causal event. |
 | `trust_unsigned_bundles` | bool | `false` | Allow revision creation without a gateway signature when the identity key is unavailable (dev escape hatch). See `docs/revision-signing.md`. |
@@ -305,6 +307,8 @@ Controls how capability broadening during `agent.revision.promote` is gated. Hig
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `capability_delta_gate_mode` | string | `"strict"` | `"strict"`: any capability broadening requires explicit approval. `"evolving"`: broadening inside an existing wildcard envelope is auto-allowed. `"bootstrap"`: disable capability-delta gating (development only). |
+| `require_operator_approval_for_new_agents` | bool | `true` | First-admission cursor: a capability-bearing **new** agent requires operator approval. `false` lets a fully-audited new agent self-promote (completeness still fail-closed). |
+| `allow_zero_capability_direct_promote` | bool | `true` | Zero-capability ("inoffensive") revisions may direct-promote; `false` requires the full review gate even for them. |
 
 > **Removed:** `revision_promote_approval_policy` / `agent_install_approval_policy` are no longer config fields. Promotion approval is driven by capability declarations, delta gating, protected-agent eval gates, and the sentinel promotion gate.
 
@@ -1092,6 +1096,8 @@ signal_delivery_timeout_secs: 60
 evidence_mode: full
 max_session_turns: 12
 capability_delta_gate_mode: strict
+require_operator_approval_for_new_agents: true
+allow_zero_capability_direct_promote: true
 interaction_answer_orchestration: true
 allow_runtime_lock_drift: false
 trust_unsigned_bundles: false
