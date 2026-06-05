@@ -302,8 +302,7 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                             .collect();
                         cap_preview(&ids.join(", "), 80)
                     }),
-                // Unknown tool: show summary from result if available.
-                Some(_) => extract_tool_summary(p.as_ref()).map(|s| cap_preview(&s, 120)),
+                Some(_) => None,
                 None => None,
             }
         }
