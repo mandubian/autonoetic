@@ -140,7 +140,6 @@ pub fn run(
     // Display toggles + spinner state for the in-flight row indicator.
     let mut show_reasoning = true;
     let mut spinner_frame: usize = 0;
-    let mut last_turn_seen: HashSet<String> = HashSet::new();
 
     loop {
         // Fetch at most one page per tick via the gateway API. On error (gateway
@@ -221,25 +220,15 @@ pub fn run(
         };
         // Annotate each row with turn membership + the in-flight bit, and
         // track the previous turn_id so the renderer can draw a faint
-        // divider when the turn changes.
-        let mut last_turn: Option<String> = None;
-        let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
-        for (i, (row, _)) in indexed.iter_mut().enumerate() {
-            if let RenderedRow::Line(spec) = row {
-                if let Some(t) = &spec.turn_id {
-                    if open_turns.contains(t) {
-                        spec.in_flight = true;
-                    }
-                    if last_turn.as_ref() != Some(t) {
-                        turn_boundaries.insert(i, true);
-                    }
-                    last_turn = Some(t.clone());
-                }
-                if !show_reasoning && spec.headline.contains('\u{1F4AD}') {
-                    spec.show_reasoning = false;
-                }
-            }
-        }
+        // divider when the turn changes. The in-flight spinner is reserved
+        // for the **most recent** row in an open turn — earlier rows of the
+        // same turn stay in their normal altitude glyph so the operator can
+        // read the chain.
+        let turn_boundaries = annotate_turns_and_in_flight(
+            &mut indexed,
+            &open_turns,
+            show_reasoning,
+        );
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
 
         if follow {
@@ -451,6 +440,53 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// Annotate a row list with turn-boundary flags and in-flight markers. The
+/// in-flight spinner is reserved for the **most recent** row of each open
+/// turn — earlier rows keep their normal altitude glyph so the operator can
+/// read the chain.
+///
+/// `open_turns` is the set of turn_ids with a `turn.start` but no matching
+/// `turn.end` yet. `show_reasoning=false` hides rows whose headline carries
+/// the 💭 marker (`agent.reasoning` rows).
+///
+/// Returns the per-row `turn_boundaries` map (true → draw divider above the
+/// row) so the renderer can decorate the boundary.
+fn annotate_turns_and_in_flight(
+    rows: &mut [(RenderedRow, RowSource)],
+    open_turns: &HashSet<String>,
+    show_reasoning: bool,
+) -> HashMap<usize, bool> {
+    let mut last_turn: Option<String> = None;
+    let mut last_row_for_turn: HashMap<String, usize> = HashMap::new();
+    let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
+    for (i, (row, _)) in rows.iter().enumerate() {
+        if let RenderedRow::Line(spec) = row {
+            if let Some(t) = &spec.turn_id {
+                if open_turns.contains(t) {
+                    last_row_for_turn.insert(t.clone(), i);
+                }
+                if last_turn.as_ref() != Some(t) {
+                    turn_boundaries.insert(i, true);
+                }
+                last_turn = Some(t.clone());
+            }
+        }
+    }
+    for (i, (row, _)) in rows.iter_mut().enumerate() {
+        if let RenderedRow::Line(spec) = row {
+            if let Some(t) = &spec.turn_id {
+                if last_row_for_turn.get(t).copied() == Some(i) {
+                    spec.in_flight = true;
+                }
+            }
+            if !show_reasoning && spec.headline.contains('\u{1F4AD}') {
+                spec.show_reasoning = false;
+            }
+        }
+    }
+    turn_boundaries
 }
 
 /// The still-resolvable gate at the selection (a single, not-yet-resolved
@@ -1078,5 +1114,86 @@ mod tests {
             seq,
             vec![Altitude::Normal, Altitude::Attention, Altitude::Error, Altitude::Detail]
         );
+    }
+
+    fn spec_with_turn(turn: Option<&str>, headline: &str) -> (RenderedRow, RowSource) {
+        (
+            RenderedRow::Line(render::RowSpec {
+                altitude: Altitude::Normal,
+                actor: render::ActorKind::Planner,
+                actor_label: "planner".into(),
+                headline: headline.into(),
+                detail: None,
+                turn_id: turn.map(str::to_string),
+                in_flight: false,
+                show_reasoning: true,
+            }),
+            RowSource::Single(0),
+        )
+    }
+
+    #[test]
+    fn in_flight_marker_only_on_most_recent_row_of_open_turn() {
+        // 3 rows in turn-A, all un-closed. Only the LAST should get the
+        // spinner — earlier rows keep their normal altitude glyph.
+        let mut rows = vec![
+            spec_with_turn(Some("A"), "first"),
+            spec_with_turn(Some("A"), "second"),
+            spec_with_turn(Some("A"), "third"),
+        ];
+        let open: HashSet<String> = ["A".into()].into_iter().collect();
+        let boundaries = annotate_turns_and_in_flight(&mut rows, &open, true);
+        // Boundary only at the start of the turn (i=0).
+        assert!(boundaries.contains_key(&0));
+        assert!(!boundaries.contains_key(&1));
+        assert!(!boundaries.contains_key(&2));
+        // In-flight only on the most recent row.
+        let inflight: Vec<bool> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.in_flight,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(inflight, vec![false, false, true]);
+    }
+
+    #[test]
+    fn closed_turn_marks_no_rows_as_in_flight() {
+        // Turn B has turn.start and turn.end, so it's closed — no spinner.
+        let mut rows = vec![
+            spec_with_turn(Some("B"), "early"),
+            spec_with_turn(Some("B"), "late"),
+        ];
+        let open: HashSet<String> = HashSet::new();
+        annotate_turns_and_in_flight(&mut rows, &open, true);
+        let inflight: Vec<bool> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.in_flight,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(inflight, vec![false, false]);
+    }
+
+    #[test]
+    fn show_reasoning_off_hides_thought_bubble_rows() {
+        // agent.reasoning rows carry a 💭 in the headline; they get the
+        // show_reasoning=false flag when the toggle is off.
+        let mut rows = vec![
+            spec_with_turn(Some("A"), "tool edit"),
+            spec_with_turn(Some("A"), "\u{1F4AD} thinking out loud"),
+        ];
+        let open: HashSet<String> = ["A".into()].into_iter().collect();
+        annotate_turns_and_in_flight(&mut rows, &open, false);
+        let shown: Vec<bool> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.show_reasoning,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(shown, vec![true, false]);
     }
 }

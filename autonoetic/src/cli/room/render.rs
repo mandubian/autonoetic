@@ -308,7 +308,11 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
 pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
     let headline = summarize(entry);
     let actor = actor_kind(&entry.role);
-    let label = role_label(&entry.role);
+    // Use `actor_label(entry)` (not just `role_label(role)`) so the principal
+    // kind is decorated — humans get a 🧑 prefix, foreign agents get a 🌐
+    // prefix with provider. Without it the TUI loses the operator-vs-agent
+    // distinction on rows that are otherwise identical by role.
+    let label = actor_label(entry);
     let show_reasoning = entry.event_type != "agent.reasoning"
         || !headline.is_empty();
     RowSpec {
@@ -361,6 +365,7 @@ pub enum ActorKind {
     /// A future / unknown seat — default style, no rail coloring.
     /// Kept for forward-compat (the room must render rows even when the
     /// gateway grows a new seat the channel doesn't know yet).
+    #[allow(dead_code)]
     Other,
 }
 
@@ -571,13 +576,16 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
     lines
 }
 
-/// Non-interactive rendering of a row. Borrows from a `Line` only when the
-/// row has no `detail` line (the common case) and is a single physical line.
-/// Collapsed runs always allocate; lines with a `detail` join on a newline.
+/// Non-interactive rendering of a row. Always allocates: the `Line` variant
+/// stores a structured `RowSpec`, not a pre-rendered string, so there is no
+/// borrowed path. Multi-line rows (those with a `detail` preview) keep their
+/// embedded `\n` — the CLI viewer prints them as multiple terminal lines via
+/// `println!`. Collapsed runs render as `⟨N summary⟩`.
 pub fn row_text(row: &RenderedRow) -> std::borrow::Cow<'_, str> {
     match row {
+        // Single-line fast path: `<glyph> [<label>] <headline>`. No borrow
+        // because the components live in separate fields of the spec.
         RenderedRow::Line(spec) if spec.detail.is_none() => {
-            // Borrowed path for the simple case — avoids a copy.
             std::borrow::Cow::Owned(format!(
                 "{} [{}] {}",
                 altitude_glyph(spec.altitude),
@@ -585,11 +593,13 @@ pub fn row_text(row: &RenderedRow) -> std::borrow::Cow<'_, str> {
                 spec.headline
             ))
         }
+        // Multi-line path: keep the `headline\ndetail` boundary intact so the
+        // CLI viewer can present the preview on its own line.
         RenderedRow::Line(spec) => std::borrow::Cow::Owned(format!(
             "{} [{}] {}",
             altitude_glyph(spec.altitude),
             spec.actor_label,
-            spec.to_plain_text().replace('\n', " — ")
+            spec.to_plain_text()
         )),
         RenderedRow::Collapsed { count, summary } => std::borrow::Cow::Owned(format!(
             "{} ⟨{} {}⟩",
@@ -1068,5 +1078,66 @@ mod tests {
         e.turn_id = Some("turn-42".into());
         let spec = render_spec(&e);
         assert_eq!(spec.turn_id.as_deref(), Some("turn-42"));
+    }
+
+    #[test]
+    fn render_spec_decorates_human_operator_with_emoji() {
+        // A human principal gets the 🧑 prefix; an autonoetic agent does not.
+        // Same role, different label — this is the decoration the old
+        // `role_label(role)` path was missing.
+        let human = entry(
+            SessionRole::Operator,
+            Principal::human("operator-1"),
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "hi" }),
+        );
+        let agent = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "hi" }),
+        );
+        let h = render_spec(&human);
+        let a = render_spec(&agent);
+        assert!(h.actor_label.contains('\u{1F9D1}'), "human gets \u{1F9D1} prefix: {}", h.actor_label);
+        assert!(!a.actor_label.contains('\u{1F9D1}'), "agent has no human prefix: {}", a.actor_label);
+    }
+
+    #[test]
+    fn render_spec_decorates_foreign_agent_with_provider() {
+        // Foreign agent principal carries the upstream provider name in the
+        // label so the operator can distinguish local vs remote origins.
+        let e = entry(
+            SessionRole::Planner,
+            Principal::foreign("openrouter", "agent-9"),
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "hi" }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.actor_label.contains('\u{1F310}'), "foreign agent gets \u{1F310} prefix");
+        assert!(spec.actor_label.contains("openrouter"), "provider name preserved");
+    }
+
+    #[test]
+    fn row_text_preserves_multi_line_detail_for_cli_viewer() {
+        // CLI viewer relies on the embedded \n to render detail on its own
+        // line via println!. Flattening it would defeat the whole point.
+        let spec = RowSpec {
+            altitude: Altitude::Normal,
+            actor: ActorKind::Planner,
+            actor_label: "planner".into(),
+            headline: "tool sandbox_exec".into(),
+            detail: Some("hello world".into()),
+            turn_id: None,
+            in_flight: false,
+            show_reasoning: true,
+        };
+        let row = RenderedRow::Line(spec);
+        let s = row_text(&row);
+        assert!(s.contains('\n'), "detail boundary must be preserved: {s:?}");
+        assert!(s.contains("hello world"));
     }
 }
