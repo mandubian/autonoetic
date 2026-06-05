@@ -286,9 +286,25 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
         // Agent message: show the full message with newlines preserved so
         // long responses display as multi-line content instead of a single
         // truncated repeat of the headline.
-        "agent.message" => s("message").map(|m| preserve_lines(&m, 500)),
-        // Operator chat: same treatment.
-        "operator.message" => s("message").map(|m| preserve_lines(&m, 500)),
+        "agent.message" => {
+            let msg = s("message").unwrap_or_default();
+            let headline_summary = one_line(&msg, 80);
+            if msg.chars().count() > headline_summary.chars().count() + 10 {
+                Some(preserve_lines(&msg, 500))
+            } else {
+                None
+            }
+        }
+        // Operator messages are typically short questions — the headline is
+        // sufficient. Only show detail if the message is genuinely multi-line.
+        "operator.message" => {
+            let msg = s("message").unwrap_or_default();
+            if msg.contains('\n') {
+                Some(preserve_lines(&msg, 500))
+            } else {
+                None
+            }
+        }
         // LLM failure: show the preceding action chain on the second line so
         // the row alone tells the story.
         "llm.request_failed" => {
