@@ -293,6 +293,18 @@ code_analysis:
 # bootstrap: disable capability-delta gating (development only).
 # capability_delta_gate_mode: strict
 
+# Promotion-completeness cursors (see docs/design/promotion-completeness-invariant.md).
+# Completeness (auditor/evaluator pass, distinct identities, reviewable artifact)
+# is ALWAYS fail-closed; these only tune the relief valves.
+#   require_operator_approval_for_new_agents (default true): first admission of a
+#     capability-bearing NEW agent requires operator approval. false ⇒ a fully-
+#     audited new agent may self-promote (autonomous self-evolution).
+#   allow_zero_capability_direct_promote (default true): a zero-capability
+#     ("inoffensive") revision may direct-promote. false ⇒ full review gate even
+#     for zero-capability agents.
+# require_operator_approval_for_new_agents: true
+# allow_zero_capability_direct_promote: true
+
 # ── Session Budget (optional per-session resource limits) ─────────────
 # Uncomment to cap LLM rounds, tool calls, tokens, or wall-clock time.
 # session_budget:
