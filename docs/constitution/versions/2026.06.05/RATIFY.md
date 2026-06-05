@@ -48,7 +48,12 @@ not change.
    ```bash
    cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_counts
    cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_startup
-   cargo test -p autonoetic-gateway constitution_promotion
+   # Select the promotion suites by file (--test) — a name filter like
+   # `constitution_promotion` matches no test fn and silently runs 0 tests.
+   cargo test -p autonoetic-gateway \
+     --test constitution_promotion_capability_delta \
+     --test constitution_promotion_gate_audit_only \
+     --test constitution_promotion_distinct_identity
    ```
 
 Canonicalization details: `docs/constitution-signing.md`. Multi-machine key
