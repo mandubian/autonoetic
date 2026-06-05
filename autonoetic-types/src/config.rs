@@ -936,6 +936,18 @@ pub struct GatewayConfig {
     #[serde(default = "default_true")]
     pub allow_zero_capability_direct_promote: bool,
 
+    /// Promotion-completeness cursor for **first admission of a brand-new agent**
+    /// (no outgoing revision). When `true` (default), promoting a new
+    /// capability-bearing agent requires operator approval — its whole capability
+    /// set is "new", so it is treated as maximal broadening (R++2). Set to `false`
+    /// to let a fully-audited new agent self-promote (autonomous self-evolution):
+    /// the completeness gate (auditor/evaluator pass, distinct identities,
+    /// reviewable artifact) still applies and is always fail-closed; only the
+    /// human-approval requirement for *being new* is lifted. Re-promotion of an
+    /// already-admitted agent is unaffected either way (gated only on broadening).
+    #[serde(default = "default_true")]
+    pub require_operator_approval_for_new_agents: bool,
+
     /// Optional per-session budgets (LLM rounds, tools, tokens, wall clock).
     #[serde(default)]
     pub session_budget: SessionBudgetConfig,
@@ -2608,6 +2620,7 @@ impl Default for GatewayConfig {
             code_analysis: CodeAnalysisConfig::default(),
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
             allow_zero_capability_direct_promote: true,
+            require_operator_approval_for_new_agents: true,
             session_budget: SessionBudgetConfig::default(),
             root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),

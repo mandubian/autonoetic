@@ -50,6 +50,27 @@ For a revision R of agent A being promoted:
 If all applicable aspects are satisfied → promote. If any is missing → refuse.
 There is no fall-through that promotes a capability-bearing revision without these.
 
+## First admission vs. iteration (preserving self-evolution)
+
+The human-approval requirement is scoped to **first admission of a new agent**, not
+to every promotion:
+
+- **New agent** (no outgoing revision): capability-bearing first admission requires
+  operator approval — its whole capability set is "new", i.e. maximal broadening.
+  The approval can come from **either** path: the capability-acknowledgement
+  approval (auto-created by the gate) **or** an **approved federation escalation**
+  (the richer jury review). An approved escalation therefore satisfies the gate —
+  a federation-promoted new agent is never asked to approve twice.
+- **Iteration** (re-promotion of an already-admitted agent): unaffected. It is
+  gated only on capability **broadening** (existing behavior) plus the always-on
+  completeness gate. A non-broadening revision whose audits pass self-promotes —
+  autonomous self-evolution keeps working.
+
+The new-agent requirement is a **cursor**
+(`promotion.require_operator_approval_for_new_agents`, default `true`): keep it on
+for human-in-the-loop admission, or turn it off to let fully-audited new agents
+self-promote. Completeness stays fail-closed regardless.
+
 ## What changes vs. today
 
 - The "no artifact OR zero-capability → direct promote" `else` is split: only the

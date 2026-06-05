@@ -360,6 +360,9 @@ fn setup_test(agent_id: &str, skill_md: &str) -> (TestSetup, String, String, Arc
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
+        // Federation tests exercise the escalation/jury/identity gates; isolate
+        // them from the new-agent first-admission human gate (its own tests).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
 
@@ -473,6 +476,9 @@ fn setup_test_with_manual_revision(
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
+        // Federation tests exercise the escalation/jury/identity gates; isolate
+        // them from the new-agent first-admission human gate (its own tests).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
 

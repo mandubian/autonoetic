@@ -388,6 +388,9 @@ fn setup_test(agent_id: &str, skill_md: &str) -> (TestSetup, String, String, Arc
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
+        // This suite hardens the audit/eval/identity promotion gates; isolate it
+        // from the new-agent first-admission human gate (its own tests).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
 
@@ -657,6 +660,9 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
+        // This suite hardens the audit/eval/identity promotion gates; isolate it
+        // from the new-agent first-admission human gate (its own tests).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
 
@@ -770,6 +776,9 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
+        // This suite hardens the audit/eval/identity promotion gates; isolate it
+        // from the new-agent first-admission human gate (its own tests).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
 

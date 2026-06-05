@@ -2153,18 +2153,47 @@ impl NativeTool for AgentRevisionPromoteTool {
         // `RevisionPromote` approval whose acknowledgement matches the delta
         // exactly. The `approval_ref` argument is how a retry call reuses an
         // earlier approval.
-        let gate_bypassed_by_approval = if let Some(ref approval_ref) = args.approval_ref {
-            check_revision_promote_approval(
-                &gateway_store,
-                approval_ref,
-                &args.agent_id,
-                &args.revision_id,
-            )?
-        } else {
-            false
-        };
+        // A NEW agent's whole capability set is its "delta", and an approved
+        // federation escalation already constitutes operator approval of the
+        // entire agent — so it satisfies the new-agent gate without a separate
+        // capability-ack approval. (Existing-agent broadening still requires the
+        // explicit ack approval.) This keeps the federation promotion path from
+        // demanding two operator approvals for one new agent.
+        let new_agent_approved_via_escalation =
+            match gateway_store.resolve_alias(&args.agent_id)? {
+                None => match rev.artifact_id.as_deref() {
+                    Some(aid) => {
+                        gateway_store
+                            .find_escalation(
+                                aid,
+                                &args.revision_id,
+                                autonoetic_types::escalation::EscalationStatus::Approved,
+                            )?
+                            .is_some()
+                            || gateway_store
+                                .find_approved_escalation_for_artifact(aid)?
+                                .is_some()
+                    }
+                    None => false,
+                },
+                Some(_) => false,
+            };
+        let gate_bypassed_by_approval = new_agent_approved_via_escalation
+            || if let Some(ref approval_ref) = args.approval_ref {
+                check_revision_promote_approval(
+                    &gateway_store,
+                    approval_ref,
+                    &args.agent_id,
+                    &args.revision_id,
+                )?
+            } else {
+                false
+            };
 
         if !gate_bypassed_by_approval {
+            let gate_new_agents = config
+                .map(|c| c.require_operator_approval_for_new_agents)
+                .unwrap_or(true);
             if let Some(delta) = check_capability_delta(
                 &gateway_store,
                 gateway_dir,
@@ -2172,6 +2201,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                 &args.revision_id,
                 &current_capabilities,
                 delta_mode,
+                gate_new_agents,
             )? {
                 let outgoing_revision_id = gateway_store
                     .resolve_alias(&args.agent_id)?
@@ -3274,6 +3304,7 @@ fn check_capability_delta(
     revision_id: &str,
     current_capabilities: &[Capability],
     mode: CapabilityDeltaGateMode,
+    gate_new_agents: bool,
 ) -> anyhow::Result<Option<autonoetic_types::capability::CapabilityDelta>> {
     if matches!(mode, CapabilityDeltaGateMode::Bootstrap) {
         return Ok(None);
@@ -3316,7 +3347,16 @@ fn check_capability_delta(
             })?;
             parse_frontmatter_capabilities(&outgoing_frontmatter)?
         }
-        None => Vec::new(), // brand-new agent: empty baseline ⇒ all caps are "added"
+        None => {
+            // Brand-new agent. The cursor decides whether first admission needs a
+            // human: default (true) ⇒ empty baseline so all caps are "added" and
+            // operator approval is required; false ⇒ no new-agent human gate (the
+            // downstream completeness gate still applies, always fail-closed).
+            if !gate_new_agents {
+                return Ok(None);
+            }
+            Vec::new()
+        }
     };
 
     let mut delta = autonoetic_types::capability::compute_capability_delta(
