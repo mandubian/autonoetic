@@ -1265,7 +1265,7 @@ fn load_known_sessions(
     }
 
     if let Some(store) = gateway_store {
-        if let Ok(db_sessions) = store.list_recent_sessions(200) {
+        if let Ok(db_sessions) = store.list_recent_sessions(200, None) {
             for (session_id, agent_id, last_ts) in db_sessions {
                 let entry = by_session
                     .entry(session_id.clone())

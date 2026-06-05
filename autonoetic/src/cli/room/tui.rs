@@ -339,7 +339,7 @@ pub fn run(
                                     }
                                 }
                                 SlashCommand::ListSessions { agent } => {
-                                    status = Some(list_sessions_status(client, agent.as_deref()));
+                                    detail = Some(list_sessions_detail(client, agent.as_deref()));
                                 }
                                 SlashCommand::ResumeSession { agent } => {
                                     if let Some(resolved_id) =
@@ -979,11 +979,9 @@ fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<St
         .map(|e| e.root_session_id)
 }
 
-/// Build a one-line-per-row status for `/session list [agent]` showing the
-/// top few recent sessions. We don't render a real modal here — the operator
-/// picks by typing `/session <id>` from the list. Returns a status string the
-/// caller drops into the footer.
-fn list_sessions_status(client: &RoomClient, agent: Option<&str>) -> String {
+/// Build a multi-line session list for `/session list [agent]`, returned as
+/// `detail` lines so the operator can see the full list in the middle pane.
+fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> Vec<String> {
     let params = serde_json::json!({
         "agent_id": agent,
         "limit": 10,
@@ -997,30 +995,26 @@ fn list_sessions_status(client: &RoomClient, agent: Option<&str>) -> String {
                 let hint = agent
                     .map(|a| format!(" for agent '{a}'"))
                     .unwrap_or_default();
-                format!("(no sessions{hint}) — /session <id> or start one with `autonoetic run`")
+                vec![format!("(no sessions{hint}) — /session <id> or start one with `autonoetic run`")]
             }
             Ok(parsed) => {
-                let head = if let Some(a) = agent {
-                    format!("sessions for agent '{a}':")
+                let mut lines = if let Some(a) = agent {
+                    vec![format!("sessions for agent '{a}':")]
                 } else {
-                    "recent sessions:".to_string()
+                    vec!["recent sessions:".to_string()]
                 };
-                let rows: Vec<String> = parsed
-                    .sessions
-                    .iter()
-                    .take(5)
-                    .map(|s| format!("  {} [{}] @ {}", s.root_session_id, s.agent_id, s.last_active_at))
-                    .collect();
-                let more = if parsed.sessions.len() > 5 {
-                    format!("  …(+{} more)", parsed.sessions.len() - 5)
-                } else {
-                    String::new()
-                };
-                format!("{head}\n{}\n{more}\n  → type /session <id> to switch", rows.join("\n"))
+                for s in parsed.sessions.iter().take(5) {
+                    lines.push(format!("  {} [{}] @ {}", s.root_session_id, s.agent_id, s.last_active_at));
+                }
+                if parsed.sessions.len() > 5 {
+                    lines.push(format!("  …(+{} more)", parsed.sessions.len() - 5));
+                }
+                lines.push("→ type /session <id> to switch".to_string());
+                lines
             }
-            Err(e) => format!("✗ malformed session.list response: {e}"),
+            Err(e) => vec![format!("✗ malformed session.list response: {e}")],
         },
-        Err(e) => format!("✗ session.list failed: {e}"),
+        Err(e) => vec![format!("✗ session.list failed: {e}")],
     }
 }
 

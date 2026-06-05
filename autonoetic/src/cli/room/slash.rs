@@ -71,7 +71,7 @@ fn parse_session(tail: &str) -> SlashCommand {
     // original case — session ids are not normalized.
     let trimmed_tail = tail.trim_start();
     if trimmed_tail.is_empty() {
-        return SlashCommand::Unknown("session".into());
+        return SlashCommand::SwitchSession(String::new());
     }
     let (head_raw, rest) = match trimmed_tail.split_once(char::is_whitespace) {
         Some((h, r)) => (h, r.trim()),
@@ -132,6 +132,12 @@ mod tests {
 
     #[test]
     fn parse_session_switch_id() {
+        // Bare `/session` (no arguments) → SwitchSession("") so the
+        // dispatcher can surface a "missing id" error.
+        assert_eq!(
+            parse("/session"),
+            SlashCommand::SwitchSession(String::new())
+        );
         assert_eq!(
             parse("/session session-abc123"),
             SlashCommand::SwitchSession("session-abc123".into())

@@ -1053,31 +1053,20 @@ impl JsonRpcRouter {
                     }
                 };
                 let limit = params.limit.clamp(1, 500) as i64;
-                match store.list_recent_sessions(limit) {
+                match store.list_recent_sessions(limit, params.agent_id.as_deref()) {
                     Ok(rows) => {
-                        let mut entries: Vec<autonoetic_types::session_timeline::SessionListEntry> =
+                        let entries: Vec<autonoetic_types::session_timeline::SessionListEntry> =
                             rows.into_iter()
-                                .filter_map(|(sid, agent_id, last_ts)| {
-                                    if let Some(filter) = params.agent_id.as_deref() {
-                                        if agent_id != filter {
-                                            return None;
-                                        }
+                                .map(|(sid, agent_id, last_ts)| {
+                                    autonoetic_types::session_timeline::SessionListEntry {
+                                        root_session_id: sid,
+                                        agent_id,
+                                        last_active_at: last_ts,
                                     }
-                                    Some(
-                                        autonoetic_types::session_timeline::SessionListEntry {
-                                            root_session_id: sid,
-                                            agent_id,
-                                            last_active_at: last_ts,
-                                        },
-                                    )
                                 })
                                 .collect();
-                        // Re-apply limit after the agent filter so callers get
-                        // at most `limit` matches of the requested agent, not
-                        // a 50-row global cap that drops to 0 after filtering.
-                        if entries.len() as i64 > limit {
-                            entries.truncate(limit as usize);
-                        }
+                        // The agent filter is pushed into the store query, so the
+                        // returned rows are already filtered and bounded by `limit`.
                         JsonRpcResponse::success(
                             req.id,
                             serde_json::to_value(
