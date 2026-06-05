@@ -218,6 +218,13 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             "EMERGENCY STOP — {}",
             one_line(&field("reason").unwrap_or_else(|| "session halted".into()), 120)
         ),
+        // Bounded-progress (loop-guard) trip terminated the session (#287/P-7.x).
+        // The actor label shows which agent; the enforcing rule rides on refs.
+        "guard.tripped" => {
+            let reason = field("reason").unwrap_or_else(|| "tripped".into());
+            let rule = field("rule_id").map(|r| format!(" [{r}]")).unwrap_or_default();
+            format!("loop guard tripped: {reason}{rule}")
+        }
         other => other.to_string(),
     }
 }
@@ -623,6 +630,9 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
     if !ref_parts.is_empty() {
         lines.push(format!("refs:      {}", ref_parts.join("  ")));
     }
+    if !refs.enforced_rules.is_empty() {
+        lines.push(format!("enforces:  {}", refs.enforced_rules.join(", ")));
+    }
 
     if let Some(payload) = &entry.payload {
         lines.push(String::new());
@@ -770,6 +780,34 @@ mod tests {
         assert!(line.starts_with("⚠"));
         assert!(line.contains("🧑 operator"));
         assert!(line.contains("approval denied (apr-9)"));
+    }
+
+    #[test]
+    fn renders_guard_tripped_with_rule_id() {
+        let e = entry(
+            SessionRole::Runtime,
+            Principal::agent("planner.default"),
+            "guard.tripped",
+            Altitude::Error,
+            serde_json::json!({ "reason": "no_progress", "rule_id": "P-7.19" }),
+        );
+        let line = render_line(&e);
+        assert!(line.starts_with("✗"), "guard trip should render at Error: {line}");
+        assert!(line.contains("loop guard tripped: no_progress [P-7.19]"), "got: {line}");
+    }
+
+    #[test]
+    fn detail_view_shows_enforced_rules() {
+        let mut e = entry(
+            SessionRole::Operator,
+            Principal::human("operator"),
+            "approval.rejected",
+            Altitude::Attention,
+            serde_json::json!({ "request_id": "apr-9" }),
+        );
+        e.refs.enforced_rules = vec!["Ri-0.9".into(), "P-2.25".into()];
+        let detail = format_detail(&e).join("\n");
+        assert!(detail.contains("enforces:  Ri-0.9, P-2.25"), "got: {detail}");
     }
 
     #[test]

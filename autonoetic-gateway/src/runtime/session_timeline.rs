@@ -92,10 +92,10 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // Extended-thinking "why" is verbose; hidable by default, surfaced on dial-down.
         "turn.start" | "turn.end" | "llm.round" | "tool.requested" | "agent.reasoning"
         | "workbench.created" | "workbench.reconciled" | "workbench.discarded" => Altitude::Detail,
-        // Failures, the emergency-stop circuit breaker, and security-critical
-        // events always surface.
+        // Failures, the emergency-stop circuit breaker, security-critical events,
+        // and bounded-progress (loop-guard) trips always surface.
         "llm.request_failed" | "tool.failed" | "session.emergency_stop"
-        | "security.sandbox_escape" => Altitude::Error,
+        | "security.sandbox_escape" | "guard.tripped" => Altitude::Error,
         // Gates awaiting the operator (conversational asks, RFC §3.5) and
         // integrity events. `runtime.lock_drift` stores an explicit altitude
         // (Error when rejected, Attention when overridden); this is just the
@@ -263,6 +263,13 @@ mod tests {
             altitude_for("agent.reasoning", &SessionRole::Sentinel),
             Altitude::Attention
         );
+    }
+
+    #[test]
+    fn guard_tripped_is_error() {
+        // A loop-guard trip terminates the session — it must surface at the
+        // Error floor so the room shows *why*, not slip by as routine.
+        assert_eq!(base_altitude("guard.tripped"), Altitude::Error);
     }
 
     #[test]

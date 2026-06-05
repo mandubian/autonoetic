@@ -106,6 +106,33 @@ impl JsonRpcResponse {
             }),
         }
     }
+
+    /// Like [`error`](Self::error) but attaches the constitutional rule/right IDs
+    /// the refusal enforced to `error.data` (`{ "enforced_rules": [...] }`), so a
+    /// client is told *which* clause blocked it — not just a prose message. Empty
+    /// `enforced_rules` ⇒ identical to `error`.
+    pub fn error_with_rules(
+        id: String,
+        code: i32,
+        message: impl Into<String>,
+        enforced_rules: Vec<String>,
+    ) -> Self {
+        let data = if enforced_rules.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({ "enforced_rules": enforced_rules }))
+        };
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data,
+            }),
+        }
+    }
 }
 
 type ProcessedSignalSet = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
@@ -161,7 +188,7 @@ impl JsonRpcRouter {
         &self,
         ingress: IngressType,
         session_id: String,
-    ) -> Result<(SpawnResult, Option<TraceSession>), (String, Option<TraceSession>)> {
+    ) -> Result<(SpawnResult, Option<TraceSession>), (String, Vec<String>, Option<TraceSession>)> {
         let (
             action_name,
             agent_id,
@@ -240,6 +267,7 @@ impl JsonRpcRouter {
                         "{} failed: unable to initialize gateway causal logger: {}",
                         action_name, e
                     ),
+                    Vec::new(),
                     None,
                 ));
             }
@@ -305,7 +333,13 @@ impl JsonRpcRouter {
         {
             Ok(r) => r,
             Err(e) => {
-                return Err((e.to_string(), Some(trace_session)));
+                // Preserve any constitutional rule IDs the refusal carried so the
+                // RPC error can surface them to the client (instead of prose only).
+                let enforced_rules = e
+                    .downcast_ref::<autonoetic_types::tool_error::tagged::Tagged>()
+                    .map(|t| t.enforced_rules().to_vec())
+                    .unwrap_or_default();
+                return Err((e.to_string(), enforced_rules, Some(trace_session)));
             }
         };
 
@@ -553,7 +587,7 @@ impl JsonRpcRouter {
                             }),
                         )
                     }
-                    Err((e, maybe_trace_session)) => {
+                    Err((e, enforced_rules, maybe_trace_session)) => {
                         if let Some(source_agent_id) = params.source_agent_id.as_deref() {
                             let _ = append_delegation_task_entry(
                                 self.config.as_ref(),
@@ -576,7 +610,12 @@ impl JsonRpcRouter {
                                 })),
                             );
                         }
-                        JsonRpcResponse::error(req.id, -32000, format!("agent.spawn failed: {}", e))
+                        JsonRpcResponse::error_with_rules(
+                            req.id,
+                            -32000,
+                            format!("agent.spawn failed: {}", e),
+                            enforced_rules,
+                        )
                     }
                 }
             }
@@ -760,7 +799,7 @@ impl JsonRpcRouter {
                                     }
                                     JsonRpcRouter::apply_spawn_result_to_async_entry(entry, &spawn_result);
                                 }
-                                Err((e, _)) => {
+                                Err((e, _enforced_rules, _)) => {
                                     if let Some(source) = source_agent_id {
                                         let _ = append_delegation_task_entry(
                                             config.as_ref(),
@@ -838,7 +877,7 @@ impl JsonRpcRouter {
                                 }),
                             )
                         }
-                        Err((e, maybe_trace_session)) => {
+                        Err((e, enforced_rules, maybe_trace_session)) => {
                             if let Some(source_agent_id) = params.source_agent_id.as_deref() {
                                 let _ = append_delegation_task_entry(
                                     self.config.as_ref(),
@@ -863,10 +902,11 @@ impl JsonRpcRouter {
                                     })),
                                 );
                             }
-                            JsonRpcResponse::error(
+                            JsonRpcResponse::error_with_rules(
                                 req.id,
                                 -32000,
                                 format!("event.ingest failed: {}", e),
+                                enforced_rules,
                             )
                         }
                     }
@@ -2604,5 +2644,34 @@ mod tests {
             .and_then(|s| s.as_str())
             == Some("already_processed");
         assert!(!is_dedup, "normal ingest must never hit the idempotency guard");
+    }
+
+    #[test]
+    fn error_with_rules_populates_data_for_clients() {
+        let resp = JsonRpcResponse::error_with_rules(
+            "1".into(),
+            -32000,
+            "agent.spawn failed: promotion incomplete",
+            vec!["P-2.25".into(), "P-2.8".into()],
+        );
+        let err = resp.error.expect("error should be set");
+        let rules = err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("enforced_rules"))
+            .and_then(|r| r.as_array())
+            .expect("data.enforced_rules must be present");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0], "P-2.25");
+        assert_eq!(rules[1], "P-2.8");
+    }
+
+    #[test]
+    fn error_with_rules_omits_data_when_no_rules() {
+        // No constitutional clause attributed ⇒ data stays None (back-compat
+        // with plain `error()`), so clients don't see an empty `enforced_rules`.
+        let resp = JsonRpcResponse::error_with_rules("1".into(), -32000, "boom", vec![]);
+        let err = resp.error.expect("error should be set");
+        assert!(err.data.is_none(), "no rules ⇒ no data envelope");
     }
 }
