@@ -96,6 +96,27 @@ fn preceding_chain(payload: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Extract a human-readable summary from a tool result payload. The `result`
+/// field may be a plain string, a stringified JSON object with a `summary` key,
+/// or a structured JSON object. Returns the `summary` field if found.
+fn extract_tool_summary(p: Option<&serde_json::Value>) -> Option<String> {
+    let p = p?;
+    let result = p.get("result")?;
+    // Direct JSON object with summary
+    if let Some(s) = result.get("summary").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    // Stringified JSON: parse inner string and look for summary
+    if let Some(s) = result.as_str() {
+        if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
+            if let Some(summary) = inner.get("summary").and_then(|v| v.as_str()) {
+                return Some(summary.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Human summary of an event, from its type + payload. Keeps the most useful
 /// field per known event type; falls back to the bare event type.
 pub fn summarize(entry: &SessionTimelineEntry) -> String {
@@ -142,12 +163,16 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             choices_hint(p.as_ref()),
         ),
         // Payload key is `tool_name`; keep `tool` as a fallback for older rows.
-        "tool.completed" => format!(
-            "tool {}",
-            field("tool_name")
-                .or_else(|| field("tool"))
-                .unwrap_or_else(|| "completed".into())
-        ),
+        // Show just the result summary — status is conveyed by altitude color.
+        "tool.completed" => {
+            let summary = extract_tool_summary(p.as_ref());
+            match summary {
+                Some(s) => one_line(&s, 160),
+                None => format!("tool {}", field("tool_name")
+                    .or_else(|| field("tool"))
+                    .unwrap_or_else(|| "completed".into())),
+            }
+        }
         // A promotion/governance escalation awaiting the operator's decision (#413).
         // Revision ids are already prefixed (`rev-9`, `rev_sha256:…`), so show the
         // id as-is and omit the suffix entirely when absent.
@@ -277,9 +302,8 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                             .collect();
                         cap_preview(&ids.join(", "), 80)
                     }),
-                // Unknown tool name: the headline already says `tool X`, so
-                // a second line repeating the name would be noise. Skip.
-                Some(_) => None,
+                // Unknown tool: show summary from result if available.
+                Some(_) => extract_tool_summary(p.as_ref()).map(|s| cap_preview(&s, 120)),
                 None => None,
             }
         }
