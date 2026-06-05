@@ -617,15 +617,45 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
         match serde_json::from_str::<serde_json::Value>(payload).ok() {
             Some(v) => {
                 let unfolded = unfold_stringified_json(&v);
-                match serde_json::to_string_pretty(&unfolded).ok() {
-                    Some(pretty) => lines.extend(pretty.lines().map(|l| format!("  {l}"))),
-                    None => lines.push(format!("  {payload}")),
-                }
+                render_payload_lines(&unfolded, &mut lines);
             }
             None => lines.push(format!("  {payload}")),
         }
     }
     lines
+}
+
+/// Render a JSON payload into human-readable lines. Unlike
+/// `serde_json::to_string_pretty`, this splits string values that contain
+/// `\n` into actual separate lines so they display properly in the detail
+/// pane instead of as a single wrapped JSON string.
+fn render_payload_lines(v: &serde_json::Value, lines: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            lines.push("  {".to_string());
+            let last_idx = map.len().saturating_sub(1);
+            for (i, (k, child)) in map.iter().enumerate() {
+                let comma = if i < last_idx { "," } else { "" };
+                match child {
+                    serde_json::Value::String(s) if s.contains('\n') => {
+                        lines.push(format!("    \"{k}\":"));
+                        for sub in s.split('\n') {
+                            lines.push(format!("      {sub}"));
+                        }
+                        lines.push(format!("    {comma}"));
+                    }
+                    other => {
+                        let formatted = serde_json::to_string(other).unwrap_or_default();
+                        lines.push(format!("    \"{k}\": {formatted}{comma}"));
+                    }
+                }
+            }
+            lines.push("  }".to_string());
+        }
+        other => {
+            lines.push(format!("  {}", serde_json::to_string(other).unwrap_or_default()));
+        }
+    }
 }
 
 /// Recursively walk a JSON value and replace any string field that parses as
