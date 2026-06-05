@@ -927,6 +927,15 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub capability_delta_gate_mode: CapabilityDeltaGateMode,
 
+    /// Promotion-completeness "cursor" (see docs/design/promotion-completeness-invariant.md).
+    /// When `true` (default), a revision that declares **zero capabilities** may be
+    /// promoted directly — it cannot invoke any privileged tool, so its blast radius
+    /// is bounded by runtime capability enforcement regardless of provenance. Set to
+    /// `false` to require the full audit/approval gate even for zero-capability agents.
+    /// Capability-bearing revisions are always gated (fail-closed) regardless of this flag.
+    #[serde(default = "default_true")]
+    pub allow_zero_capability_direct_promote: bool,
+
     /// Optional per-session budgets (LLM rounds, tools, tokens, wall clock).
     #[serde(default)]
     pub session_budget: SessionBudgetConfig,
@@ -2598,6 +2607,7 @@ impl Default for GatewayConfig {
             default_orchestrator: default_default_orchestrator(),
             code_analysis: CodeAnalysisConfig::default(),
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
+            allow_zero_capability_direct_promote: true,
             session_budget: SessionBudgetConfig::default(),
             root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),

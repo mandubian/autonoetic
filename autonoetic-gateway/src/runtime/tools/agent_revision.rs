@@ -2216,10 +2216,17 @@ impl NativeTool for AgentRevisionPromoteTool {
                     decided_at: None,
                     decided_by: None,
                     reason: args.reason.clone().or_else(|| {
-                        Some(format!(
-                            "Promote revision '{}' would broaden capabilities relative to '{}'",
-                            args.revision_id, outgoing_revision_id
-                        ))
+                        Some(if outgoing_revision_id.is_empty() {
+                            format!(
+                                "First promotion of new agent '{}' (revision '{}') — operator must acknowledge all declared capabilities",
+                                args.agent_id, args.revision_id
+                            )
+                        } else {
+                            format!(
+                                "Promote revision '{}' would broaden capabilities relative to '{}'",
+                                args.revision_id, outgoing_revision_id
+                            )
+                        })
                     }),
                     evidence_ref: None,
                     decision_reason: None,
@@ -2248,10 +2255,17 @@ impl NativeTool for AgentRevisionPromoteTool {
                     "ok": false,
                     "error_type": "permission",
                     "error": "capability_delta_requires_approval",
-                    "message": format!(
-                        "Capability set broadened relative to outgoing revision '{}'. Operator approval is required (R++2).",
-                        outgoing_revision_id
-                    ),
+                    "message": if outgoing_revision_id.is_empty() {
+                        format!(
+                            "Promoting new agent '{}' for the first time: all declared capabilities require operator acknowledgement (R++2 / promotion-completeness). Operator approval is required.",
+                            args.agent_id
+                        )
+                    } else {
+                        format!(
+                            "Capability set broadened relative to outgoing revision '{}'. Operator approval is required (R++2).",
+                            outgoing_revision_id
+                        )
+                    },
                     "approval_required": true,
                     "request_id": request_id,
                     "approval_ref": request_id,
@@ -2491,9 +2505,47 @@ impl NativeTool for AgentRevisionPromoteTool {
                 ),
             )?;
             emit_gate_event(PromotionGateMode::AuditOnly, Some(artifact_id));
+        } else {
+            // Reaching here ⇒ either zero declared capabilities, or a
+            // capability-bearing revision with no artifact (artifact-bearing
+            // capability agents were gated by the branches above). Fail closed:
+            // a capability-bearing revision with nothing to review must NOT
+            // direct-promote (the previous fall-through was the fail-open). Only
+            // the inoffensive zero-capability class is relieved — it cannot
+            // invoke any privileged tool, so runtime capability enforcement
+            // bounds its blast radius — and only while the cursor allows it
+            // (promotion-completeness invariant, docs/design/).
+            let inoffensive = current_capabilities.is_empty();
+            let cursor_allows = config
+                .map(|c| c.allow_zero_capability_direct_promote)
+                .unwrap_or(true);
+            if !(inoffensive && cursor_allows) {
+                let message = if !inoffensive {
+                    format!(
+                        "Promotion gate: revision '{}' declares capabilities but ships no reviewable artifact. \
+                         A capability-bearing agent cannot be promoted without an artifact bundle and the \
+                         required audit/approval records (fail-closed).",
+                        args.revision_id
+                    )
+                } else {
+                    format!(
+                        "Promotion gate: zero-capability direct-promote is disabled \
+                         (allow_zero_capability_direct_promote=false); revision '{}' must pass the full \
+                         review gate.",
+                        args.revision_id
+                    )
+                };
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "permission",
+                    "error": "promotion_incomplete",
+                    "message": message,
+                    "repair_hint": "Attach a reviewed artifact bundle with the required auditor (and evaluator) pass records, and obtain operator approval, then retry agent_revision_promote.",
+                })
+                .to_string());
+            }
+            // inoffensive (zero-capability) + cursor on → direct promote.
         }
-        // else: no artifact OR zero-capability sandboxed agent → direct promote.
-        // Capability enforcement on every tool call is the security gate.
 
         // FullJury gate: when federation roles have recorded verdicts, require
         // operator approval via an approved escalation. This is a fifth branch
@@ -3227,37 +3279,45 @@ fn check_capability_delta(
         return Ok(None);
     }
 
-    let Some(alias) = gateway_store.resolve_alias(agent_id)? else {
-        return Ok(None);
+    // Determine the outgoing capability baseline. A brand-new agent (no current
+    // alias) has an EMPTY baseline — every declared capability is "added"
+    // relative to nothing — so a capability-bearing first promotion is maximal
+    // broadening and requires operator approval (R++2 / the promotion-
+    // completeness invariant). A zero-capability new agent yields an empty delta
+    // and is relieved. Returning `None` here (the previous behavior) was the
+    // fail-open that let new agents promote with no operator approval.
+    let outgoing_capabilities = match gateway_store.resolve_alias(agent_id)? {
+        Some(alias) => {
+            if alias.revision_id == revision_id {
+                return Ok(None); // already-active revision; nothing to compare
+            }
+            let outgoing_revision_dir = gateway_dir
+                .join("revisions/agents")
+                .join(agent_id)
+                .join(&alias.revision_id);
+            let outgoing_skill_path = outgoing_revision_dir.join("SKILL.md");
+            let outgoing_skill_bytes = std::fs::read(&outgoing_skill_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot read SKILL.md for outgoing revision '{}': {}",
+                    alias.revision_id,
+                    e
+                )
+            })?;
+            let outgoing_skill_text = String::from_utf8_lossy(&outgoing_skill_bytes);
+            let outgoing_frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(
+                &outgoing_skill_text,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Cannot parse SKILL.md frontmatter for outgoing revision '{}': {}",
+                    alias.revision_id,
+                    e
+                )
+            })?;
+            parse_frontmatter_capabilities(&outgoing_frontmatter)?
+        }
+        None => Vec::new(), // brand-new agent: empty baseline ⇒ all caps are "added"
     };
-    if alias.revision_id == revision_id {
-        return Ok(None);
-    }
-
-    let outgoing_revision_dir = gateway_dir
-        .join("revisions/agents")
-        .join(agent_id)
-        .join(&alias.revision_id);
-    let outgoing_skill_path = outgoing_revision_dir.join("SKILL.md");
-    let outgoing_skill_bytes = std::fs::read(&outgoing_skill_path).map_err(|e| {
-        anyhow::anyhow!(
-            "Cannot read SKILL.md for outgoing revision '{}': {}",
-            alias.revision_id,
-            e
-        )
-    })?;
-    let outgoing_skill_text = String::from_utf8_lossy(&outgoing_skill_bytes);
-    let outgoing_frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(
-        &outgoing_skill_text,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "Cannot parse SKILL.md frontmatter for outgoing revision '{}': {}",
-            alias.revision_id,
-            e
-        )
-    })?;
-    let outgoing_capabilities = parse_frontmatter_capabilities(&outgoing_frontmatter)?;
 
     let mut delta = autonoetic_types::capability::compute_capability_delta(
         &outgoing_capabilities,
