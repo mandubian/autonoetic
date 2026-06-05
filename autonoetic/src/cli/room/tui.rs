@@ -9,6 +9,7 @@
 use super::channel::{Channel, GateAction, GateKind, GateRef, TuiChannel};
 use super::client::RoomClient;
 use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec};
+use super::slash::SlashCommand;
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -111,9 +112,10 @@ fn rpc(
 
 pub fn run(
     client: &RoomClient,
-    root_session_id: &str,
+    root_session_id: &mut String,
     initial_floor: Altitude,
     limit: u32,
+    target_agent_id: &mut Option<String>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     // Guard constructed before entering the alternate screen, so raw mode is
@@ -131,6 +133,7 @@ pub fn run(
     let mut detail: Option<Vec<String>> = None; // drill-down pane content
     let mut input: Option<GateInput> = None; // in-flight gate decision
     let mut compose: Option<String> = None; // in-flight free-form message to the session
+    let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
     let mut status: Option<String> = None; // last action / connection result
     // Gates no longer offerable: approvals resolved on the timeline, plus
     // anything the operator just acted on (covers interactions, which have no
@@ -148,7 +151,7 @@ pub fn run(
             client,
             "session.timeline.list",
             serde_json::json!({
-                "root_session_id": root_session_id,
+                "root_session_id": &*root_session_id,
                 "after_event_id": cursor,
                 "limit": limit,
                 // Always fetch at `detail` and filter for display below. Approval
@@ -254,6 +257,7 @@ pub fn run(
                 detail.as_deref(),
                 input.as_ref(),
                 compose.as_deref(),
+                slash.as_deref(),
                 status.as_deref(),
                 gate.as_ref(),
                 spinner_glyph,
@@ -278,9 +282,103 @@ pub fn run(
                             } else {
                                 // Async so the sync loop never blocks on the agent
                                 // turn; the operator line + reply stream in via polling.
-                                status = Some(send_message(client, root_session_id, &text));
+                                status = Some(send_message(client, root_session_id, &text, target_agent_id.as_deref()));
                                 compose = None;
                                 follow = true; // jump to newest to watch the exchange
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            buf.pop();
+                        }
+                        KeyCode::Char(c) => buf.push(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Slash mode: capture a command and dispatch on Enter. Lives
+                // before the other key handlers so `:` and `?` can also
+                // enter it (matching vim/Discord conventions). The parser
+                // classifies the buffer; we never execute a raw string.
+                if let Some(buf) = slash.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => slash = None,
+                        KeyCode::Enter => {
+                            let cmdline = buf.trim().to_string();
+                            slash = None;
+                            match super::slash::parse(&cmdline) {
+                                SlashCommand::Quit => break,
+                                SlashCommand::Help => {
+                                    status = Some(format!(
+                                        "help: {}",
+                                        super::slash::HELP_TEXT
+                                    ));
+                                }
+                                SlashCommand::SwitchSession(new_id) => {
+                                    if new_id.is_empty() {
+                                        status = Some("✗ /session: missing id".to_string());
+                                    } else if new_id == *root_session_id {
+                                        status = Some(format!("→ already viewing {new_id}"));
+                                    } else {
+                                        switch_session(
+                                            client,
+                                            &mut entries,
+                                            &mut cursor,
+                                            &mut selected,
+                                            &mut detail,
+                                            &mut follow,
+                                            &mut resolved,
+                                            &mut acted,
+                                            &mut floor,
+                                            root_session_id,
+                                            target_agent_id,
+                                            limit,
+                                            &new_id,
+                                        );
+                                        status = Some(format!("→ switched to session {new_id}"));
+                                    }
+                                }
+                                SlashCommand::ListSessions { agent } => {
+                                    detail = Some(list_sessions_detail(client, agent.as_deref()));
+                                }
+                                SlashCommand::ResumeSession { agent } => {
+                                    if let Some(resolved_id) =
+                                        resolve_latest_session(client, agent.as_deref())
+                                    {
+                                        if resolved_id == *root_session_id {
+                                            status = Some(format!("→ already viewing {resolved_id}"));
+                                        } else {
+                                            switch_session(
+                                                client,
+                                                &mut entries,
+                                                &mut cursor,
+                                                &mut selected,
+                                                &mut detail,
+                                                &mut follow,
+                                                &mut resolved,
+                                                &mut acted,
+                                                &mut floor,
+                                                root_session_id,
+                                                target_agent_id,
+                                                limit,
+                                                &resolved_id,
+                                            );
+                                            status = Some(format!("→ resumed session {resolved_id}"));
+                                        }
+                                    } else {
+                                        status = Some(
+                                            "✗ /session resume: no sessions found".to_string(),
+                                        );
+                                    }
+                                }
+                                SlashCommand::Unknown(verb) => {
+                                    let v = if verb.is_empty() {
+                                        "(empty)".to_string()
+                                    } else {
+                                        format!("/{verb}")
+                                    };
+                                    status = Some(format!("✗ unknown command {v} — type /help"));
+                                }
                             }
                         }
                         KeyCode::Backspace => {
@@ -413,6 +511,13 @@ pub fn run(
                     KeyCode::Char('i') => {
                         detail = None;
                         compose = Some(String::new());
+                        status = None;
+                    }
+                    // /: slash-command mode (vim/Discord convention). `:`
+                    // and `?` are accepted aliases for muscle memory.
+                    KeyCode::Char('/') | KeyCode::Char(':') | KeyCode::Char('?') => {
+                        detail = None;
+                        slash = Some(String::new());
                         status = None;
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
@@ -599,18 +704,25 @@ fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>
 /// (#405) — the same `event.ingest` ingress `chat` uses. Async (`async_mode`)
 /// so the sync TUI loop never blocks on the agent turn; the operator's line
 /// (recorded gateway-side) and the agent's reply then stream in via polling.
-fn send_message(client: &RoomClient, root_session_id: &str, text: &str) -> String {
-    match rpc(
-        client,
-        "event.ingest",
-        serde_json::json!({
-            "event_type": "chat",
-            "message": text,
-            "session_id": root_session_id,
-            "async_mode": true,
-            "metadata": { "source": "session_room" },
-        }),
-    ) {
+fn send_message(
+    client: &RoomClient,
+    root_session_id: &str,
+    text: &str,
+    target_agent_id: Option<&str>,
+) -> String {
+    let mut params = serde_json::json!({
+        "event_type": "chat",
+        "message": text,
+        "session_id": root_session_id,
+        "async_mode": true,
+        "metadata": { "source": "session_room" },
+    });
+    if let Some(agent_id) = target_agent_id {
+        if let Some(map) = params.as_object_mut() {
+            map.insert("target_agent_id".to_string(), serde_json::json!(agent_id));
+        }
+    }
+    match rpc(client, "event.ingest", params) {
         Ok(_) => "✓ sent".to_string(),
         Err(e) => format!("✗ {e}"),
     }
@@ -809,6 +921,103 @@ fn altitude_style(altitude: Altitude) -> Style {
     }
 }
 
+/// Reset every per-session view state when the operator reloads to a different
+/// root session. Cursor, entries, selection, follow, and the resolved-gate
+/// sets are all session-scoped — leaving them stale would let an old approval
+/// mark look "acted" on a brand-new session.
+///
+/// The `target_agent_id` is *not* cleared here: a `/session <id>` is just a
+/// viewer change, the operator still has the right to send messages addressed
+/// to whatever agent is currently selected. `event.ingest` will surface a
+/// clear error if the agent doesn't match the new session's binding; that's
+/// the natural place to detect a mismatch rather than guessing from a session
+/// list (which may not know the agent yet).
+#[allow(clippy::too_many_arguments)]
+fn switch_session(
+    _client: &RoomClient,
+    entries: &mut Vec<SessionTimelineEntry>,
+    cursor: &mut Option<String>,
+    selected: &mut usize,
+    detail: &mut Option<Vec<String>>,
+    follow: &mut bool,
+    resolved: &mut HashSet<String>,
+    acted: &mut HashSet<String>,
+    floor: &mut Altitude,
+    root_session_id: &mut String,
+    _target_agent_id: &mut Option<String>,
+    _limit: u32,
+    new_id: &str,
+) {
+    *root_session_id = new_id.to_string();
+    entries.clear();
+    *cursor = None;
+    *selected = 0;
+    *detail = None;
+    *follow = true;
+    resolved.clear();
+    acted.clear();
+    // Don't reset `floor` — the operator's altitude dial is a view preference,
+    // not a session property. Keep the previous setting.
+    let _ = floor;
+}
+
+/// Fetch the most recent session id, optionally filtered by agent. Returns
+/// `None` when the gateway has no matching session.
+fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<String> {
+    let params = serde_json::json!({
+        "agent_id": agent,
+        "limit": 1,
+    });
+    let value = rpc(client, "session.list", params).ok()?;
+    let parsed: serde_json::Result<autonoetic_types::session_timeline::SessionListResult> =
+        serde_json::from_value(value);
+    parsed
+        .ok()?
+        .sessions
+        .into_iter()
+        .next()
+        .map(|e| e.root_session_id)
+}
+
+/// Build a multi-line session list for `/session list [agent]`, returned as
+/// `detail` lines so the operator can see the full list in the middle pane.
+fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> Vec<String> {
+    let params = serde_json::json!({
+        "agent_id": agent,
+        "limit": 10,
+    });
+    match rpc(client, "session.list", params) {
+        Ok(value) => match serde_json::from_value::<
+            autonoetic_types::session_timeline::SessionListResult,
+        >(value)
+        {
+            Ok(parsed) if parsed.sessions.is_empty() => {
+                let hint = agent
+                    .map(|a| format!(" for agent '{a}'"))
+                    .unwrap_or_default();
+                vec![format!("(no sessions{hint}) — /session <id> or start one with `autonoetic run`")]
+            }
+            Ok(parsed) => {
+                let mut lines = if let Some(a) = agent {
+                    vec![format!("sessions for agent '{a}':")]
+                } else {
+                    vec!["recent sessions:".to_string()]
+                };
+                for s in parsed.sessions.iter().take(5) {
+                    lines.push(format!("  {} [{}] @ {}", s.root_session_id, s.agent_id, s.last_active_at));
+                }
+                if parsed.sessions.len() > 5 {
+                    lines.push(format!("  …(+{} more)", parsed.sessions.len() - 5));
+                }
+                lines.push("→ type /session <id> to switch".to_string());
+                lines
+            }
+            Err(e) => vec![format!("✗ malformed session.list response: {e}")],
+        },
+        Err(e) => vec![format!("✗ session.list failed: {e}")],
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     f: &mut Frame,
@@ -821,6 +1030,7 @@ fn draw(
     detail: Option<&[String]>,
     input: Option<&GateInput>,
     compose: Option<&str>,
+    slash: Option<&str>,
     status: Option<&str>,
     gate: Option<&GateRef>,
     spinner_glyph: &'static str,
@@ -904,7 +1114,13 @@ fn draw(
         &mut state,
     );
 
-    let footer = if let Some(buf) = compose {
+    let footer = if let Some(buf) = slash {
+        Paragraph::new(format!(
+            " : /{buf}▏   [Enter run · Esc cancel]   {HELP}",
+            HELP = super::slash::HELP_TEXT
+        ))
+        .style(Style::default().fg(Color::Magenta))
+    } else if let Some(buf) = compose {
         Paragraph::new(format!(" MESSAGE: {buf}▏   [Enter send · Esc cancel]"))
             .style(Style::default().fg(Color::Green))
     } else if let Some(gi) = input {
@@ -939,7 +1155,7 @@ fn draw(
         // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         Paragraph::new(format!(
-            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · R reasoning · i message · ⏎ detail{gate_hint}"
+            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };

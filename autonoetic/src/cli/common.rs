@@ -948,8 +948,17 @@ pub struct TraceArgs {
 
 #[derive(Args)]
 pub struct RoomArgs {
-    /// Root session id whose timeline to render.
-    pub root_session_id: String,
+    /// Root session id whose timeline to render. Omit when `--resume` is set
+    /// to pick the most recent session from the gateway.
+    pub root_session_id: Option<String>,
+    /// Pick the most recent root session from the gateway. Combine with
+    /// `--agent <id>` to restrict the pick to one agent.
+    #[arg(long)]
+    pub resume: bool,
+    /// When combined with `--resume`, only consider sessions owned by this
+    /// agent (e.g. `planner.default`).
+    #[arg(long)]
+    pub agent: Option<String>,
     /// Altitude floor: detail | normal | attention | error. Default: normal.
     #[arg(long, default_value = "normal")]
     pub min_altitude: String,

@@ -1328,16 +1328,35 @@ impl GatewayStore {
     pub fn list_recent_sessions(
         &self,
         limit: i64,
+        agent_id: Option<&str>,
     ) -> Result<Vec<(String, String, String)>> {
+        // When `agent_id` is provided, push the filter into SQL so the LIMIT
+        // applies *after* filtering — otherwise `--resume --agent` could miss
+        // a session for that agent that just isn't in the global top-N.
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT session_id, agent_id, MAX(timestamp) as last_ts
-             FROM causal_events
-             GROUP BY session_id
-             ORDER BY last_ts DESC
-             LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit], |row| {
+        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match agent_id {
+            Some(_) => (
+                "SELECT session_id, agent_id, MAX(timestamp) as last_ts
+                 FROM causal_events
+                 WHERE agent_id = ?2
+                 GROUP BY session_id
+                 ORDER BY last_ts DESC
+                 LIMIT ?1",
+                vec![Box::new(limit), Box::new(agent_id.unwrap().to_string())],
+            ),
+            None => (
+                "SELECT session_id, agent_id, MAX(timestamp) as last_ts
+                 FROM causal_events
+                 GROUP BY session_id
+                 ORDER BY last_ts DESC
+                 LIMIT ?1",
+                vec![Box::new(limit)],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|b| &**b as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
         })?;
         let mut results = Vec::new();
