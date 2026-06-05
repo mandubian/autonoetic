@@ -124,6 +124,11 @@ pub struct TimelineRefs {
     pub plan_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workbench_id: Option<String>,
+    /// Constitutional rule/right IDs this event enforces (e.g. `P-7.19`, `Ri-0.9`)
+    /// — first-class so channels can attribute a refusal/gate to its clause and
+    /// look the clause up, instead of parsing the payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enforced_rules: Vec<String>,
 }
 
 impl TimelineRefs {

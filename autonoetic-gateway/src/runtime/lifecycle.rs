@@ -1286,6 +1286,35 @@ impl AgentExecutor {
                             "failed to emit loop_guard.tripped causal event"
                         );
                     }
+
+                    // Also surface it on the canonical timeline so the room shows
+                    // *why* the session was terminated, carrying the rule ID as a
+                    // first-class ref (was causal-only — invisible in the room).
+                    let sid = self.session_id.clone().unwrap_or_default();
+                    let root = crate::runtime::content_store::root_session_id(&sid).to_string();
+                    let principal =
+                        autonoetic_types::principal::Principal::agent(self.manifest.agent.id.clone());
+                    let role = crate::runtime::session_timeline::derive_role(&self.manifest.agent.id);
+                    let tl = crate::runtime::session_timeline::build_timeline_event(
+                        root,
+                        sid,
+                        Some(turn_id.clone()),
+                        &principal,
+                        &role,
+                        "guard.tripped",
+                        None, // base_altitude ⇒ Error
+                        Some(serde_json::json!({
+                            "reason": reason.code(),
+                            "rule_id": reason.rule_id(),
+                        })),
+                        autonoetic_types::session_timeline::TimelineRefs {
+                            enforced_rules: vec![reason.rule_id().to_string()],
+                            ..Default::default()
+                        },
+                    );
+                    if let Err(err) = store.create_live_digest_event(&tl) {
+                        tracing::debug!(target: "session_timeline", error = %err, "guard.tripped timeline emit failed");
+                    }
                 }
                 let _ =
                     self.save_yield_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);

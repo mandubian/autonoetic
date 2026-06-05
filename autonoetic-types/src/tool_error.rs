@@ -528,6 +528,13 @@ pub mod tagged {
     }
 
     impl Tagged {
+        /// The constitutional rule/right IDs this refusal enforces (if any).
+        /// Lets a boundary (e.g. the JSON-RPC layer) surface them to clients
+        /// without consuming the error.
+        pub fn enforced_rules(&self) -> &[String] {
+            &self.enforced_rules
+        }
+
         /// Extracts the error type and message from this tagged error.
         pub fn into_parts(self) -> (ToolErrorType, String, Vec<String>) {
             (
