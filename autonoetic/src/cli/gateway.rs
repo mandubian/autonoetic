@@ -2080,15 +2080,53 @@ pub async fn handle_gateway_constitution(
     command: &super::common::GatewayConstitutionCommands,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = std::path::PathBuf::from(&config.agents_dir).join(".gateway");
-    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    // The SQLite store is opened lazily — only the proposal subcommands need
+    // it. `show` is read-only (config + signed constitution text) and must not
+    // touch the DB or run migrations, so it works on a read-only/permissionless
+    // filesystem.
+    let open_store = || -> anyhow::Result<_> {
+        let gateway_dir = std::path::PathBuf::from(&config.agents_dir).join(".gateway");
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+    };
 
     match command {
+        super::common::GatewayConstitutionCommands::Show {
+            include_text,
+            json,
+        } => {
+            autonoetic_gateway::constitution_digest::initialize_constitution(&config)?;
+            let profile =
+                autonoetic_gateway::constitution_digest::constitution_profile(*include_text);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&profile)?);
+                return Ok(());
+            }
+            println!("Constitution {}", profile.version);
+            println!("  Digest:  {}", profile.digest);
+            println!("  Format:  v{}", profile.format_version);
+            match (&profile.signer_id, profile.signed) {
+                (Some(signer), true) => println!("  Signed:  yes (signer {signer})"),
+                _ => println!("  Signed:  no"),
+            }
+            println!(
+                "  Enforced: {} rules (P-*), {} rights (Ri-*)",
+                profile.rule_enforcement_count, profile.right_enforcement_count
+            );
+            println!("\nClauses ({}):", profile.clauses.len());
+            for c in &profile.clauses {
+                let mark = if c.enforcement.is_some() { "✓" } else { " " };
+                println!("  {mark} {:<8} [{}] {}", c.id, c.binds, c.gloss);
+            }
+            if let Some(text) = &profile.text {
+                println!("\n--- constitution.md ---\n{text}");
+            }
+            Ok(())
+        }
         super::common::GatewayConstitutionCommands::Proposals { command } => {
-            handle_constitution_proposals(&store, command)
+            handle_constitution_proposals(&open_store()?, command)
         }
         super::common::GatewayConstitutionCommands::Release { tag, json } => {
-            let ids = store.publish_approved_proposals(tag)?;
+            let ids = open_store()?.publish_approved_proposals(tag)?;
             if *json {
                 println!(
                     "{}",

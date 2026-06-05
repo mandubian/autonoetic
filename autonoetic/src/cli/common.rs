@@ -392,6 +392,16 @@ pub enum GatewayCommands {
 
 #[derive(Subcommand)]
 pub enum GatewayConstitutionCommands {
+    /// Show the active constitution: version, digest, signer, and a one-line
+    /// gloss per clause (the same view clients get from `constitution.get`).
+    Show {
+        /// Include the full constitution markdown text.
+        #[arg(long)]
+        include_text: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// List amendment proposals.
     Proposals {
         #[command(subcommand)]

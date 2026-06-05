@@ -102,6 +102,18 @@ Show gateway status including connected agents, MCP servers, and scheduler state
 autonoetic gateway status [--json]
 ```
 
+### `autonoetic gateway constitution show`
+
+Show the active constitution: version, canonical digest, signer, enforcement
+counts, and a one-line gloss for every clause (`P-*` rules bind the agent,
+`Ri-*` rights bind the gateway). A `✓` marks clauses the gateway mechanically
+enforces. This is the same lightweight view clients get from the
+`constitution.get` JSON-RPC method; pass `--include-text` for the full markdown.
+
+```bash
+autonoetic gateway constitution show [--include-text] [--json]
+```
+
 ### `autonoetic gateway approvals`
 
 Manage pending approval requests for `agent_revision_promote` and `sandbox_exec` actions.
