@@ -20,7 +20,7 @@ A single, explicit relief exists — the **cursor**: a revision that is provably
 **zero declared capabilities** — such an agent cannot invoke any privileged tool
 (runtime capability enforcement blocks every capability-gated call), so its blast
 radius is bounded regardless of provenance. The cursor is config-tunable
-(`promotion.allow_zero_capability_direct_promote`, default `true`) so strictness
+(`allow_zero_capability_direct_promote`, a top-level `GatewayConfig` key, default `true`) so strictness
 can be dialed up (require review even for zero-cap agents) but not silently down.
 
 ## The invariant
@@ -67,7 +67,7 @@ to every promotion:
   autonomous self-evolution keeps working.
 
 The new-agent requirement is a **cursor**
-(`promotion.require_operator_approval_for_new_agents`, default `true`): keep it on
+(`require_operator_approval_for_new_agents`, a top-level `GatewayConfig` key, default `true`): keep it on
 for human-in-the-loop admission, or turn it off to let fully-audited new agents
 self-promote. Completeness stays fail-closed regardless.
 

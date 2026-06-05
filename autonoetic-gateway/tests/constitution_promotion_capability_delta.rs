@@ -806,8 +806,11 @@ fn new_agent_cursor_off_lifts_human_gate_but_completeness_still_fails_closed() {
         serde_json::Value::Bool(false),
         "cursor off still fails closed on completeness: {resp}"
     );
-    assert_ne!(
-        resp["error"], "capability_delta_requires_approval",
-        "cursor off lifts the new-agent human gate; expected a completeness refusal, got {resp}"
+    // Specifically the completeness refusal (capability-bearing, no artifact) —
+    // not the new-agent human gate (which the cursor lifted) and not some other
+    // gate regressing.
+    assert_eq!(
+        resp["error"], "promotion_incomplete",
+        "cursor off lifts the new-agent human gate but completeness must still fail closed, got {resp}"
     );
 }

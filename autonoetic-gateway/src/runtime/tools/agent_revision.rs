@@ -2550,19 +2550,27 @@ impl NativeTool for AgentRevisionPromoteTool {
                 .map(|c| c.allow_zero_capability_direct_promote)
                 .unwrap_or(true);
             if !(inoffensive && cursor_allows) {
-                let message = if !inoffensive {
-                    format!(
-                        "Promotion gate: revision '{}' declares capabilities but ships no reviewable artifact. \
-                         A capability-bearing agent cannot be promoted without an artifact bundle and the \
-                         required audit/approval records (fail-closed).",
-                        args.revision_id
+                let (message, repair_hint) = if !inoffensive {
+                    (
+                        format!(
+                            "Promotion gate: revision '{}' declares capabilities but ships no reviewable \
+                             artifact. A capability-bearing agent cannot be promoted without an artifact \
+                             bundle and the required audit records (fail-closed).",
+                            args.revision_id
+                        ),
+                        "Attach a reviewed artifact bundle and obtain the required auditor (and, for \
+                         high-risk capabilities, evaluator) pass records, then retry agent_revision_promote.",
                     )
                 } else {
-                    format!(
-                        "Promotion gate: zero-capability direct-promote is disabled \
-                         (allow_zero_capability_direct_promote=false); revision '{}' must pass the full \
-                         review gate.",
-                        args.revision_id
+                    (
+                        format!(
+                            "Promotion gate: zero-capability direct-promote is disabled \
+                             (allow_zero_capability_direct_promote=false); revision '{}' must pass the full \
+                             review gate.",
+                            args.revision_id
+                        ),
+                        "Provide a reviewed artifact with an auditor pass record, or re-enable \
+                         allow_zero_capability_direct_promote, then retry agent_revision_promote.",
                     )
                 };
                 return Ok(serde_json::json!({
@@ -2570,7 +2578,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                     "error_type": "permission",
                     "error": "promotion_incomplete",
                     "message": message,
-                    "repair_hint": "Attach a reviewed artifact bundle with the required auditor (and evaluator) pass records, and obtain operator approval, then retry agent_revision_promote.",
+                    "repair_hint": repair_hint,
                 })
                 .to_string());
             }
