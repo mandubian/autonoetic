@@ -384,6 +384,9 @@ fn setup(agent_id: &str, skill_md: &str, capabilities: serde_json::Value) -> Fix
 
     let config = GatewayConfig {
         agents_dir: agents_dir.clone(),
+        // Isolate the audit/eval completeness gate from the new-agent
+        // first-admission human gate (covered by its own test).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
@@ -675,7 +678,7 @@ fn high_risk_intent_only_artifact_still_requires_full_gate() {
     match result {
         Err(msg) => {
             assert!(
-                msg.contains("evaluator did not pass") || msg.contains("no promotion.record"),
+                msg.contains("no evaluator role passed") || msg.contains("no promotion.record"),
                 "high-risk intent-only must still require evaluator pass, got: {}",
                 msg
             );

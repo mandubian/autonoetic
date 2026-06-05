@@ -261,6 +261,9 @@ fn same_agent_identity_rejected_even_if_both_passed() {
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), &skill);
     let config = GatewayConfig {
         agents_dir,
+        // Isolate the distinct-identity completeness gate from the new-agent
+        // first-admission human gate (covered by its own test).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
@@ -353,6 +356,9 @@ fn distinct_identities_allowed() {
     let (artifact_id, gateway_dir) = build_agent_bundle(temp.path(), &skill);
     let config = GatewayConfig {
         agents_dir,
+        // Isolate the distinct-identity completeness gate from the new-agent
+        // first-admission human gate (covered by its own test).
+        require_operator_approval_for_new_agents: false,
         ..Default::default()
     };
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());

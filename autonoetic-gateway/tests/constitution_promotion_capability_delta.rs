@@ -198,6 +198,10 @@ fn invoke_promote_with_config(h: &PromoteHarness, args_json: &str) -> serde_json
             .parent()
             .expect("agent dir should have parent")
             .to_path_buf(),
+        // This suite exercises capability-delta gating vs an outgoing revision;
+        // isolate it from the new-agent first-admission gate (covered by its own
+        // test) so the first-revision setup promote isn't treated as a new agent.
+        require_operator_approval_for_new_agents: false,
         ..GatewayConfig::default()
     };
     let raw = registry
@@ -554,7 +558,7 @@ fn approval_ref_bypass_is_invalidated_when_alias_moves() {
         Some(&h.store),
         &approval_ref,
         "operator",
-        None,
+        Some("approved for test".to_string()), // §O: operator decisions require a motivation
         None,
         Some(&ApprovalLevel::Operator),
         None,
@@ -638,7 +642,7 @@ fn approval_ref_bypasses_gate_after_approval() {
         Some(&h.store),
         &approval_ref,
         "operator",
-        None,
+        Some("approved for test".to_string()), // §O: operator decisions require a motivation
         None,
         Some(&ApprovalLevel::Operator),
         None,
@@ -669,4 +673,144 @@ fn approval_ref_bypasses_gate_after_approval() {
             retry
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// New-agent first-admission gate (promotion-completeness cursor, #promotion)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_agent_first_promotion_requires_operator_approval_by_default() {
+    // A brand-new agent (no outgoing alias) declaring a capability is maximal
+    // broadening — its whole capability set is "new" — so under the default
+    // cursor it must NOT self-promote without operator approval.
+    let temp = tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("agents");
+    let agent_dir = agents_dir.join(AGENT_ID);
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).expect("store opens"));
+
+    write_revision_skill(
+        &gateway_dir,
+        INCOMING_REVISION,
+        "capabilities:\n  - type: NetworkAccess\n    hosts: [\"api.github.com\"]",
+    );
+    store
+        .insert_agent_revision(&make_revision_record(INCOMING_REVISION))
+        .unwrap();
+    // No alias upsert ⇒ resolve_alias is None ⇒ brand-new agent.
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let args = format!(
+        r#"{{"agent_id":"{}","revision_id":"{}"}}"#,
+        AGENT_ID, INCOMING_REVISION
+    );
+
+    // Default cursor (require_operator_approval_for_new_agents = true).
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    let raw = registry
+        .execute(
+            "agent_revision_promote",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args,
+            Some("test-session"),
+            Some("turn-000001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .expect("execute should not error");
+    let resp: serde_json::Value = serde_json::from_str(&raw).expect("json");
+    assert_eq!(
+        resp["ok"],
+        serde_json::Value::Bool(false),
+        "new capability-bearing agent must not self-promote without approval: {resp}"
+    );
+    assert_eq!(resp["error"], "capability_delta_requires_approval");
+    assert!(
+        resp["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("new agent"),
+        "message should name the new-agent case, got: {}",
+        resp["message"]
+    );
+
+}
+
+#[test]
+fn new_agent_cursor_off_lifts_human_gate_but_completeness_still_fails_closed() {
+    // Cursor off ⇒ the new-agent human gate is lifted, but the completeness gate
+    // still applies and is always fail-closed: a capability-bearing revision with
+    // no reviewable artifact is refused as incomplete, never auto-promoted.
+    let temp = tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("agents");
+    let agent_dir = agents_dir.join(AGENT_ID);
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).expect("store opens"));
+    write_revision_skill(
+        &gateway_dir,
+        INCOMING_REVISION,
+        "capabilities:\n  - type: NetworkAccess\n    hosts: [\"api.github.com\"]",
+    );
+    store
+        .insert_agent_revision(&make_revision_record(INCOMING_REVISION))
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["*".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let config = GatewayConfig {
+        agents_dir,
+        require_operator_approval_for_new_agents: false,
+        ..GatewayConfig::default()
+    };
+    let args = format!(
+        r#"{{"agent_id":"{}","revision_id":"{}"}}"#,
+        AGENT_ID, INCOMING_REVISION
+    );
+    let raw = registry
+        .execute(
+            "agent_revision_promote",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args,
+            Some("test-session"),
+            Some("turn-000001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .expect("execute should not error");
+    let resp: serde_json::Value = serde_json::from_str(&raw).expect("json");
+    assert_eq!(
+        resp["ok"],
+        serde_json::Value::Bool(false),
+        "cursor off still fails closed on completeness: {resp}"
+    );
+    // Specifically the completeness refusal (capability-bearing, no artifact) —
+    // not the new-agent human gate (which the cursor lifted) and not some other
+    // gate regressing.
+    assert_eq!(
+        resp["error"], "promotion_incomplete",
+        "cursor off lifts the new-agent human gate but completeness must still fail closed, got {resp}"
+    );
 }
