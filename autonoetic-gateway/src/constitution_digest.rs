@@ -193,6 +193,47 @@ pub fn canonical_rule_enforcement_table() -> BTreeMap<String, String> {
     runtime_arc().rules_enforcement.clone()
 }
 
+/// Build the client-facing constitution view (`constitution.get`): lock
+/// metadata + one gloss per `P-*`/`Ri-*` clause, with enforcement citations
+/// where the gateway mechanically enforces a clause. `include_text` attaches
+/// the full markdown. Source of truth is the loaded constitution text, so the
+/// gloss can never drift from what was signed.
+pub fn constitution_profile(
+    include_text: bool,
+) -> autonoetic_types::constitution::ConstitutionGetResult {
+    use autonoetic_types::constitution::{ConstitutionClause, ConstitutionGetResult};
+    let rt = runtime_arc();
+    let lock = rt.lock.as_ref();
+    let glossary = extract_rule_glossary(&rt.text);
+    let clauses = glossary
+        .into_iter()
+        .map(|(id, gloss)| {
+            let (binds, enforcement) = if id.starts_with("Ri-") {
+                ("gateway", rt.rights_enforcement.get(&id).cloned())
+            } else {
+                ("agent", rt.rules_enforcement.get(&id).cloned())
+            };
+            ConstitutionClause {
+                id,
+                binds: binds.to_string(),
+                gloss,
+                enforcement,
+            }
+        })
+        .collect();
+    ConstitutionGetResult {
+        version: lock.constitution_version.clone(),
+        digest: rt.digest.to_string(),
+        format_version: lock.format_version,
+        signer_id: lock.signature.as_ref().map(|s| s.signer_id.clone()),
+        signed: lock.signature.is_some(),
+        rule_enforcement_count: lock.rule_enforcement_count,
+        right_enforcement_count: lock.right_enforcement_count,
+        clauses,
+        text: include_text.then(|| rt.text.to_string()),
+    }
+}
+
 pub fn canonical_constitution_profile() -> autonoetic_ofp::wire::ConstitutionProfile {
     autonoetic_ofp::wire::ConstitutionProfile {
         rules_enforcement: canonical_rule_enforcement_table(),
@@ -649,6 +690,34 @@ mod tests {
     fn constitution_lock_matches_canonical_digest_and_counts() {
         init_default_constitution();
         verify_constitution_lock_integrity().expect("constitution lock integrity should hold");
+    }
+
+    #[test]
+    fn constitution_profile_exposes_clauses_and_metadata() {
+        init_default_constitution();
+        let lock = constitution_lock();
+
+        // Lightweight by default: no full text, metadata mirrors the lock.
+        let p = constitution_profile(false);
+        assert!(p.text.is_none(), "include_text=false must omit the markdown");
+        assert_eq!(p.version, lock.constitution_version);
+        assert_eq!(p.digest.as_str(), constitution_digest().as_ref());
+        assert!(p.signed && p.signer_id.as_deref() == Some("autonoetic:constitution:v1"));
+        assert_eq!(p.rule_enforcement_count, lock.rule_enforcement_count);
+        assert_eq!(p.right_enforcement_count, lock.right_enforcement_count);
+        assert!(p.clauses.len() > 100, "expected the full clause set");
+
+        // A P- rule binds the agent and carries an enforcement citation; an
+        // Ri- right binds the gateway.
+        let p11 = p.clauses.iter().find(|c| c.id == "P-1.1").expect("P-1.1");
+        assert_eq!(p11.binds, "agent");
+        assert!(p11.enforcement.as_deref().unwrap_or("").contains("tool_call_processor"));
+        let ri = p.clauses.iter().find(|c| c.id == "Ri-0.10").expect("Ri-0.10");
+        assert_eq!(ri.binds, "gateway");
+
+        // include_text attaches the full markdown.
+        let full = constitution_profile(true);
+        assert!(full.text.as_deref().unwrap_or("").contains("| P-1.1 |"));
     }
 
     #[test]

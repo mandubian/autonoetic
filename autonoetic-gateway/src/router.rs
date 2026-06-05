@@ -465,6 +465,28 @@ impl JsonRpcRouter {
                     "constitution_format_version": crate::constitution_digest::constitution_format_version(),
                 }),
             ),
+            "constitution.get" => {
+                let params: autonoetic_types::constitution::ConstitutionGetParams =
+                    if req.params.is_null() {
+                        Default::default()
+                    } else {
+                        match serde_json::from_value(req.params) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return JsonRpcResponse::error(
+                                    req.id,
+                                    -32602,
+                                    format!("Invalid params for constitution.get: {}", e),
+                                );
+                            }
+                        }
+                    };
+                let result = crate::constitution_digest::constitution_profile(params.include_text);
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+            }
             "interaction.answer" => {
                 let params: crate::interaction_answer::InteractionAnswerParams =
                     match serde_json::from_value(req.params) {
@@ -2163,6 +2185,45 @@ mod tests {
         assert!(result["gateway_version"].is_string());
         assert!(result["constitution_version"].is_string());
         assert!(result["constitution_format_version"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_constitution_get() {
+        let (_temp, router) = test_router();
+        // Null params (no body) must default to the lightweight view.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "cg".to_string(),
+            method: "constitution.get".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        let result = resp.result.expect("constitution.get should return payload");
+        assert_eq!(result["digest"].as_str().map(str::len), Some(64));
+        assert!(result["version"].is_string());
+        assert!(result["signed"].as_bool().unwrap_or(false));
+        assert!(result["text"].is_null(), "default view omits the markdown");
+        let clauses = result["clauses"].as_array().expect("clauses array");
+        assert!(clauses.len() > 100);
+        assert!(clauses
+            .iter()
+            .any(|c| c["id"] == "P-1.1" && c["binds"] == "agent"));
+
+        // include_text attaches the full markdown.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "cg2".to_string(),
+            method: "constitution.get".to_string(),
+            params: serde_json::json!({ "include_text": true }),
+            auth_token: None,
+        };
+        let result = router
+            .dispatch(req)
+            .await
+            .result
+            .expect("constitution.get should return payload");
+        assert!(result["text"].as_str().unwrap_or("").contains("P-1.1"));
     }
 
     #[tokio::test]

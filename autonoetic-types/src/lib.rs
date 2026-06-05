@@ -12,6 +12,7 @@ pub mod capsule;
 pub mod causal_chain;
 pub mod channel;
 pub mod config;
+pub mod constitution;
 pub mod disclosure;
 pub mod escalation;
 pub mod evaluation;
