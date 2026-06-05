@@ -101,12 +101,15 @@ fn preceding_chain(payload: Option<&serde_json::Value>) -> String {
 /// or a structured JSON object. Returns the `summary` field if found.
 fn extract_tool_summary(p: Option<&serde_json::Value>) -> Option<String> {
     let p = p?;
+    // Check top-level summary first (common pattern: {status, summary, result})
+    if let Some(s) = p.get("summary").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    // Check inside result field
     let result = p.get("result")?;
-    // Direct JSON object with summary
     if let Some(s) = result.get("summary").and_then(|v| v.as_str()) {
         return Some(s.to_string());
     }
-    // Stringified JSON: parse inner string and look for summary
     if let Some(s) = result.as_str() {
         if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
             if let Some(summary) = inner.get("summary").and_then(|v| v.as_str()) {
@@ -302,7 +305,17 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                             .collect();
                         cap_preview(&ids.join(", "), 80)
                     }),
-                Some(_) => None,
+                Some(_) => {
+                    // Show result content as preview, not full payload
+                    p.as_ref()
+                        .and_then(|v| v.get("result"))
+                        .and_then(|r| {
+                            // Structured result: try to extract a text preview
+                            r.get("stdout").and_then(|x| x.as_str()).map(|o| cap_preview(o, 120))
+                                .or_else(|| r.as_str().map(|s| cap_preview(s, 120)))
+                        })
+                        .or_else(|| extract_tool_summary(p.as_ref()).map(|s| cap_preview(&s, 120)))
+                }
                 None => None,
             }
         }
@@ -313,7 +326,7 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
             let msg = s("message").unwrap_or_default();
             let headline_summary = one_line(&msg, 80);
             if msg.chars().count() > headline_summary.chars().count() + 10 {
-                Some(preserve_lines(&msg, 500))
+                Some(preserve_lines(&msg, 4000))
             } else {
                 None
             }
@@ -323,7 +336,7 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
         "operator.message" => {
             let msg = s("message").unwrap_or_default();
             if msg.contains('\n') {
-                Some(preserve_lines(&msg, 500))
+                Some(preserve_lines(&msg, 4000))
             } else {
                 None
             }
