@@ -22,6 +22,12 @@ pub struct AsyncIngestResult {
     pub artifacts: Vec<serde_json::Value>,
     pub shared_knowledge: Vec<serde_json::Value>,
     pub error: Option<String>,
+    /// Constitutional rule/right IDs the refusal/termination enforced (e.g.
+    /// `P-2.25`). Empty unless `status == Failed` with an attributed cause —
+    /// lets an async client polling `session.status` learn *which* clause
+    /// refused, matching the `error.data.enforced_rules` of the sync path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enforced_rules: Vec<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
 }
@@ -766,6 +772,7 @@ impl JsonRpcRouter {
                                 artifacts: Vec::new(),
                                 shared_knowledge: Vec::new(),
                                 error: None,
+                                enforced_rules: Vec::new(),
                                 started_at: chrono::Utc::now().to_rfc3339(),
                                 completed_at: None,
                             },
@@ -799,7 +806,7 @@ impl JsonRpcRouter {
                                     }
                                     JsonRpcRouter::apply_spawn_result_to_async_entry(entry, &spawn_result);
                                 }
-                                Err((e, _enforced_rules, _)) => {
+                                Err((e, enforced_rules, _)) => {
                                     if let Some(source) = source_agent_id {
                                         let _ = append_delegation_task_entry(
                                             config.as_ref(),
@@ -810,11 +817,13 @@ impl JsonRpcRouter {
                                             Some(serde_json::json!({
                                                 "error": e.clone(),
                                                 "event_type": event_type_clone,
+                                                "enforced_rules": enforced_rules.clone(),
                                             })),
                                         );
                                     }
                                     entry.status = AsyncIngestStatus::Failed;
                                     entry.error = Some(e);
+                                    entry.enforced_rules = enforced_rules;
                                     entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
                                 }
                             }
@@ -2673,5 +2682,30 @@ mod tests {
         let resp = JsonRpcResponse::error_with_rules("1".into(), -32000, "boom", vec![]);
         let err = resp.error.expect("error should be set");
         assert!(err.data.is_none(), "no rules ⇒ no data envelope");
+    }
+
+    #[test]
+    fn async_ingest_result_surfaces_enforced_rules_when_failed() {
+        // A failed async ingest carries the attributed clause so a client
+        // polling `session.status` learns the cause — parity with the sync
+        // path's `error.data.enforced_rules`. Empty ⇒ field omitted.
+        let mut r = AsyncIngestResult {
+            session_id: "s1".into(),
+            status: AsyncIngestStatus::Failed,
+            assistant_reply: None,
+            workflow_note: None,
+            artifacts: Vec::new(),
+            shared_knowledge: Vec::new(),
+            error: Some("promotion incomplete".into()),
+            enforced_rules: vec!["P-2.25".into()],
+            started_at: "t0".into(),
+            completed_at: Some("t1".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["enforced_rules"][0], "P-2.25");
+
+        r.enforced_rules.clear();
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("enforced_rules").is_none(), "empty ⇒ omitted");
     }
 }

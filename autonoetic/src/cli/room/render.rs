@@ -219,10 +219,16 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             one_line(&field("reason").unwrap_or_else(|| "session halted".into()), 120)
         ),
         // Bounded-progress (loop-guard) trip terminated the session (#287/P-7.x).
-        // The actor label shows which agent; the enforcing rule rides on refs.
+        // The actor label shows which agent; the enforcing rule rides on refs
+        // (first-class) — fall back to the payload `rule_id` only for older
+        // events written before `enforced_rules` existed.
         "guard.tripped" => {
             let reason = field("reason").unwrap_or_else(|| "tripped".into());
-            let rule = field("rule_id").map(|r| format!(" [{r}]")).unwrap_or_default();
+            let rule = if !entry.refs.enforced_rules.is_empty() {
+                format!(" [{}]", entry.refs.enforced_rules.join(", "))
+            } else {
+                field("rule_id").map(|r| format!(" [{r}]")).unwrap_or_default()
+            };
             format!("loop guard tripped: {reason}{rule}")
         }
         other => other.to_string(),
@@ -783,7 +789,25 @@ mod tests {
     }
 
     #[test]
-    fn renders_guard_tripped_with_rule_id() {
+    fn renders_guard_tripped_from_first_class_refs() {
+        // The rule rides on the first-class `refs.enforced_rules`; the payload
+        // carries no `rule_id`, proving the renderer reads refs, not payload.
+        let mut e = entry(
+            SessionRole::Runtime,
+            Principal::agent("planner.default"),
+            "guard.tripped",
+            Altitude::Error,
+            serde_json::json!({ "reason": "no_progress" }),
+        );
+        e.refs.enforced_rules = vec!["P-7.19".into()];
+        let line = render_line(&e);
+        assert!(line.starts_with("✗"), "guard trip should render at Error: {line}");
+        assert!(line.contains("loop guard tripped: no_progress [P-7.19]"), "got: {line}");
+    }
+
+    #[test]
+    fn renders_guard_tripped_payload_rule_id_fallback() {
+        // Older events have no `refs.enforced_rules`; fall back to payload.
         let e = entry(
             SessionRole::Runtime,
             Principal::agent("planner.default"),
@@ -792,7 +816,6 @@ mod tests {
             serde_json::json!({ "reason": "no_progress", "rule_id": "P-7.19" }),
         );
         let line = render_line(&e);
-        assert!(line.starts_with("✗"), "guard trip should render at Error: {line}");
         assert!(line.contains("loop guard tripped: no_progress [P-7.19]"), "got: {line}");
     }
 
