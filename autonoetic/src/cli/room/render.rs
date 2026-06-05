@@ -130,11 +130,11 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "workbench.discarded" => "workbench discarded".into(),
         // The operator's (or any actor's) own message into the session (#405).
         // The actor label already shows who; here we just show the text.
-        "operator.message" => one_line(&field("message").unwrap_or_default(), 120),
+        "operator.message" => one_line(&field("message").unwrap_or_default(), 80),
         // The agent's own narrative (#367 P4): what it says, and (hidable) its
         // reasoning — so a turn reads intent → actions → result. Actor label
         // shows which agent; the 💭 marks reasoning as the "why".
-        "agent.message" => one_line(&field("message").unwrap_or_default(), 160),
+        "agent.message" => one_line(&field("message").unwrap_or_default(), 80),
         "agent.reasoning" => format!("💭 {}", one_line(&field("reasoning").unwrap_or_default(), 160)),
         "user.ask.pending" => format!(
             "asks: {}{}",
@@ -223,6 +223,16 @@ pub(crate) fn cap_preview(s: &str, max: usize) -> String {
     format!("{truncated}…")
 }
 
+/// Like `cap_preview` but preserves newlines, yielding a multi-line string
+/// suitable for the `detail` field. Caps total character count at `max`.
+fn preserve_lines(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{truncated}…")
+}
+
 /// Build the second-line preview for a known event type. Returns `None` for
 /// events that have no useful preview — the row then renders single-line.
 fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
@@ -273,11 +283,12 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                 None => None,
             }
         }
-        // Agent message: surface a short preview of the actual prose. Long
-        // messages get capped; the full text stays in the detail pane.
-        "agent.message" => s("message").map(|m| cap_preview(&m, 100)),
-        // Operator chat: same treatment, but usually shorter.
-        "operator.message" => s("message").map(|m| cap_preview(&m, 100)),
+        // Agent message: show the full message with newlines preserved so
+        // long responses display as multi-line content instead of a single
+        // truncated repeat of the headline.
+        "agent.message" => s("message").map(|m| preserve_lines(&m, 500)),
+        // Operator chat: same treatment.
+        "operator.message" => s("message").map(|m| preserve_lines(&m, 500)),
         // LLM failure: show the preceding action chain on the second line so
         // the row alone tells the story.
         "llm.request_failed" => {

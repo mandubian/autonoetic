@@ -32,7 +32,7 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// Anything over this gets a `…` ellipsis on the last line. Keeps the visible
 /// list from collapsing to one giant paragraph when a long agent message
 /// arrives — the full text is always one ⏎ away in the detail pane.
-const MAX_ROW_LINES: usize = 2;
+const MAX_ROW_LINES: usize = 8;
 
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
@@ -841,17 +841,22 @@ fn render_rich_row(
     ]));
     if let Some(d) = &spec.detail {
         if !d.is_empty() {
-            let prefix = "  ↳ ";
-            let avail = content_w.saturating_sub(prefix.chars().count());
-            let detail_capped = cap_to_width(d, avail);
             let pad = " ".repeat(rail_w + glyph_w + label_w + 1);
-            lines.push(Line::from(vec![
-                Span::styled(pad, Style::default()),
-                Span::styled(
-                    format!("{prefix}{detail_capped}"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
+            for (i, sub) in d.split('\n').enumerate() {
+                if sub.trim().is_empty() {
+                    continue;
+                }
+                let prefix = if i == 0 { "  ↳ " } else { "    " };
+                let avail = content_w.saturating_sub(prefix.chars().count());
+                let capped = cap_to_width(sub.trim_end(), avail);
+                lines.push(Line::from(vec![
+                    Span::styled(pad.clone(), Style::default()),
+                    Span::styled(
+                        format!("{prefix}{capped}"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
         }
     }
     let physical: Vec<Line<'static>> = lines
