@@ -1027,6 +1027,75 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.list" => {
+                // Discover existing root sessions so the operator can reload or
+                // attach to one. Backed by `causal_events` (every gateway
+                // action leaves a row) — `MAX(timestamp)` gives last activity.
+                let params: autonoetic_types::session_timeline::SessionListParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for session.list: {}", e),
+                            );
+                        }
+                    };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let limit = params.limit.clamp(1, 500) as i64;
+                match store.list_recent_sessions(limit) {
+                    Ok(rows) => {
+                        let mut entries: Vec<autonoetic_types::session_timeline::SessionListEntry> =
+                            rows.into_iter()
+                                .filter_map(|(sid, agent_id, last_ts)| {
+                                    if let Some(filter) = params.agent_id.as_deref() {
+                                        if agent_id != filter {
+                                            return None;
+                                        }
+                                    }
+                                    Some(
+                                        autonoetic_types::session_timeline::SessionListEntry {
+                                            root_session_id: sid,
+                                            agent_id,
+                                            last_active_at: last_ts,
+                                        },
+                                    )
+                                })
+                                .collect();
+                        // Re-apply limit after the agent filter so callers get
+                        // at most `limit` matches of the requested agent, not
+                        // a 50-row global cap that drops to 0 after filtering.
+                        if entries.len() as i64 > limit {
+                            entries.truncate(limit as usize);
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::to_value(
+                                autonoetic_types::session_timeline::SessionListResult {
+                                    sessions: entries,
+                                },
+                            )
+                            .unwrap_or_else(|_| serde_json::json!({"sessions": []})),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.list failed: {}", e),
+                    ),
+                }
+            }
+
             "channel.bind" => {
                 // #393 (P3.c): bind an external conversation (Discord thread,
                 // WhatsApp chat) to a room so it survives reconnects and routes

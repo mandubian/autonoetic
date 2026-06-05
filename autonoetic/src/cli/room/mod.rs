@@ -9,6 +9,7 @@
 mod channel;
 mod client;
 mod render;
+mod slash;
 mod tui;
 
 use crate::cli::common::RoomArgs;
@@ -19,6 +20,14 @@ use std::path::Path;
 use std::time::Duration;
 
 pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<()> {
+    handle_room_with_target(config_path, args, None).await
+}
+
+pub async fn handle_room_with_target(
+    config_path: &Path,
+    args: &RoomArgs,
+    mut target_agent_id: Option<String>,
+) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
 
     // `parse_str` returns `Some` for every valid floor — `None` means invalid.
@@ -33,17 +42,28 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
     // The whole room is a gateway API client (#392) — no store access.
     let client = RoomClient::from_config(&config)?;
 
+    // Resolve the session id before any read. `--resume` asks the gateway for
+    // the most recent session (optionally filtered by --agent); otherwise the
+    // caller must supply a positional `root_session_id`.
+    let mut root_session_id = resolve_root_session_id(&client, args).await?;
+
     // Interactive shell — reads via session.timeline.list, resolves gates via
     // approvals.* / interaction.resolve_and_answer.
     if args.tui {
-        return tui::run(&client, &args.root_session_id, min_altitude, args.limit);
+        return tui::run(
+            &client,
+            &mut root_session_id,
+            min_altitude,
+            args.limit,
+            &mut target_agent_id,
+        );
     }
 
     // Read-only viewer.
     let mut cursor: Option<String> = None;
     let rendered_any = drain_new_rpc(
         &client,
-        &args.root_session_id,
+        &root_session_id,
         &mut cursor,
         args.limit,
         &args.min_altitude,
@@ -54,7 +74,7 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
         if !rendered_any {
             eprintln!(
                 "(no activity at or above '{}' for session '{}')",
-                args.min_altitude, args.root_session_id
+                args.min_altitude, root_session_id
             );
         }
         return Ok(());
@@ -62,7 +82,7 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
 
     eprintln!(
         "Following room '{}' (floor: {}) via the {} channel. Press Ctrl+C to stop.",
-        args.root_session_id,
+        root_session_id,
         args.min_altitude,
         CliChannel.kind(),
     );
@@ -71,13 +91,60 @@ pub async fn handle_room(config_path: &Path, args: &RoomArgs) -> anyhow::Result<
         interval.tick().await;
         drain_new_rpc(
             &client,
-            &args.root_session_id,
+            &root_session_id,
             &mut cursor,
             args.limit,
             &args.min_altitude,
         )
         .await?;
     }
+}
+
+/// Pick the `root_session_id` to render, based on the args. Explicit positional
+/// always wins; `--resume` is the fallback for the standalone `autonoetic room`
+/// launch (no chat loop, no fresh session_id).
+async fn resolve_root_session_id(
+    client: &RoomClient,
+    args: &RoomArgs,
+) -> anyhow::Result<String> {
+    if let Some(id) = args.root_session_id.as_deref() {
+        let id = id.trim();
+        if !id.is_empty() {
+            return Ok(id.to_string());
+        }
+    }
+    if !args.resume {
+        anyhow::bail!(
+            "no <SESSION_ID> given and --resume is not set. Pass a root session id \
+             (e.g. `autonoetic room session-abc123`) or add --resume to pick the \
+             most recent one (`autonoetic room --resume [--agent <id>]`)."
+        );
+    }
+    let params = serde_json::json!({
+        "agent_id": args.agent,
+        "limit": 1,
+    });
+    let value = client.call("session.list", params).await?;
+    let parsed: autonoetic_types::session_timeline::SessionListResult =
+        serde_json::from_value(value).map_err(|e| {
+            anyhow::anyhow!("malformed session.list response: {e}")
+        })?;
+    let entry = parsed.sessions.into_iter().next().ok_or_else(|| {
+        let agent_hint = args
+            .agent
+            .as_deref()
+            .map(|a| format!(" for agent '{a}'"))
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "no sessions found in the gateway{agent_hint}. Start one with `autonoetic run` \
+             or pass an explicit <SESSION_ID>."
+        )
+    })?;
+    eprintln!(
+        "  Resolved --resume → session {} (agent: {}, last activity: {})",
+        entry.root_session_id, entry.agent_id, entry.last_active_at
+    );
+    Ok(entry.root_session_id)
 }
 
 /// Render every timeline entry newer than `cursor` via `session.timeline.list`,

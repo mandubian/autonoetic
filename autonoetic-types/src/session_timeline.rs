@@ -180,3 +180,34 @@ pub struct SessionTimelineListResult {
     pub next_cursor: Option<String>,
     pub has_more: bool,
 }
+
+/// Parameters for `session.list` — discover existing root sessions so the
+/// operator can reload or attach to one. Optional `agent_id` filter narrows
+/// the list to a single agent's sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionListParams {
+    /// Optional agent filter (e.g. `planner.default`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Max entries to return. Clamped to 1..=500 by the gateway.
+    #[serde(default = "default_list_limit")]
+    pub limit: u32,
+}
+
+fn default_list_limit() -> u32 {
+    50
+}
+
+/// One row of `session.list`. The room uses `last_active_at` to display
+/// "last activity 12m ago" hints; the SDKs use it for sorting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionListEntry {
+    pub root_session_id: String,
+    pub agent_id: String,
+    pub last_active_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionListResult {
+    pub sessions: Vec<SessionListEntry>,
+}
