@@ -194,7 +194,140 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
     }
 }
 
-/// Full one-line rendering: `<glyph> [<actor>] <summary>`.
+/// Map a `SessionRole` to the channel-neutral `ActorKind`.
+pub fn actor_kind(role: &SessionRole) -> ActorKind {
+    match role {
+        SessionRole::Operator => ActorKind::Operator,
+        SessionRole::Planner => ActorKind::Planner,
+        SessionRole::Specialist { .. } => ActorKind::Specialist,
+        SessionRole::Sentinel => ActorKind::Sentinel,
+        SessionRole::Curator => ActorKind::Curator,
+        SessionRole::Auditor => ActorKind::Auditor,
+        SessionRole::Tool { .. } => ActorKind::Tool,
+        SessionRole::ExternalSurface { .. } => ActorKind::ExternalSurface,
+        SessionRole::Runtime => ActorKind::Runtime,
+    }
+}
+
+/// Cap a `detail` line at `max` visible chars; the trailing `…` counts toward
+/// the cap. Used for the second-line preview (tool args, message snippet, etc.)
+/// so a long stdout doesn't blow the 2-line row budget.
+pub(crate) fn cap_preview(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let truncated: String = s.chars().take(max - 1).collect();
+    format!("{truncated}…")
+}
+
+/// Build the second-line preview for a known event type. Returns `None` for
+/// events that have no useful preview — the row then renders single-line.
+fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
+    let p = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let s = |k: &str| -> Option<String> {
+        p.as_ref()
+            .and_then(|v| v.get(k))
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+    };
+
+    match entry.event_type.as_str() {
+        // Tool calls: a one-line hint at the args or the result preview.
+        "tool.completed" => {
+            let tool = s("tool_name").or_else(|| s("tool"));
+            // For sandbox_exec-like tools, surface the result.stdout (or first
+            // 80 chars of any string result). For content_write, surface path.
+            match tool.as_deref() {
+                Some("content_write") => s("path").map(|p| cap_preview(&p, 80)),
+                Some("sandbox_exec") | Some("artifact_exec") => p
+                    .as_ref()
+                    .and_then(|v| v.get("result"))
+                    .and_then(|r| r.get("stdout"))
+                    .and_then(|x| x.as_str())
+                    .map(|o| cap_preview(o, 80))
+                    .or_else(|| {
+                        // The result may be a JSON string (not an object).
+                        s("result").map(|r| cap_preview(&r, 80))
+                    }),
+                Some("agent_spawn") => s("message").map(|m| cap_preview(&m, 80)),
+                Some("workflow_wait") | Some("workflow_state") => p
+                    .as_ref()
+                    .and_then(|v| v.get("task_ids"))
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        let ids: Vec<String> = a
+                            .iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect();
+                        cap_preview(&ids.join(", "), 80)
+                    }),
+                // Unknown tool name: the headline already says `tool X`, so
+                // a second line repeating the name would be noise. Skip.
+                Some(_) => None,
+                None => None,
+            }
+        }
+        // Agent message: surface a short preview of the actual prose. Long
+        // messages get capped; the full text stays in the detail pane.
+        "agent.message" => s("message").map(|m| cap_preview(&m, 100)),
+        // Operator chat: same treatment, but usually shorter.
+        "operator.message" => s("message").map(|m| cap_preview(&m, 100)),
+        // LLM failure: show the preceding action chain on the second line so
+        // the row alone tells the story.
+        "llm.request_failed" => {
+            let chain = p
+                .as_ref()
+                .and_then(|v| v.get("preceding"))
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" → ")
+                })
+                .unwrap_or_default();
+            if chain.is_empty() {
+                None
+            } else {
+                Some(cap_preview(&format!("⟵ after: {chain}"), 100))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Build a `RowSpec` for a single timeline entry — the channel-neutral, fully
+/// structured view. Callers (TUI, CLI viewer, future channels) can render this
+/// however they want.
+pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
+    let headline = summarize(entry);
+    let actor = actor_kind(&entry.role);
+    // Use `actor_label(entry)` (not just `role_label(role)`) so the principal
+    // kind is decorated — humans get a 🧑 prefix, foreign agents get a 🌐
+    // prefix with provider. Without it the TUI loses the operator-vs-agent
+    // distinction on rows that are otherwise identical by role.
+    let label = actor_label(entry);
+    let show_reasoning = entry.event_type != "agent.reasoning"
+        || !headline.is_empty();
+    RowSpec {
+        altitude: entry.altitude,
+        actor,
+        actor_label: label,
+        headline,
+        detail: detail_preview(entry),
+        turn_id: entry.turn_id.clone(),
+        in_flight: false, // The TUI fills this in once it knows turn lifecycle.
+        show_reasoning,
+    }
+}
+
+/// Backwards-compat: one-line rendering, used by the CLI viewer and tests.
 pub fn render_line(entry: &SessionTimelineEntry) -> String {
     format!(
         "{} [{}] {}",
@@ -204,21 +337,105 @@ pub fn render_line(entry: &SessionTimelineEntry) -> String {
     )
 }
 
-/// A rendered timeline row: either a single event line, or a *collapsed* run of
-/// consecutive low-altitude (Detail) plumbing folded into one count row. The
-/// structured form lets the interactive shell expand a collapsed run on demand;
-/// non-interactive consumers render it via [`row_text`].
+/// A rendered timeline row: either a single event with a structured spec, or a
+/// *collapsed* run of consecutive low-altitude (Detail) plumbing folded into one
+/// count row. The structured form lets the interactive shell style each part
+/// independently and expand a collapsed run on demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderedRow {
-    /// A single event line, carrying its altitude so consumers can style it.
-    Line { text: String, altitude: Altitude },
+    /// A single event rendered as a structured spec.
+    Line(RowSpec),
     Collapsed { count: usize, summary: String },
 }
 
+/// Coarse seat classification — drives the colored left rail in the TUI and the
+/// icon the CLI viewer prints. Channel-neutral: the TUI maps to a color, the
+/// CLI viewer maps to a 2-char tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorKind {
+    Operator,
+    Planner,
+    Specialist,
+    Sentinel,
+    Curator,
+    Auditor,
+    Tool,
+    ExternalSurface,
+    Runtime,
+    /// A future / unknown seat — default style, no rail coloring.
+    /// Kept for forward-compat (the room must render rows even when the
+    /// gateway grows a new seat the channel doesn't know yet).
+    #[allow(dead_code)]
+    Other,
+}
+
+impl ActorKind {
+    /// 2-char tag for the CLI viewer (`OP`, `PL`, ...). The TUI doesn't use
+    /// this — it has a colored rail instead — but the tag is part of the
+    /// channel-neutral contract and stays exported for future channels.
+    #[allow(dead_code)]
+    pub fn tag(self) -> &'static str {
+        match self {
+            ActorKind::Operator => "OP",
+            ActorKind::Planner => "PL",
+            ActorKind::Specialist => "SP",
+            ActorKind::Sentinel => "SE",
+            ActorKind::Curator => "CU",
+            ActorKind::Auditor => "AU",
+            ActorKind::Tool => "TL",
+            ActorKind::ExternalSurface => "EX",
+            ActorKind::Runtime => "RT",
+            ActorKind::Other => "--",
+        }
+    }
+}
+
+/// Structured, channel-neutral specification of a single timeline row. The TUI
+/// maps each field to styled spans; the CLI viewer joins `headline` + (optional)
+/// `detail` for the legacy stream. Adding a new field here is additive — old
+/// consumers fall back to the headline string via [`to_plain_text`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowSpec {
+    /// Altitude glyph (▸ ⚠ ✗ ·) and the row's color class.
+    pub altitude: Altitude,
+    /// Which seat/actor — drives the rail color in the TUI.
+    pub actor: ActorKind,
+    /// Human actor name (e.g. "operator", "coder"). Shown as `[name]` in the TUI.
+    pub actor_label: String,
+    /// Primary headline — the most important thing to show.
+    pub headline: String,
+    /// Optional second line: a concrete preview (tool args, message preview,
+    /// result snippet). Capped per channel rules.
+    pub detail: Option<String>,
+    /// Turn this event belongs to (if any). Used to draw turn boundaries.
+    pub turn_id: Option<String>,
+    /// True when the turn containing this row is still in flight (no matching
+    /// `turn.end` has been seen yet). The TUI uses this to show a spinner.
+    pub in_flight: bool,
+    /// Show the 💭 reasoning prefix — false when reasoning is hidden by toggle.
+    pub show_reasoning: bool,
+}
+
+impl RowSpec {
+    /// Plain-text projection for the CLI viewer. Joins headline + (optional)
+    /// detail with a newline so the legacy stream still reads as a clean
+    /// one-or-two-line entry.
+    pub fn to_plain_text(&self) -> String {
+        match &self.detail {
+            Some(d) if !d.is_empty() => format!("{}\n  {}", self.headline, d),
+            _ => self.headline.clone(),
+        }
+    }
+}
+
 /// The altitude a row renders at (collapsed runs are Detail by definition).
+/// Kept exported — the TUI currently reads `spec.altitude` directly, but
+/// `row_altitude` is the single channel-neutral accessor for callers that
+/// don't want to pattern-match.
+#[allow(dead_code)]
 pub fn row_altitude(row: &RenderedRow) -> Altitude {
     match row {
-        RenderedRow::Line { altitude, .. } => *altitude,
+        RenderedRow::Line(spec) => spec.altitude,
         RenderedRow::Collapsed { .. } => Altitude::Detail,
     }
 }
@@ -256,7 +473,7 @@ pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, R
         } else {
             flush_run(entries, &mut run_start, &mut run_len, &mut out);
             out.push((
-                RenderedRow::Line { text: render_line(e), altitude: e.altitude },
+                RenderedRow::Line(render_spec(e)),
                 RowSource::Single(i),
             ));
         }
@@ -276,10 +493,7 @@ fn flush_run(
     match len {
         0 => {}
         1 => out.push((
-            RenderedRow::Line {
-                text: render_line(&entries[start]),
-                altitude: entries[start].altitude,
-            },
+            RenderedRow::Line(render_spec(&entries[start])),
             RowSource::Single(start),
         )),
         n => {
@@ -362,11 +576,31 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
     lines
 }
 
-/// Non-interactive rendering of a row. Borrows the existing line for `Line`
-/// (no allocation on the hot path); only the collapsed form allocates.
+/// Non-interactive rendering of a row. Always allocates: the `Line` variant
+/// stores a structured `RowSpec`, not a pre-rendered string, so there is no
+/// borrowed path. Multi-line rows (those with a `detail` preview) keep their
+/// embedded `\n` — the CLI viewer prints them as multiple terminal lines via
+/// `println!`. Collapsed runs render as `⟨N summary⟩`.
 pub fn row_text(row: &RenderedRow) -> std::borrow::Cow<'_, str> {
     match row {
-        RenderedRow::Line { text, .. } => std::borrow::Cow::Borrowed(text),
+        // Single-line fast path: `<glyph> [<label>] <headline>`. No borrow
+        // because the components live in separate fields of the spec.
+        RenderedRow::Line(spec) if spec.detail.is_none() => {
+            std::borrow::Cow::Owned(format!(
+                "{} [{}] {}",
+                altitude_glyph(spec.altitude),
+                spec.actor_label,
+                spec.headline
+            ))
+        }
+        // Multi-line path: keep the `headline\ndetail` boundary intact so the
+        // CLI viewer can present the preview on its own line.
+        RenderedRow::Line(spec) => std::borrow::Cow::Owned(format!(
+            "{} [{}] {}",
+            altitude_glyph(spec.altitude),
+            spec.actor_label,
+            spec.to_plain_text()
+        )),
         RenderedRow::Collapsed { count, summary } => std::borrow::Cow::Owned(format!(
             "{} ⟨{} {}⟩",
             altitude_glyph(Altitude::Detail),
@@ -462,7 +696,7 @@ mod tests {
             }
             other => panic!("expected collapsed run, got {other:?}"),
         }
-        assert!(matches!(&rows[1], RenderedRow::Line { text, .. } if text.contains("approval requested")));
+        assert!(matches!(&rows[1], RenderedRow::Line(spec) if spec.headline.contains("approval requested")));
         // The trailing lone Detail event is a normal line, not collapsed.
         assert!(matches!(&rows[2], RenderedRow::Line { .. }));
         assert!(row_text(&rows[0]).contains("⟨3 routine events"));
@@ -694,5 +928,216 @@ mod tests {
             serde_json::json!({}),
         );
         assert!(render_line(&e).contains("some.future.event"));
+    }
+
+    #[test]
+    fn render_spec_carries_actor_kind_and_label() {
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "Edit" }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.altitude, Altitude::Normal);
+        assert_eq!(spec.actor, ActorKind::Specialist);
+        assert_eq!(spec.actor_label, "coder");
+        assert!(spec.headline.contains("tool Edit"));
+        // No second line for an unknown tool with no payload detail.
+        assert!(spec.detail.is_none());
+        // No turn set by default.
+        assert!(spec.turn_id.is_none());
+    }
+
+    #[test]
+    fn render_spec_extracts_sandbox_exec_result_preview() {
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "sandbox_exec",
+                "result": { "ok": true, "stdout": "hello world from the script" }
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.detail.is_some());
+        assert!(spec.detail.as_ref().unwrap().contains("hello world"));
+    }
+
+    #[test]
+    fn render_spec_extracts_agent_spawn_message_preview() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "message": "build the weather skill end-to-end"
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("build the weather skill"));
+    }
+
+    #[test]
+    fn render_spec_extracts_workflow_wait_task_ids() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "workflow_wait",
+                "task_ids": ["t-1", "t-2", "t-3"]
+            }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.detail.as_deref(), Some("t-1, t-2, t-3"));
+    }
+
+    #[test]
+    fn render_spec_shows_llm_failure_preceding_chain() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "llm.request_failed",
+            Altitude::Error,
+            serde_json::json!({
+                "error": "rate limited",
+                "preceding": ["read_file", "edit", "run"]
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.detail.is_some());
+        assert!(spec.detail.as_ref().unwrap().contains("after:"));
+        assert!(spec.detail.as_ref().unwrap().contains("read_file"));
+    }
+
+    #[test]
+    fn row_spec_plain_text_joins_headline_and_detail() {
+        let spec = RowSpec {
+            altitude: Altitude::Normal,
+            actor: ActorKind::Planner,
+            actor_label: "planner".into(),
+            headline: "headline here".into(),
+            detail: Some("and a detail".into()),
+            turn_id: None,
+            in_flight: false,
+            show_reasoning: true,
+        };
+        let s = spec.to_plain_text();
+        assert!(s.contains("headline here"));
+        assert!(s.contains("and a detail"));
+        // Two lines, separated by \n.
+        assert_eq!(s.lines().count(), 2);
+    }
+
+    #[test]
+    fn cap_preview_truncates_at_max_with_ellipsis() {
+        let long = "a".repeat(100);
+        let capped = cap_preview(&long, 12);
+        assert_eq!(capped.chars().count(), 12);
+        assert!(capped.ends_with('\u{2026}'));
+        // Within-budget strings pass through unchanged.
+        assert_eq!(cap_preview("short", 12), "short");
+    }
+
+    #[test]
+    fn detail_preview_omitted_for_unknown_event_types() {
+        // The room is intentionally permissive: an unknown event type yields
+        // a single-line row with no preview, not an error.
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "some.future.event",
+            Altitude::Normal,
+            serde_json::json!({ "anything": "goes" }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.detail.is_none());
+    }
+
+    #[test]
+    fn render_spec_propagates_turn_id() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "hi" }),
+        );
+        let mut e = e;
+        e.turn_id = Some("turn-42".into());
+        let spec = render_spec(&e);
+        assert_eq!(spec.turn_id.as_deref(), Some("turn-42"));
+    }
+
+    #[test]
+    fn render_spec_decorates_human_operator_with_emoji() {
+        // A human principal gets the 🧑 prefix; an autonoetic agent does not.
+        // Same role, different label — this is the decoration the old
+        // `role_label(role)` path was missing.
+        let human = entry(
+            SessionRole::Operator,
+            Principal::human("operator-1"),
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "hi" }),
+        );
+        let agent = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "hi" }),
+        );
+        let h = render_spec(&human);
+        let a = render_spec(&agent);
+        assert!(h.actor_label.contains('\u{1F9D1}'), "human gets \u{1F9D1} prefix: {}", h.actor_label);
+        assert!(!a.actor_label.contains('\u{1F9D1}'), "agent has no human prefix: {}", a.actor_label);
+    }
+
+    #[test]
+    fn render_spec_decorates_foreign_agent_with_provider() {
+        // Foreign agent principal carries the upstream provider name in the
+        // label so the operator can distinguish local vs remote origins.
+        let e = entry(
+            SessionRole::Planner,
+            Principal::foreign("openrouter", "agent-9"),
+            "operator.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "hi" }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.actor_label.contains('\u{1F310}'), "foreign agent gets \u{1F310} prefix");
+        assert!(spec.actor_label.contains("openrouter"), "provider name preserved");
+    }
+
+    #[test]
+    fn row_text_preserves_multi_line_detail_for_cli_viewer() {
+        // CLI viewer relies on the embedded \n to render detail on its own
+        // line via println!. Flattening it would defeat the whole point.
+        let spec = RowSpec {
+            altitude: Altitude::Normal,
+            actor: ActorKind::Planner,
+            actor_label: "planner".into(),
+            headline: "tool sandbox_exec".into(),
+            detail: Some("hello world".into()),
+            turn_id: None,
+            in_flight: false,
+            show_reasoning: true,
+        };
+        let row = RenderedRow::Line(spec);
+        let s = row_text(&row);
+        assert!(s.contains('\n'), "detail boundary must be preserved: {s:?}");
+        assert!(s.contains("hello world"));
     }
 }

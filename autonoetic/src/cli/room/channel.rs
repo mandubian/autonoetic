@@ -41,9 +41,10 @@ pub trait Channel {
     fn kind(&self) -> &'static str;
 
     /// Format a rendered row into this channel's native line. Defaults to the
-    /// channel-neutral text, borrowing the existing line for `RenderedRow::Line`
-    /// (no allocation on the hot path — mirrors [`render::row_text`]); a richer
-    /// surface (styled TUI, Discord markdown) overrides and allocates as needed.
+    /// channel-neutral text from [`render::row_text`]; a richer surface (styled
+    /// TUI, Discord markdown) overrides and allocates as needed. Multi-line
+    /// rows (those with a `detail` preview) embed `\n` and the terminal
+    /// honors them.
     fn format_row<'r>(&self, row: &'r RenderedRow) -> Cow<'r, str> {
         render::row_text(row)
     }

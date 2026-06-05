@@ -8,7 +8,7 @@
 
 use super::channel::{Channel, GateAction, GateKind, GateRef, TuiChannel};
 use super::client::RoomClient;
-use super::render::{self, RenderedRow, RowSource};
+use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec};
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -19,9 +19,19 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Duration;
+
+/// Spinner frames — a gentle breathing indicator on the in-flight row. The
+/// current frame is rotated on each TUI tick (the existing 250 ms poll loop).
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Hard cap on the number of physical text lines a single rich row may occupy.
+/// Anything over this gets a `…` ellipsis on the last line. Keeps the visible
+/// list from collapsing to one giant paragraph when a long agent message
+/// arrives — the full text is always one ⏎ away in the detail pane.
+const MAX_ROW_LINES: usize = 2;
 
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
@@ -127,6 +137,9 @@ pub fn run(
     // timeline resolution event yet).
     let mut resolved: HashSet<String> = HashSet::new();
     let mut acted: HashSet<String> = HashSet::new();
+    // Display toggles + spinner state for the in-flight row indicator.
+    let mut show_reasoning = true;
+    let mut spinner_frame: usize = 0;
 
     loop {
         // Fetch at most one page per tick via the gateway API. On error (gateway
@@ -176,21 +189,46 @@ pub fn run(
         // index into `visible`, so gate selection and drill-down use it too.
         let visible: Vec<SessionTimelineEntry> =
             entries.iter().filter(|e| e.altitude >= floor).cloned().collect();
+        // Detect in-flight turns: any turn_id we've seen `turn.start` for but
+        // not yet `turn.end` is still open. The TUI marks the most recent row
+        // in such a turn with a spinner.
+        let mut open_turns: HashSet<String> = HashSet::new();
+        for e in &entries {
+            match e.event_type.as_str() {
+                "turn.start" => {
+                    if let Some(t) = &e.turn_id {
+                        open_turns.insert(t.clone());
+                    }
+                }
+                "turn.end" => {
+                    if let Some(t) = &e.turn_id {
+                        open_turns.remove(t);
+                    }
+                }
+                _ => {}
+            }
+        }
         // Rows + their source mapping (lets Enter drill into the underlying event).
-        let indexed: Vec<(RenderedRow, RowSource)> = if squash {
+        let mut indexed: Vec<(RenderedRow, RowSource)> = if squash {
             render::coalesce_indexed(&visible)
         } else {
             visible
                 .iter()
                 .enumerate()
-                .map(|(i, e)| {
-                    (
-                        RenderedRow::Line { text: render::render_line(e), altitude: e.altitude },
-                        RowSource::Single(i),
-                    )
-                })
+                .map(|(i, e)| (RenderedRow::Line(render::render_spec(e)), RowSource::Single(i)))
                 .collect()
         };
+        // Annotate each row with turn membership + the in-flight bit, and
+        // track the previous turn_id so the renderer can draw a faint
+        // divider when the turn changes. The in-flight spinner is reserved
+        // for the **most recent** row in an open turn — earlier rows of the
+        // same turn stay in their normal altitude glyph so the operator can
+        // read the chain.
+        let turn_boundaries = annotate_turns_and_in_flight(
+            &mut indexed,
+            &open_turns,
+            show_reasoning,
+        );
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
 
         if follow {
@@ -201,8 +239,27 @@ pub fn run(
 
         let gate = selectable_gate(&visible, indexed.get(selected), &resolved, &acted);
 
+        spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
+        let spinner_glyph = SPINNER_FRAMES[spinner_frame];
+
         terminal.draw(|f| {
-            draw(f, root_session_id, floor, squash, follow, &rows, selected, detail.as_deref(), input.as_ref(), compose.as_deref(), status.as_deref(), gate.as_ref())
+            draw(
+                f,
+                root_session_id,
+                floor,
+                squash,
+                follow,
+                &rows,
+                selected,
+                detail.as_deref(),
+                input.as_ref(),
+                compose.as_deref(),
+                status.as_deref(),
+                gate.as_ref(),
+                spinner_glyph,
+                &turn_boundaries,
+                show_reasoning,
+            )
         })?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -346,6 +403,12 @@ pub fn run(
                         detail = None;
                     }
                     KeyCode::Char('s') => squash = !squash,
+                    // R: toggle the 💭 reasoning prefix on/off everywhere. Off
+                    // hides the prefix; the reasoning row itself stays visible
+                    // (it's a Detail-altitude event, so it's normally hidden
+                    // by the floor or by squash — but the toggle matters for
+                    // any channel that doesn't filter on altitude).
+                    KeyCode::Char('R') => show_reasoning = !show_reasoning,
                     // i: compose a free-form message into the session (#405).
                     KeyCode::Char('i') => {
                         detail = None;
@@ -377,6 +440,53 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+/// Annotate a row list with turn-boundary flags and in-flight markers. The
+/// in-flight spinner is reserved for the **most recent** row of each open
+/// turn — earlier rows keep their normal altitude glyph so the operator can
+/// read the chain.
+///
+/// `open_turns` is the set of turn_ids with a `turn.start` but no matching
+/// `turn.end` yet. `show_reasoning=false` hides rows whose headline carries
+/// the 💭 marker (`agent.reasoning` rows).
+///
+/// Returns the per-row `turn_boundaries` map (true → draw divider above the
+/// row) so the renderer can decorate the boundary.
+fn annotate_turns_and_in_flight(
+    rows: &mut [(RenderedRow, RowSource)],
+    open_turns: &HashSet<String>,
+    show_reasoning: bool,
+) -> HashMap<usize, bool> {
+    let mut last_turn: Option<String> = None;
+    let mut last_row_for_turn: HashMap<String, usize> = HashMap::new();
+    let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
+    for (i, (row, _)) in rows.iter().enumerate() {
+        if let RenderedRow::Line(spec) = row {
+            if let Some(t) = &spec.turn_id {
+                if open_turns.contains(t) {
+                    last_row_for_turn.insert(t.clone(), i);
+                }
+                if last_turn.as_ref() != Some(t) {
+                    turn_boundaries.insert(i, true);
+                }
+                last_turn = Some(t.clone());
+            }
+        }
+    }
+    for (i, (row, _)) in rows.iter_mut().enumerate() {
+        if let RenderedRow::Line(spec) = row {
+            if let Some(t) = &spec.turn_id {
+                if last_row_for_turn.get(t).copied() == Some(i) {
+                    spec.in_flight = true;
+                }
+            }
+            if !show_reasoning && spec.headline.contains('\u{1F4AD}') {
+                spec.show_reasoning = false;
+            }
+        }
+    }
+    turn_boundaries
 }
 
 /// The still-resolvable gate at the selection (a single, not-yet-resolved
@@ -527,6 +637,160 @@ fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
     }
 }
 
+/// Render a single rich `RowSpec` as a styled multi-line `ListItem`. Capped at
+/// `MAX_ROW_LINES` physical lines; longer content gets a `…` ellipsis on the
+/// last line. The actor rail on the left uses the actor's color, giving an
+/// at-a-glance map of "who said what."
+#[allow(clippy::too_many_arguments)]
+fn render_rich_row(
+    spec: &RowSpec,
+    row_index: usize,
+    turn_boundaries: &HashMap<usize, bool>,
+    content_w: usize,
+    glyph_w: usize,
+    rail_w: usize,
+    label_w: usize,
+    spinner_glyph: &'static str,
+    show_reasoning: bool,
+) -> ListItem<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if turn_boundaries.contains_key(&row_index) {
+        let bar = "─".repeat(content_w + glyph_w + label_w + rail_w + 2);
+        lines.push(Line::from(Span::styled(
+            bar,
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    let rail_style = Style::default().fg(actor_color(spec.actor));
+    let rail_block = "▌".repeat(rail_w);
+    let glyph = if spec.in_flight {
+        spinner_glyph
+    } else {
+        render::altitude_glyph(spec.altitude)
+    };
+    let label_text = format!(
+        "[{}]",
+        truncate(&spec.actor_label, label_w.saturating_sub(2))
+    );
+    let label_padded = format!("{label_text:>label_w$}");
+    let mut headline = spec.headline.clone();
+    if !show_reasoning && headline.starts_with('💭') {
+        if let Some(stripped) = headline.strip_prefix('💭') {
+            headline = stripped.trim_start().to_string();
+        }
+    }
+    let headline_capped = cap_to_width(&headline, content_w);
+    let head_style = altitude_style(spec.altitude).patch(rail_style);
+    lines.push(Line::from(vec![
+        Span::styled(rail_block, rail_style),
+        Span::raw(" "),
+        Span::styled(format!("{glyph:<2}"), head_style),
+        Span::styled(label_padded, Style::default().fg(actor_color(spec.actor))),
+        Span::raw(" "),
+        Span::styled(headline_capped, head_style),
+    ]));
+    if let Some(d) = &spec.detail {
+        if !d.is_empty() {
+            let prefix = "  ↳ ";
+            let avail = content_w.saturating_sub(prefix.chars().count());
+            let detail_capped = cap_to_width(d, avail);
+            let pad = " ".repeat(rail_w + glyph_w + label_w + 1);
+            lines.push(Line::from(vec![
+                Span::styled(pad, Style::default()),
+                Span::styled(
+                    format!("{prefix}{detail_capped}"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
+    let physical: Vec<Line<'static>> = lines
+        .iter()
+        .filter(|l| !is_divider_line(l))
+        .cloned()
+        .collect();
+    let mut out: Vec<Line<'static>> = lines
+        .iter()
+        .filter(|l| is_divider_line(l))
+        .cloned()
+        .collect();
+    if physical.len() > MAX_ROW_LINES {
+        let dropped = physical.len() - MAX_ROW_LINES;
+        let mut kept: Vec<Line<'static>> =
+            physical.into_iter().take(MAX_ROW_LINES).collect();
+        if let Some(last) = kept.last_mut() {
+            last.spans.push(Span::styled(
+                format!(" …(+{dropped})"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        out.extend(kept);
+    } else {
+        out.extend(physical);
+    }
+    ListItem::new(Text::from(out))
+}
+
+fn is_divider_line(line: &Line) -> bool {
+    line.spans.len() == 1
+        && line
+            .spans
+            .first()
+            .map(|s| s.content.starts_with('─'))
+            .unwrap_or(false)
+}
+
+fn render_collapsed_row(count: usize, summary: &str) -> ListItem<'static> {
+    let style = Style::default().fg(Color::DarkGray);
+    let text = format!(
+        "{} ⟨{} {}⟩",
+        render::altitude_glyph(Altitude::Detail),
+        count,
+        summary
+    );
+    ListItem::new(Line::from(Span::styled(text, style)))
+}
+
+/// Cap a string to `width` visible characters; append `…` if truncated. Counts
+/// Unicode chars, not bytes (so emoji don't blow the budget).
+fn cap_to_width(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(width - 1).collect();
+    format!("{truncated}…")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect()
+}
+
+/// Map an `ActorKind` to a stable color. The TUI's left rail uses this so the
+/// operator can scan the room and tell *who* is speaking at a glance.
+fn actor_color(actor: ActorKind) -> Color {
+    match actor {
+        ActorKind::Operator => Color::Cyan,
+        ActorKind::Planner => Color::Green,
+        ActorKind::Specialist => Color::LightGreen,
+        ActorKind::Sentinel => Color::Yellow,
+        ActorKind::Curator => Color::Magenta,
+        ActorKind::Auditor => Color::LightMagenta,
+        ActorKind::Tool => Color::DarkGray,
+        ActorKind::ExternalSurface => Color::Blue,
+        ActorKind::Runtime => Color::Red,
+        ActorKind::Other => Color::White,
+    }
+}
+
 fn cycle_floor(floor: Altitude) -> Altitude {
     match floor {
         Altitude::Detail => Altitude::Normal,
@@ -559,6 +823,9 @@ fn draw(
     compose: Option<&str>,
     status: Option<&str>,
     gate: Option<&GateRef>,
+    spinner_glyph: &'static str,
+    turn_boundaries: &HashMap<usize, bool>,
+    show_reasoning: bool,
 ) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -568,10 +835,11 @@ fn draw(
     .split(f.area());
 
     let header = format!(
-        " Session Room [{}] — {root}   floor: {}   squash: {}   {} rows{}{}",
+        " Session Room [{}] — {root}   floor: {}   squash: {}   reasoning: {}   {} rows{}{}",
         TuiChannel.kind(),
         floor.as_str(),
         if squash { "on" } else { "off" },
+        if show_reasoning { "on" } else { "off" },
         rows.len(),
         if follow { "   (following)" } else { "" },
         status.map(|s| format!("   {s}")).unwrap_or_default(),
@@ -594,11 +862,33 @@ fn draw(
         return;
     }
 
+    // The terminal width caps each line. Reserve 2 cells for the actor rail
+    // and 3 cells for the altitude glyph + space, leaving the rest for the
+    // label + headline + detail.
+    let width = chunks[1].width as usize;
+    let rail_w = 2usize;
+    let glyph_w = 3usize;
+    let label_w = 12usize.min(width / 4);
+    let content_w = width.saturating_sub(rail_w + glyph_w + label_w + 2);
+
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|row| {
-            let style = altitude_style(render::row_altitude(row));
-            ListItem::new(Line::from(Span::styled(render::row_text(row), style)))
+        .enumerate()
+        .map(|(i, row)| match row {
+            RenderedRow::Line(spec) => render_rich_row(
+                spec,
+                i,
+                turn_boundaries,
+                content_w,
+                glyph_w,
+                rail_w,
+                label_w,
+                spinner_glyph,
+                show_reasoning,
+            ),
+            RenderedRow::Collapsed { count, summary } => {
+                render_collapsed_row(*count, summary)
+            }
         })
         .collect();
 
@@ -649,7 +939,7 @@ fn draw(
         // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         Paragraph::new(format!(
-            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · i message · ⏎ detail{gate_hint}"
+            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · R reasoning · i message · ⏎ detail{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };
@@ -685,7 +975,16 @@ mod tests {
     #[test]
     fn selectable_gate_classifies_and_respects_resolved() {
         let single = (
-            RenderedRow::Line { text: "x".into(), altitude: Altitude::Attention },
+            RenderedRow::Line(render::RowSpec {
+                altitude: Altitude::Attention,
+                actor: render::ActorKind::Planner,
+                actor_label: "planner".into(),
+                headline: "x".into(),
+                detail: None,
+                turn_id: None,
+                in_flight: false,
+                show_reasoning: true,
+            }),
             RowSource::Single(0),
         );
         let empty = HashSet::new();
@@ -815,5 +1114,86 @@ mod tests {
             seq,
             vec![Altitude::Normal, Altitude::Attention, Altitude::Error, Altitude::Detail]
         );
+    }
+
+    fn spec_with_turn(turn: Option<&str>, headline: &str) -> (RenderedRow, RowSource) {
+        (
+            RenderedRow::Line(render::RowSpec {
+                altitude: Altitude::Normal,
+                actor: render::ActorKind::Planner,
+                actor_label: "planner".into(),
+                headline: headline.into(),
+                detail: None,
+                turn_id: turn.map(str::to_string),
+                in_flight: false,
+                show_reasoning: true,
+            }),
+            RowSource::Single(0),
+        )
+    }
+
+    #[test]
+    fn in_flight_marker_only_on_most_recent_row_of_open_turn() {
+        // 3 rows in turn-A, all un-closed. Only the LAST should get the
+        // spinner — earlier rows keep their normal altitude glyph.
+        let mut rows = vec![
+            spec_with_turn(Some("A"), "first"),
+            spec_with_turn(Some("A"), "second"),
+            spec_with_turn(Some("A"), "third"),
+        ];
+        let open: HashSet<String> = ["A".into()].into_iter().collect();
+        let boundaries = annotate_turns_and_in_flight(&mut rows, &open, true);
+        // Boundary only at the start of the turn (i=0).
+        assert!(boundaries.contains_key(&0));
+        assert!(!boundaries.contains_key(&1));
+        assert!(!boundaries.contains_key(&2));
+        // In-flight only on the most recent row.
+        let inflight: Vec<bool> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.in_flight,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(inflight, vec![false, false, true]);
+    }
+
+    #[test]
+    fn closed_turn_marks_no_rows_as_in_flight() {
+        // Turn B has turn.start and turn.end, so it's closed — no spinner.
+        let mut rows = vec![
+            spec_with_turn(Some("B"), "early"),
+            spec_with_turn(Some("B"), "late"),
+        ];
+        let open: HashSet<String> = HashSet::new();
+        annotate_turns_and_in_flight(&mut rows, &open, true);
+        let inflight: Vec<bool> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.in_flight,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(inflight, vec![false, false]);
+    }
+
+    #[test]
+    fn show_reasoning_off_hides_thought_bubble_rows() {
+        // agent.reasoning rows carry a 💭 in the headline; they get the
+        // show_reasoning=false flag when the toggle is off.
+        let mut rows = vec![
+            spec_with_turn(Some("A"), "tool edit"),
+            spec_with_turn(Some("A"), "\u{1F4AD} thinking out loud"),
+        ];
+        let open: HashSet<String> = ["A".into()].into_iter().collect();
+        annotate_turns_and_in_flight(&mut rows, &open, false);
+        let shown: Vec<bool> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.show_reasoning,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(shown, vec![true, false]);
     }
 }
