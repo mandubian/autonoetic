@@ -134,6 +134,7 @@ pub fn run(
     let mut input: Option<GateInput> = None; // in-flight gate decision
     let mut compose: Option<String> = None; // in-flight free-form message to the session
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
+    let mut session_pick_list: Option<Vec<String>> = None; // ids from /session list for number-pick
     let mut status: Option<String> = None; // last action / connection result
     // Gates no longer offerable: approvals resolved on the timeline, plus
     // anything the operator just acted on (covers interactions, which have no
@@ -316,7 +317,9 @@ pub fn run(
                                 }
                                 SlashCommand::SwitchSession(new_id) => {
                                     if new_id.is_empty() {
-                                        status = Some("✗ /session: missing id".to_string());
+                                        let (lines, ids) = list_sessions_detail(client, None);
+                                        detail = Some(lines);
+                                        session_pick_list = Some(ids);
                                     } else if new_id == *root_session_id {
                                         status = Some(format!("→ already viewing {new_id}"));
                                     } else {
@@ -339,7 +342,9 @@ pub fn run(
                                     }
                                 }
                                 SlashCommand::ListSessions { agent } => {
-                                    detail = Some(list_sessions_detail(client, agent.as_deref()));
+                                    let (lines, ids) = list_sessions_detail(client, agent.as_deref());
+                                    detail = Some(lines);
+                                    session_pick_list = Some(ids);
                                 }
                                 SlashCommand::ResumeSession { agent } => {
                                     if let Some(resolved_id) =
@@ -449,8 +454,41 @@ pub fn run(
                     KeyCode::Esc => {
                         if detail.is_some() {
                             detail = None;
+                            session_pick_list = None;
                         } else {
                             break;
+                        }
+                    }
+                    // Number pick from session list: when the detail pane is
+                    // showing a numbered session list, a digit 1-9 switches
+                    // to that session instantly.
+                    KeyCode::Char(c @ '1'..='9') => {
+                        if let Some(ref ids) = session_pick_list {
+                            let idx = (c as usize) - ('1' as usize);
+                            if let Some(picked_id) = ids.get(idx).cloned() {
+                                if picked_id != *root_session_id {
+                                    switch_session(
+                                        client,
+                                        &mut entries,
+                                        &mut cursor,
+                                        &mut selected,
+                                        &mut detail,
+                                        &mut follow,
+                                        &mut resolved,
+                                        &mut acted,
+                                        &mut floor,
+                                        root_session_id,
+                                        target_agent_id,
+                                        limit,
+                                        &picked_id,
+                                    );
+                                    status = Some(format!("→ switched to session {picked_id}"));
+                                } else {
+                                    status = Some(format!("→ already viewing {picked_id}"));
+                                }
+                                detail = None;
+                                session_pick_list = None;
+                            }
                         }
                     }
                     // y/n: approve/reject the selected pending approval.
@@ -979,12 +1017,14 @@ fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<St
         .map(|e| e.root_session_id)
 }
 
-/// Build a multi-line session list for `/session list [agent]`, returned as
-/// `detail` lines so the operator can see the full list in the middle pane.
-fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> Vec<String> {
+/// Build a multi-line session list for `/session` and `/session list [agent]`,
+/// returned as (display lines, pickable session ids). Rows are numbered [1]-[9]
+/// so the operator can switch by pressing a single digit while the detail pane
+/// is open.
+fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> (Vec<String>, Vec<String>) {
     let params = serde_json::json!({
         "agent_id": agent,
-        "limit": 10,
+        "limit": 9,
     });
     match rpc(client, "session.list", params) {
         Ok(value) => match serde_json::from_value::<
@@ -995,7 +1035,10 @@ fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> Vec<String>
                 let hint = agent
                     .map(|a| format!(" for agent '{a}'"))
                     .unwrap_or_default();
-                vec![format!("(no sessions{hint}) — /session <id> or start one with `autonoetic run`")]
+                (
+                    vec![format!("(no sessions{hint}) — /session <id> or start one with `autonoetic run`")],
+                    Vec::new(),
+                )
             }
             Ok(parsed) => {
                 let mut lines = if let Some(a) = agent {
@@ -1003,18 +1046,32 @@ fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> Vec<String>
                 } else {
                     vec!["recent sessions:".to_string()]
                 };
-                for s in parsed.sessions.iter().take(5) {
-                    lines.push(format!("  {} [{}] @ {}", s.root_session_id, s.agent_id, s.last_active_at));
+                let ids: Vec<String> = parsed
+                    .sessions
+                    .iter()
+                    .map(|s| s.root_session_id.clone())
+                    .collect();
+                for (i, s) in parsed.sessions.iter().enumerate() {
+                    lines.push(format!(
+                        "  [{}] {} [{}] @ {}",
+                        i + 1,
+                        s.root_session_id,
+                        s.agent_id,
+                        s.last_active_at
+                    ));
                 }
-                if parsed.sessions.len() > 5 {
-                    lines.push(format!("  …(+{} more)", parsed.sessions.len() - 5));
-                }
-                lines.push("→ type /session <id> to switch".to_string());
-                lines
+                lines.push("→ press a number to switch, or /session <id>".to_string());
+                (lines, ids)
             }
-            Err(e) => vec![format!("✗ malformed session.list response: {e}")],
+            Err(e) => (
+                vec![format!("✗ malformed session.list response: {e}")],
+                Vec::new(),
+            ),
         },
-        Err(e) => vec![format!("✗ session.list failed: {e}")],
+        Err(e) => (
+            vec![format!("✗ session.list failed: {e}")],
+            Vec::new(),
+        ),
     }
 }
 

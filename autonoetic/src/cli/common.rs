@@ -321,6 +321,11 @@ pub struct RunArgs {
     /// Enables PlanFrame, workbench projection, reconciliation, and the /return handoff.
     #[arg(short, long)]
     pub collaborative: bool,
+    /// Launch the Session Room TUI instead of the chat interface. The room shows
+    /// the canonical timeline, lets you resolve gates, and send messages to the
+    /// agent — all in a scrollable, live-tailing view.
+    #[arg(long)]
+    pub room: bool,
 }
 
 // ---------------------------------------------------------------------------

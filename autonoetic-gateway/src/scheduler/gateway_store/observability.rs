@@ -1330,24 +1330,26 @@ impl GatewayStore {
         limit: i64,
         agent_id: Option<&str>,
     ) -> Result<Vec<(String, String, String)>> {
+        // Query live_digest_events (the canonical timeline) grouped by
+        // root_session_id so only root sessions appear — child sessions are
+        // excluded because they share the same root_session_id.
         // When `agent_id` is provided, push the filter into SQL so the LIMIT
-        // applies *after* filtering — otherwise `--resume --agent` could miss
-        // a session for that agent that just isn't in the global top-N.
+        // applies *after* filtering.
         let conn = self.conn.lock().unwrap();
         let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match agent_id {
             Some(_) => (
-                "SELECT session_id, agent_id, MAX(timestamp) as last_ts
-                 FROM causal_events
-                 WHERE agent_id = ?2
-                 GROUP BY session_id
+                "SELECT root_session_id, source_agent_id, MAX(created_at) as last_ts
+                 FROM live_digest_events
+                 WHERE source_agent_id = ?2
+                 GROUP BY root_session_id
                  ORDER BY last_ts DESC
                  LIMIT ?1",
                 vec![Box::new(limit), Box::new(agent_id.unwrap().to_string())],
             ),
             None => (
-                "SELECT session_id, agent_id, MAX(timestamp) as last_ts
-                 FROM causal_events
-                 GROUP BY session_id
+                "SELECT root_session_id, source_agent_id, MAX(created_at) as last_ts
+                 FROM live_digest_events
+                 GROUP BY root_session_id
                  ORDER BY last_ts DESC
                  LIMIT ?1",
                 vec![Box::new(limit)],

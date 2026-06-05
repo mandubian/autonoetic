@@ -309,6 +309,109 @@ fn summarize_self_describe(parsed: Option<&Value>) -> String {
     )
 }
 
+fn capability_label(cap: &Value) -> String {
+    if let Some(s) = cap.as_str() {
+        return s.to_string();
+    }
+    if let Some(obj) = cap.as_object() {
+        if obj.len() == 1 {
+            if let Some(key) = obj.keys().next() {
+                return key.clone();
+            }
+        }
+    }
+    cap.to_string()
+}
+
+/// Human-readable expansion of a `self_describe` tool result for chat display.
+pub fn format_self_describe_for_chat(v: &Value) -> String {
+    let agent_id = v
+        .get("identity")
+        .and_then(|i| i.get("agent_id"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("unknown");
+    let name = v
+        .get("identity")
+        .and_then(|i| i.get("name"))
+        .and_then(|x| x.as_str())
+        .unwrap_or(agent_id);
+    let caps: Vec<String> = v
+        .get("may_do")
+        .and_then(|m| m.get("capabilities"))
+        .and_then(|c| c.as_array())
+        .map(|arr| arr.iter().map(capability_label).collect())
+        .unwrap_or_default();
+    let tiers: Vec<String> = v
+        .get("may_do")
+        .and_then(|m| m.get("allowed_tool_tiers"))
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let rights: Vec<String> = v
+        .get("guaranteed")
+        .and_then(|g| g.get("rights"))
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.get("id").and_then(|x| x.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let paths: Vec<String> = v
+        .get("evolution")
+        .and_then(|e| e.get("paths"))
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut out = format!("**{name}** (`{agent_id}`)\n");
+    if !caps.is_empty() {
+        out.push_str("\n**Capabilities:**\n");
+        for cap in &caps {
+            out.push_str(&format!("- {cap}\n"));
+        }
+    }
+    if !tiers.is_empty() {
+        out.push_str(&format!(
+            "\n**Tool tiers:** {} (tools are grouped by tier in the gateway registry)\n",
+            tiers.join(", ")
+        ));
+    }
+    if !rights.is_empty() {
+        out.push_str(&format!(
+            "\n**Rights:** {} constitutional guarantees",
+            rights.len()
+        ));
+        if rights.len() <= 6 {
+            out.push_str(&format!(" ({})", rights.join(", ")));
+        }
+        out.push('\n');
+    }
+    if !paths.is_empty() {
+        out.push_str("\n**Evolution paths:**\n");
+        for path in paths.iter().take(3) {
+            out.push_str(&format!("- {path}\n"));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+pub fn parse_and_format_self_describe_json(raw: &str) -> Option<String> {
+    let v = serde_json::from_str::<Value>(raw).ok()?;
+    if !looks_like_self_describe_json(&v) {
+        return None;
+    }
+    Some(format_self_describe_for_chat(&v))
+}
+
 fn looks_like_self_describe_json(v: &Value) -> bool {
     v.get("evolution").is_some()
         && (v.get("identity").is_some()
@@ -608,5 +711,17 @@ mod tests {
         let raw = r#"{"ok":true,"identity":{"name":"Planner"},"may_do":{"capabilities":[{},{}],"allowed_tool_tiers":["Core"]},"guaranteed":{"rights":[{}]},"evolution":{}}"#;
         let shown = display_operator_activity_summary(None, raw);
         assert_eq!(shown, "introspected Planner — 2 capabilities, 1 rights, 1 tool tiers");
+    }
+
+    #[test]
+    fn format_self_describe_for_chat_lists_capabilities_and_tiers() {
+        let raw = r#"{"ok":true,"identity":{"agent_id":"planner.collaborative","name":"Collaborative Planner"},"may_do":{"capabilities":[{"AgentSpawn":{"max_children":3,"max_spawn_depth":2}},{"ReadAccess":{"scopes":["*"]}}],"allowed_tool_tiers":["Core","Standard"]},"guaranteed":{"rights":[{"id":"Ri-0.1"}]},"evolution":{"paths":["skill promotion"]}}"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        let text = format_self_describe_for_chat(&v);
+        assert!(text.contains("Collaborative Planner"));
+        assert!(text.contains("AgentSpawn"));
+        assert!(text.contains("ReadAccess"));
+        assert!(text.contains("Core, Standard"));
+        assert!(text.contains("skill promotion"));
     }
 }

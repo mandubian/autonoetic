@@ -3350,28 +3350,169 @@ fn loose_field_from_reply(
         .or_else(|| extract_json_string_field_loose(reply, field))
 }
 
+fn extract_json_value_loose(text: &str, field: &str) -> Option<serde_json::Value> {
+    let needle = format!(r#""{field}""#);
+    let field_pos = text.find(&needle)?;
+    let rest = text[field_pos + needle.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let start = rest.find('{').or_else(|| rest.find('['))?;
+    let slice = &rest[start..];
+    let end = if slice.starts_with('{') {
+        json_object_end(slice, 0)?
+    } else {
+        json_array_end(slice)?
+    };
+    serde_json::from_str(&slice[..=end]).ok()
+}
+
+fn json_array_end(text: &str) -> Option<usize> {
+    let mut depth = 0;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn summary_is_meta_only(summary: &str) -> bool {
+    let t = summary.trim();
+    if t.contains('\n') && t.lines().count() > 2 {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    lower.starts_with("provided a ")
+        || lower.starts_with("provided an ")
+        || lower.starts_with("summarized my ")
+        || lower.starts_with("summarized the ")
+        || lower.starts_with("described my ")
+        || lower.starts_with("described the ")
+        || lower.starts_with("gave a ")
+        || lower.starts_with("gave an ")
+        || lower.starts_with("shared a ")
+        || lower.starts_with("shared an ")
+        || lower.starts_with("returned a ")
+        || lower.starts_with("returned an ")
+        || lower.starts_with("outlined my ")
+        || lower.starts_with("outlined the ")
+        || lower.contains(" summary of ")
+        || lower.contains(" overview of ")
+        || lower.contains("capabilities and tool")
+}
+
+fn format_non_meta_reply_fields(source: &serde_json::Value) -> Option<String> {
+    const SKIP: &[&str] = &["status", "summary", "intent", "goal_status", "error", "plan_id"];
+    let obj = source.as_object()?;
+    let parts: Vec<String> = obj
+        .iter()
+        .filter(|(k, v)| !SKIP.contains(&k.as_str()) && !v.is_null())
+        .map(|(_, v)| format_json_value_as_text(v))
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+fn resolve_result_display(reply: &str, source: &Option<serde_json::Value>) -> Option<String> {
+    source
+        .as_ref()
+        .and_then(|v| v.get("result"))
+        .filter(|v| !v.is_null())
+        .map(format_json_value_as_text)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            extract_json_value_loose(reply, "result")
+                .map(|v| format_json_value_as_text(&v))
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| source.as_ref().and_then(format_non_meta_reply_fields))
+}
+
+fn enrich_assistant_display_from_self_describe(
+    display: &str,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    session_id: &str,
+) -> String {
+    if !summary_is_meta_only(display) || display.lines().count() > 1 {
+        return display.to_string();
+    }
+    let Ok(traces) = store.search_execution_traces(
+        Some("self_describe"),
+        Some(true),
+        None,
+        None,
+        None,
+        Some(session_id),
+        1,
+    ) else {
+        return display.to_string();
+    };
+    let Some(trace) = traces.first() else {
+        return display.to_string();
+    };
+    let Some(raw) = trace.result.as_deref() else {
+        return display.to_string();
+    };
+    autonoetic_gateway::runtime::operator_activity::parse_and_format_self_describe_json(raw)
+        .unwrap_or_else(|| display.to_string())
+}
+
+fn finalize_assistant_display(
+    display: String,
+    store: Option<&autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
+) -> String {
+    let Some(store) = store else {
+        return display;
+    };
+    enrich_assistant_display_from_self_describe(&display, store, session_id)
+}
+
 fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
     let (source, is_fenced) = parse_assistant_reply_json(reply);
 
     let summary = loose_field_from_reply(reply, "summary", &source);
-    let result_str = source
-        .as_ref()
-        .and_then(|v| v.get("result").map(|r| format_json_value_as_text(r)));
+    let result_str = resolve_result_display(reply, &source);
 
     let display = match (summary.as_deref(), result_str.as_deref()) {
         (Some(s), Some(r)) if is_fenced => {
             let prose = strip_prose_around_json(reply);
+            let lead = if summary_is_meta_only(s) { None } else { Some(s) };
             if prose.is_empty() || prose_is_json_fragment(&prose) {
-                format!("{}\n\n{}", s, r)
+                match lead {
+                    Some(s) => format!("{}\n\n{}", s, r),
+                    None => r.to_string(),
+                }
             } else {
-                format!("{}\n\n{}\n\n{}", prose, s, r)
+                match lead {
+                    Some(s) => format!("{}\n\n{}\n\n{}", prose, s, r),
+                    None => format!("{}\n\n{}", prose, r),
+                }
             }
         }
-        (Some(s), Some(r)) => format!("{}\n\n{}", s, r),
+        (Some(s), Some(r)) => {
+            if summary_is_meta_only(s) {
+                r.to_string()
+            } else {
+                format!("{}\n\n{}", s, r)
+            }
+        }
         (Some(s), None) if is_fenced => {
             let prose = strip_prose_around_json(reply);
             if prose.is_empty() || prose_is_json_fragment(&prose) {
                 s.to_string()
+            } else if summary_is_meta_only(s) {
+                prose
             } else {
                 format!("{}\n\n{}", prose, s)
             }
@@ -3380,7 +3521,11 @@ fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
         (None, Some(r)) => r.to_string(),
         (None, None) => {
             if let Some(s) = extract_json_string_field_loose(reply, "summary") {
-                s
+                if summary_is_meta_only(&s) {
+                    resolve_result_display(reply, &source).unwrap_or(s)
+                } else {
+                    s
+                }
             } else if let Some(err) = extract_json_string_field_loose(reply, "error") {
                 err
             } else if let Some(v) = source.as_ref().filter(|v| v.is_object() || v.is_array()) {
@@ -6325,7 +6470,12 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 app.remove_pending(done_pending_id);
                 if let Some(reply) = assistant_reply {
                     let formatted = format_assistant_reply(&reply);
-                    app.add_message(MessageRole::Assistant, formatted.display);
+                    let display = finalize_assistant_display(
+                        formatted.display,
+                        gateway_store,
+                        &app.session_id,
+                    );
+                    app.add_message(MessageRole::Assistant, display);
                 } else if let Some(err) = error_msg {
                     app.add_message(
                         MessageRole::System,
@@ -6378,12 +6528,17 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         if status == "completed" {
                                             if let Some(r) = reply.filter(|s| !s.trim().is_empty()) {
                                                 let formatted = format_assistant_reply(r);
+                                                let display = finalize_assistant_display(
+                                                    formatted.display.clone(),
+                                                    gateway_store,
+                                                    &app.session_id,
+                                                );
                                                 let is_duplicate = app.messages.iter().rev().take(5).any(|m| {
-                                                    matches!(m.role, MessageRole::Assistant) && m.content == formatted.display
+                                                    matches!(m.role, MessageRole::Assistant) && m.content == display
                                                 });
                                                 if !is_duplicate {
                                                     display_assistant_metadata(app, &formatted, None);
-                                                    app.add_message(MessageRole::Assistant, formatted.display);
+                                                    app.add_message(MessageRole::Assistant, display);
                                                 }
                                             }
                                             if let Some(note) = workflow_note.filter(|s| !s.trim().is_empty()) {
@@ -6513,7 +6668,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         .and_then(|a| a.as_array())
                                         .map(|a| a.len());
                                     display_assistant_metadata(app, &formatted, artifact_count);
-                                    let reply_text = formatted.display;
+                                    let reply_text = finalize_assistant_display(
+                                        formatted.display,
+                                        gateway_store,
+                                        &app.session_id,
+                                    );
                                     let workflow_note = result_json
                                         .and_then(|v| {
                                             v.get("workflow_note")
@@ -9747,5 +9906,14 @@ mod tests {
             formatted.display,
             super::UNPARSEABLE_ASSISTANT_REPLY
         );
+    }
+
+    #[test]
+    fn format_assistant_reply_meta_summary_defers_to_result() {
+        let reply = r#"{"status":"ok","summary":"Provided a categorized summary of tools.","result":{"categories":["planning","delegation"]}}"#;
+        let formatted = super::format_assistant_reply(reply);
+        assert!(!formatted.display.contains("Provided a categorized"));
+        assert!(formatted.display.contains("planning"));
+        assert!(formatted.display.contains("delegation"));
     }
 }

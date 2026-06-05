@@ -677,7 +677,7 @@ impl SessionTracer {
             self.append_live_digest_event(
                 "agent.message",
                 Some(serde_json::json!({
-                    "message": cap_chars(&redact_text_for_logs(message), 2000),
+                    "message": cap_chars(&autonoetic_types::redaction::redact_embedded_secrets(message), 2000),
                 })),
             );
         }
@@ -687,7 +687,7 @@ impl SessionTracer {
                 self.append_live_digest_event(
                     "agent.reasoning",
                     Some(serde_json::json!({
-                        "reasoning": cap_chars(&redact_text_for_logs(rc), 2000),
+                        "reasoning": cap_chars(&autonoetic_types::redaction::redact_embedded_secrets(rc), 2000),
                     })),
                 );
             }

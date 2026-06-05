@@ -328,11 +328,15 @@ pub async fn handle_run(
         args.agent_id.clone()
     };
 
+    let session_id = args.session_id.clone().unwrap_or_else(|| {
+        format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8])
+    });
+
     let chat_args = super::common::ChatArgs {
-        agent_id: resolved_agent_id,
+        agent_id: resolved_agent_id.clone(),
         sender_id: None,
         channel_id: None,
-        session_id: args.session_id.clone(),
+        session_id: Some(session_id.clone()),
         resume: args.resume,
         test_mode: false,
     };
@@ -368,6 +372,32 @@ pub async fn handle_run(
         "  Tracing output: {0} — run `tail -f {0}/*.log` in another terminal for live gateway logs.",
         log_dir.display()
     );
+
+    if args.room {
+        let resolved_target = resolved_agent_id.as_deref().unwrap_or("planner.default");
+        let room_args = super::common::RoomArgs {
+            root_session_id: Some(session_id),
+            min_altitude: "normal".to_string(),
+            resume: false,
+            agent: Some(resolved_target.to_string()),
+            follow: true,
+            tui: true,
+            limit: 200,
+        };
+
+        eprintln!("  Session Room: {} (agent: {})", room_args.root_session_id.as_deref().unwrap_or("?"), resolved_target);
+        eprintln!("  Press 'i' to send a message. Press '/' for slash commands. Press 'q' to quit.");
+
+        let result = super::room::handle_room_with_target(
+            &config_path,
+            &room_args,
+            Some(resolved_target.to_string()),
+        )
+        .await;
+
+        gateway_handle.abort();
+        return result;
+    }
 
     let result = super::chat::handle_chat(&config_path, &chat_args).await;
 
