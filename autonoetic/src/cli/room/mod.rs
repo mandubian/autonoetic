@@ -11,6 +11,7 @@ mod client;
 mod markdown;
 mod render;
 mod slash;
+mod test_scenarios;
 mod tui;
 
 use crate::cli::common::RoomArgs;

@@ -31,12 +31,59 @@ pub enum SlashCommand {
     Quit,
     /// Show the help text.
     Help,
+    /// Run a test scenario to inject synthetic events (`/test <name>`).
+    Test { name: String },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
-/// One-line help shown by `/help` and at the bottom of the prompt while typing.
-pub const HELP_TEXT: &str = "/session <id> · /session list [agent] · /session resume [agent] · /quit · /help";
+/// One-line hint while typing a slash command (full guide: `/help`).
+pub const HELP_TEXT: &str = "/help for commands · /session · /test · /quit";
+
+/// Full Session Room TUI reference — shown in the detail pane by `/help`.
+pub fn help_lines() -> Vec<String> {
+    vec![
+        "Session Room — commands & keys".to_string(),
+        String::new(),
+        "Navigation".to_string(),
+        "  j / ↓        scroll down".to_string(),
+        "  k / ↑        scroll up".to_string(),
+        "  g / Home     jump to oldest row".to_string(),
+        "  G / End      jump to newest row".to_string(),
+        "  f / Space    toggle follow (pin to newest)".to_string(),
+        "  Enter        event detail · or answer pending question".to_string(),
+        "  Esc          close detail pane · quit from sub-modes".to_string(),
+        "  h / l        horizontal scroll in detail pane".to_string(),
+        String::new(),
+        "View".to_string(),
+        "  a            cycle altitude floor (detail → normal → attention → error)".to_string(),
+        "  s            toggle squash (fold routine detail events)".to_string(),
+        "  R            toggle 💭 reasoning prefix on agent rows".to_string(),
+        String::new(),
+        "Gates".to_string(),
+        "  y / n        approve / reject selected pending approval".to_string(),
+        "  Enter/i/r    answer a pending user.ask (any row; newest ask wins)".to_string(),
+        "  1–9          pick a numbered option while answering".to_string(),
+        String::new(),
+        "Messaging".to_string(),
+        "  i            compose operator message (multi-line editor)".to_string(),
+        "               Enter send · Shift+Enter newline".to_string(),
+        "               ←→↑↓ edit · Ctrl+V paste · Ctrl+C copy".to_string(),
+        String::new(),
+        "Slash commands  (press / then type, Enter to run)".to_string(),
+        "  /help  /?    this guide".to_string(),
+        "  /quit  /q    exit the room".to_string(),
+        "  /session <id>           switch to a root session".to_string(),
+        "  /session list [agent]   list recent sessions (1–9 to pick)".to_string(),
+        "  /session resume [agent] jump to most recent session".to_string(),
+        "  /test <scenario>        inject synthetic events (dev)".to_string(),
+        "  /test help              list test scenarios".to_string(),
+        String::new(),
+        "  q / Ctrl+C   quit".to_string(),
+        String::new(),
+        "Press Esc to close this pane.".to_string(),
+    ]
+}
 
 /// Parse a slash command from the user's buffer (without the leading `/`).
 /// Trims surrounding whitespace; the leading `/` is expected to have been
@@ -57,6 +104,10 @@ pub fn parse(input: &str) -> SlashCommand {
     let tail = parts.next().unwrap_or("").trim();
     match head.as_str() {
         "session" => parse_session(tail),
+        "test" => {
+            let name = tail.trim().to_string();
+            SlashCommand::Test { name }
+        }
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         other => SlashCommand::Unknown(other.to_string()),
@@ -128,6 +179,15 @@ mod tests {
     fn parse_help_variants() {
         assert_eq!(parse("/help"), SlashCommand::Help);
         assert_eq!(parse("/?"), SlashCommand::Help);
+    }
+
+    #[test]
+    fn help_lines_covers_slash_commands_and_navigation() {
+        let text = help_lines().join("\n");
+        assert!(text.contains("/session list"));
+        assert!(text.contains("user.ask"));
+        assert!(text.contains("i            compose"));
+        assert!(text.contains("j / ↓"));
     }
 
     #[test]
@@ -220,6 +280,34 @@ mod tests {
         assert_eq!(
             parse("/session foo bar"),
             SlashCommand::SwitchSession("foo bar".into())
+        );
+    }
+
+    #[test]
+    fn parse_test_variants() {
+        assert_eq!(
+            parse("/test user-ask"),
+            SlashCommand::Test {
+                name: "user-ask".into()
+            }
+        );
+        assert_eq!(
+            parse("/test full-session"),
+            SlashCommand::Test {
+                name: "full-session".into()
+            }
+        );
+        assert_eq!(
+            parse("/test help"),
+            SlashCommand::Test {
+                name: "help".into()
+            }
+        );
+        assert_eq!(
+            parse("/test"),
+            SlashCommand::Test {
+                name: String::new()
+            }
         );
     }
 }

@@ -5,19 +5,30 @@ use ratatui::text::{Line, Span};
 /// Detect whether a string looks like it contains markdown formatting
 /// (headers, bold, italic, code fences, lists, links).
 pub fn looks_like_markdown(s: &str) -> bool {
-    for line in s.lines().take(10) {
+    for line in s.lines().take(20) {
         let trimmed = line.trim();
         if trimmed.starts_with("# ")
             || trimmed.starts_with("## ")
             || trimmed.starts_with("### ")
+            || trimmed.starts_with("#### ")
             || trimmed.starts_with("- ")
             || trimmed.starts_with("* ")
             || trimmed.starts_with("> ")
             || trimmed.starts_with("```")
             || trimmed.contains("**")
-            || trimmed.contains("`")
+            || trimmed.contains('`')
             || trimmed.starts_with(|c: char| c.is_ascii_digit())
                 && trimmed.contains(". ")
+        {
+            return true;
+        }
+        // Short section labels: "What it does:" / "**Input:**"
+        if trimmed.len() <= 64
+            && trimmed.ends_with(':')
+            && trimmed
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase() || c == '*')
         {
             return true;
         }
@@ -43,6 +54,33 @@ pub fn strip_markdown(input: &str) -> String {
     // Collapse whitespace
     let collapsed: String = out.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed
+}
+
+/// Promote plain section labels (`What it does:`) to markdown headings when the
+/// body has no `#` headers yet — common in operator-facing planner summaries.
+pub(crate) fn normalize_prose_sections(input: &str) -> String {
+    if input.contains("\n# ") || input.contains("\n## ") || input.starts_with('#') {
+        return input.to_string();
+    }
+    input
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                String::new()
+            } else if trimmed.len() <= 64
+                && trimmed.ends_with(':')
+                && !trimmed.starts_with('-')
+                && !trimmed.starts_with('*')
+                && trimmed.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            {
+                format!("### {}", trimmed.trim_end_matches(':'))
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Render markdown input into styled ratatui `Line`s for the detail pane.
@@ -164,5 +202,31 @@ fn compute_style(heading: u8, bold: bool, italic: bool, code_block: bool) -> Sty
 fn flush_line(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
     if !spans.is_empty() {
         lines.push(Line::from(spans.drain(..).collect::<Vec<_>>()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_markdown_preserves_heading_and_list_structure() {
+        let md = "## What it does\n\nA stateless script.\n\n- input: JSON\n- output: JSON";
+        let lines = render_markdown(md);
+        let text = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("What it does"));
+        assert!(text.contains("stateless"));
+        assert!(text.contains("input"));
+    }
+
+    #[test]
+    fn normalize_prose_sections_promotes_labels_to_headings() {
+        let out = normalize_prose_sections("What it does:\n\nSome prose.\n\nHow it works:\n\nDetails.");
+        assert!(out.contains("### What it does"));
+        assert!(out.contains("### How it works"));
     }
 }

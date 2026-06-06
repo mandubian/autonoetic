@@ -88,7 +88,7 @@ impl Channel for TuiChannel {
     fn gate_prompt(&self, gate: &GateRef) -> String {
         match gate.kind {
             GateKind::Approval => " · ⚠ APPROVAL PENDING — y/n".into(),
-            GateKind::Interaction => " · ⚠ QUESTION PENDING — i/r to answer".into(),
+            GateKind::Interaction => " · ⚠ QUESTION PENDING — Enter/i/r to answer".into(),
         }
     }
 }
@@ -105,6 +105,7 @@ mod tests {
         assert_eq!(TuiChannel.kind(), "tui");
         assert!(TuiChannel.gate_prompt(&appr).contains("APPROVAL"));
         assert!(TuiChannel.gate_prompt(&ask).contains("QUESTION"));
+        assert!(TuiChannel.gate_prompt(&ask).contains("Enter"));
 
         assert_eq!(CliChannel.kind(), "cli");
         // The viewer can't resolve; it points at the interactive shell.

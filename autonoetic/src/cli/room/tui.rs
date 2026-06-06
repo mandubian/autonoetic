@@ -34,6 +34,232 @@ const MAX_ROW_LINES: usize = 8;
 /// Agent/operator narrative rows may wrap across more lines before folding.
 const MAX_NARRATIVE_ROW_LINES: usize = 24;
 
+/// Expanded footer height while composing a multi-line message.
+const COMPOSE_PANEL_HEIGHT: u16 = 7;
+
+/// Rows visible in the main timeline list for the current terminal height.
+fn main_list_page_step(terminal_height: u16, compose_open: bool) -> usize {
+    let chrome = 2u16 + if compose_open { COMPOSE_PANEL_HEIGHT } else { 0 };
+    terminal_height.saturating_sub(chrome).max(1) as usize
+}
+
+/// Lines visible in the detail pane for the current terminal height.
+fn detail_page_step(terminal_height: u16) -> u16 {
+    // header(1) + footer(1) + detail block borders(2)
+    terminal_height.saturating_sub(4).max(1)
+}
+
+/// Multi-line message editor for compose mode (`i`).
+struct ComposeInput {
+    buffer: String,
+    cursor_pos: usize,
+}
+
+impl ComposeInput {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor_pos: 0,
+        }
+    }
+
+    fn insert_char(&mut self, c: char) {
+        self.buffer.insert(self.cursor_pos, c);
+        self.cursor_pos += c.len_utf8();
+    }
+
+    fn insert_str(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '\r' {
+                continue;
+            }
+            self.insert_char(c);
+        }
+    }
+
+    fn delete_before(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let prev = self.buffer[..self.cursor_pos].chars().last().unwrap();
+        let len = prev.len_utf8();
+        self.cursor_pos -= len;
+        self.buffer.remove(self.cursor_pos);
+    }
+
+    fn delete_after(&mut self) {
+        if self.cursor_pos < self.buffer.len() {
+            self.buffer.remove(self.cursor_pos);
+        }
+    }
+
+    fn cursor_left(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let prev = self.buffer[..self.cursor_pos].chars().last().unwrap();
+        self.cursor_pos -= prev.len_utf8();
+    }
+
+    fn cursor_right(&mut self) {
+        if self.cursor_pos >= self.buffer.len() {
+            return;
+        }
+        let next = self.buffer[self.cursor_pos..].chars().next().unwrap();
+        self.cursor_pos += next.len_utf8();
+    }
+
+    fn cursor_up(&mut self) {
+        let (line, col) = self.line_col();
+        if line > 0 {
+            self.cursor_pos = self.pos_at_line_col(line - 1, col);
+        }
+    }
+
+    fn cursor_down(&mut self) {
+        let (line, col) = self.line_col();
+        if line + 1 < self.line_count() {
+            self.cursor_pos = self.pos_at_line_col(line + 1, col);
+        }
+    }
+
+    fn home(&mut self) {
+        let (line, _) = self.line_col();
+        self.cursor_pos = self.pos_at_line_col(line, 0);
+    }
+
+    fn end(&mut self) {
+        let (line, _) = self.line_col();
+        self.cursor_pos = self.pos_at_line_col(line, usize::MAX);
+    }
+
+    fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    fn line_starts(&self) -> Vec<usize> {
+        let mut starts = vec![0];
+        for (i, b) in self.buffer.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(i + 1);
+            }
+        }
+        starts
+    }
+
+    fn line_count(&self) -> usize {
+        self.line_starts().len()
+    }
+
+    fn line_col(&self) -> (usize, usize) {
+        let starts = self.line_starts();
+        let line = starts
+            .iter()
+            .rposition(|&s| s <= self.cursor_pos)
+            .unwrap_or(0);
+        let col = self.cursor_pos.saturating_sub(starts[line]);
+        (line, col)
+    }
+
+    fn pos_at_line_col(&self, line: usize, col: usize) -> usize {
+        let starts = self.line_starts();
+        let line_start = *starts.get(line).unwrap_or_else(|| starts.last().unwrap_or(&0));
+        let line_end = starts
+            .get(line + 1)
+            .map(|s| s.saturating_sub(1))
+            .unwrap_or(self.buffer.len());
+        let line_len = line_end.saturating_sub(line_start);
+        line_start + col.min(line_len)
+    }
+}
+
+enum ComposeKeyResult {
+    Continue,
+    Send(String),
+    Cancel,
+}
+
+fn handle_compose_key(
+    compose: &mut ComposeInput,
+    key: &event::KeyEvent,
+    clipboard: &mut Option<arboard::Clipboard>,
+) -> ComposeKeyResult {
+    match key.code {
+        KeyCode::Esc => ComposeKeyResult::Cancel,
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            compose.insert_newline();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Enter => {
+            let text = compose.buffer.trim().to_string();
+            if text.is_empty() {
+                ComposeKeyResult::Cancel
+            } else {
+                ComposeKeyResult::Send(text)
+            }
+        }
+        KeyCode::Backspace => {
+            compose.delete_before();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Delete => {
+            compose.delete_after();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Left => {
+            compose.cursor_left();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Right => {
+            compose.cursor_right();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Up => {
+            compose.cursor_up();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Down => {
+            compose.cursor_down();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Home => {
+            compose.home();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::End => {
+            compose.end();
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            paste_clipboard(compose, clipboard);
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            copy_clipboard(compose, clipboard);
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            compose.insert_char(c);
+            ComposeKeyResult::Continue
+        }
+        _ => ComposeKeyResult::Continue,
+    }
+}
+
+fn paste_clipboard(compose: &mut ComposeInput, clipboard: &mut Option<arboard::Clipboard>) {
+    let text = clipboard
+        .as_mut()
+        .and_then(|cb| cb.get_text().ok())
+        .unwrap_or_default();
+    compose.insert_str(&text);
+}
+
+fn copy_clipboard(compose: &ComposeInput, clipboard: &mut Option<arboard::Clipboard>) {
+    if let Some(cb) = clipboard.as_mut() {
+        let _ = cb.set_text(&compose.buffer);
+    }
+}
+
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
 /// and `GateAction` are the channel-neutral primitives, shared from
@@ -70,7 +296,9 @@ fn render_detail_lines(raw: &[String]) -> Vec<Line<'static>> {
             if indent <= 4 && (trimmed.starts_with('}') || trimmed.starts_with(',') || trimmed.is_empty()) {
                 // Flush markdown buffer
                 let md_text = md_buf.join("\n");
-                out.extend(markdown::render_markdown(&md_text));
+                out.extend(markdown::render_markdown(
+                    &markdown::normalize_prose_sections(&md_text),
+                ));
                 in_markdown_block = false;
                 md_buf.clear();
                 out.push(Line::from(line.clone()));
@@ -101,7 +329,9 @@ fn render_detail_lines(raw: &[String]) -> Vec<Line<'static>> {
 
     if in_markdown_block && !md_buf.is_empty() {
         let md_text = md_buf.join("\n");
-        out.extend(markdown::render_markdown(&md_text));
+        out.extend(markdown::render_markdown(
+            &markdown::normalize_prose_sections(&md_text),
+        ));
     }
 
     out
@@ -111,17 +341,112 @@ fn render_detail_lines(raw: &[String]) -> Vec<Line<'static>> {
 /// settings in [`draw`] or vertical scroll will drift from the true end.
 fn detail_wrap_line_count(lines: &[Line<'static>], wrap_width: u16) -> usize {
     Paragraph::new(lines.to_vec())
-        .wrap(Wrap { trim: true })
+        .wrap(Wrap { trim: false })
         .line_count(wrap_width.max(1))
 }
 
+fn payload_field_str(entry: &SessionTimelineEntry, key: &str) -> Option<String> {
+    entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get(key).and_then(|x| x.as_str().map(str::to_string)))
+}
+
+fn interaction_id_for(entry: &SessionTimelineEntry) -> Option<String> {
+    entry
+        .refs
+        .interaction_id
+        .clone()
+        .or_else(|| payload_field_str(entry, "interaction_id"))
+}
+
+fn approval_id_for(entry: &SessionTimelineEntry) -> Option<String> {
+    entry
+        .refs
+        .approval_request_id
+        .clone()
+        .or_else(|| payload_field_str(entry, "request_id"))
+}
+
+fn notification_approval_id(entry: &SessionTimelineEntry) -> Option<String> {
+    let msg = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(|m| m.to_string()))?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&msg).ok()?;
+    if parsed.get("type").and_then(|v| v.as_str()) != Some("child_state_notification") {
+        return None;
+    }
+    let notif = parsed.get("notification")?;
+    let status = notif.get("child_status").and_then(|v| v.as_str());
+    if status != Some("awaiting_approval") {
+        return None;
+    }
+    notif.get("approval_request_id").and_then(|v| v.as_str()).map(String::from)
+}
+
 /// Read the pre-digested choices + freeform policy for an interaction from its
+struct SessionStats {
+    total_input: u64,
+    total_output: u64,
+    llm_calls: u64,
+    models: Vec<String>,
+}
+
+fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
+    let mut stats = SessionStats {
+        total_input: 0,
+        total_output: 0,
+        llm_calls: 0,
+        models: Vec::new(),
+    };
+    for e in entries {
+        if e.event_type != "llm.round" {
+            continue;
+        }
+        if let Some(p) = e.payload.as_deref() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(p) {
+                let inp = v.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                let out = v.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                if inp > 0 || out > 0 {
+                    stats.total_input += inp;
+                    stats.total_output += out;
+                    stats.llm_calls += 1;
+                    if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
+                        let short = model.split('/').last().unwrap_or(model);
+                        if !stats.models.contains(&short.to_string()) {
+                            stats.models.push(short.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    stats
+}
+
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 100_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else if n >= 1_000 {
+        format!("{:.2}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// `user.ask.pending` timeline entry (the gateway embeds them, #393). Returns
 /// `(options, allow_freeform)`; missing `allow_freeform` defaults to permissive.
 fn interaction_choices(entries: &[SessionTimelineEntry], interaction_id: &str) -> (Vec<GateOption>, bool) {
     let entry = entries.iter().find(|e| {
         e.event_type == "user.ask.pending"
-            && e.refs.interaction_id.as_deref() == Some(interaction_id)
+            && interaction_id_for(e).as_deref() == Some(interaction_id)
     });
     let Some(payload) = entry
         .and_then(|e| e.payload.as_deref())
@@ -193,7 +518,9 @@ pub fn run(
     let mut detail_scroll: u16 = 0; // vertical scroll offset for detail pane
     let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
     let mut input: Option<GateInput> = None; // in-flight gate decision
-    let mut compose: Option<String> = None; // in-flight free-form message to the session
+    let mut compose: Option<ComposeInput> = None; // in-flight free-form message to the session
+    let mut clipboard =
+        std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None);
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
     let mut session_pick_list: Option<Vec<String>> = None; // ids from /session list for number-pick
     let mut status: Option<String> = None; // last action / connection result
@@ -302,10 +629,11 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
-        let gate = selectable_gate(&visible, indexed.get(selected), &resolved, &acted);
+        let gate = active_gate(&entries, &visible, indexed.get(selected), &resolved, &acted);
 
         spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
         let spinner_glyph = SPINNER_FRAMES[spinner_frame];
+        let session_stats = compute_session_stats(&entries);
 
         terminal.draw(|f| {
             draw(
@@ -320,42 +648,43 @@ pub fn run(
                 detail_scroll,
                 detail_h_scroll,
                 input.as_ref(),
-                compose.as_deref(),
+                compose.as_ref(),
                 slash.as_deref(),
                 status.as_deref(),
                 gate.as_ref(),
                 spinner_glyph,
                 &turn_boundaries,
                 show_reasoning,
+                &session_stats,
             )
         })?;
 
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
+            match event::read()? {
+                Event::Paste(text) if compose.is_some() => {
+                    if let Some(c) = compose.as_mut() {
+                        c.insert_str(&text);
+                    }
+                }
+                Event::Key(key) => {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Compose mode: capturing a free-form message to the session (#405).
-                if let Some(buf) = compose.as_mut() {
-                    match key.code {
-                        KeyCode::Esc => compose = None,
-                        KeyCode::Enter => {
-                            let text = buf.trim().to_string();
-                            if text.is_empty() {
-                                compose = None; // nothing to send
-                            } else {
-                                // Async so the sync loop never blocks on the agent
-                                // turn; the operator line + reply stream in via polling.
-                                status = Some(send_message(client, root_session_id, &text, target_agent_id.as_deref()));
-                                compose = None;
-                                follow = true; // jump to newest to watch the exchange
-                            }
+                // Compose mode: multi-line editor with cursor + clipboard (#405).
+                if let Some(c) = compose.as_mut() {
+                    match handle_compose_key(c, &key, &mut clipboard) {
+                        ComposeKeyResult::Continue => {}
+                        ComposeKeyResult::Cancel => compose = None,
+                        ComposeKeyResult::Send(text) => {
+                            status = Some(send_message(
+                                client,
+                                root_session_id,
+                                &text,
+                                target_agent_id.as_deref(),
+                            ));
+                            compose = None;
+                            follow = true;
                         }
-                        KeyCode::Backspace => {
-                            buf.pop();
-                        }
-                        KeyCode::Char(c) => buf.push(c),
-                        _ => {}
                     }
                     continue;
                 }
@@ -373,10 +702,36 @@ pub fn run(
                             match super::slash::parse(&cmdline) {
                                 SlashCommand::Quit => break,
                                 SlashCommand::Help => {
-                                    status = Some(format!(
-                                        "help: {}",
-                                        super::slash::HELP_TEXT
-                                    ));
+                                    detail = Some(super::slash::help_lines());
+                                    detail_scroll = 0;
+                                    detail_h_scroll = 0;
+                                    session_pick_list = None;
+                                    status = Some("help: Esc to close".to_string());
+                                }
+                                SlashCommand::Test { name } => {
+                                    if name.is_empty() || name == "help" {
+                                        detail = Some(
+                                            super::test_scenarios::scenario_help()
+                                                .lines()
+                                                .map(String::from)
+                                                .collect(),
+                                        );
+                                        detail_scroll = 0;
+                                        detail_h_scroll = 0;
+                                        status = Some("test: pick a scenario, e.g. /test full-session".to_string());
+                                    } else if let Some(events) =
+                                        super::test_scenarios::run(&name, &root_session_id)
+                                    {
+                                        let count = events.len();
+                                        entries.extend(events);
+                                        status = Some(format!(
+                                            "✓ injected {count} test events for '{name}'"
+                                        ));
+                                    } else {
+                                        status = Some(format!(
+                                            "✗ unknown test scenario '{name}' — /test help to list"
+                                        ));
+                                    }
                                 }
                                 SlashCommand::SwitchSession(new_id) => {
                                     if new_id.is_empty() {
@@ -482,18 +837,42 @@ pub fn run(
                     let commit = chosen.is_some() || key.code == KeyCode::Enter;
                     if commit {
                         let gi = input.take().unwrap();
-                        match resolve_gate(client, &gi, chosen.as_ref()) {
-                            // Mark acted only on success — a failed RPC or an
-                            // invalid answer leaves the gate offerable.
-                            Ok(msg) => {
-                                acted.insert(gi.id.clone());
-                                status = Some(msg);
-                            }
-                            // Reopen capture with the buffer intact so the operator
-                            // can fix the input and resubmit.
-                            Err(msg) => {
-                                status = Some(msg);
-                                input = Some(gi);
+                        if gi.id.starts_with("test-") {
+                            acted.insert(gi.id.clone());
+                            let verb = match gi.action {
+                                GateAction::Approve => "approved",
+                                GateAction::Reject => "rejected",
+                                GateAction::Answer => "answered",
+                            };
+                            let answer_text = chosen
+                                .as_ref()
+                                .map(|o| o.label.as_str())
+                                .or_else(|| {
+                                    let b = gi.buffer.trim();
+                                    (!b.is_empty()).then_some(b)
+                                });
+                            let followup = super::test_scenarios::resolve_followup(
+                                &gi.id,
+                                gi.action == GateAction::Approve,
+                                answer_text,
+                                &root_session_id,
+                            );
+                            let n = followup.len();
+                            entries.extend(followup);
+                            status = Some(format!(
+                                "✓ {verb} {} (test) — {n} follow-up events injected",
+                                gi.id
+                            ));
+                        } else {
+                            match resolve_gate(client, &gi, chosen.as_ref()) {
+                                Ok(msg) => {
+                                    acted.insert(gi.id.clone());
+                                    status = Some(msg);
+                                }
+                                Err(msg) => {
+                                    status = Some(msg);
+                                    input = Some(gi);
+                                }
                             }
                         }
                         continue;
@@ -579,7 +958,7 @@ pub fn run(
                     KeyCode::Char('r') => {
                         if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Interaction) {
                             detail = None;
-                            let (options, allow_freeform) = interaction_choices(&visible, &g.id);
+                            let (options, allow_freeform) = interaction_choices(&entries, &g.id);
                             input = Some(GateInput {
                                 action: GateAction::Answer,
                                 id: g.id.clone(),
@@ -595,6 +974,18 @@ pub fn run(
                             detail = None;
                             detail_scroll = 0;
                             detail_h_scroll = 0;
+                        } else if let Some(g) =
+                            gate.as_ref().filter(|g| g.kind == GateKind::Interaction)
+                        {
+                            let (options, allow_freeform) = interaction_choices(&entries, &g.id);
+                            input = Some(GateInput {
+                                action: GateAction::Answer,
+                                id: g.id.clone(),
+                                buffer: String::new(),
+                                options,
+                                allow_freeform,
+                            });
+                            status = None;
                         } else {
                             detail = indexed.get(selected).map(|(_, src)| detail_for(&visible, *src));
                             detail_scroll = 0;
@@ -617,7 +1008,7 @@ pub fn run(
                     // i: compose a free-form message into the session (#405).
                     KeyCode::Char('i') => {
                         if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Interaction) {
-                            let (options, allow_freeform) = interaction_choices(&visible, &g.id);
+                            let (options, allow_freeform) = interaction_choices(&entries, &g.id);
                             detail = None;
                             input = Some(GateInput {
                                 action: GateAction::Answer,
@@ -629,7 +1020,7 @@ pub fn run(
                             status = None;
                         } else {
                             detail = None;
-                            compose = Some(String::new());
+                            compose = Some(ComposeInput::new());
                             status = None;
                         }
                     }
@@ -654,6 +1045,34 @@ pub fn run(
                         } else {
                             follow = false;
                             selected = selected.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if detail.is_some() {
+                            if let Ok(size) = terminal.size() {
+                                let step = detail_page_step(size.height);
+                                detail_scroll = detail_scroll.saturating_add(step);
+                            }
+                        } else {
+                            follow = false;
+                            if let Ok(size) = terminal.size() {
+                                let step = main_list_page_step(size.height, compose.is_some());
+                                selected = (selected + step).min(rows.len().saturating_sub(1));
+                            }
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        if detail.is_some() {
+                            if let Ok(size) = terminal.size() {
+                                let step = detail_page_step(size.height);
+                                detail_scroll = detail_scroll.saturating_sub(step);
+                            }
+                        } else {
+                            follow = false;
+                            if let Ok(size) = terminal.size() {
+                                let step = main_list_page_step(size.height, compose.is_some());
+                                selected = selected.saturating_sub(step);
+                            }
                         }
                     }
                     KeyCode::Right | KeyCode::Char('l') => {
@@ -684,6 +1103,8 @@ pub fn run(
                     }
                     _ => {}
                 }
+                }
+                _ => {}
             }
         }
     }
@@ -737,8 +1158,8 @@ fn annotate_turns_and_in_flight(
     turn_boundaries
 }
 
-/// The still-resolvable gate at the selection (a single, not-yet-resolved
-/// `approval.pending` or `user.ask.pending` row).
+/// The still-resolvable gate on the selected row, if it is a single
+/// `approval.pending` or `user.ask.pending` event.
 fn selectable_gate(
     entries: &[SessionTimelineEntry],
     src: Option<&(RenderedRow, RowSource)>,
@@ -748,24 +1169,65 @@ fn selectable_gate(
     let (_, RowSource::Single(i)) = src? else {
         return None;
     };
-    let e = entries.get(*i)?;
+    gate_for_entry(entries.get(*i)?, resolved, acted)
+}
+
+/// Newest unresolved gate anywhere in the fetched timeline. Follow mode pins
+/// selection to the latest row, which is often *after* a `user.ask.pending`
+/// event — without this, `i`/`r` would never open the answer editor.
+fn find_active_gate(
+    entries: &[SessionTimelineEntry],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Option<GateRef> {
+    entries
+        .iter()
+        .rev()
+        .find_map(|e| gate_for_entry(e, resolved, acted))
+}
+
+fn gate_for_entry(
+    e: &SessionTimelineEntry,
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Option<GateRef> {
     match e.event_type.as_str() {
         "approval.pending" => {
-            let id = e.refs.approval_request_id.clone()?;
+            let id = approval_id_for(e)?;
             (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
                 kind: GateKind::Approval,
                 id,
             })
         }
         "user.ask.pending" => {
-            let id = e.refs.interaction_id.clone()?;
+            let id = interaction_id_for(e)?;
             (!acted.contains(&id)).then_some(GateRef {
                 kind: GateKind::Interaction,
                 id,
             })
         }
+        "operator.message" => {
+            let id = notification_approval_id(e)?;
+            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
+                kind: GateKind::Approval,
+                id,
+            })
+        }
         _ => None,
     }
+}
+
+/// Prefer the gate under the cursor; otherwise the newest pending gate in the
+/// session (so operators can answer without hunting for the ask row).
+fn active_gate(
+    entries: &[SessionTimelineEntry],
+    visible: &[SessionTimelineEntry],
+    src: Option<&(RenderedRow, RowSource)>,
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Option<GateRef> {
+    selectable_gate(visible, src, resolved, acted)
+        .or_else(|| find_active_gate(entries, resolved, acted))
 }
 
 /// Decide the `interaction.resolve_and_answer` params for an interaction, or a
@@ -877,7 +1339,20 @@ fn send_message(
 /// methods that don't exist yet; tracked as a follow-up.)
 fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
     match src {
-        RowSource::Single(i) => entries.get(i).map(render::format_detail).unwrap_or_default(),
+        RowSource::Single(i) => {
+            let Some(e) = entries.get(i) else {
+                return vec![];
+            };
+            if let Some(turn_lines) = render::turn_summary(e, entries) {
+                let mut base = render::format_detail(e);
+                base.push(String::new());
+                base.push("── turn summary ──".to_string());
+                base.extend(turn_lines);
+                base
+            } else {
+                render::format_detail(e)
+            }
+        }
         RowSource::Run { start, len } => {
             let mut lines = vec![
                 format!("collapsed run — {len} routine events"),
@@ -941,25 +1416,42 @@ fn render_rich_row(
     ];
 
     if spec.tone == RowTone::AgentNarrative {
-        if let Some(body) = spec.detail.as_deref().filter(|s| !s.is_empty()) {
+        let mut wrote = false;
+        if !spec.headline.is_empty() {
             push_wrapped_narrative(
                 &mut lines,
-                body,
+                &spec.headline,
                 content_w,
                 &cont_pad,
-                first_prefix,
+                first_prefix.clone(),
                 head_style,
             );
-        } else {
-            let mut headline = spec.headline.clone();
-            if !show_reasoning && headline.starts_with('💭') {
-                if let Some(stripped) = headline.strip_prefix('💭') {
-                    headline = stripped.trim_start().to_string();
-                }
+            wrote = true;
+        }
+        if let Some(body) = spec.detail.as_deref().filter(|s| !s.is_empty()) {
+            if wrote {
+                push_agent_message_detail(
+                    &mut lines,
+                    body,
+                    content_w,
+                    &cont_pad,
+                    detail_style,
+                    head_style,
+                );
+            } else {
+                push_wrapped_narrative(
+                    &mut lines,
+                    body,
+                    content_w,
+                    &cont_pad,
+                    first_prefix,
+                    head_style,
+                );
             }
+        } else if !wrote {
             push_wrapped_narrative(
                 &mut lines,
-                &headline,
+                "",
                 content_w,
                 &cont_pad,
                 first_prefix,
@@ -1092,6 +1584,109 @@ fn word_wrap_text(text: &str, max_width: usize) -> Vec<String> {
     result
 }
 
+/// Plain-text content of a rendered line (for width measurement / wrapping).
+fn line_display_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Render markdown prose into wrapped list rows with optional rail/glyph prefix.
+fn push_wrapped_markdown_body(
+    lines: &mut Vec<Line<'static>>,
+    body: &str,
+    content_w: usize,
+    cont_pad: &str,
+    mut first_prefix: Option<Vec<Span<'static>>>,
+    default_style: Style,
+) {
+    use super::markdown;
+    let normalized = markdown::normalize_prose_sections(body);
+    for md_line in markdown::render_markdown(&normalized) {
+        let text = line_display_text(&md_line);
+        if text.trim().is_empty() {
+            lines.push(Line::from(Span::raw(cont_pad.to_string())));
+            continue;
+        }
+        let style = md_line
+            .spans
+            .iter()
+            .find(|s| !s.content.is_empty())
+            .map(|s| s.style)
+            .unwrap_or(default_style);
+        for chunk in word_wrap_text(text.trim_end(), content_w) {
+            if let Some(prefix) = first_prefix.take() {
+                let mut spans = prefix;
+                spans.push(Span::styled(chunk, style));
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(cont_pad.to_string()),
+                    Span::styled(chunk, style),
+                ]));
+            }
+        }
+    }
+}
+
+/// Render structured agent-message detail: optional `[status]` subline, then prose/markdown body.
+fn push_agent_message_detail(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    content_w: usize,
+    cont_pad: &str,
+    detail_style: Style,
+    body_style: Style,
+) {
+    if let Some((subline, body)) = text.split_once("\n\n") {
+        if !subline.trim().is_empty() {
+            push_wrapped_detail_lines(lines, subline, content_w, cont_pad, detail_style);
+        }
+        if !body.trim().is_empty() {
+            if super::markdown::looks_like_markdown(body) {
+                push_wrapped_markdown_body(lines, body, content_w, cont_pad, None, body_style);
+            } else {
+                push_wrapped_narrative(
+                    lines,
+                    body,
+                    content_w,
+                    cont_pad,
+                    vec![Span::raw(cont_pad.to_string())],
+                    body_style,
+                );
+            }
+        }
+        return;
+    }
+    if super::markdown::looks_like_markdown(text) {
+        push_wrapped_markdown_body(lines, text, content_w, cont_pad, None, body_style);
+    } else {
+        push_wrapped_detail_lines(lines, text, content_w, cont_pad, detail_style);
+    }
+}
+
+/// Render compact sub-lines under a narrative headline (`↳ sketch · …`).
+fn push_wrapped_detail_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    content_w: usize,
+    cont_pad: &str,
+    detail_style: Style,
+) {
+    for (i, sub) in text.split('\n').enumerate() {
+        if sub.trim().is_empty() {
+            continue;
+        }
+        let prefix = if i == 0 { "  ↳ " } else { "    " };
+        let avail = content_w.saturating_sub(prefix.chars().count());
+        for (j, chunk) in word_wrap_text(sub.trim_end(), avail).into_iter().enumerate() {
+            let line_prefix = if i == 0 && j == 0 { prefix } else { "    " };
+            lines.push(Line::from(vec![
+                Span::raw(cont_pad.to_string()),
+                Span::styled(format!("{line_prefix}{chunk}"), detail_style),
+            ]));
+        }
+    }
+}
+
 /// Render agent/operator narrative: preserve paragraph breaks, wrap each block.
 fn push_wrapped_narrative(
     lines: &mut Vec<Line<'static>>,
@@ -1101,6 +1696,17 @@ fn push_wrapped_narrative(
     first_prefix: Vec<Span<'static>>,
     body_style: Style,
 ) {
+    if super::markdown::looks_like_markdown(text) {
+        push_wrapped_markdown_body(
+            lines,
+            text,
+            content_w,
+            cont_pad,
+            Some(first_prefix),
+            body_style,
+        );
+        return;
+    }
     let mut first = true;
     for paragraph in text.split('\n') {
         let chunks = if paragraph.is_empty() {
@@ -1344,23 +1950,53 @@ fn draw(
     detail_scroll: u16,
     detail_h_scroll: u16,
     input: Option<&GateInput>,
-    compose: Option<&str>,
+    compose: Option<&ComposeInput>,
     slash: Option<&str>,
     status: Option<&str>,
     gate: Option<&GateRef>,
     spinner_glyph: &'static str,
     turn_boundaries: &HashMap<usize, bool>,
     show_reasoning: bool,
+    stats: &SessionStats,
 ) {
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(f.area());
+    let compose_open = compose.is_some() && detail.is_none();
+    let chunks = if compose_open {
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(COMPOSE_PANEL_HEIGHT),
+            Constraint::Length(1),
+        ])
+        .split(f.area())
+    } else {
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(f.area())
+    };
+    let footer_idx = if compose_open { 3 } else { 2 };
+    let list_idx = 1usize;
 
+    let stats_tag = if stats.llm_calls > 0 {
+        let models_tag = if stats.models.len() == 1 {
+            stats.models[0].clone()
+        } else {
+            format!("{} models", stats.models.len())
+        };
+        format!(
+            "   in:{} out:{} calls:{} [{}]",
+            format_tokens(stats.total_input),
+            format_tokens(stats.total_output),
+            stats.llm_calls,
+            models_tag,
+        )
+    } else {
+        String::new()
+    };
     let header = format!(
-        " Session Room [{}] — {root}   floor: {}   squash: {}   reasoning: {}   {} rows{}{}",
+        " Session Room [{}] — {root}   floor: {}   squash: {}   reasoning: {}   {} rows{stats_tag}{}{}",
         TuiChannel.kind(),
         floor.as_str(),
         if squash { "on" } else { "off" },
@@ -1375,8 +2011,8 @@ fn draw(
     );
 
     if let Some(lines) = detail {
-        let inner_width = chunks[1].width.saturating_sub(2);
-        let inner_height = chunks[1].height.saturating_sub(2) as usize;
+        let inner_width = chunks[list_idx].width.saturating_sub(2);
+        let inner_height = chunks[list_idx].height.saturating_sub(2) as usize;
         let text = render_detail_lines(lines);
         let total_lines = detail_wrap_line_count(&text, inner_width);
         let max_scroll = total_lines.saturating_sub(inner_height) as u16;
@@ -1385,18 +2021,18 @@ fn draw(
         f.render_widget(
             Paragraph::new(text)
                 .block(Block::default().borders(Borders::ALL).title(" event detail "))
-                .wrap(Wrap { trim: true })
+                .wrap(Wrap { trim: false })
                 .scroll((scroll, h)),
-            chunks[1],
+            chunks[list_idx],
         );
         let scroll_hint = if max_scroll > 0 || h > 0 {
-            format!(" · j/k ↓↑ ({}/{}) · h/l ←→ ({})", scroll, max_scroll, h)
+            format!(" · j/k ↓↑ ({}/{}) · PgUp/PgDn · h/l ←→ ({})", scroll, max_scroll, h)
         } else {
             String::new()
         };
         f.render_widget(
             Paragraph::new(format!(" Esc/Enter close · q quit{scroll_hint}")).style(Style::default().fg(Color::DarkGray)),
-            chunks[2],
+            chunks[footer_idx],
         );
         return;
     }
@@ -1404,7 +2040,7 @@ fn draw(
     // The terminal width caps each line. Reserve 2 cells for the actor rail
     // and 3 cells for the altitude glyph + space, leaving the rest for the
     // label + headline + detail.
-    let width = chunks[1].width as usize;
+    let width = chunks[list_idx].width as usize;
     let rail_w = 2usize;
     let glyph_w = 3usize;
     let label_w = 12usize.min(width / 4);
@@ -1439,9 +2075,13 @@ fn draw(
         List::new(items)
             .block(Block::default().borders(Borders::NONE))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-        chunks[1],
+        chunks[list_idx],
         &mut state,
     );
+
+    if let Some(c) = compose {
+        draw_compose_input(f, c, chunks[2]);
+    }
 
     let footer = if let Some(buf) = slash {
         Paragraph::new(format!(
@@ -1449,9 +2089,11 @@ fn draw(
             HELP = super::slash::HELP_TEXT
         ))
         .style(Style::default().fg(Color::Magenta))
-    } else if let Some(buf) = compose {
-        Paragraph::new(format!(" MESSAGE: {buf}▏   [Enter send · Esc cancel]"))
-            .style(Style::default().fg(Color::Green))
+    } else if compose.is_some() {
+        Paragraph::new(
+            " Enter send · Shift+Enter newline · ←→↑↓ edit · Ctrl+V paste · Ctrl+C copy · Esc cancel",
+        )
+        .style(Style::default().fg(Color::Green))
     } else if let Some(gi) = input {
         let label = match gi.action {
             GateAction::Approve => "APPROVE — motivation (optional)",
@@ -1485,16 +2127,115 @@ fn draw(
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         let follow_indicator = if follow { " ● following" } else { " ○ paused" };
         Paragraph::new(format!(
-            " q quit · j/k scroll · f/Space follow{follow_indicator} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
+            " q quit · j/k scroll · PgUp/PgDn page · f/Space follow{follow_indicator} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };
-    f.render_widget(footer, chunks[2]);
+    f.render_widget(footer, chunks[footer_idx]);
+}
+
+/// Render the compose editor with wrapped lines and an inverted cursor cell.
+fn draw_compose_input(f: &mut Frame, compose: &ComposeInput, area: Rect) {
+    let prefix = Span::styled("MESSAGE: ", Style::default().fg(Color::Green));
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let text = if compose.buffer.is_empty() {
+        let mut lines = wrap_spans(&[prefix], inner_width);
+        if let Some(last) = lines.last_mut() {
+            let mut last_spans = std::mem::take(last);
+            last_spans
+                .spans
+                .push(Span::styled(" ", Style::default().bg(Color::White)));
+            *last = Line::from(last_spans);
+        }
+        Text::from(lines)
+    } else {
+        let before = &compose.buffer[..compose.cursor_pos];
+        let after = &compose.buffer[compose.cursor_pos..];
+        let mut spans = vec![prefix];
+        if !before.is_empty() {
+            spans.push(Span::raw(before.to_string()));
+        }
+        if after.is_empty() {
+            spans.push(Span::styled(" ", Style::default().bg(Color::White)));
+        } else {
+            let c = after.chars().next().unwrap();
+            let c_len = c.len_utf8();
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default().fg(Color::Black).bg(Color::White),
+            ));
+            if c_len < after.len() {
+                spans.push(Span::raw(after[c_len..].to_string()));
+            }
+        }
+        Text::from(wrap_spans(&spans, inner_width))
+    };
+
+    let p = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+/// Wrap styled spans to `max_width` display cells (Unicode-aware).
+fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_line: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0usize;
+
+    for span in spans {
+        for c in span.content.chars() {
+            let style = span.style;
+            if c == '\n' {
+                if !current_line.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_line)));
+                    current_width = 0;
+                } else {
+                    lines.push(Line::raw(""));
+                }
+                continue;
+            }
+            let s = c.to_string();
+            let cw = UnicodeWidthStr::width(s.as_str());
+            if current_width + cw > max_width && !current_line.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut current_line)));
+                current_width = 0;
+            }
+            current_width += cw;
+            current_line.push(Span::styled(s, style));
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(Line::from(current_line));
+    }
+    if lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_list_page_step_accounts_for_chrome() {
+        assert_eq!(main_list_page_step(24, false), 22);
+        assert_eq!(main_list_page_step(24, true), 15);
+        assert_eq!(main_list_page_step(1, false), 1);
+    }
+
+    #[test]
+    fn detail_page_step_accounts_for_chrome() {
+        assert_eq!(detail_page_step(24), 20);
+        assert_eq!(detail_page_step(3), 1);
+    }
 
     fn gate_entry(event_type: &str) -> SessionTimelineEntry {
         use autonoetic_types::principal::Principal;
@@ -1569,6 +2310,42 @@ mod tests {
     }
 
     #[test]
+    fn find_active_gate_finds_newest_pending_ask_without_row_selection() {
+        let ask = gate_entry("user.ask.pending");
+        let mut entries = vec![
+            ask,
+            gate_entry("tool.completed"),
+            gate_entry("agent.message"),
+        ];
+        // Simulate refs_json missing on older rows — id still in payload.
+        entries[0].refs.interaction_id = None;
+        entries[0].payload = Some(
+            serde_json::json!({ "interaction_id": "int-1", "question": "Pick one?" }).to_string(),
+        );
+        let empty = HashSet::new();
+        let later_row = (
+            RenderedRow::Line(render::RowSpec {
+                altitude: Altitude::Normal,
+                actor: render::ActorKind::Planner,
+                tone: RowTone::Default,
+                actor_label: "planner".into(),
+                headline: "tool done".into(),
+                detail: None,
+                turn_id: None,
+                in_flight: false,
+                show_reasoning: true,
+            }),
+            RowSource::Single(2),
+        );
+        assert!(selectable_gate(&entries, Some(&later_row), &empty, &empty).is_none());
+        let g = find_active_gate(&entries, &empty, &empty).unwrap();
+        assert_eq!(g.kind, GateKind::Interaction);
+        assert_eq!(g.id, "int-1");
+        let active = active_gate(&entries, &entries, Some(&later_row), &empty, &empty).unwrap();
+        assert_eq!(active.id, "int-1");
+    }
+
+    #[test]
     fn empty_interaction_answer_is_rejected_before_any_rpc() {
         // An empty answer is rejected locally (the gateway requires non-empty),
         // so the caller never marks the gate acted on a doomed submission.
@@ -1625,6 +2402,34 @@ mod tests {
         // Plain free-text with no options ⇒ answer_text.
         let p = answer_params(&mk("ship it", Vec::new(), true), None).unwrap();
         assert_eq!(p["answer_text"], "ship it");
+    }
+
+    #[test]
+    fn compose_input_supports_multiline_cursor_navigation() {
+        let mut c = ComposeInput::new();
+        c.insert_str("line one\nline two");
+        c.cursor_pos = 0;
+        c.cursor_down();
+        assert_eq!(c.line_col(), (1, 0));
+        c.cursor_right();
+        c.cursor_right();
+        c.cursor_right();
+        assert_eq!(c.line_col(), (1, 3));
+        c.cursor_up();
+        assert_eq!(c.line_col(), (0, 3));
+        c.end();
+        assert_eq!(c.cursor_pos, 8, "End moves to the current line end");
+        c.cursor_down();
+        c.end();
+        assert_eq!(c.cursor_pos, c.buffer.len());
+        c.home();
+        assert_eq!(c.cursor_pos, 9, "Home moves to the current line start");
+
+        let mut d = ComposeInput::new();
+        d.insert_str("ab\ncd");
+        d.cursor_pos = 2;
+        d.delete_after();
+        assert_eq!(d.buffer, "abcd");
     }
 
     #[test]

@@ -20,6 +20,11 @@ const EVIDENCE_MODE_ENV: &str = "AUTONOETIC_EVIDENCE_MODE";
 /// Full tool results are stored in the evidence store when evidence mode is Full (see evidence_ref).
 const TOOL_RESULT_PREVIEW_MAX_CHARS: usize = 256;
 
+/// Max characters for `agent.message` / `agent.reasoning` on the canonical
+/// timeline (after redaction). Aligns with the room list body ceiling; the TUI
+/// still repairs JSON truncated at the tail. Full text remains in the evidence store.
+const TIMELINE_AGENT_NARRATIVE_MAX_CHARS: usize = 8_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceMode {
     Off,
@@ -677,7 +682,10 @@ impl SessionTracer {
             self.append_live_digest_event(
                 "agent.message",
                 Some(serde_json::json!({
-                    "message": cap_chars(&autonoetic_types::redaction::redact_embedded_secrets(message), 2000),
+                    "message": cap_chars(
+                        &autonoetic_types::redaction::redact_embedded_secrets(message),
+                        TIMELINE_AGENT_NARRATIVE_MAX_CHARS,
+                    ),
                 })),
             );
         }
@@ -687,7 +695,10 @@ impl SessionTracer {
                 self.append_live_digest_event(
                     "agent.reasoning",
                     Some(serde_json::json!({
-                        "reasoning": cap_chars(&autonoetic_types::redaction::redact_embedded_secrets(rc), 2000),
+                        "reasoning": cap_chars(
+                            &autonoetic_types::redaction::redact_embedded_secrets(rc),
+                            TIMELINE_AGENT_NARRATIVE_MAX_CHARS,
+                        ),
                     })),
                 );
             }
@@ -1289,6 +1300,11 @@ mod tests {
         assert_eq!(out.chars().count(), 5, "must not exceed max incl. ellipsis");
         assert!(out.ends_with('…'));
         assert_eq!(cap_chars(s, 0), "");
+    }
+
+    #[test]
+    fn timeline_agent_narrative_cap_is_eight_thousand_chars() {
+        assert_eq!(TIMELINE_AGENT_NARRATIVE_MAX_CHARS, 8_000);
     }
 
     #[test]

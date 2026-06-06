@@ -48,38 +48,341 @@ fn role_label(role: &SessionRole) -> String {
 /// detail pane (⏎) still shows the full payload; beyond this we add `…`.
 const NARRATIVE_BODY_MAX: usize = 8_000;
 
-/// Full agent/operator message text for multiline row display. Strips markdown
-/// to plain text and preserves intentional newlines.
-pub(crate) fn narrative_body(entry: &SessionTimelineEntry, key: &str) -> Option<String> {
-    let p = entry
-        .payload
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())?;
-    let msg = p.get(key).and_then(|v| v.as_str()).map(str::to_string)?;
-    if msg.is_empty() {
+/// Try to parse a string that may be JSON — including gateway-truncated timeline
+/// copies ending with `…`.
+fn parse_jsonish_string(s: &str) -> Option<serde_json::Value> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
         return None;
     }
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&msg) {
-        if let Some(summary) = parsed.get("summary").and_then(|v| v.as_str()) {
-            return Some(preserve_lines(summary, NARRATIVE_BODY_MAX));
+    if let Ok(v) = serde_json::from_str(trimmed) {
+        return Some(v);
+    }
+    let without_ellipsis = trimmed.trim_end_matches('…').trim_end();
+    if without_ellipsis != trimmed {
+        if let Ok(v) = serde_json::from_str(without_ellipsis) {
+            return Some(v);
         }
-        if parsed.get("result").is_some() {
-            if let Some(pretty) = parsed
-                .get("result")
-                .and_then(|r| serde_json::to_string_pretty(r).ok())
-            {
-                if !pretty.is_empty() {
-                    return Some(preserve_lines(&pretty, NARRATIVE_BODY_MAX));
+    }
+    repair_truncated_json(without_ellipsis)
+}
+
+/// Whether a JSON object looks like an agent `io.returns` envelope.
+fn looks_like_io_returns(v: &serde_json::Value) -> bool {
+    v.as_object().is_some_and(|o| o.contains_key("status") || o.contains_key("summary"))
+}
+
+/// Split agent text that may lead with prose and end with an embedded JSON object.
+fn split_embedded_json_tail(s: &str) -> (String, Option<serde_json::Value>) {
+    let trimmed = s.trim();
+    if let Some(v) = parse_jsonish_string(trimmed) {
+        return (String::new(), Some(v));
+    }
+    for sep in ["\n\n{", "\r\n\r\n{"] {
+        if let Some(idx) = trimmed.rfind(sep) {
+            let split_at = idx + sep.len() - 1;
+            if let Some(v) = parse_jsonish_string(&trimmed[split_at..]) {
+                if looks_like_io_returns(&v) {
+                    return (trimmed[..idx].trim().to_string(), Some(v));
                 }
             }
         }
     }
-    let plain = if super::markdown::looks_like_markdown(&msg) {
-        super::markdown::strip_markdown(&msg)
-    } else {
-        msg
+    for (i, _) in trimmed.match_indices('{').rev() {
+        if let Some(v) = parse_jsonish_string(&trimmed[i..]) {
+            if looks_like_io_returns(&v) {
+                return (trimmed[..i].trim().to_string(), Some(v));
+            }
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
+/// Expand `agent.message` payloads where `message` is prose + trailing JSON text.
+fn expand_agent_message_payload(v: &serde_json::Value) -> serde_json::Value {
+    let Some(msg) = v.get("message") else {
+        return v.clone();
     };
-    Some(preserve_lines(&plain, NARRATIVE_BODY_MAX))
+    let msg_str = match msg {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Object(_) => return v.clone(),
+        _ => return v.clone(),
+    };
+    let (prose, structured) = split_embedded_json_tail(msg_str);
+    let Some(structured) = structured else {
+        return v.clone();
+    };
+    let Some(obj) = structured.as_object() else {
+        return v.clone();
+    };
+    let mut merged = obj.clone();
+    if !prose.is_empty() {
+        merged.insert("prose".to_string(), serde_json::Value::String(prose));
+    }
+    let mut out = v.as_object().cloned().unwrap_or_default();
+    out.insert("message".to_string(), serde_json::Value::Object(merged));
+    serde_json::Value::Object(out)
+}
+
+/// List-row projection when `message` contains lead prose plus structured JSON.
+fn structured_with_lead_prose(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    lead_prose: &str,
+) -> (String, Option<String>) {
+    let headline = one_line(lead_prose, 240);
+    let mut detail_parts = Vec::new();
+    if let Some(sub) = structured_subline(obj) {
+        detail_parts.push(sub);
+    }
+    if let Some(s) = obj.get("summary").and_then(|v| v.as_str()) {
+        let title = summary_headline(s);
+        if let Some(body) = summary_detail_body(s, &title) {
+            detail_parts.push(body);
+        }
+    }
+    let detail = if detail_parts.is_empty() {
+        None
+    } else {
+        Some(detail_parts.join("\n\n"))
+    };
+    (headline, detail)
+}
+
+/// Read a payload field as JSON — accepts an embedded object/array or a JSON
+/// string; plain prose strings are returned as [`Value::String`].
+fn payload_field_json(p: &serde_json::Value, key: &str) -> Option<serde_json::Value> {
+    let v = p.get(key)?;
+    match v {
+        serde_json::Value::String(s) if s.is_empty() => None,
+        serde_json::Value::String(s) => Some(
+            parse_jsonish_string(s).unwrap_or_else(|| serde_json::Value::String(s.clone())),
+        ),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Plaintext projection of a summary field (markdown stripped when detected).
+fn summary_plaintext(s: &str) -> String {
+    if super::markdown::looks_like_markdown(s) {
+        super::markdown::strip_markdown(s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Short list-row title from a summary — first non-empty line, `#` headers flattened.
+fn summary_headline(s: &str) -> String {
+    let first = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(s);
+    let title = first.trim().trim_start_matches('#').trim();
+    one_line(title, 240)
+}
+
+/// Remaining summary prose for the list body (after the title line).
+fn summary_detail_body(s: &str, headline: &str) -> Option<String> {
+    if !s.contains('\n') && s.chars().count() <= headline.chars().count().saturating_add(40) {
+        return None;
+    }
+    let mut lines: Vec<&str> = s.lines().collect();
+    while lines
+        .first()
+        .map(|l| l.trim().trim_start_matches('#').trim().is_empty())
+        .unwrap_or(false)
+    {
+        lines.remove(0);
+    }
+    if lines.first().is_some_and(|l| {
+        one_line(l.trim().trim_start_matches('#').trim(), 240) == headline
+    }) {
+        lines.remove(0);
+    }
+    while lines.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        lines.remove(0);
+    }
+    let body = lines.join("\n").trim().to_string();
+    if body.is_empty() {
+        None
+    } else {
+        Some(preserve_lines(&body, NARRATIVE_BODY_MAX))
+    }
+}
+
+/// Render a scalar JSON value as a short inline fact.
+fn scalar_fact_preview(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => {
+            let preview = one_line(s, 80);
+            if preview.is_empty() {
+                None
+            } else {
+                Some(preview)
+            }
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Flat string/scalar facts from a structured `result` for the list sub-line.
+/// Nested objects/arrays collapse to `(+N fields)` / `[N]` — never full JSON.
+fn result_prose_line(result: Option<&serde_json::Value>) -> Option<String> {
+    let obj = result?.as_object()?;
+    let mut parts = Vec::new();
+    if let Some(id) = obj.get("agent_id").and_then(|v| v.as_str()) {
+        parts.push(format!("agent: {id}"));
+    }
+    for (k, v) in obj {
+        if k == "agent_id" {
+            continue;
+        }
+        match v {
+            serde_json::Value::Object(map) => parts.push(format!("{k} (+{} fields)", map.len())),
+            serde_json::Value::Array(arr) => parts.push(format!("{k}[{}]", arr.len())),
+            other => {
+                if let Some(preview) = scalar_fact_preview(other) {
+                    parts.push(format!("{k}: {preview}"));
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// Status chip + flat result facts (+ error/plan_id when present) for list sub-lines.
+fn structured_subline(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
+        parts.push(format!("[{status}]"));
+    }
+    if let Some(plan_id) = obj.get("plan_id").and_then(|v| v.as_str()) {
+        parts.push(format!("plan: {plan_id}"));
+    }
+    if let Some(err) = obj.get("error").and_then(|v| v.as_str()) {
+        let preview = one_line(err, 100);
+        if !preview.is_empty() {
+            parts.push(format!("error: {preview}"));
+        }
+    }
+    if let Some(result) = result_prose_line(obj.get("result")) {
+        parts.push(result);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// List-row projection for structured agent messages (`summary`/`result`,
+/// install intents, child notifications). Returns `(headline, detail)` where
+/// the headline is human-readable and detail is an optional compact sketch.
+fn structured_object_preview(obj: &serde_json::Map<String, serde_json::Value>) -> Option<(String, Option<String>)> {
+    if let Some(notif_msg) = obj
+        .get("message")
+        .and_then(|v| v.as_str())
+        .filter(|_| obj.get("type").is_some())
+    {
+        return Some((
+            String::new(),
+            Some(preserve_lines(notif_msg, NARRATIVE_BODY_MAX)),
+        ));
+    }
+    if let Some(reason) = obj.get("reason").and_then(|v| v.as_str()) {
+        let headline = one_line(reason, 240);
+        let detail = obj
+            .get("artifact_ref")
+            .and_then(|v| v.as_str())
+            .map(|r| format!("artifact: {r}"));
+        return Some((headline, detail));
+    }
+    let summary_raw = obj.get("summary").and_then(|v| v.as_str());
+    let headline = summary_raw
+        .map(summary_headline)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            obj.get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("status: {s}"))
+        })?;
+    let mut detail_parts = Vec::new();
+    if let Some(sub) = structured_subline(obj) {
+        detail_parts.push(sub);
+    }
+    if let Some(s) = summary_raw {
+        if let Some(body) = summary_detail_body(s, &headline) {
+            detail_parts.push(body);
+        }
+    }
+    let detail = if detail_parts.is_empty() {
+        None
+    } else {
+        Some(detail_parts.join("\n\n"))
+    };
+    Some((headline, detail))
+}
+
+/// Build list-row headline + detail for an agent/operator message event.
+pub(crate) fn message_list_rows(entry: &SessionTimelineEntry, key: &str) -> (String, Option<String>) {
+    let Some(p) = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    else {
+        return (summarize(entry), None);
+    };
+    let Some(msg_v) = payload_field_json(&p, key) else {
+        return (summarize(entry), None);
+    };
+    if let Some(obj) = msg_v.as_object() {
+        if let Some(rows) = structured_object_preview(obj) {
+            return rows;
+        }
+    }
+    if let Some(text) = msg_v.as_str() {
+        if text.is_empty() {
+            return (summarize(entry), None);
+        }
+        let (prose, structured) = split_embedded_json_tail(text);
+        if let Some(v) = structured {
+            if let Some(obj) = v.as_object() {
+                if !prose.is_empty() {
+                    return structured_with_lead_prose(obj, &prose);
+                }
+                if let Some(rows) = structured_object_preview(obj) {
+                    return rows;
+                }
+            }
+        }
+        if let Some(parsed) = parse_jsonish_string(text) {
+            if let Some(obj) = parsed.as_object() {
+                if let Some(rows) = structured_object_preview(obj) {
+                    return rows;
+                }
+            }
+        }
+        let plain = if super::markdown::looks_like_markdown(text) {
+            super::markdown::strip_markdown(text)
+        } else {
+            text.to_string()
+        };
+        return (String::new(), Some(preserve_lines(&plain, NARRATIVE_BODY_MAX)));
+    }
+    (summarize(entry), None)
+}
+
+/// Full agent/operator message text for multiline row display. Strips markdown
+/// to plain text and preserves intentional newlines.
+pub(crate) fn narrative_body(entry: &SessionTimelineEntry, key: &str) -> Option<String> {
+    let (_, detail) = message_list_rows(entry, key);
+    detail
 }
 
 /// Collapse a possibly multi-line string into a single timeline line: runs of
@@ -246,9 +549,8 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         }
         "agent.reasoning" => format!("💭 {}", one_line(&field("reasoning").unwrap_or_default(), 160)),
         "user.ask.pending" => format!(
-            "asks: {}{}",
-            one_line(&field("question").unwrap_or_default(), 100),
-            choices_hint(p.as_ref()),
+            "asks: {}",
+            one_line(&field("question").unwrap_or_default(), 200),
         ),
         // Payload key is `tool_name`; keep `tool` as a fallback for older rows.
         // Show just the result summary — status is conveyed by altitude color.
@@ -441,6 +743,35 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                 None => None,
             }
         }
+        "user.ask.pending" => {
+            let opts = p
+                .as_ref()
+                .and_then(|v| v.get("options"))
+                .and_then(|v| v.as_array());
+            let freeform = p
+                .as_ref()
+                .and_then(|v| v.get("allow_freeform"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let Some(opts) = opts else { return None };
+            let mut lines: Vec<String> = opts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, o)| {
+                    o.get("label").and_then(|l| l.as_str()).map(|l| {
+                        format!("[{}] {}", i + 1, l)
+                    })
+                })
+                .collect();
+            if freeform {
+                lines.push("(or type your own answer)".to_string());
+            }
+            if lines.is_empty() {
+                None
+            } else {
+                Some(lines.join("\n"))
+            }
+        }
         // Agent/operator narrative bodies are assembled in `render_spec` via
         // [`narrative_body`] — not duplicated here.
         "agent.message" | "operator.message" => None,
@@ -486,21 +817,62 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
     }
 }
 
+fn notification_detail(entry: &SessionTimelineEntry) -> Option<String> {
+    let msg = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(|m| m.to_string()))?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&msg).ok()?;
+    if parsed.get("type").and_then(|v| v.as_str()) != Some("child_state_notification") {
+        return None;
+    }
+    let notif = parsed.get("notification")?;
+    let child = notif
+        .get("child_session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let approval_id = notif
+        .get("approval_request_id")
+        .and_then(|v| v.as_str());
+    let task_id = notif.get("task_id").and_then(|v| v.as_str());
+    let mut lines = vec![];
+    let short_child = child
+        .rsplit('/')
+        .next()
+        .unwrap_or(child);
+    lines.push(format!("child: {short_child}"));
+    if let Some(task) = task_id {
+        lines.push(format!("task: {task}"));
+    }
+    if let Some(apr) = approval_id {
+        lines.push(format!("approval: {apr}"));
+    }
+    Some(lines.join("\n"))
+}
+
 /// Build a `RowSpec` for a single timeline entry — the channel-neutral, fully
 /// structured view. Callers (TUI, CLI viewer, future channels) can render this
 /// however they want.
 pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
     let (headline, detail) = match entry.event_type.as_str() {
-        "agent.message" => narrative_body(entry, "message")
-            .map(|body| (String::new(), Some(body)))
-            .unwrap_or_else(|| (summarize(entry), None)),
-        "operator.message" => match narrative_body(entry, "message") {
-            Some(body) if body.contains('\n') || body.chars().count() > 120 => {
-                (String::new(), Some(body))
+        "agent.message" => message_list_rows(entry, "message"),
+        "operator.message" => {
+            let (headline, body) = message_list_rows(entry, "message");
+            let notif_detail = notification_detail(entry);
+            match body {
+                Some(b) if b.contains('\n') || b.chars().count() > 120 => {
+                    let detail = match notif_detail {
+                        Some(nd) => format!("{b}\n{nd}"),
+                        None => b,
+                    };
+                    (headline, Some(detail))
+                }
+                Some(b) if headline.is_empty() => (one_line(&b, 240), notif_detail),
+                Some(b) => (headline, Some(b).or(notif_detail)),
+                None => (headline, notif_detail),
             }
-            Some(body) => (one_line(&body, 240), None),
-            None => (summarize(entry), None),
-        },
+        }
         _ => (summarize(entry), detail_preview(entry)),
     };
     let actor = actor_kind(&entry.role);
@@ -526,11 +898,19 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
 
 /// Backwards-compat: one-line rendering, used by the CLI viewer and tests.
 pub fn render_line(entry: &SessionTimelineEntry) -> String {
+    let summary = summarize(entry);
+    let suffix = if entry.event_type == "user.ask.pending" {
+        choices_hint(
+            entry.payload.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).as_ref(),
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{} [{}] {}",
+        "{} [{}] {}{suffix}",
         altitude_glyph(entry.altitude),
         actor_label(entry),
-        summarize(entry)
+        summary,
     )
 }
 
@@ -749,6 +1129,74 @@ fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
 
 /// Multi-line detail view of a single event for the drill-down pane: metadata,
 /// refs, and the pretty-printed payload. Pure (no I/O) and channel-neutral.
+/// Render a `turn.end` detail by aggregating `llm.round` events from the same
+/// turn. Returns `None` if the entry is not `turn.end` or no rounds were found.
+pub fn turn_summary(entry: &SessionTimelineEntry, all: &[SessionTimelineEntry]) -> Option<Vec<String>> {
+    if entry.event_type != "turn.end" {
+        return None;
+    }
+    let turn_id = entry.turn_id.as_deref()?;
+    let mut total_in: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut calls: u64 = 0;
+    let mut models: Vec<String> = Vec::new();
+    let mut in_turn = false;
+    for e in all {
+        if e.turn_id.as_deref() != Some(turn_id) {
+            continue;
+        }
+        match e.event_type.as_str() {
+            "turn.start" => in_turn = true,
+            "turn.end" => break,
+            "llm.round" if in_turn => {
+                if let Some(p) = e.payload.as_deref() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(p) {
+                        let inp = v.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        let out = v.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        total_in += inp;
+                        total_out += out;
+                        calls += 1;
+                        if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
+                            let short = m.split('/').last().unwrap_or(m).to_string();
+                            if !models.contains(&short) {
+                                models.push(short);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if calls == 0 {
+        return None;
+    }
+    let mut lines = vec![
+        format!("turn:      {}", turn_id),
+        format!("llm calls: {}", calls),
+        format!("tokens in: {} ({})", total_in, format_tokens_compact(total_in)),
+        format!("tokens out: {} ({})", total_out, format_tokens_compact(total_out)),
+        format!("models:    {}", models.join(", ")),
+    ];
+    let ratio = if total_in > 0 {
+        format!("{:.1}%", total_out as f64 / total_in as f64 * 100.0)
+    } else {
+        "n/a".to_string()
+    };
+    lines.push(format!("out/in:    {}", ratio));
+    Some(lines)
+}
+
+fn format_tokens_compact(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
     let mut lines = vec![
         format!("event:     {}", entry.event_type),
@@ -784,7 +1232,12 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
         lines.push(format!("refs:      {}", ref_parts.join("  ")));
     }
     if !refs.enforced_rules.is_empty() {
-        lines.push(format!("enforces:  {}", refs.enforced_rules.join(", ")));
+        let glossary = autonoetic_gateway::constitution_glossary::format_enforced_rules(&refs.enforced_rules);
+        if glossary.is_empty() {
+            lines.push(format!("enforces:  {}", refs.enforced_rules.join(", ")));
+        } else {
+            lines.push(glossary);
+        }
     }
 
     if let Some(payload) = &entry.payload {
@@ -792,7 +1245,11 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
         lines.push("payload:".to_string());
         match serde_json::from_str::<serde_json::Value>(payload).ok() {
             Some(v) => {
-                let unfolded = unfold_stringified_json(&v);
+                let unfolded = if entry.event_type == "agent.message" || entry.event_type == "operator.message" {
+                    unfold_stringified_json(&expand_agent_message_payload(&v))
+                } else {
+                    unfold_stringified_json(&v)
+                };
                 render_payload_lines(&unfolded, &mut lines);
             }
             None => lines.push(format!("  {payload}")),
@@ -805,12 +1262,16 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
 /// `serde_json::to_string_pretty`, this splits string values that contain
 /// `\n` into actual separate lines so they display properly in the detail
 /// pane instead of as a single wrapped JSON string.
+/// Spaces added per JSON nesting level in the detail-pane payload renderer.
+const PAYLOAD_INDENT: usize = 2;
+
 fn render_payload_lines(v: &serde_json::Value, lines: &mut Vec<String>) {
-    render_payload_lines_indent(v, lines, 2);
+    render_payload_lines_indent(v, lines, 1);
 }
 
-fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, indent: usize) {
-    let pad = " ".repeat(indent);
+fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, depth: usize) {
+    let pad = " ".repeat(depth * PAYLOAD_INDENT);
+    let inner = " ".repeat((depth + 1) * PAYLOAD_INDENT);
     match v {
         serde_json::Value::Object(map) => {
             lines.push(format!("{pad}{{"));
@@ -819,31 +1280,37 @@ fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, i
                 let comma = if i < last_idx { "," } else { "" };
                 match child {
                     serde_json::Value::String(s) if s.contains('\n') => {
-                        lines.push(format!("{pad}  \"{k}\":"));
+                        lines.push(format!("{inner}\"{k}\":"));
                         for sub in s.split('\n') {
-                            lines.push(format!("{pad}    {sub}"));
+                            lines.push(format!("{inner}  {sub}"));
                         }
-                        lines.push(format!("{pad}  {comma}"));
+                        if !comma.is_empty() {
+                            lines.push(format!("{inner}{comma}"));
+                        }
                     }
                     serde_json::Value::String(s)
                         if (s.starts_with('{') || s.starts_with('[')) && s.len() > 10 =>
                     {
-                        lines.push(format!("{pad}  \"{k}\":"));
-                        render_jsonish_string(s, lines, indent + 4);
-                        lines.push(format!("{pad}  {comma}"));
+                        lines.push(format!("{inner}\"{k}\":"));
+                        render_jsonish_string(s, lines, depth + 2);
+                        if !comma.is_empty() {
+                            lines.push(format!("{inner}{comma}"));
+                        }
                     }
                     serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        lines.push(format!("{pad}  \"{k}\":"));
-                        render_payload_lines_indent(child, lines, indent + 4);
-                        lines.push(format!("{pad}  {comma}"));
+                        lines.push(format!("{inner}\"{k}\":"));
+                        render_payload_lines_indent(child, lines, depth + 1);
+                        if !comma.is_empty() {
+                            lines.push(format!("{inner}{comma}"));
+                        }
                     }
                     other => {
                         let formatted = serde_json::to_string(other).unwrap_or_default();
-                        lines.push(format!("{pad}  \"{k}\": {formatted}{comma}"));
+                        lines.push(format!("{inner}\"{k}\": {formatted}{comma}"));
                     }
                 }
             }
-            lines.push(format!("{pad}}}",));
+            lines.push(format!("{pad}}}"));
         }
         serde_json::Value::Array(arr) => {
             lines.push(format!("{pad}["));
@@ -852,28 +1319,34 @@ fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, i
                 let comma = if i < last_idx { "," } else { "" };
                 match elem {
                     serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                        render_payload_lines_indent(elem, lines, indent + 2);
-                        if let Some(last) = lines.last_mut() {
-                            last.push_str(comma);
+                        render_payload_lines_indent(elem, lines, depth + 1);
+                        if !comma.is_empty() {
+                            if let Some(last) = lines.last_mut() {
+                                last.push_str(comma);
+                            }
                         }
                     }
                     serde_json::Value::String(s) if s.contains('\n') => {
                         for sub in s.split('\n') {
-                            lines.push(format!("{pad}  {sub}"));
+                            lines.push(format!("{inner}{sub}"));
                         }
-                        lines.push(format!("{pad}  {comma}"));
+                        if !comma.is_empty() {
+                            lines.push(format!("{inner}{comma}"));
+                        }
                     }
                     serde_json::Value::String(s)
                         if (s.starts_with('{') || s.starts_with('[')) && s.len() > 10 =>
                     {
-                        render_jsonish_string(s, lines, indent + 2);
-                        if let Some(last) = lines.last_mut() {
-                            last.push_str(comma);
+                        render_jsonish_string(s, lines, depth + 1);
+                        if !comma.is_empty() {
+                            if let Some(last) = lines.last_mut() {
+                                last.push_str(comma);
+                            }
                         }
                     }
                     other => {
                         let formatted = serde_json::to_string(other).unwrap_or_default();
-                        lines.push(format!("{pad}  {formatted}{comma}"));
+                        lines.push(format!("{inner}{formatted}{comma}"));
                     }
                 }
             }
@@ -888,18 +1361,19 @@ fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, i
 /// Render a string that looks like JSON (possibly truncated). Tries to parse it
 /// as structured JSON first, then falls back to bracket-repair for truncated
 /// payloads, and finally displays the raw text if nothing works.
-fn render_jsonish_string(s: &str, lines: &mut Vec<String>, indent: usize) {
+fn render_jsonish_string(s: &str, lines: &mut Vec<String>, depth: usize) {
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
-        render_payload_lines_indent(&parsed, lines, indent);
+        render_payload_lines_indent(&parsed, lines, depth);
         return;
     }
     if let Some(repaired) = repair_truncated_json(s) {
-        render_payload_lines_indent(&repaired, lines, indent);
-        lines.push(format!("{}… (truncated)", " ".repeat(indent)));
+        render_payload_lines_indent(&repaired, lines, depth);
+        lines.push(format!("{}… (truncated)", " ".repeat(depth * PAYLOAD_INDENT)));
         return;
     }
+    let pad = " ".repeat(depth * PAYLOAD_INDENT);
     for sub in s.split(", ") {
-        lines.push(format!("{}{}", " ".repeat(indent), sub));
+        lines.push(format!("{pad}{sub}"));
     }
 }
 
@@ -1114,7 +1588,8 @@ mod tests {
         );
         e.refs.enforced_rules = vec!["Ri-0.9".into(), "P-2.25".into()];
         let detail = format_detail(&e).join("\n");
-        assert!(detail.contains("enforces:  Ri-0.9, P-2.25"), "got: {detail}");
+        assert!(detail.contains("Ri-0.9"), "got: {detail}");
+        assert!(detail.contains("P-2.25"), "got: {detail}");
     }
 
     #[test]
@@ -1209,6 +1684,34 @@ mod tests {
     }
 
     #[test]
+    fn format_detail_indents_nested_payload_keys() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({
+                "message": {
+                    "artifact_ref": "ar.cb049a325507",
+                    "reason": "Artifact ready.",
+                    "status": "ok"
+                }
+            }),
+        );
+        let lines = format_detail(&e);
+        let artifact_line = lines
+            .iter()
+            .find(|l| l.contains("artifact_ref"))
+            .expect("nested key present");
+        assert!(
+            artifact_line.starts_with("      \"artifact_ref\""),
+            "expected 6-space indent for nested key, got: {artifact_line:?}"
+        );
+        let outer = lines.iter().find(|l| l.trim_start() == "{").expect("outer brace");
+        assert_eq!(outer, "  {", "top-level object starts at 2 spaces");
+    }
+
+    #[test]
     fn multiline_question_flattens_and_truncates_with_choices() {
         let long_q = "Pick a market:\n\n1. US equities\n2. Crypto\n".to_string() + &"x".repeat(200);
         let e = entry(
@@ -1228,6 +1731,55 @@ mod tests {
         // Pre-digested choices rendered inline and numbered.
         assert!(line.contains("[1] US equities"));
         assert!(line.contains("[2] Crypto"));
+    }
+
+    #[test]
+    fn user_ask_detail_shows_choices_multiline() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "user.ask.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "question": "Which approach?",
+                "options": [
+                    {"id": "o1", "label": "Option A"},
+                    {"id": "o2", "label": "Option B"},
+                    {"id": "o3", "label": "Option C"},
+                ],
+                "allow_freeform": true,
+            }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.headline, "asks: Which approach?");
+        let detail = spec.detail.expect("should have detail");
+        assert!(detail.contains("[1] Option A"));
+        assert!(detail.contains("[2] Option B"));
+        assert!(detail.contains("[3] Option C"));
+        assert!(detail.contains("or type your own"));
+        assert_eq!(detail.lines().count(), 4);
+    }
+
+    #[test]
+    fn user_ask_detail_no_freeform() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "user.ask.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "question": "Confirm?",
+                "options": [
+                    {"id": "o1", "label": "Yes"},
+                    {"id": "o2", "label": "No"},
+                ],
+                "allow_freeform": false,
+            }),
+        );
+        let spec = render_spec(&e);
+        let detail = spec.detail.expect("should have detail");
+        assert!(!detail.contains("type your own"));
+        assert_eq!(detail.lines().count(), 2);
     }
 
     #[test]
@@ -1446,6 +1998,192 @@ mod tests {
         assert!(spec.headline.is_empty(), "body lives in detail for wrapping");
         assert_eq!(spec.detail.as_deref(), Some(greeting));
         assert_eq!(spec.tone, RowTone::AgentNarrative);
+    }
+
+    #[test]
+    fn render_spec_structured_agent_message_uses_summary_title_and_result_sketch() {
+        let msg = serde_json::json!({
+            "status": "ok",
+            "summary": "Here is a walkthrough of the fibonacci-next agent's code and its state management model.",
+            "result": {
+                "agent_id": "fibonacci-next",
+                "explanation": { "overview": "pure script", "files": { "main.py": "entry" } },
+                "state_management": { "model": "stateless" }
+            }
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("walkthrough"));
+        assert!(!spec.headline.starts_with('{'), "title must not be raw JSON");
+        let detail = spec.detail.expect("result subline");
+        assert!(detail.contains("[ok]"));
+        assert!(detail.contains("agent: fibonacci-next"));
+        assert!(detail.contains("explanation (+2 fields)"));
+        assert!(detail.contains("state_management (+1 fields)"));
+    }
+
+    #[test]
+    fn render_spec_structured_agent_message_flattens_string_result_facts() {
+        let msg = serde_json::json!({
+            "status": "ok",
+            "summary": "fibonacci-next is a stateless stdin/stdout script.",
+            "result": {
+                "agent_id": "fibonacci-next",
+                "entrypoint": "main.py",
+                "tests": "12 passing in test_main.py",
+                "state": "none — pure computation"
+            }
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        let spec = render_spec(&e);
+        let detail = spec.detail.expect("flat result prose");
+        assert!(detail.contains("[ok]"));
+        assert!(detail.contains("entrypoint: main.py"));
+        assert!(!detail.contains("(+"), "flat strings must not become field-count sketches");
+    }
+
+    #[test]
+    fn render_spec_markdown_summary_uses_heading_title_and_prose_body() {
+        let msg = serde_json::json!({
+            "status": "ok",
+            "summary": "## fibonacci-next Agent\n\nWhat it does:\n\nfibonacci-next is a stateless script agent.",
+            "result": { "agent_id": "fibonacci-next", "entrypoint": "main.py" }
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.headline, "fibonacci-next Agent");
+        let detail = spec.detail.expect("subline + body");
+        assert!(detail.contains("[ok]"));
+        assert!(detail.contains("entrypoint: main.py"));
+        assert!(detail.contains("What it does:"));
+        assert!(detail.contains("stateless script agent"));
+        assert!(!detail.starts_with('{'), "must not show raw JSON");
+    }
+
+    #[test]
+    fn render_spec_repairs_truncated_json_message_string() {
+        let msg = serde_json::json!({
+            "status": "ok",
+            "summary": "## fibonacci-next Agent\n\nWhat it does:\n\nfibonacci-next is a stateless script agent that computes the next Fibonacci number.",
+            "result": { "agent_id": "fibonacci-next", "entrypoint": "main.py" }
+        });
+        let mut raw = msg.to_string();
+        if raw.chars().count() > 180 {
+            raw = raw.chars().take(179).collect();
+            raw.push('…');
+        }
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": raw }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.headline, "fibonacci-next Agent");
+        assert!(!spec.headline.starts_with('{'));
+        let detail = spec.detail.expect("repaired structured detail");
+        assert!(detail.contains("[ok]"));
+    }
+
+    #[test]
+    fn render_spec_structured_agent_message_surfaces_failed_status_and_error() {
+        let msg = serde_json::json!({
+            "status": "failed",
+            "summary": "Could not install the agent.",
+            "error": "artifact_ref kind mismatch",
+            "result": { "agent_id": "fibonacci-next" }
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        let spec = render_spec(&e);
+        let detail = spec.detail.expect("failed subline");
+        assert!(detail.contains("[failed]"));
+        assert!(detail.contains("error: artifact_ref kind mismatch"));
+        assert!(detail.contains("agent: fibonacci-next"));
+    }
+
+    #[test]
+    fn render_spec_splits_prose_prefix_from_embedded_json_message() {
+        let structured = serde_json::json!({
+            "status": "ok",
+            "summary": "## Installation Status\n\n**All federation gates passed.**",
+            "result": {
+                "agent_id": "fibonacci-next",
+                "approval_id": "apr-esc-esc_eba476c5dfe3",
+                "blocker": "Operator approval pending"
+            }
+        });
+        let message = format!(
+            "All federation gates passed and the builder is ready.\n\n{}",
+            structured
+        );
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": message }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("federation gates passed"));
+        assert!(!spec.headline.contains('"'), "headline must not contain JSON");
+        let detail = spec.detail.expect("structured detail");
+        assert!(detail.contains("[ok]"));
+        assert!(detail.contains("approval_id"));
+        assert!(detail.contains("Installation Status") || detail.contains("federation gates passed"));
+
+        let lines = format_detail(&e);
+        let payload = lines.join("\n");
+        assert!(payload.contains("\"prose\":"));
+        assert!(payload.contains("\"summary\":"));
+        assert!(
+            !payload.contains("\"message\":\n      All federation"),
+            "raw glued message"
+        );
+    }
+
+    #[test]
+    fn render_spec_structured_install_intent_uses_reason_title() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({
+                "message": {
+                    "artifact_ref": "ar.cb049a325507",
+                    "reason": "Artifact ready with semantic install intent.",
+                    "status": "ok"
+                }
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("Artifact ready"));
+        assert_eq!(spec.detail.as_deref(), Some("artifact: ar.cb049a325507"));
     }
 
     #[test]
