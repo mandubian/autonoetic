@@ -1993,10 +1993,10 @@ impl NativeTool for AgentRevisionPromoteTool {
         gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
-        _turn_id: Option<&str>,
+        turn_id: Option<&str>,
         config: Option<&GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: RevisionPromoteArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments: {}", e))?;
@@ -2260,7 +2260,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                     }),
                     evidence_ref: None,
                     decision_reason: None,
-                    approval_level,
+                    approval_level: approval_level.clone(),
                     similar_to_request_id: None,
                     similarity_score: None,
                     min_dwell_ms: None,
@@ -2268,6 +2268,13 @@ impl NativeTool for AgentRevisionPromoteTool {
             code_excerpts: None,
             risk_summary: None,
                 };
+                // Resolve root_session_id so the approval is visible on the
+                // canonical timeline (human_gate does this via resolve_execution_context).
+                let root_sid = run_context
+                    .and_then(|rc| Some(rc.root_session_id.clone()).filter(|s| !s.is_empty()))
+                    .or_else(|| session_id.map(|s| crate::runtime::content_store::root_session_id(s).to_string()));
+                req.root_session_id = root_sid.clone();
+
                 gateway_store.create_approval(&mut req)?;
                 if let (Some(config), Some((workflow_id, spec))) = (config, single_flight_scope.as_ref()) {
                     crate::scheduler::single_flight::attach_approval_request(
@@ -2279,6 +2286,39 @@ impl NativeTool for AgentRevisionPromoteTool {
                 }
                 if let Some(guard) = single_flight_guard.as_mut() {
                     guard.disarm();
+                }
+
+                // Emit approval.pending on the canonical timeline so the Room TUI
+                // can surface the gate (same pattern as human_gate.rs #363).
+                if let Some(root) = &root_sid {
+                    let role = crate::runtime::session_timeline::derive_role(&manifest.agent.id);
+                    let principal = autonoetic_types::principal::Principal::agent(manifest.agent.id.clone());
+                    let refs = autonoetic_types::session_timeline::TimelineRefs {
+                        approval_request_id: Some(request_id.clone()),
+                        ..Default::default()
+                    };
+                    let event = crate::runtime::session_timeline::build_timeline_event(
+                        root.clone(),
+                        session_id.unwrap_or("").to_string(),
+                        turn_id.map(str::to_string),
+                        &principal,
+                        &role,
+                        "approval.pending",
+                        None,
+                        Some(serde_json::json!({
+                            "request_id": request_id,
+                            "approval_level": approval_level.to_config(),
+                            "action": "revision_promote",
+                            "agent_id": args.agent_id,
+                            "revision_id": args.revision_id,
+                            "added_capabilities": added_capabilities,
+                            "broadened_capabilities": broadened_capabilities,
+                        })),
+                        refs,
+                    );
+                    if let Err(e) = gateway_store.create_live_digest_event(&event) {
+                        tracing::debug!(target: "session_timeline", error = %e, "approval.pending timeline emit failed for revision promote");
+                    }
                 }
 
                 return Ok(serde_json::json!({

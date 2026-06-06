@@ -140,6 +140,10 @@ impl GatewayStore {
                 autonoetic_types::session_timeline::TimelineRefs {
                     artifact_id: (!escalation.artifact_id.is_empty())
                         .then(|| escalation.artifact_id.clone()),
+                    approval_request_id: Some(format!(
+                        "apr-esc-{}",
+                        &escalation.escalation_id[..16.min(escalation.escalation_id.len())]
+                    )),
                     ..Default::default()
                 },
             );
