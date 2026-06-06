@@ -1213,6 +1213,7 @@ impl AgentExecutor {
             &model,
             self.openrouter_catalog.as_ref(),
             self.local_model_context_cache.as_ref(),
+            self.config.as_deref(),
         )
         .await;
         let mut latest_assistant_text: Option<String> = None;
@@ -1708,6 +1709,14 @@ impl AgentExecutor {
                             error = %e,
                             "ContextGovernor error, falling through without reduction"
                         );
+                        let _ = tracer.log_event(
+                            "context_governor",
+                            "error",
+                            autonoetic_types::causal_chain::EntryStatus::Error,
+                            Some(serde_json::json!({
+                                "error": crate::log_redaction::redact_text_for_logs(&e.to_string()),
+                            })),
+                        );
                     }
                 }
                 *history = ctx.history;
@@ -2004,6 +2013,7 @@ impl AgentExecutor {
                 match response {
                     Ok(resp) => resp,
                     Err(e) => {
+                        let _ = tracer.log_llm_request_failed(&e);
                         if fallback_chain.is_empty() {
                             return Err(e);
                         }
@@ -2067,6 +2077,7 @@ impl AgentExecutor {
                                         error = %e,
                                         "Fallback model failed"
                                     );
+                                    let _ = tracer.log_llm_request_failed(&e);
                                     last_err = Some(e);
                                 }
                             }
@@ -2257,6 +2268,31 @@ impl AgentExecutor {
             // Only count consecutive anomalies.
             if !is_retryable_empty_other_response(&response) {
                 empty_other_retries_used = 0;
+            }
+
+            // Detect empty LLM responses (Ok but zero output tokens and no text).
+            // This catches providers that silently return nothing instead of an error.
+            // The narrower `is_retryable_empty_other_response` retry above handles
+            // the Other("") case with automatic retry; this logs *any* empty result
+            // that survived that retry (or had a different stop reason).
+            if response.text.trim().is_empty()
+                && response.tool_calls.is_empty()
+                && response.usage.output_tokens == 0
+            {
+                tracing::warn!(
+                    target: "autonoetic::llm",
+                    model = %actual_model,
+                    stop_reason = ?response.stop_reason,
+                    input_tokens = response.usage.input_tokens,
+                    output_tokens = response.usage.output_tokens,
+                    "LLM returned empty response (zero output tokens, no text, no tool calls)"
+                );
+                let _ = tracer.log_llm_empty_response(
+                    &actual_model,
+                    &format!("{:?}", response.stop_reason),
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                );
             }
 
             if !response.text.trim().is_empty() {

@@ -650,7 +650,7 @@ fn apply_session_timeline_v46(conn: &mut Connection) -> Result<()> {
     // the reader derives those from source_agent_id.
     conn.execute(
         "UPDATE live_digest_events SET altitude = CASE
-            WHEN event_type IN ('llm.request_failed','tool.failed') THEN 'error'
+            WHEN event_type IN ('llm.request_failed','llm.empty_response','tool.failed') THEN 'error'
             WHEN event_type IN ('user.ask.pending','approval.pending','plan.pending','divergence.intervention') THEN 'attention'
             WHEN COALESCE(source_agent_id,'') LIKE 'sentinel%' THEN 'attention'
             WHEN event_type IN ('turn.start','turn.end','llm.round','tool.requested') THEN 'detail'

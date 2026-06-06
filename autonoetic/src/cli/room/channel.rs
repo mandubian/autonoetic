@@ -34,6 +34,13 @@ pub enum GateAction {
     Answer,
 }
 
+/// A pre-digested choice for an interaction answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateOption {
+    pub id: String,
+    pub label: String,
+}
+
 /// A presentation + input surface over the shared render core.
 pub trait Channel {
     /// Stable channel-kind identifier — also the `channel` column value in
@@ -80,8 +87,8 @@ impl Channel for TuiChannel {
     }
     fn gate_prompt(&self, gate: &GateRef) -> String {
         match gate.kind {
-            GateKind::Approval => " · y/n approve/reject".into(),
-            GateKind::Interaction => " · r reply".into(),
+            GateKind::Approval => " · ⚠ APPROVAL PENDING — y/n".into(),
+            GateKind::Interaction => " · ⚠ QUESTION PENDING — i/r to answer".into(),
         }
     }
 }
@@ -96,8 +103,8 @@ mod tests {
         let ask = GateRef { kind: GateKind::Interaction, id: "int-1".into() };
 
         assert_eq!(TuiChannel.kind(), "tui");
-        assert!(TuiChannel.gate_prompt(&appr).contains("approve/reject"));
-        assert!(TuiChannel.gate_prompt(&ask).contains("reply"));
+        assert!(TuiChannel.gate_prompt(&appr).contains("APPROVAL"));
+        assert!(TuiChannel.gate_prompt(&ask).contains("QUESTION"));
 
         assert_eq!(CliChannel.kind(), "cli");
         // The viewer can't resolve; it points at the interactive shell.

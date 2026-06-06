@@ -44,6 +44,44 @@ fn role_label(role: &SessionRole) -> String {
     }
 }
 
+/// Hard ceiling for narrative body text shown inline in the room list. The
+/// detail pane (⏎) still shows the full payload; beyond this we add `…`.
+const NARRATIVE_BODY_MAX: usize = 8_000;
+
+/// Full agent/operator message text for multiline row display. Strips markdown
+/// to plain text and preserves intentional newlines.
+pub(crate) fn narrative_body(entry: &SessionTimelineEntry, key: &str) -> Option<String> {
+    let p = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())?;
+    let msg = p.get(key).and_then(|v| v.as_str()).map(str::to_string)?;
+    if msg.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&msg) {
+        if let Some(summary) = parsed.get("summary").and_then(|v| v.as_str()) {
+            return Some(preserve_lines(summary, NARRATIVE_BODY_MAX));
+        }
+        if parsed.get("result").is_some() {
+            if let Some(pretty) = parsed
+                .get("result")
+                .and_then(|r| serde_json::to_string_pretty(r).ok())
+            {
+                if !pretty.is_empty() {
+                    return Some(preserve_lines(&pretty, NARRATIVE_BODY_MAX));
+                }
+            }
+        }
+    }
+    let plain = if super::markdown::looks_like_markdown(&msg) {
+        super::markdown::strip_markdown(&msg)
+    } else {
+        msg
+    };
+    Some(preserve_lines(&plain, NARRATIVE_BODY_MAX))
+}
+
 /// Collapse a possibly multi-line string into a single timeline line: runs of
 /// whitespace (incl. newlines) become one space, then truncate with an ellipsis.
 /// Keeps a rich `user.ask` question or any prose from breaking the one-line feed.
@@ -101,19 +139,37 @@ fn preceding_chain(payload: Option<&serde_json::Value>) -> String {
 /// or a structured JSON object. Returns the `summary` field if found.
 fn extract_tool_summary(p: Option<&serde_json::Value>) -> Option<String> {
     let p = p?;
-    // Check top-level summary first (common pattern: {status, summary, result})
+    let p = if let Some(s) = p.as_str() {
+        serde_json::from_str::<serde_json::Value>(s).unwrap_or_else(|_| p.clone())
+    } else {
+        p.clone()
+    };
     if let Some(s) = p.get("summary").and_then(|v| v.as_str()) {
         return Some(s.to_string());
     }
-    // Check inside result field
-    let result = p.get("result")?;
-    if let Some(s) = result.get("summary").and_then(|v| v.as_str()) {
+    // Check inside "message" field (tool.completed wraps result in message)
+    let inner = p
+        .get("message")
+        .cloned()
+        .unwrap_or(p.clone());
+    // Unfold if message is a string containing JSON
+    let inner = if let Some(s) = inner.as_str() {
+        serde_json::from_str::<serde_json::Value>(s).unwrap_or(inner)
+    } else {
+        inner
+    };
+    if let Some(s) = inner.get("summary").and_then(|v| v.as_str()) {
         return Some(s.to_string());
     }
-    if let Some(s) = result.as_str() {
-        if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
-            if let Some(summary) = inner.get("summary").and_then(|v| v.as_str()) {
-                return Some(summary.to_string());
+    if let Some(result) = inner.get("result") {
+        if let Some(s) = result.get("summary").and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+        if let Some(s) = result.as_str() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                if let Some(summary) = parsed.get("summary").and_then(|v| v.as_str()) {
+                    return Some(summary.to_string());
+                }
             }
         }
     }
@@ -126,7 +182,15 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
     let p = entry
         .payload
         .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| {
+            // Unfold double-encoded JSON (payload stored as a string containing JSON)
+            if let Some(s) = v.as_str() {
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(v)
+            } else {
+                v
+            }
+        });
     let field = |key: &str| -> Option<String> {
         p.as_ref()
             .and_then(|v| v.get(key))
@@ -158,7 +222,28 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         // The agent's own narrative (#367 P4): what it says, and (hidable) its
         // reasoning — so a turn reads intent → actions → result. Actor label
         // shows which agent; the 💭 marks reasoning as the "why".
-        "agent.message" => one_line(&field("message").unwrap_or_default(), 80),
+        "agent.message" => {
+            let msg = field("message").unwrap_or_default();
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&msg) {
+                if let Some(s) = parsed.get("summary").and_then(|v| v.as_str()) {
+                    one_line(s, 160)
+                } else {
+                    let plain = if super::markdown::looks_like_markdown(&msg) {
+                        super::markdown::strip_markdown(&msg)
+                    } else {
+                        msg
+                    };
+                    one_line(&plain, 80)
+                }
+            } else {
+                let plain = if super::markdown::looks_like_markdown(&msg) {
+                    super::markdown::strip_markdown(&msg)
+                } else {
+                    msg
+                };
+                one_line(&plain, 80)
+            }
+        }
         "agent.reasoning" => format!("💭 {}", one_line(&field("reasoning").unwrap_or_default(), 160)),
         "user.ask.pending" => format!(
             "asks: {}{}",
@@ -170,7 +255,14 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "tool.completed" => {
             let summary = extract_tool_summary(p.as_ref());
             match summary {
-                Some(s) => one_line(&s, 160),
+                Some(s) => {
+                    let plain = if super::markdown::looks_like_markdown(&s) {
+                        super::markdown::strip_markdown(&s)
+                    } else {
+                        s
+                    };
+                    one_line(&plain, 160)
+                }
                 None => format!("tool {}", field("tool_name")
                     .or_else(|| field("tool"))
                     .unwrap_or_else(|| "completed".into())),
@@ -199,6 +291,16 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             one_line(&field("error").unwrap_or_default(), 120),
             preceding_chain(p.as_ref()),
         ),
+        "llm.empty_response" => {
+            let model = field("model").unwrap_or_default();
+            let stop = field("stop_reason").unwrap_or_default();
+            let in_tok = p.as_ref().and_then(|v| v.get("input_tokens")).and_then(|x| x.as_u64()).unwrap_or(0);
+            let out_tok = p.as_ref().and_then(|v| v.get("output_tokens")).and_then(|x| x.as_u64()).unwrap_or(0);
+            format!(
+                "LLM empty response: model={model} stop={stop} tokens={in_tok}/{out_tok}{}",
+                preceding_chain(p.as_ref()),
+            )
+        }
         "runtime.lock_drift" => {
             let overridden = p
                 .as_ref()
@@ -280,7 +382,14 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
     let p = entry
         .payload
         .as_deref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(v)
+            } else {
+                v
+            }
+        });
     let s = |k: &str| -> Option<String> {
         p.as_ref()
             .and_then(|v| v.get(k))
@@ -332,31 +441,30 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                 None => None,
             }
         }
-        // Agent message: show the full message with newlines preserved so
-        // long responses display as multi-line content instead of a single
-        // truncated repeat of the headline.
-        "agent.message" => {
-            let msg = s("message").unwrap_or_default();
-            let headline_summary = one_line(&msg, 80);
-            if msg.chars().count() > headline_summary.chars().count() + 10 {
-                Some(preserve_lines(&msg, 4000))
-            } else {
-                None
-            }
-        }
-        // Operator messages are typically short questions — the headline is
-        // sufficient. Only show detail if the message is genuinely multi-line.
-        "operator.message" => {
-            let msg = s("message").unwrap_or_default();
-            if msg.contains('\n') {
-                Some(preserve_lines(&msg, 4000))
-            } else {
-                None
-            }
-        }
+        // Agent/operator narrative bodies are assembled in `render_spec` via
+        // [`narrative_body`] — not duplicated here.
+        "agent.message" | "operator.message" => None,
         // LLM failure: show the preceding action chain on the second line so
         // the row alone tells the story.
         "llm.request_failed" => {
+            let chain = p
+                .as_ref()
+                .and_then(|v| v.get("preceding"))
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" → ")
+                })
+                .unwrap_or_default();
+            if chain.is_empty() {
+                None
+            } else {
+                Some(cap_preview(&format!("⟵ after: {chain}"), 100))
+            }
+        }
+        "llm.empty_response" => {
             let chain = p
                 .as_ref()
                 .and_then(|v| v.get("preceding"))
@@ -382,7 +490,19 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
 /// structured view. Callers (TUI, CLI viewer, future channels) can render this
 /// however they want.
 pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
-    let headline = summarize(entry);
+    let (headline, detail) = match entry.event_type.as_str() {
+        "agent.message" => narrative_body(entry, "message")
+            .map(|body| (String::new(), Some(body)))
+            .unwrap_or_else(|| (summarize(entry), None)),
+        "operator.message" => match narrative_body(entry, "message") {
+            Some(body) if body.contains('\n') || body.chars().count() > 120 => {
+                (String::new(), Some(body))
+            }
+            Some(body) => (one_line(&body, 240), None),
+            None => (summarize(entry), None),
+        },
+        _ => (summarize(entry), detail_preview(entry)),
+    };
     let actor = actor_kind(&entry.role);
     // Use `actor_label(entry)` (not just `role_label(role)`) so the principal
     // kind is decorated — humans get a 🧑 prefix, foreign agents get a 🌐
@@ -395,8 +515,9 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
         altitude: entry.altitude,
         actor,
         actor_label: label,
+        tone: row_tone(&entry.event_type),
         headline,
-        detail: detail_preview(entry),
+        detail,
         turn_id: entry.turn_id.clone(),
         in_flight: false, // The TUI fills this in once it knows turn lifecycle.
         show_reasoning,
@@ -422,6 +543,30 @@ pub enum RenderedRow {
     /// A single event rendered as a structured spec.
     Line(RowSpec),
     Collapsed { count: usize, summary: String },
+}
+
+/// Visual class for a timeline row — lets channels style agent narrative
+/// separately from tool plumbing even when both share the same seat/actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowTone {
+    /// What the agent (or operator) said — primary narrative.
+    AgentNarrative,
+    /// A completed tool invocation and its result preview.
+    ToolCall,
+    /// Hidden-by-default reasoning (`agent.reasoning`).
+    Reasoning,
+    /// Approvals, gates, LLM errors, and everything else.
+    Default,
+}
+
+/// Map a gateway event type to the row's visual tone.
+pub fn row_tone(event_type: &str) -> RowTone {
+    match event_type {
+        "agent.message" | "operator.message" => RowTone::AgentNarrative,
+        "tool.completed" => RowTone::ToolCall,
+        "agent.reasoning" => RowTone::Reasoning,
+        _ => RowTone::Default,
+    }
 }
 
 /// Coarse seat classification — drives the colored left rail in the TUI and the
@@ -476,6 +621,8 @@ pub struct RowSpec {
     pub altitude: Altitude,
     /// Which seat/actor — drives the rail color in the TUI.
     pub actor: ActorKind,
+    /// Agent narrative vs tool call vs reasoning — drives headline/rail tint.
+    pub tone: RowTone,
     /// Human actor name (e.g. "operator", "coder"). Shown as `[name]` in the TUI.
     pub actor_label: String,
     /// Primary headline — the most important thing to show.
@@ -659,38 +806,157 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
 /// `\n` into actual separate lines so they display properly in the detail
 /// pane instead of as a single wrapped JSON string.
 fn render_payload_lines(v: &serde_json::Value, lines: &mut Vec<String>) {
+    render_payload_lines_indent(v, lines, 2);
+}
+
+fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, indent: usize) {
+    let pad = " ".repeat(indent);
     match v {
         serde_json::Value::Object(map) => {
-            lines.push("  {".to_string());
+            lines.push(format!("{pad}{{"));
             let last_idx = map.len().saturating_sub(1);
             for (i, (k, child)) in map.iter().enumerate() {
                 let comma = if i < last_idx { "," } else { "" };
                 match child {
                     serde_json::Value::String(s) if s.contains('\n') => {
-                        lines.push(format!("    \"{k}\":"));
+                        lines.push(format!("{pad}  \"{k}\":"));
                         for sub in s.split('\n') {
-                            lines.push(format!("      {sub}"));
+                            lines.push(format!("{pad}    {sub}"));
                         }
-                        lines.push(format!("    {comma}"));
+                        lines.push(format!("{pad}  {comma}"));
+                    }
+                    serde_json::Value::String(s)
+                        if (s.starts_with('{') || s.starts_with('[')) && s.len() > 10 =>
+                    {
+                        lines.push(format!("{pad}  \"{k}\":"));
+                        render_jsonish_string(s, lines, indent + 4);
+                        lines.push(format!("{pad}  {comma}"));
+                    }
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        lines.push(format!("{pad}  \"{k}\":"));
+                        render_payload_lines_indent(child, lines, indent + 4);
+                        lines.push(format!("{pad}  {comma}"));
                     }
                     other => {
                         let formatted = serde_json::to_string(other).unwrap_or_default();
-                        lines.push(format!("    \"{k}\": {formatted}{comma}"));
+                        lines.push(format!("{pad}  \"{k}\": {formatted}{comma}"));
                     }
                 }
             }
-            lines.push("  }".to_string());
+            lines.push(format!("{pad}}}",));
+        }
+        serde_json::Value::Array(arr) => {
+            lines.push(format!("{pad}["));
+            let last_idx = arr.len().saturating_sub(1);
+            for (i, elem) in arr.iter().enumerate() {
+                let comma = if i < last_idx { "," } else { "" };
+                match elem {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        render_payload_lines_indent(elem, lines, indent + 2);
+                        if let Some(last) = lines.last_mut() {
+                            last.push_str(comma);
+                        }
+                    }
+                    serde_json::Value::String(s) if s.contains('\n') => {
+                        for sub in s.split('\n') {
+                            lines.push(format!("{pad}  {sub}"));
+                        }
+                        lines.push(format!("{pad}  {comma}"));
+                    }
+                    serde_json::Value::String(s)
+                        if (s.starts_with('{') || s.starts_with('[')) && s.len() > 10 =>
+                    {
+                        render_jsonish_string(s, lines, indent + 2);
+                        if let Some(last) = lines.last_mut() {
+                            last.push_str(comma);
+                        }
+                    }
+                    other => {
+                        let formatted = serde_json::to_string(other).unwrap_or_default();
+                        lines.push(format!("{pad}  {formatted}{comma}"));
+                    }
+                }
+            }
+            lines.push(format!("{pad}]"));
         }
         other => {
-            lines.push(format!("  {}", serde_json::to_string(other).unwrap_or_default()));
+            lines.push(format!("{pad}{}", serde_json::to_string(other).unwrap_or_default()));
         }
     }
 }
 
+/// Render a string that looks like JSON (possibly truncated). Tries to parse it
+/// as structured JSON first, then falls back to bracket-repair for truncated
+/// payloads, and finally displays the raw text if nothing works.
+fn render_jsonish_string(s: &str, lines: &mut Vec<String>, indent: usize) {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+        render_payload_lines_indent(&parsed, lines, indent);
+        return;
+    }
+    if let Some(repaired) = repair_truncated_json(s) {
+        render_payload_lines_indent(&repaired, lines, indent);
+        lines.push(format!("{}… (truncated)", " ".repeat(indent)));
+        return;
+    }
+    for sub in s.split(", ") {
+        lines.push(format!("{}{}", " ".repeat(indent), sub));
+    }
+}
+
+/// Try to parse truncated JSON by counting unclosed brackets and appending
+/// the needed closing characters. Returns None if repair doesn't yield valid JSON.
+fn repair_truncated_json(s: &str) -> Option<serde_json::Value> {
+    let mut open_braces: i32 = 0;
+    let mut open_brackets: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    for ch in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match ch {
+            '{' => open_braces += 1,
+            '}' => open_braces -= 1,
+            '[' => open_brackets += 1,
+            ']' => open_brackets -= 1,
+            _ => {}
+        }
+    }
+    let close_brackets = open_brackets.max(0) as usize;
+    let close_braces = open_braces.max(0) as usize;
+    if close_brackets == 0 && close_braces == 0 {
+        return None;
+    }
+    let mut repaired = s.to_string();
+    // If we're inside a string, close it
+    if in_string {
+        repaired.push('"');
+    }
+    // Remove trailing incomplete token (partial key or value)
+    let trimmed = repaired.trim_end_matches(|c: char| c != '{' && c != '}' && c != '[' && c != ']' && c != '"' && c != ',' && c != ':');
+    let suffix = format!(
+        "{}{}",
+        "]".repeat(close_brackets),
+        "}".repeat(close_braces),
+    );
+    serde_json::from_str(&format!("{trimmed}{suffix}")).ok()
+}
+
 /// Recursively walk a JSON value and replace any string field that parses as
-/// valid JSON with the parsed value. This handles double-encoded payloads
-/// like `"result": "{\"any_failed\":false,...}"` so they pretty-print as
-/// structured objects instead of a single wrapped line.
+/// valid JSON with the parsed value. Handles double-encoded payloads and
+/// attempts bracket-repair for truncated JSON strings.
 fn unfold_stringified_json(v: &serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::Object(map) => {
@@ -698,11 +964,14 @@ fn unfold_stringified_json(v: &serde_json::Value) -> serde_json::Value {
                 .into_iter()
                 .map(|(k, child)| {
                     let unrolled = match child.as_str() {
-                        Some(s) if s.len() < 32_768 => {
-                            serde_json::from_str::<serde_json::Value>(s)
-                                .ok()
-                                .map(|parsed| unfold_stringified_json(&parsed))
-                                .unwrap_or_else(|| child.clone())
+                        Some(s) if s.len() < 1_048_576 => {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                                unfold_stringified_json(&parsed)
+                            } else if let Some(repaired) = repair_truncated_json(s) {
+                                unfold_stringified_json(&repaired)
+                            } else {
+                                child.clone()
+                            }
                         }
                         _ => unfold_stringified_json(child),
                     };
@@ -712,7 +981,22 @@ fn unfold_stringified_json(v: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(unfolded)
         }
         serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(unfold_stringified_json).collect())
+            serde_json::Value::Array(
+                arr.iter()
+                    .map(|elem| match elem.as_str() {
+                        Some(s) if s.len() < 1_048_576 => {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                                unfold_stringified_json(&parsed)
+                            } else if let Some(repaired) = repair_truncated_json(s) {
+                                unfold_stringified_json(&repaired)
+                            } else {
+                                elem.clone()
+                            }
+                        }
+                        _ => unfold_stringified_json(elem),
+                    })
+                    .collect(),
+            )
         }
         other => other.clone(),
     }
@@ -1039,6 +1323,29 @@ mod tests {
     }
 
     #[test]
+    fn llm_empty_response_renders_model_and_tokens() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "llm.empty_response",
+            Altitude::Error,
+            serde_json::json!({
+                "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "stop_reason": "EndTurn",
+                "input_tokens": 33332,
+                "output_tokens": 0,
+                "preceding": ["read_file"],
+            }),
+        );
+        let line = render_line(&e);
+        assert!(line.starts_with("✗"));
+        assert!(line.contains("LLM empty response"));
+        assert!(line.contains("nemotron"));
+        assert!(line.contains("tokens=33332/0"));
+        assert!(line.contains("after: read_file"));
+    }
+
+    #[test]
     fn emergency_stop_renders_prominently_with_operator_label() {
         let e = entry(
             SessionRole::Operator,
@@ -1114,6 +1421,51 @@ mod tests {
             serde_json::json!({}),
         );
         assert!(render_line(&e).contains("some.future.event"));
+    }
+
+    #[test]
+    fn row_tone_classifies_agent_vs_tool_rows() {
+        assert_eq!(row_tone("agent.message"), RowTone::AgentNarrative);
+        assert_eq!(row_tone("operator.message"), RowTone::AgentNarrative);
+        assert_eq!(row_tone("tool.completed"), RowTone::ToolCall);
+        assert_eq!(row_tone("agent.reasoning"), RowTone::Reasoning);
+        assert_eq!(row_tone("approval.pending"), RowTone::Default);
+    }
+
+    #[test]
+    fn render_spec_agent_message_keeps_full_body_for_wrapped_display() {
+        let greeting = "Hello! I'm your planner agent. I can help you research topics, build agents, execute code, set up credentials, and coordinate complex workflows. What would you like to work on?";
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": greeting }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.is_empty(), "body lives in detail for wrapping");
+        assert_eq!(spec.detail.as_deref(), Some(greeting));
+        assert_eq!(spec.tone, RowTone::AgentNarrative);
+    }
+
+    #[test]
+    fn render_spec_sets_tone_from_event_type() {
+        let tool = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "agent_list" }),
+        );
+        let msg = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "I'll list agents first." }),
+        );
+        assert_eq!(render_spec(&tool).tone, RowTone::ToolCall);
+        assert_eq!(render_spec(&msg).tone, RowTone::AgentNarrative);
     }
 
     #[test]
@@ -1212,6 +1564,7 @@ mod tests {
         let spec = RowSpec {
             altitude: Altitude::Normal,
             actor: ActorKind::Planner,
+            tone: RowTone::Default,
             actor_label: "planner".into(),
             headline: "headline here".into(),
             detail: Some("and a detail".into()),
@@ -1314,6 +1667,7 @@ mod tests {
         let spec = RowSpec {
             altitude: Altitude::Normal,
             actor: ActorKind::Planner,
+            tone: RowTone::ToolCall,
             actor_label: "planner".into(),
             headline: "tool sandbox_exec".into(),
             detail: Some("hello world".into()),

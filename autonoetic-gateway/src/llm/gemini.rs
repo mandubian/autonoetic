@@ -171,10 +171,12 @@ impl LlmDriver for GeminiDriver {
         let url = self.url();
 
         const MAX_RETRIES: u32 = 3;
+        const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
         for attempt in 0..=MAX_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&url)
+                    .timeout(COMPLETE_TIMEOUT)
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
@@ -216,17 +218,71 @@ impl LlmDriver for GeminiDriver {
                     }
                     anyhow::bail!("Gemini rate limited after {} retries", MAX_RETRIES);
                 }
+                tracing::warn!(
+                    target: "autonoetic::llm::gemini",
+                    status,
+                    response_text = %text,
+                    "Gemini API error"
+                );
                 anyhow::bail!("Gemini API error {}: {}", status, text);
             }
 
-            let j: serde_json::Value = response.json().await?;
+            let body_text = response.text().await.map_err(|e| {
+                anyhow::anyhow!("error reading LLM response body: {}", e)
+            })?;
+            let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+                tracing::warn!(
+                    target: "llm::gemini",
+                    body_len = body_text.len(),
+                    body_preview = %String::from_utf8_lossy(&body_text.as_bytes()[..body_text.len().min(512)]),
+                    "LLM response body is not valid JSON"
+                );
+                anyhow::anyhow!(
+                    "error decoding LLM response body as JSON: {} (body_len={}, preview={:?})",
+                    e,
+                    body_text.len(),
+                    &body_text[..body_text.len().min(256)]
+                )
+            })?;
             return Ok(parse_response(&j));
         }
-        anyhow::bail!("Max retries exceeded");
+        tracing::warn!(
+            target: "llm::gemini",
+            model = %self.provider.model,
+            "Gemini complete() fell through retry loop"
+        );
+        anyhow::bail!(
+            "Gemini complete() retries exhausted for model {}",
+            self.provider.model
+        );
     }
 }
 
 fn parse_response(j: &serde_json::Value) -> CompletionResponse {
+    let candidates = j["candidates"].as_array();
+    if candidates.is_none_or(|a| a.is_empty()) {
+        tracing::warn!(
+            target: "llm::gemini",
+            has_candidates = candidates.is_some(),
+            "Gemini response has no candidates array — returning empty completion"
+        );
+        return CompletionResponse {
+            text: String::new(),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            reasoning_details: None,
+            stop_reason: StopReason::Other("no_candidates".to_string()),
+            usage: TokenUsage::default(),
+        };
+    }
+    let finish = j["candidates"][0]["finishReason"].as_str().unwrap_or("");
+    if finish == "SAFETY" {
+        tracing::warn!(
+            target: "llm::gemini",
+            finish_reason = finish,
+            "Gemini safety filter triggered — response content blocked"
+        );
+    }
     let parts = &j["candidates"][0]["content"]["parts"];
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();

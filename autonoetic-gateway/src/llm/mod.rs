@@ -26,7 +26,8 @@ pub mod provider;
 ///   concurrent sessions share the same client.
 /// - `tcp_keepalive`: 30 s — detect dead TCP connections proactively.
 /// - **No global request timeout** — LLM streams can run for minutes; a blanket
-///   `timeout()` would kill legitimate long-running responses.
+///   `timeout()` would kill legitimate long-running responses. Instead, each
+///   non-streaming `complete()` call applies a per-request timeout (5 min).
 pub fn build_llm_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))

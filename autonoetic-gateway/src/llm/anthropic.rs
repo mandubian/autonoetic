@@ -120,10 +120,12 @@ impl LlmDriver for AnthropicDriver {
         let body = self.build_body(req, false);
 
         const MAX_RETRIES: u32 = 3;
+        const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
         for attempt in 0..=MAX_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
+                    .timeout(COMPLETE_TIMEOUT)
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
@@ -164,13 +166,43 @@ impl LlmDriver for AnthropicDriver {
                         "context_overflow: provider=anthropic status={} detail={}", status, text
                     );
                 }
+                tracing::warn!(
+                    target: "autonoetic::llm::anthropic",
+                    status,
+                    response_text = %text,
+                    "Anthropic API error"
+                );
                 anyhow::bail!("Anthropic API error {}: {}", status, text);
             }
 
-            let j: serde_json::Value = response.json().await?;
+            let body_text = response.text().await.map_err(|e| {
+                anyhow::anyhow!("error reading LLM response body: {}", e)
+            })?;
+            let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+                tracing::warn!(
+                    target: "llm::anthropic",
+                    body_len = body_text.len(),
+                    body_preview = %String::from_utf8_lossy(&body_text.as_bytes()[..body_text.len().min(512)]),
+                    "LLM response body is not valid JSON"
+                );
+                anyhow::anyhow!(
+                    "error decoding LLM response body as JSON: {} (body_len={}, preview={:?})",
+                    e,
+                    body_text.len(),
+                    &body_text[..body_text.len().min(256)]
+                )
+            })?;
             return Ok(parse_response(&j));
         }
-        anyhow::bail!("Max retries exceeded");
+        tracing::warn!(
+            target: "llm::anthropic",
+            model = %self.provider.model,
+            "Anthropic complete() fell through retry loop"
+        );
+        anyhow::bail!(
+            "Anthropic complete() retries exhausted for model {}",
+            self.provider.model
+        );
     }
 
     async fn stream(
@@ -226,6 +258,12 @@ impl LlmDriver for AnthropicDriver {
                 .unwrap_or(false)
             {
                 let text = response.text().await.unwrap_or_default();
+                tracing::warn!(
+                    target: "autonoetic::llm::anthropic",
+                    status,
+                    response_text = %text,
+                    "Anthropic stream error"
+                );
                 anyhow::bail!("Anthropic stream error {}: {}", status, text);
             }
 
@@ -257,6 +295,11 @@ impl LlmDriver for AnthropicDriver {
                         continue;
                     }
                     let Ok(j) = serde_json::from_str::<serde_json::Value>(&data) else {
+                        tracing::debug!(
+                            target: "llm::anthropic",
+                            data_preview = %&data[..data.len().min(128)],
+                            "Malformed SSE JSON chunk skipped"
+                        );
                         continue;
                     };
 
@@ -347,7 +390,15 @@ impl LlmDriver for AnthropicDriver {
             let _ = tx.send(StreamEvent::Complete { stop_reason, usage }).await;
             return Ok(resp);
         }
-        anyhow::bail!("Max connection retries exceeded");
+        tracing::warn!(
+            target: "llm::anthropic",
+            model = %self.provider.model,
+            "Anthropic stream() max connection retries exceeded"
+        );
+        anyhow::bail!(
+            "Anthropic stream() max connection retries exceeded for model {}",
+            self.provider.model
+        );
     }
 }
 
@@ -379,6 +430,12 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     }
 
     let stop_reason = parse_stop_reason(j["stop_reason"].as_str().unwrap_or(""));
+    if j.get("usage").is_none() {
+        tracing::warn!(
+            target: "llm::anthropic",
+            "Anthropic response missing usage block — token counts will be zero"
+        );
+    }
     let usage = TokenUsage {
         input_tokens: j["usage"]["input_tokens"].as_u64().unwrap_or(0),
         output_tokens: j["usage"]["output_tokens"].as_u64().unwrap_or(0),

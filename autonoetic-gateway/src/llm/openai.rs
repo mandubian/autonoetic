@@ -234,10 +234,12 @@ impl LlmDriver for OpenAiDriver {
         }
 
         const MAX_RETRIES: u32 = 3;
+        const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
         for attempt in 0..=MAX_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
+                    .timeout(COMPLETE_TIMEOUT)
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
@@ -290,10 +292,35 @@ impl LlmDriver for OpenAiDriver {
                 anyhow::bail!("OpenAI API error {}: {}", status, text);
             }
 
-            let j: serde_json::Value = response.json().await?;
+            let body_text = response.text().await.map_err(|e| {
+                anyhow::anyhow!("error reading LLM response body: {}", e)
+            })?;
+            let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+                tracing::warn!(
+                    target: "llm::openai",
+                    model = %self.provider.model,
+                    body_len = body_text.len(),
+                    body_preview = %String::from_utf8_lossy(&body_text.as_bytes()[..body_text.len().min(512)]),
+                    "LLM response body is not valid JSON"
+                );
+                anyhow::anyhow!(
+                    "error decoding LLM response body as JSON: {} (body_len={}, preview={:?})",
+                    e,
+                    body_text.len(),
+                    &body_text[..body_text.len().min(256)]
+                )
+            })?;
             return Ok(parse_response(&j));
         }
-        anyhow::bail!("Max retries exceeded");
+        tracing::warn!(
+            target: "llm::openai",
+            model = %self.provider.model,
+            "OpenAI complete() fell through retry loop"
+        );
+        anyhow::bail!(
+            "OpenAI complete() retries exhausted for model {}",
+            self.provider.model
+        );
     }
 
     async fn stream(
@@ -338,6 +365,12 @@ impl LlmDriver for OpenAiDriver {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
+                tracing::warn!(
+                    target: "autonoetic::llm::openai",
+                    status = %status,
+                    response_text = %text,
+                    "OpenAI stream error"
+                );
                 anyhow::bail!("OpenAI stream error {}: {}", status, text);
             }
 
@@ -370,6 +403,11 @@ impl LlmDriver for OpenAiDriver {
                     }
 
                     let Ok(j) = serde_json::from_str::<serde_json::Value>(&data) else {
+                        tracing::debug!(
+                            target: "llm::openai",
+                            data_preview = %&data[..data.len().min(128)],
+                            "Malformed SSE JSON chunk skipped"
+                        );
                         continue;
                     };
                     let delta = &j["choices"][0]["delta"];
@@ -468,12 +506,28 @@ impl LlmDriver for OpenAiDriver {
                 .await;
             return Ok(resp);
         }
-        anyhow::bail!("Max connection retries exceeded");
+        tracing::warn!(
+            target: "llm::openai",
+            model = %self.provider.model,
+            "OpenAI stream() max connection retries exceeded"
+        );
+        anyhow::bail!(
+            "OpenAI stream() max connection retries exceeded for model {}",
+            self.provider.model
+        );
     }
 }
 
 /// Parse a non-streaming JSON response body.
 fn parse_response(j: &serde_json::Value) -> CompletionResponse {
+    let choices = j["choices"].as_array();
+    if choices.is_none_or(|a| a.is_empty()) {
+        tracing::warn!(
+            target: "llm::openai",
+            has_choices = choices.is_some(),
+            "OpenAI response has no choices array — returning empty completion"
+        );
+    }
     let choice = &j["choices"][0];
     let text = extract_text_content(&choice["message"]["content"]);
     let reasoning_content = extract_reasoning_content(&choice["message"]);
@@ -508,6 +562,12 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     let reasoning_details = extract_reasoning_details(&choice["message"]);
 
     let usage = parse_usage(&j["usage"]);
+    if j.get("usage").is_none() {
+        tracing::warn!(
+            target: "llm::openai",
+            "OpenAI response missing usage block — token counts will be zero"
+        );
+    }
 
     CompletionResponse {
         text,

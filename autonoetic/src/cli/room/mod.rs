@@ -8,6 +8,7 @@
 
 mod channel;
 mod client;
+mod markdown;
 mod render;
 mod slash;
 mod tui;

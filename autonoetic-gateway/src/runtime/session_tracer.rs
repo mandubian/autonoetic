@@ -732,6 +732,57 @@ impl SessionTracer {
         Ok(())
     }
 
+    /// Logged when the LLM driver returns Ok but with zero output tokens and empty text
+    /// (provider silently returned nothing). Records a causal event, session report entry,
+    /// and live digest event so the operator can see what happened.
+    pub fn log_llm_empty_response(
+        &mut self,
+        model: &str,
+        stop_reason: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "model": model,
+            "stop_reason": stop_reason,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "error": format!("LLM returned empty response (0 output tokens, stop_reason={})", stop_reason),
+        });
+        let event_id = self.log_event(
+            "llm",
+            "empty_response",
+            autonoetic_types::causal_chain::EntryStatus::Error,
+            Some(payload.clone()),
+        )?;
+        if let Some(w) = &self.live_report {
+            if let Err(e) = w.lock().unwrap().record_execution_failure(
+                "llm.empty_response",
+                &format!("model={} stop_reason={} input_tokens={} output_tokens=0", model, stop_reason, input_tokens),
+                self.turn_id.as_deref(),
+                Some(payload),
+                Some(&event_id),
+            ) {
+                tracing::warn!(
+                    target: "session_report",
+                    error = %e,
+                    "session report record_execution_failure (llm empty) failed"
+                );
+            }
+        }
+        self.append_live_digest_event(
+            "llm.empty_response",
+            Some(serde_json::json!({
+                "model": model,
+                "stop_reason": stop_reason,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "preceding": Vec::from_iter(self.recent_actions.iter().cloned()),
+            })),
+        );
+        Ok(())
+    }
+
     pub fn log_tool_requested(
         &mut self,
         tool_name: &str,

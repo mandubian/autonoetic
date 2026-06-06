@@ -6,9 +6,9 @@
 //! via `approvals.approve`/`reject` and `interaction.resolve_and_answer`. No
 //! direct store access. chat.rs untouched.
 
-use super::channel::{Channel, GateAction, GateKind, GateRef, TuiChannel};
+use super::channel::{Channel, GateAction, GateKind, GateOption, GateRef, TuiChannel};
 use super::client::RoomClient;
-use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec};
+use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
 use crossterm::{
@@ -20,6 +20,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Duration;
@@ -28,11 +29,10 @@ use std::time::Duration;
 /// current frame is rotated on each TUI tick (the existing 250 ms poll loop).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// Hard cap on the number of physical text lines a single rich row may occupy.
-/// Anything over this gets a `…` ellipsis on the last line. Keeps the visible
-/// list from collapsing to one giant paragraph when a long agent message
-/// arrives — the full text is always one ⏎ away in the detail pane.
+/// Hard cap on plumbing/tool rows — keeps the list scannable.
 const MAX_ROW_LINES: usize = 8;
+/// Agent/operator narrative rows may wrap across more lines before folding.
+const MAX_NARRATIVE_ROW_LINES: usize = 24;
 
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
@@ -49,11 +49,70 @@ struct GateInput {
     allow_freeform: bool,
 }
 
-/// One pre-digested choice surfaced from a `user.ask.pending` event payload.
-#[derive(Clone)]
-struct GateOption {
-    id: String,
-    label: String,
+/// Render detail lines, detecting markdown content in string values
+/// (anything indented under the payload section) and rendering it with
+/// styled ratatui Lines instead of plain text.
+fn render_detail_lines(raw: &[String]) -> Vec<Line<'static>> {
+    use super::markdown;
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut in_markdown_block = false;
+    let mut md_buf: Vec<String> = Vec::new();
+
+    for line in raw {
+        // Detect start of a multi-line string value (indented content after a key)
+        // that looks like markdown. The render_payload_lines formatter outputs
+        // string values split on \n with 6-space indent.
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+
+        if in_markdown_block {
+            // End of multi-line string: a line with less indent or a comma/closing brace
+            if indent <= 4 && (trimmed.starts_with('}') || trimmed.starts_with(',') || trimmed.is_empty()) {
+                // Flush markdown buffer
+                let md_text = md_buf.join("\n");
+                out.extend(markdown::render_markdown(&md_text));
+                in_markdown_block = false;
+                md_buf.clear();
+                out.push(Line::from(line.clone()));
+            } else {
+                md_buf.push(trimmed.to_string());
+            }
+            continue;
+        }
+
+        // Detect a key followed by split multi-line content (from render_payload_lines)
+        // Pattern: `    "key":` followed by indented lines
+        // Or detect markdown in a single string value
+        if indent == 6
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('"')
+            && !trimmed.starts_with('{')
+            && !trimmed.starts_with('[')
+        {
+            if markdown::looks_like_markdown(trimmed) {
+                in_markdown_block = true;
+                md_buf.push(trimmed.to_string());
+                continue;
+            }
+        }
+
+        out.push(Line::from(line.clone()));
+    }
+
+    if in_markdown_block && !md_buf.is_empty() {
+        let md_text = md_buf.join("\n");
+        out.extend(markdown::render_markdown(&md_text));
+    }
+
+    out
+}
+
+/// Wrapped line count for detail-pane content. Must match the `Paragraph::wrap`
+/// settings in [`draw`] or vertical scroll will drift from the true end.
+fn detail_wrap_line_count(lines: &[Line<'static>], wrap_width: u16) -> usize {
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: true })
+        .line_count(wrap_width.max(1))
 }
 
 /// Read the pre-digested choices + freeform policy for an interaction from its
@@ -132,6 +191,7 @@ pub fn run(
     let mut selected: usize = 0;
     let mut detail: Option<Vec<String>> = None; // drill-down pane content
     let mut detail_scroll: u16 = 0; // vertical scroll offset for detail pane
+    let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
     let mut input: Option<GateInput> = None; // in-flight gate decision
     let mut compose: Option<String> = None; // in-flight free-form message to the session
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
@@ -258,6 +318,7 @@ pub fn run(
                 selected,
                 detail.as_deref(),
                 detail_scroll,
+                detail_h_scroll,
                 input.as_ref(),
                 compose.as_deref(),
                 slash.as_deref(),
@@ -457,6 +518,7 @@ pub fn run(
                         if detail.is_some() {
                             detail = None;
                             detail_scroll = 0;
+                            detail_h_scroll = 0;
                             session_pick_list = None;
                         } else {
                             break;
@@ -532,9 +594,11 @@ pub fn run(
                         if detail.is_some() {
                             detail = None;
                             detail_scroll = 0;
+                            detail_h_scroll = 0;
                         } else {
                             detail = indexed.get(selected).map(|(_, src)| detail_for(&visible, *src));
                             detail_scroll = 0;
+                            detail_h_scroll = 0;
                         }
                     }
                     KeyCode::Char('a') => {
@@ -552,9 +616,22 @@ pub fn run(
                     KeyCode::Char('R') => show_reasoning = !show_reasoning,
                     // i: compose a free-form message into the session (#405).
                     KeyCode::Char('i') => {
-                        detail = None;
-                        compose = Some(String::new());
-                        status = None;
+                        if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Interaction) {
+                            let (options, allow_freeform) = interaction_choices(&visible, &g.id);
+                            detail = None;
+                            input = Some(GateInput {
+                                action: GateAction::Answer,
+                                id: g.id.clone(),
+                                buffer: String::new(),
+                                options,
+                                allow_freeform,
+                            });
+                            status = None;
+                        } else {
+                            detail = None;
+                            compose = Some(String::new());
+                            status = None;
+                        }
                     }
                     // /: slash-command mode (vim/Discord convention). `:`
                     // and `?` are accepted aliases for muscle memory.
@@ -579,10 +656,15 @@ pub fn run(
                             selected = selected.saturating_sub(1);
                         }
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        follow = false;
-                        detail = None;
-                        selected = selected.saturating_sub(1);
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        if detail.is_some() {
+                            detail_h_scroll = detail_h_scroll.saturating_add(4);
+                        }
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        if detail.is_some() {
+                            detail_h_scroll = detail_h_scroll.saturating_sub(4);
+                        }
                     }
                     KeyCode::Char('g') | KeyCode::Home => {
                         follow = false;
@@ -592,6 +674,13 @@ pub fn run(
                     KeyCode::Char('G') | KeyCode::End => {
                         follow = true;
                         detail = None;
+                    }
+                    KeyCode::Char('f') | KeyCode::Char(' ') => {
+                        follow = !follow;
+                        if follow {
+                            detail = None;
+                        }
+                        status = Some(if follow { "following newest".into() } else { "follow paused".into() });
                     }
                     _ => {}
                 }
@@ -827,7 +916,7 @@ fn render_rich_row(
             Style::default().fg(Color::DarkGray),
         )));
     }
-    let rail_style = Style::default().fg(actor_color(spec.actor));
+    let rail_style = Style::default().fg(row_rail_color(spec));
     let rail_block = "▌".repeat(rail_w);
     let glyph = if spec.in_flight {
         spinner_glyph
@@ -839,39 +928,80 @@ fn render_rich_row(
         truncate(&spec.actor_label, label_w.saturating_sub(2))
     );
     let label_padded = format!("{label_text:>label_w$}");
-    let mut headline = spec.headline.clone();
-    if !show_reasoning && headline.starts_with('💭') {
-        if let Some(stripped) = headline.strip_prefix('💭') {
-            headline = stripped.trim_start().to_string();
-        }
-    }
-    let headline_capped = cap_to_width(&headline, content_w);
-    let head_style = altitude_style(spec.altitude).patch(rail_style);
-    lines.push(Line::from(vec![
-        Span::styled(rail_block, rail_style),
+    let head_style = row_headline_style(spec);
+    let label_style = row_label_style(spec);
+    let detail_style = row_detail_style(spec);
+    let cont_pad = " ".repeat(rail_w + glyph_w + label_w + 1);
+    let first_prefix = vec![
+        Span::styled(rail_block.clone(), rail_style),
         Span::raw(" "),
         Span::styled(format!("{glyph:<2}"), head_style),
-        Span::styled(label_padded, Style::default().fg(actor_color(spec.actor))),
+        Span::styled(label_padded.clone(), label_style),
         Span::raw(" "),
-        Span::styled(headline_capped, head_style),
-    ]));
-    if let Some(d) = &spec.detail {
-        if !d.is_empty() {
-            let pad = " ".repeat(rail_w + glyph_w + label_w + 1);
-            for (i, sub) in d.split('\n').enumerate() {
-                if sub.trim().is_empty() {
-                    continue;
+    ];
+
+    if spec.tone == RowTone::AgentNarrative {
+        if let Some(body) = spec.detail.as_deref().filter(|s| !s.is_empty()) {
+            push_wrapped_narrative(
+                &mut lines,
+                body,
+                content_w,
+                &cont_pad,
+                first_prefix,
+                head_style,
+            );
+        } else {
+            let mut headline = spec.headline.clone();
+            if !show_reasoning && headline.starts_with('💭') {
+                if let Some(stripped) = headline.strip_prefix('💭') {
+                    headline = stripped.trim_start().to_string();
                 }
-                let prefix = if i == 0 { "  ↳ " } else { "    " };
-                let avail = content_w.saturating_sub(prefix.chars().count());
-                let capped = cap_to_width(sub.trim_end(), avail);
+            }
+            push_wrapped_narrative(
+                &mut lines,
+                &headline,
+                content_w,
+                &cont_pad,
+                first_prefix,
+                head_style,
+            );
+        }
+    } else {
+        let mut headline = spec.headline.clone();
+        if !show_reasoning && headline.starts_with('💭') {
+            if let Some(stripped) = headline.strip_prefix('💭') {
+                headline = stripped.trim_start().to_string();
+            }
+        }
+        let wrapped_headline = word_wrap_text(&headline, content_w);
+        for (i, chunk) in wrapped_headline.iter().enumerate() {
+            if i == 0 {
+                let mut spans = first_prefix.clone();
+                spans.push(Span::styled(chunk.clone(), head_style));
+                lines.push(Line::from(spans));
+            } else {
                 lines.push(Line::from(vec![
-                    Span::styled(pad.clone(), Style::default()),
-                    Span::styled(
-                        format!("{prefix}{capped}"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::raw(cont_pad.clone()),
+                    Span::styled(chunk.clone(), head_style),
                 ]));
+            }
+        }
+        if let Some(d) = &spec.detail {
+            if !d.is_empty() {
+                for (i, sub) in d.split('\n').enumerate() {
+                    if sub.trim().is_empty() {
+                        continue;
+                    }
+                    let prefix = if i == 0 { "  ↳ " } else { "    " };
+                    let avail = content_w.saturating_sub(prefix.chars().count());
+                    for (j, chunk) in word_wrap_text(sub.trim_end(), avail).into_iter().enumerate() {
+                        let line_prefix = if i == 0 && j == 0 { prefix } else { "    " };
+                        lines.push(Line::from(vec![
+                            Span::raw(cont_pad.clone()),
+                            Span::styled(format!("{line_prefix}{chunk}"), detail_style),
+                        ]));
+                    }
+                }
             }
         }
     }
@@ -885,10 +1015,14 @@ fn render_rich_row(
         .filter(|l| is_divider_line(l))
         .cloned()
         .collect();
-    if physical.len() > MAX_ROW_LINES {
-        let dropped = physical.len() - MAX_ROW_LINES;
+    let max_lines = match spec.tone {
+        RowTone::AgentNarrative => MAX_NARRATIVE_ROW_LINES,
+        _ => MAX_ROW_LINES,
+    };
+    if physical.len() > max_lines {
+        let dropped = physical.len() - max_lines;
         let mut kept: Vec<Line<'static>> =
-            physical.into_iter().take(MAX_ROW_LINES).collect();
+            physical.into_iter().take(max_lines).collect();
         if let Some(last) = kept.last_mut() {
             last.spans.push(Span::styled(
                 format!(" …(+{dropped})"),
@@ -922,17 +1056,77 @@ fn render_collapsed_row(count: usize, summary: &str) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(text, style)))
 }
 
-/// Cap a string to `width` visible characters; append `…` if truncated. Counts
-/// Unicode chars, not bytes (so emoji don't blow the budget).
-fn cap_to_width(s: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
+/// Word-wrap prose to terminal cells (Unicode-aware). Blank input ⇒ one empty line.
+fn word_wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![String::new()];
     }
-    if s.chars().count() <= width {
-        return s.to_string();
+    if text.is_empty() {
+        return vec![String::new()];
     }
-    let truncated: String = s.chars().take(width - 1).collect();
-    format!("{truncated}…")
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in text.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        let sep_width = if current.is_empty() { 0 } else { 1 };
+        if current_width + sep_width + word_width > max_width && !current.is_empty() {
+            result.push(std::mem::take(&mut current));
+            current = word.to_string();
+            current_width = word_width;
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+                current_width += 1;
+            }
+            current.push_str(word);
+            current_width += word_width;
+        }
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
+/// Render agent/operator narrative: preserve paragraph breaks, wrap each block.
+fn push_wrapped_narrative(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    content_w: usize,
+    cont_pad: &str,
+    first_prefix: Vec<Span<'static>>,
+    body_style: Style,
+) {
+    let mut first = true;
+    for paragraph in text.split('\n') {
+        let chunks = if paragraph.is_empty() {
+            vec![String::new()]
+        } else {
+            word_wrap_text(paragraph, content_w)
+        };
+        for chunk in chunks {
+            if first {
+                let mut spans = first_prefix.clone();
+                spans.push(Span::styled(chunk, body_style));
+                lines.push(Line::from(spans));
+                first = false;
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(cont_pad.to_string()),
+                    Span::styled(chunk, body_style),
+                ]));
+            }
+        }
+    }
+    if first {
+        let mut spans = first_prefix;
+        spans.push(Span::styled(String::new(), body_style));
+        lines.push(Line::from(spans));
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -943,6 +1137,47 @@ fn truncate(s: &str, max: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max).collect()
+}
+
+/// Left-rail color: agent narrative keeps the seat hue; tool calls use a cool
+/// blue so they read as plumbing, not speech.
+fn row_rail_color(spec: &RowSpec) -> Color {
+    match spec.tone {
+        RowTone::ToolCall => Color::Blue,
+        RowTone::Reasoning => Color::DarkGray,
+        RowTone::AgentNarrative | RowTone::Default => actor_color(spec.actor),
+    }
+}
+
+/// Headline emphasis: agent messages pop; tool calls stay subdued.
+fn row_headline_style(spec: &RowSpec) -> Style {
+    let alt = altitude_style(spec.altitude);
+    match spec.tone {
+        RowTone::AgentNarrative => alt
+            .fg(actor_color(spec.actor))
+            .add_modifier(Modifier::BOLD),
+        RowTone::ToolCall => alt.fg(Color::LightBlue).add_modifier(Modifier::DIM),
+        RowTone::Reasoning => alt.fg(Color::DarkGray),
+        RowTone::Default => alt.patch(Style::default().fg(actor_color(spec.actor))),
+    }
+}
+
+fn row_label_style(spec: &RowSpec) -> Style {
+    match spec.tone {
+        RowTone::ToolCall => Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
+        RowTone::Reasoning => Style::default().fg(Color::DarkGray),
+        RowTone::AgentNarrative | RowTone::Default => {
+            Style::default().fg(actor_color(spec.actor))
+        }
+    }
+}
+
+fn row_detail_style(spec: &RowSpec) -> Style {
+    match spec.tone {
+        RowTone::ToolCall => Style::default().fg(Color::Indexed(67)),
+        RowTone::AgentNarrative => Style::default().fg(Color::Gray),
+        _ => Style::default().fg(Color::DarkGray),
+    }
 }
 
 /// Map an `ActorKind` to a stable color. The TUI's left rail uses this so the
@@ -1107,6 +1342,7 @@ fn draw(
     selected: usize,
     detail: Option<&[String]>,
     detail_scroll: u16,
+    detail_h_scroll: u16,
     input: Option<&GateInput>,
     compose: Option<&str>,
     slash: Option<&str>,
@@ -1139,19 +1375,22 @@ fn draw(
     );
 
     if let Some(lines) = detail {
-        let text: Vec<Line> = lines.iter().map(|l| Line::from(l.as_str())).collect();
-        let inner_height = chunks[1].height.saturating_sub(2) as usize; // minus borders
-        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+        let inner_width = chunks[1].width.saturating_sub(2);
+        let inner_height = chunks[1].height.saturating_sub(2) as usize;
+        let text = render_detail_lines(lines);
+        let total_lines = detail_wrap_line_count(&text, inner_width);
+        let max_scroll = total_lines.saturating_sub(inner_height) as u16;
         let scroll = detail_scroll.min(max_scroll);
+        let h = detail_h_scroll;
         f.render_widget(
             Paragraph::new(text)
                 .block(Block::default().borders(Borders::ALL).title(" event detail "))
-                .scroll((scroll, 0))
-                .wrap(Wrap { trim: false }),
+                .wrap(Wrap { trim: true })
+                .scroll((scroll, h)),
             chunks[1],
         );
-        let scroll_hint = if max_scroll > 0 {
-            format!(" · j/k scroll ({}/{})", scroll, max_scroll)
+        let scroll_hint = if max_scroll > 0 || h > 0 {
+            format!(" · j/k ↓↑ ({}/{}) · h/l ←→ ({})", scroll, max_scroll, h)
         } else {
             String::new()
         };
@@ -1244,8 +1483,9 @@ fn draw(
         // The gate affordance hint is the channel's concern (#393) — route it
         // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
+        let follow_indicator = if follow { " ● following" } else { " ○ paused" };
         Paragraph::new(format!(
-            " q quit · j/k scroll · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
+            " q quit · j/k scroll · f/Space follow{follow_indicator} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };
@@ -1284,6 +1524,7 @@ mod tests {
             RenderedRow::Line(render::RowSpec {
                 altitude: Altitude::Attention,
                 actor: render::ActorKind::Planner,
+                tone: RowTone::Default,
                 actor_label: "planner".into(),
                 headline: "x".into(),
                 detail: None,
@@ -1387,6 +1628,33 @@ mod tests {
     }
 
     #[test]
+    fn word_wrap_text_splits_long_prose_without_ellipsis() {
+        let text = "Hello! I'm your planner agent. I can help you research topics, build agents, execute code.";
+        let wrapped = word_wrap_text(text, 40);
+        assert!(wrapped.len() > 1, "expected multiple wrapped lines: {wrapped:?}");
+        let joined = wrapped.join(" ");
+        assert!(joined.contains("planner agent"));
+        assert!(!joined.contains('…'));
+    }
+
+    #[test]
+    fn detail_wrap_line_count_splits_long_plain_lines() {
+        let long = "Problem: The echo.py script reads input from the SDK's load_invocation().input, but artifact_exec's args parameter passes shell arguments (sys.argv), not SDK invocation context.";
+        let raw = vec![
+            "payload:".to_string(),
+            format!("      {long}"),
+        ];
+        let lines = render_detail_lines(&raw);
+        let narrow = detail_wrap_line_count(&lines, 40);
+        let wide = detail_wrap_line_count(&lines, 200);
+        assert!(
+            narrow > wide,
+            "long prose should wrap across more visual lines at narrow width (narrow={narrow}, wide={wide})"
+        );
+        assert_eq!(wide, 2, "payload header + one wrapped line at wide width");
+    }
+
+    #[test]
     fn interaction_choices_reads_options_from_payload() {
         let mut e = gate_entry("user.ask.pending");
         e.payload = Some(
@@ -1427,6 +1695,7 @@ mod tests {
             RenderedRow::Line(render::RowSpec {
                 altitude: Altitude::Normal,
                 actor: render::ActorKind::Planner,
+                tone: RowTone::Default,
                 actor_label: "planner".into(),
                 headline: headline.into(),
                 detail: None,
