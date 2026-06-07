@@ -12,18 +12,21 @@ use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Spinner frames — a gentle breathing indicator on the in-flight row. The
 /// current frame is rotated on each TUI tick (the existing 250 ms poll loop).
@@ -37,6 +40,28 @@ const MAX_NARRATIVE_ROW_LINES: usize = 24;
 /// Expanded footer height while composing a multi-line message.
 const COMPOSE_PANEL_HEIGHT: u16 = 7;
 
+/// Seconds the operator has to press `q`/`Ctrl+C` again after arming quit.
+const QUIT_ARM_SECS: u64 = 3;
+const QUIT_ARM_STATUS: &str = "Quit? press q or Ctrl+C again within 3s — Esc cancels";
+
+fn quit_armed(armed_until: &Option<Instant>) -> bool {
+    armed_until
+        .filter(|until| Instant::now() < *until)
+        .is_some()
+}
+
+fn arm_quit(armed_until: &mut Option<Instant>, status: &mut Option<String>) {
+    *armed_until = Some(Instant::now() + Duration::from_secs(QUIT_ARM_SECS));
+    *status = Some(QUIT_ARM_STATUS.to_string());
+}
+
+fn disarm_quit(armed_until: &mut Option<Instant>, status: &mut Option<String>) {
+    *armed_until = None;
+    if status.as_deref() == Some(QUIT_ARM_STATUS) {
+        *status = None;
+    }
+}
+
 /// Rows visible in the main timeline list for the current terminal height.
 fn main_list_page_step(terminal_height: u16, compose_open: bool) -> usize {
     let chrome = 2u16 + if compose_open { COMPOSE_PANEL_HEIGHT } else { 0 };
@@ -47,23 +72,56 @@ fn main_list_page_step(terminal_height: u16, compose_open: bool) -> usize {
 /// visible AND the last row of the list does not scroll off the bottom of the
 /// viewport when the cursor moves up from the end.
 ///
-/// Without this helper, calling `ListState::select` on every frame resets
-/// `state.offset` to 0, and the ratatui List widget then re-derives the
-/// viewport from offset 0 — which pushes the last row off the bottom the moment
-/// the cursor moves up, leaving a blank row at the bottom of the list.
-fn compute_viewport_offset(selected: usize, list_height: usize, row_count: usize) -> usize {
-    if list_height == 0 || row_count <= list_height {
+/// Takes `row_heights` (one entry per rendered row, in terminal lines) so
+/// multi-line rows (title + preview) are accounted for — a single multi-line
+/// row at the bottom can take 2–24 lines, so a row-count-based offset would
+/// either hide the last row or leave blank lines at the bottom.
+///
+/// Pinned-to-bottom rule: the viewport is anchored to the last row, with as
+/// many preceding rows as fit packed in above. The cursor is free to move
+/// within this window. The moment the cursor moves above the window, the
+/// viewport scrolls up to follow, with the cursor as far down in the new
+/// window as possible (i.e. the most-recent rows visible alongside it).
+fn compute_viewport_offset(selected: usize, list_height: usize, row_heights: &[usize]) -> usize {
+    if list_height == 0 || row_heights.is_empty() {
         return 0;
     }
-    let max_offset = row_count - list_height;
-    // Pin to the bottom: when the cursor is in the bottom window, keep the
-    // last row at the bottom of the viewport so the operator never sees it
-    // vanish as they scroll the cursor up.
-    if selected >= max_offset {
-        return max_offset;
+    let row_count = row_heights.len();
+    let total_height: usize = row_heights.iter().sum();
+    if total_height <= list_height {
+        return 0;
     }
-    // Otherwise, follow the cursor (centered with a half-window padding).
-    selected.saturating_sub(list_height / 2)
+
+    // Step 1: bottom-anchored window. Pack rows upward from the end, stopping
+    // when the next row would overflow the viewport.
+    let mut height = 0usize;
+    let mut bottom_offset = row_count;
+    for i in (0..row_count).rev() {
+        if height + row_heights[i] > list_height {
+            break;
+        }
+        height += row_heights[i];
+        bottom_offset = i;
+    }
+
+    if selected >= bottom_offset {
+        return bottom_offset;
+    }
+
+    // Step 2: cursor moved above the bottom window. Build a window that
+    // includes `selected` at the bottom, packing earlier rows above as long
+    // as they fit. This keeps the cursor at the bottom of the new window
+    // while showing as much context above as possible.
+    let mut new_height = 0usize;
+    let mut new_offset = selected;
+    for i in (0..=selected).rev() {
+        if new_height + row_heights[i] > list_height {
+            break;
+        }
+        new_height += row_heights[i];
+        new_offset = i;
+    }
+    new_offset
 }
 
 /// Lines visible in the detail pane for the current terminal height.
@@ -92,12 +150,12 @@ impl ComposeInput {
     }
 
     fn insert_str(&mut self, text: &str) {
-        for c in text.chars() {
-            if c == '\r' {
-                continue;
-            }
-            self.insert_char(c);
+        let normalized: String = text.chars().filter(|c| *c != '\r').collect();
+        if normalized.is_empty() {
+            return;
         }
+        self.buffer.insert_str(self.cursor_pos, &normalized);
+        self.cursor_pos += normalized.len();
     }
 
     fn delete_before(&mut self) {
@@ -254,6 +312,10 @@ fn handle_compose_key(
             ComposeKeyResult::Continue
         }
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            paste_clipboard(compose, clipboard);
+            ComposeKeyResult::Continue
+        }
+        KeyCode::Insert if key.modifiers.contains(KeyModifiers::SHIFT) => {
             paste_clipboard(compose, clipboard);
             ComposeKeyResult::Continue
         }
@@ -503,7 +565,7 @@ struct TerminalRestore;
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
     }
 }
 
@@ -528,7 +590,7 @@ pub fn run(
     // Guard constructed before entering the alternate screen, so raw mode is
     // restored even if `EnterAlternateScreen` (or anything after) fails.
     let _restore = TerminalRestore;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     let mut entries: Vec<SessionTimelineEntry> = Vec::new();
@@ -555,6 +617,7 @@ pub fn run(
     // Display toggles + spinner state for the in-flight row indicator.
     let mut show_reasoning = true;
     let mut spinner_frame: usize = 0;
+    let mut quit_armed_until: Option<Instant> = None;
 
     loop {
         // Fetch at most one page per tick via the gateway API. On error (gateway
@@ -684,9 +747,13 @@ pub fn run(
 
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
-                Event::Paste(text) if compose.is_some() => {
+                Event::Paste(text) => {
                     if let Some(c) = compose.as_mut() {
                         c.insert_str(&text);
+                    } else if let Some(gi) = input.as_mut() {
+                        if gi.allow_freeform {
+                            gi.buffer.push_str(&text.replace('\r', ""));
+                        }
                     }
                 }
                 Event::Key(key) => {
@@ -723,7 +790,9 @@ pub fn run(
                             let cmdline = buf.trim().to_string();
                             slash = None;
                             match super::slash::parse(&cmdline) {
-                                SlashCommand::Quit => break,
+                                SlashCommand::Quit => {
+                                    arm_quit(&mut quit_armed_until, &mut status);
+                                }
                                 SlashCommand::Help => {
                                     detail = Some(super::slash::help_lines());
                                     detail_scroll = 0;
@@ -917,9 +986,14 @@ pub fn run(
 
                 let ctrl_c = key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL);
+                if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
+                    if quit_armed(&quit_armed_until) {
+                        break;
+                    }
+                    arm_quit(&mut quit_armed_until, &mut status);
+                    continue;
+                }
                 match key.code {
-                    KeyCode::Char('q') => break,
-                    _ if ctrl_c => break,
                     KeyCode::Esc => {
                         if detail.is_some() {
                             detail = None;
@@ -927,7 +1001,7 @@ pub fn run(
                             detail_h_scroll = 0;
                             session_pick_list = None;
                         } else {
-                            break;
+                            disarm_quit(&mut quit_armed_until, &mut status);
                         }
                     }
                     // Number pick from session list: when the detail pane is
@@ -1394,12 +1468,13 @@ fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
     }
 }
 
-/// Render a single rich `RowSpec` as a styled multi-line `ListItem`. Capped at
-/// `MAX_ROW_LINES` physical lines; longer content gets a `…` ellipsis on the
-/// last line. The actor rail on the left uses the actor's color, giving an
-/// at-a-glance map of "who said what."
-#[allow(clippy::too_many_arguments)]
-fn render_rich_row(
+/// Build the styled `Line`s for a single row. Capped at `MAX_ROW_LINES`
+/// physical lines; longer content gets a `…` ellipsis on the last line. The
+/// actor rail on the left uses the actor's color, giving an at-a-glance map of
+/// "who said what." Used by the custom render loop in `draw` so we can
+/// measure the row's physical height and stop rendering cleanly when a
+/// multi-line row no longer fits in the remaining viewport area.
+fn build_rich_row_lines(
     spec: &RowSpec,
     row_index: usize,
     turn_boundaries: &HashMap<usize, bool>,
@@ -1409,7 +1484,7 @@ fn render_rich_row(
     label_w: usize,
     spinner_glyph: &'static str,
     show_reasoning: bool,
-) -> ListItem<'static> {
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if turn_boundaries.contains_key(&row_index) {
         let bar = "─".repeat(content_w + glyph_w + label_w + rail_w + 2);
@@ -1552,7 +1627,7 @@ fn render_rich_row(
     } else {
         out.extend(physical);
     }
-    ListItem::new(Text::from(out))
+    out
 }
 
 fn is_divider_line(line: &Line) -> bool {
@@ -1564,7 +1639,7 @@ fn is_divider_line(line: &Line) -> bool {
             .unwrap_or(false)
 }
 
-fn render_collapsed_row(count: usize, summary: &str) -> ListItem<'static> {
+fn build_collapsed_row_line(count: usize, summary: &str) -> Line<'static> {
     let style = Style::default().fg(Color::DarkGray);
     let text = format!(
         "{} ⟨{} {}⟩",
@@ -1572,7 +1647,7 @@ fn render_collapsed_row(count: usize, summary: &str) -> ListItem<'static> {
         count,
         summary
     );
-    ListItem::new(Line::from(Span::styled(text, style)))
+    Line::from(Span::styled(text, style))
 }
 
 /// Word-wrap prose to terminal cells (Unicode-aware). Blank input ⇒ one empty line.
@@ -2111,7 +2186,8 @@ fn draw(
             String::new()
         };
         f.render_widget(
-            Paragraph::new(format!(" Esc/Enter close · q quit{scroll_hint}")).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(format!(" Esc/Enter close · q quit (2×){scroll_hint}"))
+                .style(Style::default().fg(Color::DarkGray)),
             chunks[footer_idx],
         );
         return;
@@ -2126,45 +2202,101 @@ fn draw(
     let label_w = 12usize.min(width / 4);
     let content_w = width.saturating_sub(rail_w + glyph_w + label_w + 2);
 
-    let items: Vec<ListItem> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| match row {
-            RenderedRow::Line(spec) => render_rich_row(
-                spec,
-                i,
-                turn_boundaries,
-                content_w,
-                glyph_w,
-                rail_w,
-                label_w,
-                spinner_glyph,
-                show_reasoning,
-            ),
-            RenderedRow::Collapsed { count, summary } => {
-                render_collapsed_row(*count, summary)
+    // Custom viewport renderer. We don't use ratatui's `List` widget here
+    // because it overwrites `state.offset` during render — that broke the
+    // "keep last row visible when scrolling up" behavior, and it also
+    // silently skips multi-line rows (title + preview) that no longer fit
+    // in the remaining viewport height, leaving a blank line at the bottom
+    // of the list. Rendering each row into its own sub-area gives us full
+    // control over both behaviors.
+    let list_area = chunks[list_idx];
+    let list_height = list_area.height as usize;
+    let row_count = rows.len();
+    let safe_selected = selected.min(row_count.saturating_sub(1));
+    // In follow mode the viewport is pinned to the bottom of the list;
+    // compute the per-row heights first so the offset is height-aware.
+    let row_heights: Vec<usize> = (0..row_count)
+        .map(|i| match &rows[i] {
+            RenderedRow::Line(spec) => {
+                build_rich_row_lines(
+                    spec,
+                    i,
+                    turn_boundaries,
+                    content_w,
+                    glyph_w,
+                    rail_w,
+                    label_w,
+                    spinner_glyph,
+                    show_reasoning,
+                )
+                .len()
             }
+            RenderedRow::Collapsed { .. } => 1,
         })
         .collect();
+    let viewport_offset = if follow {
+        // Pin to the bottom; if the last row is multi-line, the offset
+        // adjusts to keep the last row fully visible.
+        compute_viewport_offset(row_count - 1, list_height, &row_heights)
+    } else {
+        compute_viewport_offset(safe_selected, list_height, &row_heights)
+    };
+    let highlight = Style::default().add_modifier(Modifier::REVERSED);
 
-    let mut state = ListState::default();
-    if !rows.is_empty() {
-        // Use `selected_mut` + manual `offset_mut` instead of `state.select`:
-        // `state.select` resets `offset` to 0 every call, which causes the
-        // List widget to re-derive the viewport from offset 0 and pushes the
-        // last row off the bottom when the cursor moves up.
-        let safe_selected = selected.min(rows.len() - 1);
-        *state.selected_mut() = Some(safe_selected);
-        *state.offset_mut() =
-            compute_viewport_offset(safe_selected, chunks[list_idx].height as usize, rows.len());
+    let mut y: u16 = list_area.y;
+    let list_end_y = list_area.y.saturating_add(list_area.height);
+    let mut i = viewport_offset;
+    while (y as usize) < (list_end_y as usize) && i < row_count {
+        let remaining = (list_end_y - y) as usize;
+        let (lines, line_count) = match &rows[i] {
+            RenderedRow::Line(spec) => {
+                let lines = build_rich_row_lines(
+                    spec,
+                    i,
+                    turn_boundaries,
+                    content_w,
+                    glyph_w,
+                    rail_w,
+                    label_w,
+                    spinner_glyph,
+                    show_reasoning,
+                );
+                let n = lines.len();
+                (lines, n)
+            }
+            RenderedRow::Collapsed { count, summary } => {
+                let line = build_collapsed_row_line(*count, summary);
+                (vec![line], 1usize)
+            }
+        };
+        // Defensive: if the multi-line row's height exceeds what's left in
+        // the viewport, stop here. With the height-aware offset above this
+        // should not happen, but guard against any future code that shifts
+        // the offset out of sync with the row heights.
+        if line_count == 0 || line_count > remaining {
+            break;
+        }
+        let styled: Vec<Line<'static>> = if i == safe_selected {
+            lines
+                .into_iter()
+                .map(|mut l| {
+                    l.style = l.style.patch(highlight);
+                    l
+                })
+                .collect()
+        } else {
+            lines
+        };
+        let row_area = Rect {
+            x: list_area.x,
+            y,
+            width: list_area.width,
+            height: line_count as u16,
+        };
+        f.render_widget(Paragraph::new(styled), row_area);
+        y = y.saturating_add(line_count as u16);
+        i += 1;
     }
-    f.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().borders(Borders::NONE))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-        chunks[list_idx],
-        &mut state,
-    );
 
     if let Some(c) = compose {
         draw_compose_input(f, c, chunks[2]);
@@ -2178,7 +2310,7 @@ fn draw(
         .style(Style::default().fg(Color::Magenta))
     } else if compose.is_some() {
         Paragraph::new(
-            " Enter send · Shift+Enter newline · ←→↑↓ edit · Ctrl+V paste · Ctrl+C copy · Esc cancel",
+            " Enter send · Shift+Enter newline · ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy · Esc cancel",
         )
         .style(Style::default().fg(Color::Green))
     } else if let Some(gi) = input {
@@ -2214,7 +2346,7 @@ fn draw(
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         let follow_indicator = if follow { " ● following" } else { " ○ paused" };
         Paragraph::new(format!(
-            " q quit · j/k scroll · PgUp/PgDn page · f/Space follow{follow_indicator} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
+            " q quit (2×) · j/k scroll · PgUp/PgDn page · f/Space follow{follow_indicator} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };
@@ -2320,30 +2452,46 @@ mod tests {
 
     #[test]
     fn viewport_offset_pins_to_bottom_when_cursor_near_end() {
-        // 7 rows, 5 visible — once the cursor is in the bottom window the
-        // last row must stay at the bottom of the viewport.
-        assert_eq!(compute_viewport_offset(0, 5, 7), 0);
-        assert_eq!(compute_viewport_offset(1, 5, 7), 0);
-        assert_eq!(compute_viewport_offset(2, 5, 7), 2);
-        assert_eq!(compute_viewport_offset(3, 5, 7), 2);
-        assert_eq!(compute_viewport_offset(4, 5, 7), 2);
-        assert_eq!(compute_viewport_offset(5, 5, 7), 2);
-        assert_eq!(compute_viewport_offset(6, 5, 7), 2);
+        // 7 single-line rows, 5 visible — once the cursor is in the bottom
+        // window the last row must stay at the bottom of the viewport.
+        let h = vec![1usize; 7];
+        assert_eq!(compute_viewport_offset(0, 5, &h), 0);
+        assert_eq!(compute_viewport_offset(1, 5, &h), 0);
+        assert_eq!(compute_viewport_offset(2, 5, &h), 2);
+        assert_eq!(compute_viewport_offset(3, 5, &h), 2);
+        assert_eq!(compute_viewport_offset(4, 5, &h), 2);
+        assert_eq!(compute_viewport_offset(5, 5, &h), 2);
+        assert_eq!(compute_viewport_offset(6, 5, &h), 2);
     }
 
     #[test]
     fn viewport_offset_returns_zero_when_list_fits() {
-        assert_eq!(compute_viewport_offset(0, 5, 0), 0);
-        assert_eq!(compute_viewport_offset(0, 5, 5), 0);
-        assert_eq!(compute_viewport_offset(4, 5, 5), 0);
-        assert_eq!(compute_viewport_offset(2, 5, 3), 0);
+        assert_eq!(compute_viewport_offset(0, 5, &[]), 0);
+        assert_eq!(compute_viewport_offset(0, 5, &[1, 1, 1, 1, 1]), 0);
+        assert_eq!(compute_viewport_offset(2, 5, &[1, 1, 1]), 0);
     }
 
     #[test]
-    fn viewport_offset_centers_cursor_in_middle_of_long_list() {
-        // 20 rows, 5 visible — cursor at row 10 should land near the middle.
-        // ideal = max(0, 10 - 2) = 8, min(8, 15) = 8. Visible: 8..=12.
-        assert_eq!(compute_viewport_offset(10, 5, 20), 8);
+    fn viewport_offset_keeps_multiline_last_row_visible() {
+        // 7 rows, last two are 2 lines tall, viewport 5 lines tall.
+        // Bottom window: row 4 (1) + row 5 (2) + row 6 (2) = 5 → fits.
+        // Last row (6) must stay visible as the cursor moves from 6 down to 4.
+        let h = vec![1usize, 1, 1, 1, 1, 2, 2];
+        assert_eq!(compute_viewport_offset(4, 5, &h), 4);
+        assert_eq!(compute_viewport_offset(5, 5, &h), 4);
+        assert_eq!(compute_viewport_offset(6, 5, &h), 4);
+        // selected=3 leaves the bottom window; viewport scrolls up to a
+        // window that includes row 3 with rows 0..3 packed above.
+        assert_eq!(compute_viewport_offset(3, 5, &h), 0);
+    }
+
+    #[test]
+    fn viewport_offset_anchors_to_bottom_in_follow_mode_with_multiline() {
+        // 5 rows, last one is 3 lines tall, viewport 4 tall.
+        // bottom window: row 2 (1) + row 3 (1) + row 4 (3) = 5 > 4, can't fit.
+        // shrink: row 3 (1) + row 4 (3) = 4 → fits, offset=3.
+        let h = vec![1usize, 1, 1, 1, 3];
+        assert_eq!(compute_viewport_offset(4, 4, &h), 3);
     }
 
     #[test]
@@ -2690,5 +2838,17 @@ mod tests {
             })
             .collect();
         assert_eq!(shown, vec![true, false]);
+    }
+
+    #[test]
+    fn quit_arm_expires_after_window() {
+        let mut armed = Some(Instant::now() + Duration::from_millis(50));
+        assert!(quit_armed(&armed));
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!quit_armed(&armed));
+        let mut status = Some(QUIT_ARM_STATUS.to_string());
+        disarm_quit(&mut armed, &mut status);
+        assert!(armed.is_none());
+        assert!(status.is_none());
     }
 }
