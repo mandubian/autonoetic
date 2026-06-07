@@ -594,7 +594,108 @@ pub fn append_workflow_event(
             "Failed to refresh workflow_graph.md"
         );
     }
+    maybe_emit_scheduled_job_timeline(config, store, event);
     Ok(())
+}
+
+/// Mirror scheduled-job workflow events onto the canonical session timeline so
+/// the Session Room (and any channel reading `live_digest_events`) shows cron
+/// trigger + result lines — not just the chat TUI's workflow-event poll.
+fn maybe_emit_scheduled_job_timeline(
+    config: &GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    event: &WorkflowEventRecord,
+) {
+    if !event.workflow_id.starts_with("sched-") {
+        return;
+    }
+    let root_session_id = store
+        .resolve_root_session_id(&event.workflow_id)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            load_workflow_run(config, Some(store), &event.workflow_id)
+                .ok()
+                .flatten()
+                .map(|r| r.root_session_id)
+        })
+        .filter(|s| !s.is_empty());
+    let Some(root_session_id) = root_session_id else {
+        return;
+    };
+    let agent_label = workflow_agent_label(event.agent_id.as_deref());
+    let (timeline_type, payload) = match event.event_type.as_str() {
+        "scheduled_job.triggered" => (
+            "scheduled_job.triggered",
+            serde_json::json!({
+                "agent_id": agent_label,
+                "job_id": event.payload.get("job_id").and_then(|v| v.as_str()),
+                "task_id": event.task_id,
+            }),
+        ),
+        "task.completed" => {
+            let summary = event
+                .payload
+                .get("result_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            (
+                "scheduled_job.completed",
+                serde_json::json!({
+                    "agent_id": agent_label,
+                    "task_id": event.task_id,
+                    "result_summary": summary,
+                }),
+            )
+        }
+        "task.failed" => {
+            let summary = event
+                .payload
+                .get("result_summary")
+                .or_else(|| event.payload.get("reason"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("task failed");
+            (
+                "scheduled_job.failed",
+                serde_json::json!({
+                    "agent_id": agent_label,
+                    "task_id": event.task_id,
+                    "result_summary": summary,
+                }),
+            )
+        }
+        _ => return,
+    };
+    let principal = autonoetic_types::principal::Principal::agent(&agent_label);
+    let role = crate::runtime::session_timeline::derive_role(&agent_label);
+    let tl_event = crate::runtime::session_timeline::build_timeline_event(
+        root_session_id.clone(),
+        root_session_id,
+        None,
+        &principal,
+        &role,
+        timeline_type,
+        None,
+        Some(payload),
+        autonoetic_types::session_timeline::TimelineRefs::default(),
+    );
+    if let Err(e) = store.create_live_digest_event(&tl_event) {
+        tracing::debug!(
+            target: "session_timeline",
+            error = %e,
+            event_type = timeline_type,
+            "scheduled job timeline emit failed"
+        );
+    }
+}
+
+fn workflow_agent_label(agent_id: Option<&str>) -> String {
+    agent_id
+        .unwrap_or("agent")
+        .split('@')
+        .next()
+        .unwrap_or("agent")
+        .to_string()
 }
 
 /// Append a primary-workflow event when a cron job is cancelled so the chat TUI can show it.
@@ -2456,6 +2557,61 @@ mod tests {
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
         }
+    }
+
+    #[test]
+    fn scheduled_job_completed_mirrors_result_to_session_timeline() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf_id = "sched-sj-test";
+        let wf_run = autonoetic_types::workflow::WorkflowRun {
+            workflow_id: wf_id.to_string(),
+            root_session_id: "root-cron".to_string(),
+            lead_agent_id: "planner.default".to_string(),
+            status: autonoetic_types::workflow::WorkflowRunStatus::Active,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            active_task_ids: vec![],
+            queued_task_ids: vec![],
+            join_policy: JoinPolicy::AllOf,
+            join_task_ids: vec![],
+            active_plan_ref: None,
+        };
+        save_workflow_run(&cfg, Some(&store), &wf_run).unwrap();
+
+        append_workflow_event(
+            &cfg,
+            Some(&store),
+            &WorkflowEventRecord {
+                event_id: "wevt-sched-test".to_string(),
+                workflow_id: wf_id.to_string(),
+                event_type: "task.completed".to_string(),
+                task_id: Some("task-fib".to_string()),
+                agent_id: Some("fibonacci-next@rev_sha256:abc".to_string()),
+                payload: serde_json::json!({
+                    "status": "Succeeded",
+                    "result_summary": "next=21",
+                }),
+                occurred_at: now_rfc3339(),
+            },
+        )
+        .unwrap();
+
+        let tl = store
+            .list_session_timeline("root-cron", None, 10, None, None)
+            .unwrap();
+        let completed = tl
+            .entries
+            .iter()
+            .find(|e| e.event_type == "scheduled_job.completed")
+            .expect("scheduled_job.completed must reach the timeline");
+        assert!(completed.payload.as_deref().unwrap_or("").contains("next=21"));
+        assert!(completed.payload.as_deref().unwrap_or("").contains("fibonacci-next"));
     }
 
     #[test]

@@ -583,6 +583,18 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 None => format!("escalation: {synthesis}"),
             }
         }
+        "scheduled_job.triggered" => format!(
+            "scheduled call → {}",
+            field("agent_id").unwrap_or_else(|| "agent".into())
+        ),
+        "scheduled_job.completed" => format!(
+            "scheduled result [{}]",
+            field("agent_id").unwrap_or_else(|| "agent".into())
+        ),
+        "scheduled_job.failed" => format!(
+            "scheduled failed [{}]",
+            field("agent_id").unwrap_or_else(|| "agent".into())
+        ),
         // A sandbox escape attempt during execution (#413) — security-critical.
         "security.sandbox_escape" => format!(
             "SANDBOX ESCAPE ATTEMPT — {}",
@@ -775,6 +787,9 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
         // Agent/operator narrative bodies are assembled in `render_spec` via
         // [`narrative_body`] — not duplicated here.
         "agent.message" | "operator.message" => None,
+        "scheduled_job.completed" | "scheduled_job.failed" => s("result_summary")
+            .filter(|r| !r.is_empty())
+            .map(|r| cap_preview(&r, 200)),
         // LLM failure: show the preceding action chain on the second line so
         // the row alone tells the story.
         "llm.request_failed" => {
@@ -1930,6 +1945,27 @@ mod tests {
         let overridden = render_line(&mk(true, Altitude::Attention));
         assert!(overridden.starts_with("⚠"));
         assert!(overridden.contains("overridden, running anyway"));
+    }
+
+    #[test]
+    fn scheduled_job_completed_renders_result_summary() {
+        let e = entry(
+            SessionRole::Specialist { kind: "fibonacci".into() },
+            Principal::agent("fibonacci-next"),
+            "scheduled_job.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "agent_id": "fibonacci-next",
+                "result_summary": "next=21 a=8 b=13",
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("scheduled result"));
+        assert!(spec.headline.contains("fibonacci-next"));
+        assert_eq!(
+            spec.detail.as_deref(),
+            Some("next=21 a=8 b=13")
+        );
     }
 
     #[test]
