@@ -43,6 +43,29 @@ fn main_list_page_step(terminal_height: u16, compose_open: bool) -> usize {
     terminal_height.saturating_sub(chrome).max(1) as usize
 }
 
+/// Compute the scroll offset for the timeline list so the selected row stays
+/// visible AND the last row of the list does not scroll off the bottom of the
+/// viewport when the cursor moves up from the end.
+///
+/// Without this helper, calling `ListState::select` on every frame resets
+/// `state.offset` to 0, and the ratatui List widget then re-derives the
+/// viewport from offset 0 — which pushes the last row off the bottom the moment
+/// the cursor moves up, leaving a blank row at the bottom of the list.
+fn compute_viewport_offset(selected: usize, list_height: usize, row_count: usize) -> usize {
+    if list_height == 0 || row_count <= list_height {
+        return 0;
+    }
+    let max_offset = row_count - list_height;
+    // Pin to the bottom: when the cursor is in the bottom window, keep the
+    // last row at the bottom of the viewport so the operator never sees it
+    // vanish as they scroll the cursor up.
+    if selected >= max_offset {
+        return max_offset;
+    }
+    // Otherwise, follow the cursor (centered with a half-window padding).
+    selected.saturating_sub(list_height / 2)
+}
+
 /// Lines visible in the detail pane for the current terminal height.
 fn detail_page_step(terminal_height: u16) -> u16 {
     // header(1) + footer(1) + detail block borders(2)
@@ -763,6 +786,10 @@ pub fn run(
                                     let (lines, ids) = list_sessions_detail(client, agent.as_deref());
                                     detail = Some(lines);
                                     session_pick_list = Some(ids);
+                                }
+                                SlashCommand::ListCronJobs => {
+                                    detail = Some(list_cron_detail(client, root_session_id));
+                                    session_pick_list = None;
                                 }
                                 SlashCommand::ResumeSession { agent } => {
                                     if let Some(resolved_id) =
@@ -1883,6 +1910,59 @@ fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<St
 /// returned as (display lines, pickable session ids). Rows are numbered [1]-[9]
 /// so the operator can switch by pressing a single digit while the detail pane
 /// is open.
+fn list_cron_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
+    let params = serde_json::json!({
+        "root_session_id": root_session_id,
+        "limit": 50,
+    });
+    match rpc(client, "scheduled_jobs.list", params) {
+        Ok(value) => match serde_json::from_value::<
+            autonoetic_types::scheduled_job::ScheduledJobsListResult,
+        >(value)
+        {
+            Ok(parsed) if parsed.jobs.is_empty() => vec![
+                format!("(no scheduled jobs for session '{root_session_id}')"),
+                "Jobs survive session close — create one with scheduler.cron in an agent run."
+                    .to_string(),
+            ],
+            Ok(parsed) => {
+                let mut lines = vec![format!("scheduled jobs for {root_session_id}:")];
+                for job in &parsed.jobs {
+                    let msg_preview = if job.message.len() > 48 {
+                        format!("{}...", &job.message[..45])
+                    } else {
+                        job.message.clone()
+                    };
+                    lines.push(format!(
+                        "  {} [{}] → {}@{} · {} · next {}",
+                        job.job_id,
+                        job.status,
+                        job.target_agent_id,
+                        job.target_revision_id,
+                        job.cron_expr,
+                        job.next_run_at
+                    ));
+                    lines.push(format!("    msg: {msg_preview}"));
+                    if let Some(err) = job.last_error.as_deref().filter(|s| !s.is_empty()) {
+                        let err_preview = if err.len() > 72 {
+                            format!("{}...", &err[..69])
+                        } else {
+                            err.to_string()
+                        };
+                        lines.push(format!("    last_error: {err_preview}"));
+                    }
+                }
+                lines.push(
+                    "Results appear in this timeline as scheduled_job.* events.".to_string(),
+                );
+                lines
+            }
+            Err(e) => vec![format!("✗ malformed scheduled_jobs.list response: {e}")],
+        },
+        Err(e) => vec![format!("✗ scheduled_jobs.list failed: {e}")],
+    }
+}
+
 fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> (Vec<String>, Vec<String>) {
     let params = serde_json::json!({
         "agent_id": agent,
@@ -2069,7 +2149,14 @@ fn draw(
 
     let mut state = ListState::default();
     if !rows.is_empty() {
-        state.select(Some(selected.min(rows.len() - 1)));
+        // Use `selected_mut` + manual `offset_mut` instead of `state.select`:
+        // `state.select` resets `offset` to 0 every call, which causes the
+        // List widget to re-derive the viewport from offset 0 and pushes the
+        // last row off the bottom when the cursor moves up.
+        let safe_selected = selected.min(rows.len() - 1);
+        *state.selected_mut() = Some(safe_selected);
+        *state.offset_mut() =
+            compute_viewport_offset(safe_selected, chunks[list_idx].height as usize, rows.len());
     }
     f.render_stateful_widget(
         List::new(items)
@@ -2229,6 +2316,34 @@ mod tests {
         assert_eq!(main_list_page_step(24, false), 22);
         assert_eq!(main_list_page_step(24, true), 15);
         assert_eq!(main_list_page_step(1, false), 1);
+    }
+
+    #[test]
+    fn viewport_offset_pins_to_bottom_when_cursor_near_end() {
+        // 7 rows, 5 visible — once the cursor is in the bottom window the
+        // last row must stay at the bottom of the viewport.
+        assert_eq!(compute_viewport_offset(0, 5, 7), 0);
+        assert_eq!(compute_viewport_offset(1, 5, 7), 0);
+        assert_eq!(compute_viewport_offset(2, 5, 7), 2);
+        assert_eq!(compute_viewport_offset(3, 5, 7), 2);
+        assert_eq!(compute_viewport_offset(4, 5, 7), 2);
+        assert_eq!(compute_viewport_offset(5, 5, 7), 2);
+        assert_eq!(compute_viewport_offset(6, 5, 7), 2);
+    }
+
+    #[test]
+    fn viewport_offset_returns_zero_when_list_fits() {
+        assert_eq!(compute_viewport_offset(0, 5, 0), 0);
+        assert_eq!(compute_viewport_offset(0, 5, 5), 0);
+        assert_eq!(compute_viewport_offset(4, 5, 5), 0);
+        assert_eq!(compute_viewport_offset(2, 5, 3), 0);
+    }
+
+    #[test]
+    fn viewport_offset_centers_cursor_in_middle_of_long_list() {
+        // 20 rows, 5 visible — cursor at row 10 should land near the middle.
+        // ideal = max(0, 10 - 2) = 8, min(8, 15) = 8. Visible: 8..=12.
+        assert_eq!(compute_viewport_offset(10, 5, 20), 8);
     }
 
     #[test]
