@@ -7,8 +7,35 @@
 
 use crate::runtime::model_router::ResolvedModelEntry;
 use autonoetic_types::agent::LlmConfig;
-use autonoetic_types::config::{CapabilityTier, LlmPreset, RoutingPresetConfig};
+use autonoetic_types::config::{CapabilityTier, GatewayConfig, LlmPreset, RoutingPresetConfig};
 use std::collections::HashMap;
+
+/// Resolve the mapped preset name for an agent (`agent_id` → base role → `default`).
+pub fn resolve_preset_name_for_agent<'a>(
+    agent_id: &str,
+    mapping: &'a HashMap<String, String>,
+) -> Option<&'a String> {
+    mapping
+        .get(agent_id)
+        .or_else(|| {
+            agent_id
+                .rsplit_once('.')
+                .and_then(|(base, _)| mapping.get(base))
+        })
+        .or_else(|| mapping.get("default"))
+}
+
+/// `context_window_tokens` from the gateway preset mapped to `agent_id`.
+pub fn context_window_tokens_from_gateway_config(
+    agent_id: &str,
+    config: &GatewayConfig,
+) -> Option<u32> {
+    let preset_name = resolve_preset_name_for_agent(agent_id, &config.llm_preset_mapping)?;
+    config
+        .llm_presets
+        .get(preset_name.as_str())
+        .and_then(|preset| preset.context_window_tokens)
+}
 
 /// Resolves a fixed preset to its concrete LlmConfig.
 pub fn resolve_fixed_preset(preset: &LlmPreset) -> Option<LlmConfig> {
@@ -199,5 +226,48 @@ mod tests {
         assert_eq!(entry.config.provider, "openai");
         assert_eq!(entry.config.model, "gpt-4o");
         assert_eq!(entry.tier, CapabilityTier::Premium);
+    }
+
+    #[test]
+    fn test_resolve_preset_name_for_agent_mapping_order() {
+        let mut mapping = HashMap::new();
+        mapping.insert("planner.default".to_string(), "planner".to_string());
+        mapping.insert("planner".to_string(), "planner-preset".to_string());
+        mapping.insert("default".to_string(), "default-preset".to_string());
+
+        assert_eq!(
+            resolve_preset_name_for_agent("planner.default", &mapping)
+                .map(String::as_str),
+            Some("planner.default")
+        );
+        assert_eq!(
+            resolve_preset_name_for_agent("coder.default", &mapping)
+                .map(String::as_str),
+            Some("default")
+        );
+    }
+
+    #[test]
+    fn test_context_window_tokens_from_gateway_config() {
+        let mut presets = HashMap::new();
+        presets.insert(
+            "default".to_string(),
+            LlmPreset {
+                context_window_tokens: Some(114_688),
+                ..fixed_preset("llamacpp", "qwen", CapabilityTier::Economy)
+            },
+        );
+        let mut mapping = HashMap::new();
+        mapping.insert("planner".to_string(), "default".to_string());
+        let config = GatewayConfig {
+            llm_presets: presets,
+            llm_preset_mapping: mapping,
+            ..GatewayConfig::default()
+        };
+
+        assert_eq!(
+            context_window_tokens_from_gateway_config("planner.default", &config),
+            Some(114_688)
+        );
     }
 }
