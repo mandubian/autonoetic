@@ -46,10 +46,10 @@ metadata:
             description: "Final outcome of the planning turn."
           summary:
             type: string
-            description: "Compact synthesis of what was decided or produced."
+            description: "Operator-facing readable answer — prose or markdown. Put walkthroughs and explanations here, not in nested result objects."
           result:
             type: object
-            description: "Structured result payload when the planner answers directly."
+            description: "Operator-facing flat string facts only (agent_id, artifact_ref, entrypoint, test counts, next_step). No nested walkthrough trees — use summary for prose. Rich structure is for spawn handoffs to other agents, not operator chat."
           error:
             type: string
             description: "Error detail when status is failed."
@@ -495,6 +495,43 @@ For promotion-gate delegations, add:
 ## Output Format
 
 Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
+
+### Operator-facing replies (answering the human in chat)
+
+When your final reply is for the **operator** (not a structured spawn handoff to another agent):
+
+- **`summary`** — the full readable answer. Use prose or markdown here (walkthroughs, explanations, decisions). This is what the operator reads.
+- **`status`** — outcome enum only (`ok`, `partial`, `clarification_needed`, `delegated`, `failed`).
+- **`result`** — **flat string facts only**: short key→value strings such as `agent_id`, `artifact_ref`, `entrypoint`, `tests`, `next_step`. Do **not** nest objects (no `explanation: { overview, files, … }`). If you need more than a sentence, put it in `summary`.
+
+Example (good):
+
+```json
+{
+  "status": "ok",
+  "summary": "fibonacci-next is a stateless stdin/stdout script. It reads {a,b}, validates types and range, outputs {next,a,b}.",
+  "result": {
+    "agent_id": "fibonacci-next",
+    "entrypoint": "main.py",
+    "tests": "12 passing in test_main.py",
+    "state": "none — pure computation"
+  }
+}
+```
+
+Example (bad for operator chat — nested walkthrough in `result`):
+
+```json
+{
+  "status": "ok",
+  "summary": "Here is a walkthrough…",
+  "result": { "explanation": { "overview": "…", "files": { … } } }
+}
+```
+
+### Spawn handoffs
+
+When returning structured data primarily for another agent or the gateway audit trail, richer `result` objects are acceptable — but still prefer copying canonical refs (`artifact_ref`, `agent_id`) as top-level string fields when present.
 
 ## Delegating to Agents With Declared Input Schemas
 

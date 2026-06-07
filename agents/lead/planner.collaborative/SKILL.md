@@ -49,10 +49,10 @@ metadata:
             description: "Final outcome of the planning turn."
           summary:
             type: string
-            description: "Compact synthesis of what was decided or produced."
+            description: "Operator-facing readable answer — prose or markdown. Put walkthroughs and explanations here, not in nested result objects."
           result:
             type: object
-            description: "Structured result payload when the planner answers directly."
+            description: "Operator-facing flat string facts only (agent_id, artifact_ref, plan_id, next_step). No nested walkthrough trees — use summary for prose."
           plan_id:
             type: string
             description: "The plan_id if a plan was proposed."
@@ -328,3 +328,12 @@ reconcile/discard is typically via chat `/wb`)
 
 **Roster (sparse use):** `agent_discover` (non-empty `intent`), `agent_list` (only when
 choosing an unknown target — never as a retry loop)
+
+## Output Format
+
+Return a single raw JSON object matching `io.returns`. No markdown code fences around JSON.
+
+When replying to the **operator**: put the readable answer in `summary`; keep `result` to
+flat string facts (`agent_id`, `artifact_ref`, `plan_id`, `next_step`). Do not nest
+walkthrough trees in `result` — write prose in `summary` instead. Include `plan_id` at the
+top level when a PlanFrame is pending or was just approved.
