@@ -125,12 +125,66 @@ fn bootstrap_agent_inner(
     })?;
 
     let lock_text = String::from_utf8_lossy(&lock_content);
-    if lock_text.contains(crate::runtime::install_contract::PLACEHOLDER_SHA) {
+    let current_build_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
+    let needs_rewrite = if lock_text.contains(crate::runtime::install_contract::PLACEHOLDER_SHA) {
+        // The bundled template left a `replace-me` marker — materialize it.
+        true
+    } else {
+        // The on-disk lock has a real SHA but it isn't the current gateway's
+        // build SHA. The agent was installed/scaffolded against an older
+        // binary and `--overwrite` is supposed to bring it in sync. Refresh
+        // it so the next drift check has something to match against.
+        let lock_sha = lock_text
+            .lines()
+            .find_map(|line| {
+                let trimmed = line.trim_start();
+                trimmed
+                    .strip_prefix("sha256:")
+                    .and_then(|v| v.trim().strip_prefix('"').map(|s| s.to_string()))
+            })
+            .unwrap_or_default();
+        lock_sha != current_build_sha
+    };
+    if needs_rewrite {
         let replaced = lock_text.replace(
             crate::runtime::install_contract::PLACEHOLDER_SHA,
-            crate::runtime::install_contract::GATEWAY_BUILD_SHA256,
+            current_build_sha,
         );
-        lock_content = replaced.into_bytes();
+        // Also replace any other stale `sha256: "<digest>"` line under the
+        // `gateway:` block with the current build SHA. The placeholder
+        // branch above is the common path; this handles agents that were
+        // installed under a previous binary and never re-overwritten.
+        let mut rewritten = String::with_capacity(replaced.len());
+        let mut in_gateway_block = false;
+        for line in replaced.lines() {
+            if line.trim_start().starts_with("gateway:") {
+                in_gateway_block = true;
+            } else if line.chars().next().map_or(false, |c| !c.is_whitespace()) {
+                in_gateway_block = false;
+            }
+            if in_gateway_block && line.trim_start().starts_with("sha256:") {
+                let indent: String = line
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .collect();
+                rewritten.push_str(&format!("{indent}sha256: \"{current_build_sha}\"\n"));
+            } else {
+                rewritten.push_str(line);
+                rewritten.push('\n');
+            }
+        }
+        // Trim trailing whitespace introduced by the rewrite.
+        let rewritten = rewritten.trim_end().to_string() + "\n";
+        lock_content = rewritten.into_bytes();
+        // Materialize the populated lock back to the deployed agent dir so
+        // the on-disk file matches the current gateway build SHA. Without
+        // this, the deployed runtime.lock keeps either the `replace-me`
+        // placeholder (template case) or a stale real SHA (upgrade case),
+        // and `check_runtime_lock_drift` (R+7/R+18) trips on the first
+        // session turn. The revision's runtime.lock is already correct
+        // (built from the in-memory `lock_content`), so this only fixes
+        // the deployed copy.
+        std::fs::write(&lock_path, &lock_content)?;
     }
 
     let manifest_hash = format!("sha256:{:x}", Sha256::digest(&skill_content));
@@ -493,4 +547,124 @@ fn write_gateway_identity(gateway_dir: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(&identity)?;
     std::fs::write(gateway_dir.join("gateway.json"), json)?;
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn minimal_skill(agent_id: &str) -> String {
+        format!(
+            "---\nversion: \"1.0\"\nruntime:\n  engine: \"autonoetic\"\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  type: \"stateful\"\n  sandbox: \"bubblewrap\"\n  runtime_lock: \"runtime.lock\"\nagent:\n  id: \"{agent_id}\"\n  name: \"{agent_id}\"\n  description: \"test\"\ncapabilities: []\n---\nbody\n"
+        )
+    }
+
+    fn minimal_config(agents_dir: &std::path::Path) -> autonoetic_types::config::GatewayConfig {
+        let mut config = autonoetic_types::config::GatewayConfig::default();
+        config.agents_dir = agents_dir.to_path_buf();
+        config
+    }
+
+    fn write_runtime_lock_yaml(agent_dir: &std::path::Path, sha_value: &str) {
+        let lock = format!(
+            "gateway:\n  artifact: \"marketplace://gateway/autonoetic-gateway\"\n  version: \"0.1.0\"\n  sha256: \"{sha_value}\"\nsdk:\n  version: \"0.1.0\"\nsandbox:\n  backend: \"bubblewrap\"\ndependencies: []\nartifacts: []\n"
+        );
+        std::fs::write(agent_dir.join("runtime.lock"), lock).unwrap();
+    }
+
+    fn bootstrap_test_agent(agent_id: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let agent_dir = agents_dir.join(agent_id);
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("SKILL.md"), minimal_skill(agent_id)).unwrap();
+        // Use the current build SHA as the initial lock so the first
+        // bootstrap creates a revision. The individual tests then mutate
+        // the lock to placeholder / stale and re-bootstrap to exercise
+        // the rewrite path.
+        let current_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
+        write_runtime_lock_yaml(&agent_dir, current_sha);
+        let config = minimal_config(&agents_dir);
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, agent_id).unwrap();
+        (dir, agent_dir)
+    }
+
+    /// Regression: when the on-disk runtime.lock has the `replace-me`
+    /// placeholder, bootstrap must materialize the populated lock back to
+    /// disk so `check_runtime_lock_drift` sees the current build SHA.
+    #[test]
+    fn bootstrap_materializes_placeholder_lock_on_disk() {
+        let (_dir, agent_dir) = bootstrap_test_agent("test-agent");
+        write_runtime_lock_yaml(&agent_dir, "replace-me");
+        // Re-run bootstrap to trigger the rewrite path (the helper above
+        // already ran once, but with whatever the file contained then —
+        // here we set the placeholder explicitly and re-bootstrap).
+        let agents_dir = agent_dir.parent().unwrap().to_path_buf();
+        let config = minimal_config(&agents_dir);
+        let gateway_dir = agents_dir.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent").unwrap();
+        let written = std::fs::read_to_string(agent_dir.join("runtime.lock")).unwrap();
+        let current_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
+        assert!(
+            !written.contains("replace-me"),
+            "placeholder must be replaced, got:\n{written}"
+        );
+        assert!(
+            written.contains(&format!("sha256: \"{current_sha}\"")),
+            "deployed lock must carry current build SHA, got:\n{written}"
+        );
+    }
+
+    /// Regression: when the on-disk lock has a real but STALE build SHA
+    /// (the user upgraded the binary but the deployed lock wasn't refreshed),
+    /// bootstrap must update it to the current build SHA.
+    #[test]
+    fn bootstrap_refreshes_stale_real_sha_on_disk() {
+        let (_dir, agent_dir) = bootstrap_test_agent("test-agent");
+        write_runtime_lock_yaml(&agent_dir, "sha256:stale_old_digest");
+        let agents_dir = agent_dir.parent().unwrap().to_path_buf();
+        let config = minimal_config(&agents_dir);
+        let gateway_dir = agents_dir.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent").unwrap();
+        let written = std::fs::read_to_string(agent_dir.join("runtime.lock")).unwrap();
+        let current_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
+        assert!(
+            !written.contains("stale_old_digest"),
+            "stale SHA must be replaced, got:\n{written}"
+        );
+        assert!(
+            written.contains(&format!("sha256: \"{current_sha}\"")),
+            "deployed lock must carry current build SHA, got:\n{written}"
+        );
+    }
+
+    /// The on-disk lock should be left alone when its SHA already matches
+    /// the current gateway build (idempotent re-bootstrap).
+    #[test]
+    fn bootstrap_does_not_touch_lock_when_sha_already_current() {
+        let current_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
+        let original_lock = format!(
+            "gateway:\n  artifact: \"marketplace://gateway/autonoetic-gateway\"\n  version: \"0.1.0\"\n  sha256: \"{current_sha}\"\nsdk:\n  version: \"0.1.0\"\nsandbox:\n  backend: \"bubblewrap\"\ndependencies: []\nartifacts: []\n"
+        );
+        let (_dir, agent_dir) = bootstrap_test_agent("test-agent");
+        std::fs::write(agent_dir.join("runtime.lock"), &original_lock).unwrap();
+        let agents_dir = agent_dir.parent().unwrap().to_path_buf();
+        let config = minimal_config(&agents_dir);
+        let gateway_dir = agents_dir.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent").unwrap();
+        let written = std::fs::read_to_string(agent_dir.join("runtime.lock")).unwrap();
+        assert_eq!(
+            written, original_lock,
+            "lock with current SHA must be left untouched"
+        );
+    }
 }
