@@ -177,6 +177,10 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ("promotion-fail", "promotion verdict: fail (critical)"),
     ("emergency-stop", "emergency stop"),
     ("guard-tripped", "loop guard tripped"),
+    ("plan-propose", "plan.pending with structured steps"),
+    ("plan-approved", "plan.approved full cycle"),
+    ("workbench", "workbench created → reconciled lifecycle"),
+    ("collaborative-session", "plan + workbench + delegation full session"),
     ("full-session", "complete session lifecycle"),
     ("help", "list available scenarios"),
 ];
@@ -209,6 +213,10 @@ pub fn run(name: &str, root: &str) -> Option<Vec<SessionTimelineEntry>> {
         "promotion-fail" => Some(scenario_promotion_fail(root)),
         "emergency-stop" => Some(scenario_emergency_stop(root)),
         "guard-tripped" => Some(scenario_guard_tripped(root)),
+        "plan-propose" => Some(scenario_plan_propose(root)),
+        "plan-approved" => Some(scenario_plan_approved(root)),
+        "workbench" => Some(scenario_workbench(root)),
+        "collaborative-session" => Some(scenario_collaborative_session(root)),
         "full-session" => Some(scenario_full_session(root)),
         _ => None,
     }
@@ -911,6 +919,342 @@ fn scenario_guard_tripped(root: &str) -> Vec<SessionTimelineEntry> {
         "system",
     )))
     .collect()
+}
+
+fn scenario_plan_propose(root: &str) -> Vec<SessionTimelineEntry> {
+    let plan_id = next_gate_id("pln");
+    let plan = serde_json::json!({
+        "plan_id": plan_id,
+        "version": 1,
+        "title": "Add rate limiter to /api/echo endpoint",
+        "objective": "Throttle per-IP request rate on /api/echo to prevent abuse while preserving legitimate traffic.",
+        "steps": [
+            {"step_id": "s1", "title": "Design rate-limit algorithm", "owner": "agent", "agent_id": "architect.default", "depends_on": []},
+            {"step_id": "s2", "title": "Implement middleware", "owner": "agent", "agent_id": "coder.default", "depends_on": ["s1"]},
+            {"step_id": "s3", "title": "Add unit tests", "owner": "agent", "agent_id": "unit_test_runner.default", "depends_on": ["s2"]},
+            {"step_id": "s4", "title": "Security review", "owner": "agent", "agent_id": "auditor.default", "depends_on": ["s2"]},
+        ],
+        "validation_policy": {
+            "entries": [
+                {"step_id": "s3", "validator": "unit_test_runner.default", "min_pass_rate": 1.0},
+                {"step_id": "s4", "validator": "auditor.default", "blocking_findings_severity": ["critical"]},
+            ]
+        }
+    });
+    vec![
+        turn_start(root),
+        agent_message(
+            root,
+            "Before I start building, let me propose a structured plan. This is a 4-step plan with distinct validators.",
+        ),
+        llm_round(root, "claude-sonnet-4-20250514", 2400, 320),
+        tool_completed(
+            root,
+            "planframe_propose",
+            &format!("PlanFrame {plan_id} proposed (4 steps)"),
+        ),
+        agent_entry(
+            root,
+            "plan.pending",
+            Altitude::Attention,
+            Some(plan.to_string()),
+            TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
+fn scenario_plan_approved(root: &str) -> Vec<SessionTimelineEntry> {
+    let plan_id = next_gate_id("pln");
+    let mut evts = scenario_plan_propose(root);
+    evts[4] = {
+        let mut e = agent_entry(
+            root,
+            "plan.pending",
+            Altitude::Attention,
+            Some(serde_json::json!({
+                "plan_id": plan_id,
+                "version": 1,
+                "title": "Refactor auth module into separate service",
+            }).to_string()),
+            TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+        );
+        e.event_id = format!("test-ev-{}-override", EV_SEQ.fetch_add(1, Ordering::Relaxed));
+        e
+    };
+    evts.push(operator_message(root, "Plan looks good. Approving to start execution."));
+    evts.push(agent_entry(
+        root,
+        "plan.approved",
+        Altitude::Normal,
+        Some(serde_json::json!({
+            "plan_id": plan_id,
+            "version": 1,
+            "approved_by": "operator",
+        }).to_string()),
+        TimelineRefs {
+            plan_id: Some(plan_id.clone()),
+            ..Default::default()
+        },
+    ));
+    evts.push(agent_message(
+        root,
+        "Plan approved. Starting step s1 — delegating to architect.",
+    ));
+    evts.push(tool_completed(root, "agent_spawn", "spawned architect.default for s1"));
+    evts.push(llm_round(root, "claude-sonnet-4-20250514", 1200, 180));
+    evts.push(tool_completed(
+        root,
+        "planframe_amend",
+        &format!("PlanFrame {plan_id} amended: s1 marked complete"),
+    ));
+    evts.push(turn_end(root));
+    evts
+}
+
+fn scenario_workbench(root: &str) -> Vec<SessionTimelineEntry> {
+    let workbench_id = next_gate_id("wb");
+    let plan_id = next_gate_id("pln");
+    vec![
+        turn_start(root),
+        agent_message(
+            root,
+            "Projecting the auth module artifact into a workbench for the operator to review before promotion.",
+        ),
+        llm_round(root, "claude-sonnet-4-20250514", 1600, 220),
+        tool_completed(
+            root,
+            "planframe_propose",
+            &format!("PlanFrame {plan_id} proposed (1 step)"),
+        ),
+        agent_entry(
+            root,
+            "plan.pending",
+            Altitude::Attention,
+            Some(serde_json::json!({
+                "plan_id": plan_id,
+                "version": 1,
+                "title": "Project auth module for operator review",
+            }).to_string()),
+            TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+        ),
+        operator_message(root, "Approved — project the workbench."),
+        agent_entry(
+            root,
+            "plan.approved",
+            Altitude::Normal,
+            Some(serde_json::json!({
+                "plan_id": plan_id,
+                "version": 1,
+                "approved_by": "operator",
+            }).to_string()),
+            TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+        ),
+        tool_completed(
+            root,
+            "artifact_project",
+            &format!("Workbench {workbench_id} projected (3 files)"),
+        ),
+        entry(
+            root,
+            "workbench.created",
+            Altitude::Detail,
+            Some(serde_json::json!({ "workbench_id": workbench_id }).to_string()),
+            TimelineRefs {
+                workbench_id: Some(workbench_id.clone()),
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+            agent_principal("planner.collaborative"),
+            "planner",
+        ),
+        agent_message(
+            root,
+            "Workbench projected. The operator can now review and edit the files before reconciliation.",
+        ),
+        operator_message(
+            root,
+            "Reviewed the changes. Looks correct — reconciling to make the revisions permanent.",
+        ),
+        entry(
+            root,
+            "workbench.reconciled",
+            Altitude::Detail,
+            Some(serde_json::json!({ "workbench_id": workbench_id }).to_string()),
+            TimelineRefs {
+                workbench_id: Some(workbench_id.clone()),
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+            operator_principal(),
+            "operator",
+        ),
+        agent_message(root, "Reconciled. The session can now proceed to promotion."),
+        turn_end(root),
+    ]
+}
+
+fn scenario_collaborative_session(root: &str) -> Vec<SessionTimelineEntry> {
+    let plan_id = next_gate_id("pln");
+    let workbench_id = next_gate_id("wb");
+    let interaction_id = next_gate_id("int");
+    vec![
+        turn_start(root),
+        agent_message(
+            root,
+            "Let me design the new feature, but first I want to clarify a constraint before committing to a plan.",
+        ),
+        llm_round(root, "claude-sonnet-4-20250514", 1800, 210),
+        tool_completed(
+            root,
+            "researcher.search",
+            "Found 3 existing rate-limiter libraries compatible with the current stack",
+        ),
+        agent_entry(
+            root,
+            "user.ask.pending",
+            Altitude::Attention,
+            Some(serde_json::json!({
+                "interaction_id": interaction_id,
+                "question": "The research found 3 viable rate-limiter libraries. Which should I standardize on?",
+                "options": [
+                    {"id": "opt-redis", "label": "Redis-based (distributed, requires Redis)"},
+                    {"id": "opt-mem", "label": "In-memory (per-instance, no external deps)"},
+                    {"id": "opt-token", "label": "Token bucket algorithm (custom impl, lightweight)"},
+                ],
+                "options_count": 3,
+                "allow_freeform": true,
+            }).to_string()),
+            TimelineRefs {
+                interaction_id: Some(interaction_id.clone()),
+                ..Default::default()
+            },
+        ),
+        operator_message(root, "Use Redis — we already run a Redis cluster for sessions."),
+        llm_round(root, "claude-sonnet-4-20250514", 1500, 240),
+        agent_message(root, "Good. Now I have a clear plan to propose."),
+        tool_completed(
+            root,
+            "planframe_propose",
+            &format!("PlanFrame {plan_id} proposed (4 steps)"),
+        ),
+        agent_entry(
+            root,
+            "plan.pending",
+            Altitude::Attention,
+            Some(serde_json::json!({
+                "plan_id": plan_id,
+                "version": 1,
+                "title": "Add Redis-backed rate limiter to /api/echo",
+                "objective": "Throttle /api/echo per-IP using Redis-backed sliding window.",
+                "steps": [
+                    {"step_id": "s1", "title": "Architect Redis schema", "owner": "agent", "agent_id": "architect.default"},
+                    {"step_id": "s2", "title": "Implement middleware", "owner": "agent", "agent_id": "coder.default", "depends_on": ["s1"]},
+                    {"step_id": "s3", "title": "Write unit tests", "owner": "agent", "agent_id": "unit_test_runner.default", "depends_on": ["s2"]},
+                    {"step_id": "s4", "title": "Security review", "owner": "agent", "agent_id": "auditor.default", "depends_on": ["s2"]},
+                ],
+            }).to_string()),
+            TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+        ),
+        operator_message(root, "Plan approved."),
+        agent_entry(
+            root,
+            "plan.approved",
+            Altitude::Normal,
+            Some(serde_json::json!({
+                "plan_id": plan_id,
+                "version": 1,
+                "approved_by": "operator",
+            }).to_string()),
+            TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+        ),
+        tool_completed(
+            root,
+            "agent_spawn",
+            "spawned architect.default for s1",
+        ),
+        tool_completed(
+            root,
+            "agent_spawn",
+            "spawned coder.default for s2",
+        ),
+        tool_completed(
+            root,
+            "planframe_amend",
+            &format!("PlanFrame {plan_id} amended: s1+s2 complete"),
+        ),
+        tool_completed(
+            root,
+            "artifact_project",
+            &format!("Workbench {workbench_id} projected (5 files)"),
+        ),
+        entry(
+            root,
+            "workbench.created",
+            Altitude::Detail,
+            Some(serde_json::json!({ "workbench_id": workbench_id }).to_string()),
+            TimelineRefs {
+                workbench_id: Some(workbench_id.clone()),
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+            agent_principal("planner.collaborative"),
+            "planner",
+        ),
+        agent_message(
+            root,
+            "The implementation is in the workbench. Please review and reconcile when ready — I'll resume with the changes applied.",
+        ),
+        operator_message(
+            root,
+            "Reviewed. Two small fixes applied in the workbench. Reconciling now.",
+        ),
+        entry(
+            root,
+            "workbench.reconciled",
+            Altitude::Detail,
+            Some(serde_json::json!({ "workbench_id": workbench_id }).to_string()),
+            TimelineRefs {
+                workbench_id: Some(workbench_id.clone()),
+                plan_id: Some(plan_id.clone()),
+                ..Default::default()
+            },
+            operator_principal(),
+            "operator",
+        ),
+        llm_round(root, "claude-sonnet-4-20250514", 2200, 380),
+        agent_message(
+            root,
+            "Reconciled with operator edits. Running sealed evaluation before promotion.",
+        ),
+        tool_completed(
+            root,
+            "sealed_evaluation.evaluate",
+            "PASS: all gates satisfied",
+        ),
+        agent_message(
+            root,
+            "All checks pass. The feature is ready for production.",
+        ),
+        turn_end(root),
+    ]
 }
 
 fn scenario_full_session(root: &str) -> Vec<SessionTimelineEntry> {
