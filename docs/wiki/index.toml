@@ -1,0 +1,83 @@
+[[pages]]
+id = "sdk-python"
+title = "Python SDK Reference (sandbox.exec)"
+file = "sdk-python.md"
+tags = ["sdk", "python", "sandbox", "memory", "state", "events", "credentials"]
+
+[[pages]]
+id = "sdk-typescript"
+title = "TypeScript SDK Reference"
+file = "sdk-typescript.md"
+tags = ["sdk", "typescript", "sandbox"]
+
+[[pages]]
+id = "architecture-overview"
+title = "Architecture Overview"
+file = "architecture-overview.md"
+tags = ["architecture", "gateway", "agents", "security", "separation-of-powers"]
+
+[[pages]]
+id = "tool-reference"
+title = "Tool Reference Guide"
+file = "tool-reference.md"
+tags = ["tools", "content", "artifact", "knowledge", "agent", "sandbox", "memory"]
+
+[[pages]]
+id = "approval-system"
+title = "Approval System"
+file = "approval-system.md"
+tags = ["approval", "security", "gates", "dedup", "grants", "escalation"]
+
+[[pages]]
+id = "promotion-lifecycle"
+title = "Promotion Lifecycle"
+file = "promotion-lifecycle.md"
+tags = ["promotion", "revision", "activation", "evidence", "federation", "gate"]
+
+[[pages]]
+id = "credential-management"
+title = "Credential Management"
+file = "credential-management.md"
+tags = ["credentials", "vault", "secrets", "injection", "sandbox"]
+
+[[pages]]
+id = "remote-access-approval"
+title = "Remote Access and Network Policy"
+file = "remote-access-approval.md"
+tags = ["network", "remote-access", "static-analysis", "approval", "sandbox"]
+
+[[pages]]
+id = "agent-capabilities"
+title = "Agent Capabilities and Permissions"
+file = "agent-capabilities.md"
+tags = ["capabilities", "permissions", "tools", "access-control"]
+
+[[pages]]
+id = "memory-architecture"
+title = "Memory Architecture"
+file = "memory-architecture.md"
+tags = ["memory", "tier1", "tier2", "knowledge", "session", "visibility"]
+
+[[pages]]
+id = "constitution-rules"
+title = "Constitution Rules for Agents"
+file = "constitution-rules.md"
+tags = ["constitution", "rules", "rights", "governance", "enforcement"]
+
+[[pages]]
+id = "agent-lifecycle"
+title = "Agent Lifecycle: Wake, Reason, Hibernate"
+file = "agent-lifecycle.md"
+tags = ["lifecycle", "wake", "reasoning", "script", "session", "spawn"]
+
+[[pages]]
+id = "skill-manifest"
+title = "SKILL.md Manifest Format"
+file = "skill-manifest.md"
+tags = ["skill", "manifest", "yaml", "frontmatter", "agent", "configuration"]
+
+[[pages]]
+id = "workflow-orchestration"
+title = "Workflow Orchestration and Child Agents"
+file = "workflow-orchestration.md"
+tags = ["workflow", "spawn", "children", "wait", "join", "signal", "orchestration"]

@@ -50,6 +50,7 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
     write_gateway_identity(gateway_dir)?;
     bootstrap_constitution_snapshot(config, gateway_dir)?;
     bootstrap_sdk_snapshot(gateway_dir)?;
+    bootstrap_wiki_snapshot(gateway_dir)?;
     crate::sandbox::init_sdk_deployed_path(gateway_dir);
 
     let store = GatewayStore::open(gateway_dir)?;
@@ -90,6 +91,7 @@ pub fn bootstrap_single_agent(
     write_gateway_identity(gateway_dir)?;
     bootstrap_constitution_snapshot(config, gateway_dir)?;
     bootstrap_sdk_snapshot(gateway_dir)?;
+    bootstrap_wiki_snapshot(gateway_dir)?;
     crate::sandbox::init_sdk_deployed_path(gateway_dir);
     let store = GatewayStore::open(gateway_dir)?;
     bootstrap_agent_inner(config, gateway_dir, &store, agent_id)
@@ -584,6 +586,24 @@ pub fn bootstrap_sdk_snapshot(gateway_dir: &Path) -> Result<()> {
         sync_dir(&ts_src, &ts_dest)?;
     }
 
+    Ok(())
+}
+
+/// Materialize the wiki docs corpus into `.gateway/wiki/` so agents can
+/// discover and read platform documentation at runtime.
+pub fn bootstrap_wiki_snapshot(gateway_dir: &Path) -> Result<()> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let wiki_src = manifest_dir
+        .parent()
+        .map(|p| p.join("docs").join("wiki"));
+
+    let Some(wiki_src) = wiki_src else { return Ok(()) };
+    if !wiki_src.exists() {
+        return Ok(());
+    }
+
+    let dest = gateway_dir.join("wiki");
+    sync_dir(&wiki_src, &dest)?;
     Ok(())
 }
 

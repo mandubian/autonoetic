@@ -1313,6 +1313,55 @@ impl JsonRpcRouter {
                 }
             }
 
+            "wiki.list" => {
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let wiki_dir = gateway_dir.join("wiki");
+                match crate::runtime::tools::wiki::list_pages(
+                    if wiki_dir.exists() { Some(wiki_dir.as_path()) } else { None },
+                ) {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({"pages": []})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("wiki.list failed: {}", e),
+                    ),
+                }
+            }
+
+            "wiki.get" => {
+                let params: autonoetic_types::wiki::WikiGetParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for wiki.get: {}", e),
+                            );
+                        }
+                    };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let wiki_dir = gateway_dir.join("wiki");
+                match crate::runtime::tools::wiki::get_page(
+                    if wiki_dir.exists() { Some(wiki_dir.as_path()) } else { None },
+                    &params.id,
+                ) {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result)
+                            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("wiki.get failed: {}", e),
+                    ),
+                }
+            }
+
             "channel.bind" => {
                 // #393 (P3.c): bind an external conversation (Discord thread,
                 // WhatsApp chat) to a room so it survives reconnects and routes

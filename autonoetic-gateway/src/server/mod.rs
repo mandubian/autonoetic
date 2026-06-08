@@ -57,6 +57,13 @@ impl GatewayServer {
                 e
             )
         })?;
+        crate::bootstrap::bootstrap_wiki_snapshot(&gateway_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "Wiki bootstrap into gateway dir failed (target='{}'): {}",
+                gateway_dir.join("wiki").display(),
+                e
+            )
+        })?;
         crate::sandbox::init_sdk_deployed_path(&gateway_dir);
 
         crate::constitution_digest::initialize_constitution(self.config.as_ref()).map_err(|e| {

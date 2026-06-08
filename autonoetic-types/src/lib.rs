@@ -40,3 +40,4 @@ pub mod task_completion;
 pub mod tool_error;
 pub mod workbench;
 pub mod workflow;
+pub mod wiki;
