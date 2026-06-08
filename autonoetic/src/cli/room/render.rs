@@ -225,6 +225,21 @@ fn structured_with_lead_prose(
     lead_prose: &str,
 ) -> (String, Option<String>) {
     let lead = lead_prose.trim();
+    if is_plan_proposal_object(obj) {
+        let (mut plan_headline, mut plan_detail) = plan_proposal_preview(obj);
+        if !lead.is_empty() {
+            if lead.contains('\n') || lead.chars().count() > 120 {
+                let mut parts = vec![preserve_lines(lead, NARRATIVE_BODY_MAX)];
+                if let Some(d) = plan_detail {
+                    parts.push(d);
+                }
+                plan_detail = Some(parts.join("\n\n"));
+            } else {
+                plan_headline = one_line(lead, 120);
+            }
+        }
+        return (plan_headline, plan_detail);
+    }
     let headline = if lead.contains('\n') || lead.chars().count() > 120 {
         String::new()
     } else if lead.is_empty() {
@@ -277,9 +292,9 @@ fn summary_plaintext(s: &str) -> String {
     }
 }
 
-/// Short list-row title from a summary — markdown `#` headings, or a brief
-/// single-line summary. Multi-line prose with sections renders entirely in the
-/// list body so the main pane can apply markdown formatting.
+/// Short list-row title from a summary — only explicit `#` markdown headings.
+/// Everything else renders as formatted body (models often glue section titles
+/// onto the first sentence without newlines).
 fn summary_title(s: &str) -> String {
     for line in s.lines() {
         let t = line.trim();
@@ -289,19 +304,6 @@ fn summary_title(s: &str) -> String {
         {
             return one_line(t.trim_start_matches('#').trim(), 72);
         }
-    }
-    let non_empty = s.lines().filter(|l| !l.trim().is_empty()).count();
-    if non_empty <= 1 {
-        let first = s
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or(s)
-            .trim();
-        let flat = one_line(first, 240);
-        if flat.chars().count() <= 120 {
-            return flat;
-        }
-        return String::new();
     }
     String::new()
 }
@@ -389,13 +391,189 @@ fn result_prose_line(result: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+fn plan_id_from_proposal(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    obj.get("plan_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            obj.get("result")
+                .and_then(|r| r.get("plan_id"))
+                .and_then(|v| v.as_str())
+        })
+        .map(str::to_string)
+}
+
+fn is_plan_proposal_object(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    obj.get("status").and_then(|v| v.as_str()) == Some("awaiting_approval")
+        && plan_id_from_proposal(obj).is_some()
+}
+
+/// Target agent id for an `agent_spawn` tool row (`tool.requested` or
+/// `tool.completed`), when present in the payload.
+pub fn agent_spawn_agent_id(entry: &SessionTimelineEntry) -> Option<String> {
+    let p = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(v)
+            } else {
+                v
+            }
+        })?;
+    let tool = p
+        .get("tool_name")
+        .or_else(|| p.get("tool"))
+        .and_then(|v| v.as_str())?;
+    if tool != "agent_spawn" {
+        return None;
+    }
+    match entry.event_type.as_str() {
+        "tool.requested" => {
+            let args = p.get("arguments")?;
+            let args_v = if let Some(s) = args.as_str() {
+                serde_json::from_str::<serde_json::Value>(s).ok()?
+            } else {
+                args.clone()
+            };
+            args_v
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        }
+        "tool.completed" => agent_id_from_spawn_result(
+            p.get("result")
+                .or_else(|| p.get("message"))
+                .or_else(|| p.get("summary")),
+        ),
+        _ => None,
+    }
+}
+
+fn agent_id_from_spawn_result(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    let parsed = if let Some(s) = value.as_str() {
+        serde_json::from_str::<serde_json::Value>(s)
+            .unwrap_or_else(|_| serde_json::Value::String(s.to_string()))
+    } else {
+        value.clone()
+    };
+    if let Some(id) = parsed.get("agent_id").and_then(|v| v.as_str()) {
+        return Some(id.to_string());
+    }
+    parsed
+        .as_str()
+        .and_then(agent_id_from_spawn_summary_text)
+}
+
+/// Parse test-scenario / digest summaries like `spawned coder.default for s1`.
+fn agent_id_from_spawn_summary_text(s: &str) -> Option<String> {
+    let rest = s.trim().strip_prefix("spawned ")?;
+    let agent = rest.split_whitespace().next()?;
+    (!agent.is_empty()).then(|| agent.to_string())
+}
+
+/// Extract a pending plan id from an agent/operator message payload, if present.
+pub(crate) fn extract_plan_proposal_id(entry: &SessionTimelineEntry) -> Option<String> {
+    if entry.event_type != "agent.message" && entry.event_type != "operator.message" {
+        return None;
+    }
+    let p = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())?;
+    let msg_v = payload_field_json(&p, "message")?;
+    plan_proposal_id_from_value(&msg_v)
+}
+
+fn plan_proposal_id_from_value(v: &serde_json::Value) -> Option<String> {
+    if let Some(obj) = v.as_object() {
+        return if is_plan_proposal_object(obj) {
+            plan_id_from_proposal(obj)
+        } else {
+            None
+        };
+    }
+    if let Some(text) = v.as_str() {
+        let (_, structured) = split_embedded_json_tail(text);
+        if let Some(obj) = structured.as_ref().and_then(|v| v.as_object()) {
+            if is_plan_proposal_object(obj) {
+                return plan_id_from_proposal(obj);
+            }
+        }
+    }
+    None
+}
+
+/// Compact plan-proposal card for list rows (no raw JSON envelope).
+fn plan_proposal_preview(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> (String, Option<String>) {
+    let plan_id = plan_id_from_proposal(obj).unwrap_or_default();
+    let version = obj
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .map(|v| format!("v{v}"))
+        .unwrap_or_default();
+    let step_count = obj
+        .get("result")
+        .and_then(|r| r.get("steps"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            obj.get("steps")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len() as u64)
+        });
+    let title = obj
+        .get("summary")
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+        .map(|l| one_line(l.trim(), 72))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| format!("Plan {plan_id}"));
+
+    let headline = format!("📋 PLAN AWAITING APPROVAL — {title}");
+    let mut lines = vec![format!(
+        "plan: {plan_id}{}",
+        if version.is_empty() {
+            String::new()
+        } else {
+            format!(" · {version}")
+        }
+    )];
+    if let Some(n) = step_count {
+        lines.push(format!("  {n} steps"));
+    }
+    if let Some(fix) = obj
+        .get("result")
+        .and_then(|r| r.get("fix"))
+        .and_then(|v| v.as_str())
+    {
+        lines.push(format!("  fix: {}", one_line(fix, 160)));
+    }
+    if let Some(next) = obj
+        .get("result")
+        .and_then(|r| r.get("next_step"))
+        .and_then(|v| v.as_str())
+    {
+        lines.push(format!("  next: {}", one_line(next, 120)));
+    }
+    if let Some(summary) = obj.get("summary").and_then(|v| v.as_str()) {
+        if let Some(body) = summary_detail_body(summary, "") {
+            lines.push(body);
+        }
+    }
+    lines.push("  ↳ y approve · Enter/p review · /plan for steps".to_string());
+    (headline, Some(lines.join("\n")))
+}
+
 /// Status chip + flat result facts (+ error/plan_id when present) for list sub-lines.
 fn structured_subline(obj: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
         parts.push(format!("[{status}]"));
     }
-    if let Some(plan_id) = obj.get("plan_id").and_then(|v| v.as_str()) {
+    if let Some(plan_id) = plan_id_from_proposal(obj) {
         parts.push(format!("plan: {plan_id}"));
     }
     if let Some(err) = obj.get("error").and_then(|v| v.as_str()) {
@@ -403,6 +581,13 @@ fn structured_subline(obj: &serde_json::Map<String, serde_json::Value>) -> Optio
         if !preview.is_empty() {
             parts.push(format!("error: {preview}"));
         }
+    }
+    if is_plan_proposal_object(obj) {
+        return if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" · "))
+        };
     }
     if let Some(result) = result_prose_line(obj.get("result")) {
         parts.push(result);
@@ -436,6 +621,9 @@ fn structured_object_preview(obj: &serde_json::Map<String, serde_json::Value>) -
             .map(|r| format!("artifact: {r}"));
         return Some((headline, detail));
     }
+    if is_plan_proposal_object(obj) {
+        return Some(plan_proposal_preview(obj));
+    }
     let summary_raw = obj.get("summary").and_then(|v| v.as_str());
     let headline = if let Some(s) = summary_raw {
         summary_title(s)
@@ -459,6 +647,150 @@ fn structured_object_preview(obj: &serde_json::Map<String, serde_json::Value>) -
         Some(detail_parts.join("\n\n"))
     };
     Some((headline, detail))
+}
+
+fn parse_entry_payload(entry: &SessionTimelineEntry) -> Option<serde_json::Value> {
+    entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+}
+
+fn payload_field_str(p: &serde_json::Value, key: &str) -> Option<String> {
+    p.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// High-visibility approval gate card (`approval.pending`).
+fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let request_id = field("request_id")
+        .or_else(|| entry.refs.approval_request_id.clone())
+        .unwrap_or_default();
+    let action = field("action").unwrap_or_else(|| "approval".into());
+    let level = field("approval_level");
+    let headline = format!("⏸ APPROVAL REQUIRED — {}", one_line(&action, 72));
+    let mut lines = vec![format!("  request: {request_id}")];
+    if let Some(lvl) = level {
+        lines.push(format!("  level: {lvl}"));
+    }
+    if let Some(cmd) = field("command") {
+        lines.push(format!("  command: {}", one_line(&cmd, 140)));
+    }
+    if let Some(hosts) = p
+        .as_ref()
+        .and_then(|v| v.get("host_patterns"))
+        .and_then(|v| v.as_array())
+    {
+        let joined: Vec<_> = hosts
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        if !joined.is_empty() {
+            lines.push(format!("  hosts: {}", joined.join(", ")));
+        }
+    }
+    if let Some(risk) = field("risk_summary") {
+        lines.push(format!("  risk: {}", one_line(&risk, 120)));
+    }
+    lines.push("  ↳ y approve · n reject".to_string());
+    (headline, Some(lines.join("\n")))
+}
+
+/// High-visibility clarification gate card (`user.ask.pending`).
+fn interaction_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let interaction_id = field("interaction_id")
+        .or_else(|| entry.refs.interaction_id.clone())
+        .unwrap_or_default();
+    let question = field("question").unwrap_or_else(|| "operator input needed".into());
+    let headline = format!("❓ CLARIFICATION — {}", one_line(&question, 88));
+    let mut lines = vec![format!("  ask: {interaction_id}")];
+    if let Some(opts) = p
+        .as_ref()
+        .and_then(|v| v.get("options"))
+        .and_then(|v| v.as_array())
+    {
+        for (i, o) in opts.iter().enumerate() {
+            if let Some(label) = o.get("label").and_then(|l| l.as_str()) {
+                lines.push(format!("  [{}] {}", i + 1, one_line(label, 80)));
+            }
+        }
+    }
+    let freeform = p
+        .as_ref()
+        .and_then(|v| v.get("allow_freeform"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if freeform {
+        lines.push("  (or type your own answer)".to_string());
+    }
+    lines.push("  ↳ Enter/i/r to answer · 1–9 pick option".to_string());
+    (headline, Some(lines.join("\n")))
+}
+
+/// High-visibility plan gate card (`plan.pending`).
+fn plan_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let plan_id = field("plan_id")
+        .or_else(|| entry.refs.plan_id.clone())
+        .unwrap_or_default();
+    let title = field("title").unwrap_or_default();
+    let version = p
+        .as_ref()
+        .and_then(|v| v.get("version"))
+        .and_then(|x| x.as_u64())
+        .map(|v| format!("v{v}"))
+        .unwrap_or_default();
+    let reason = field("reason").filter(|r| !r.trim().is_empty());
+    let step_count = p
+        .as_ref()
+        .and_then(|v| v.get("steps"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.len());
+    let headline = if title.is_empty() {
+        format!("📋 PLAN AWAITING APPROVAL — {plan_id}")
+    } else {
+        format!("📋 PLAN AWAITING APPROVAL — {title}")
+    };
+    let mut lines = vec![format!(
+        "  plan: {plan_id}{}",
+        if version.is_empty() {
+            String::new()
+        } else {
+            format!(" · {version}")
+        }
+    )];
+    if let Some(n) = step_count {
+        lines.push(format!("  {n} steps"));
+    }
+    if let Some(r) = reason {
+        lines.push(format!("  reason: {}", one_line(&r, 120)));
+    }
+    if let Some(obj) = field("objective") {
+        lines.push(format!("  objective: {}", one_line(&obj, 120)));
+    }
+    lines.push("  ↳ y approve · Enter/p review · n request changes".to_string());
+    (headline, Some(lines.join("\n")))
+}
+
+/// High-visibility escalation gate card (`escalation.pending`).
+fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let synthesis = field("synthesis").unwrap_or_else(|| "operator decision requested".into());
+    let rev = field("revision_id");
+    let headline = format!("⏸ ESCALATION — {}", one_line(&synthesis, 88));
+    let mut lines = Vec::new();
+    if let Some(r) = rev.filter(|r| !r.is_empty()) {
+        lines.push(format!("  revision: {r}"));
+    }
+    lines.push("  ↳ review in detail pane · resolve via gateway approvals".to_string());
+    (headline, Some(lines.join("\n")))
 }
 
 /// Build list-row headline + detail for an agent/operator message event.
@@ -503,12 +835,8 @@ pub(crate) fn message_list_rows(entry: &SessionTimelineEntry, key: &str) -> (Str
                 }
             }
         }
-        let plain = if super::markdown::looks_like_markdown(text) {
-            super::markdown::strip_markdown(text)
-        } else {
-            text.to_string()
-        };
-        return (String::new(), Some(preserve_lines(&plain, NARRATIVE_BODY_MAX)));
+        let body = preserve_lines(text, NARRATIVE_BODY_MAX);
+        return (String::new(), Some(body));
     }
     (summarize(entry), None)
 }
@@ -1039,6 +1367,10 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
                 None => (headline, notif_detail),
             }
         }
+        "approval.pending" => approval_gate_card(entry),
+        "user.ask.pending" => interaction_gate_card(entry),
+        "plan.pending" => plan_gate_card(entry),
+        "escalation.pending" => escalation_gate_card(entry),
         _ => (summarize(entry), detail_preview(entry)),
     };
     let actor = actor_kind(&entry.role);
@@ -1053,10 +1385,11 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
         altitude: entry.altitude,
         actor,
         actor_label: label,
-        tone: row_tone(&entry.event_type),
+        tone: tone_for_entry(entry),
         headline,
         detail,
         turn_id: entry.turn_id.clone(),
+        turn_index: None, // The TUI fills in a 1-based ordinal once turns are scanned.
         in_flight: false, // The TUI fills this in once it knows turn lifecycle.
         show_reasoning,
     }
@@ -1101,7 +1434,9 @@ pub enum RowTone {
     ToolCall,
     /// Hidden-by-default reasoning (`agent.reasoning`).
     Reasoning,
-    /// Approvals, gates, LLM errors, and everything else.
+    /// Operator gates — plans, approvals, clarifications (high visibility).
+    OperatorGate,
+    /// LLM errors and everything else.
     Default,
 }
 
@@ -1112,6 +1447,19 @@ pub fn row_tone(event_type: &str) -> RowTone {
         "tool.completed" => RowTone::ToolCall,
         "agent.reasoning" => RowTone::Reasoning,
         _ => RowTone::Default,
+    }
+}
+
+/// Tone for a full timeline entry — includes embedded plan proposals in messages.
+pub fn tone_for_entry(entry: &SessionTimelineEntry) -> RowTone {
+    match entry.event_type.as_str() {
+        "plan.pending" | "approval.pending" | "user.ask.pending" | "escalation.pending" => {
+            RowTone::OperatorGate
+        }
+        "agent.message" | "operator.message" if extract_plan_proposal_id(entry).is_some() => {
+            RowTone::OperatorGate
+        }
+        other => row_tone(other),
     }
 }
 
@@ -1178,6 +1526,9 @@ pub struct RowSpec {
     pub detail: Option<String>,
     /// Turn this event belongs to (if any). Used to draw turn boundaries.
     pub turn_id: Option<String>,
+    /// 1-based ordinal of this turn in the session (first `turn_id` seen = 1).
+    /// Filled by the TUI after scanning the timeline; `None` when untagged.
+    pub turn_index: Option<u32>,
     /// True when the turn containing this row is still in flight (no matching
     /// `turn.end` has been seen yet). The TUI uses this to show a spinner.
     pub in_flight: bool,
@@ -1428,6 +1779,43 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
 /// `serde_json::to_string_pretty`, this splits string values that contain
 /// `\n` into actual separate lines so they display properly in the detail
 /// pane instead of as a single wrapped JSON string.
+/// Payload string keys whose values are operator-facing prose — rendered as
+/// markdown in the client detail pane (gateway stays format-agnostic).
+const NARRATIVE_PAYLOAD_KEYS: &[&str] = &[
+    "summary", "prose", "message", "text", "content", "body", "question",
+];
+
+fn is_narrative_payload_key(key: &str) -> bool {
+    NARRATIVE_PAYLOAD_KEYS.contains(&key)
+}
+
+fn should_render_payload_as_narrative(key: &str, value: &str) -> bool {
+    if !is_narrative_payload_key(key) {
+        return false;
+    }
+    if value.starts_with('{') || value.starts_with('[') {
+        return false;
+    }
+    value.contains('\n')
+        || value.chars().count() > 80
+        || super::markdown::looks_like_narrative_content(value)
+}
+
+fn push_narrative_payload_lines(
+    key: &str,
+    value: &str,
+    lines: &mut Vec<String>,
+    inner: &str,
+    comma: &str,
+) {
+    lines.push(format!("{inner}\"{key}\":"));
+    lines.push(format!("{inner}  {}", super::markdown::NARRATIVE_MD_START));
+    for sub in value.split('\n') {
+        lines.push(format!("{inner}  {sub}"));
+    }
+    lines.push(format!("{inner}  {}{comma}", super::markdown::NARRATIVE_MD_END));
+}
+
 /// Spaces added per JSON nesting level in the detail-pane payload renderer.
 const PAYLOAD_INDENT: usize = 2;
 
@@ -1445,6 +1833,11 @@ fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, d
             for (i, (k, child)) in map.iter().enumerate() {
                 let comma = if i < last_idx { "," } else { "" };
                 match child {
+                    serde_json::Value::String(s)
+                        if should_render_payload_as_narrative(k, s) =>
+                    {
+                        push_narrative_payload_lines(k, s, lines, &inner, comma);
+                    }
                     serde_json::Value::String(s) if s.contains('\n') => {
                         lines.push(format!("{inner}\"{k}\":"));
                         for sub in s.split('\n') {
@@ -1472,6 +1865,12 @@ fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, d
                     }
                     other => {
                         let formatted = serde_json::to_string(other).unwrap_or_default();
+                        if let serde_json::Value::String(s) = other {
+                            if should_render_payload_as_narrative(k, s) {
+                                push_narrative_payload_lines(k, s, lines, &inner, comma);
+                                continue;
+                            }
+                        }
                         lines.push(format!("{inner}\"{k}\": {formatted}{comma}"));
                     }
                 }
@@ -1809,7 +2208,7 @@ mod tests {
             }
             other => panic!("expected collapsed run, got {other:?}"),
         }
-        assert!(matches!(&rows[1], RenderedRow::Line(spec) if spec.headline.contains("approval requested")));
+        assert!(matches!(&rows[1], RenderedRow::Line(spec) if spec.headline.contains("APPROVAL REQUIRED")));
         // The trailing lone Detail event is a normal line, not collapsed.
         assert!(matches!(&rows[2], RenderedRow::Line { .. }));
         assert!(row_text(&rows[0]).contains("⟨3 routine events"));
@@ -1880,6 +2279,25 @@ mod tests {
     }
 
     #[test]
+    fn format_detail_marks_narrative_summary_for_markdown_rendering() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({
+                "message": {
+                    "status": "ok",
+                    "summary": "## Diagnosis\n\n```python\nimport autonoetic_sdk\n```\n\nUse file-based state instead."
+                }
+            }),
+        );
+        let detail = format_detail(&e).join("\n");
+        assert!(detail.contains("@@NARRATIVE@@"));
+        assert!(detail.contains("import autonoetic_sdk"));
+    }
+
+    #[test]
     fn multiline_question_flattens_and_truncates_with_choices() {
         let long_q = "Pick a market:\n\n1. US equities\n2. Crypto\n".to_string() + &"x".repeat(200);
         let e = entry(
@@ -1919,13 +2337,15 @@ mod tests {
             }),
         );
         let spec = render_spec(&e);
-        assert_eq!(spec.headline, "asks: Which approach?");
+        assert!(spec.headline.contains("CLARIFICATION"));
+        assert!(spec.headline.contains("Which approach?"));
+        assert_eq!(spec.tone, RowTone::OperatorGate);
         let detail = spec.detail.expect("should have detail");
         assert!(detail.contains("[1] Option A"));
         assert!(detail.contains("[2] Option B"));
         assert!(detail.contains("[3] Option C"));
         assert!(detail.contains("or type your own"));
-        assert_eq!(detail.lines().count(), 4);
+        assert!(detail.contains("Enter/i/r"));
     }
 
     #[test]
@@ -1945,9 +2365,11 @@ mod tests {
             }),
         );
         let spec = render_spec(&e);
+        assert_eq!(spec.tone, RowTone::OperatorGate);
         let detail = spec.detail.expect("should have detail");
         assert!(!detail.contains("type your own"));
-        assert_eq!(detail.lines().count(), 2);
+        assert!(detail.contains("[1] Yes"));
+        assert!(detail.contains("[2] No"));
     }
 
     #[test]
@@ -2171,6 +2593,18 @@ mod tests {
         assert_eq!(row_tone("tool.completed"), RowTone::ToolCall);
         assert_eq!(row_tone("agent.reasoning"), RowTone::Reasoning);
         assert_eq!(row_tone("approval.pending"), RowTone::Default);
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-1",
+                "action": "sandbox_exec",
+                "command": "curl example.com",
+            }),
+        );
+        assert_eq!(tone_for_entry(&appr), RowTone::OperatorGate);
     }
 
     #[test]
@@ -2208,9 +2642,13 @@ mod tests {
             serde_json::json!({ "message": msg }),
         );
         let spec = render_spec(&e);
-        assert!(spec.headline.contains("walkthrough"));
+        assert!(
+            spec.headline.is_empty(),
+            "plain summary sentences render as formatted body, not a flat headline"
+        );
         assert!(!spec.headline.starts_with('{'), "title must not be raw JSON");
         let detail = spec.detail.expect("result subline");
+        assert!(detail.contains("walkthrough"));
         assert!(detail.contains("[ok]"));
         assert!(detail.contains("agent: fibonacci-next"));
         assert!(detail.contains("explanation (+2 fields)"));
@@ -2377,6 +2815,125 @@ mod tests {
     }
 
     #[test]
+    fn render_spec_operator_gate_cards_are_high_visibility() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-99",
+                "action": "sandbox_exec",
+                "command": "cargo test",
+                "risk_summary": "runs tests in sandbox",
+            }),
+        );
+        let spec = render_spec(&appr);
+        assert_eq!(spec.tone, RowTone::OperatorGate);
+        assert!(spec.headline.contains("APPROVAL REQUIRED"));
+        let detail = spec.detail.expect("approval card body");
+        assert!(detail.contains("apr-99"));
+        assert!(detail.contains("y approve"));
+
+        let ask = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "user.ask.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "interaction_id": "int-42",
+                "question": "Which database should we use?",
+                "options": [{"id": "a", "label": "Postgres"}, {"id": "b", "label": "SQLite"}],
+                "allow_freeform": false,
+            }),
+        );
+        let ask_spec = render_spec(&ask);
+        assert_eq!(ask_spec.tone, RowTone::OperatorGate);
+        assert!(ask_spec.headline.contains("CLARIFICATION"));
+        let ask_detail = ask_spec.detail.expect("ask card body");
+        assert!(ask_detail.contains("[1] Postgres"));
+        assert!(ask_detail.contains("Enter/i/r"));
+    }
+
+    #[test]
+    fn render_spec_plan_proposal_card_hides_raw_json_envelope() {
+        let msg = serde_json::json!({
+            "status": "awaiting_approval",
+            "plan_id": "plan-af1e431bc8a7",
+            "summary": "Proposed a 4-step plan to fix the fibonacci-next agent.",
+            "result": {
+                "fix": "main.py line 14: sdk.init() → sdk = autonoetic_sdk.init()",
+                "next_step": "Operator approval via /plan approve",
+                "plan_id": "plan-af1e431bc8a7",
+                "steps": 4
+            }
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.collaborative"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.tone, RowTone::OperatorGate);
+        assert!(spec.headline.contains("PLAN AWAITING APPROVAL"));
+        assert!(spec.headline.contains("4-step plan") || spec.headline.contains("fibonacci"));
+        let detail = spec.detail.expect("plan card body");
+        assert!(detail.contains("plan-af1e431bc8a7"));
+        assert!(detail.contains("4 steps"));
+        assert!(detail.contains("y approve"));
+        assert!(!detail.contains("\"status\":"), "raw JSON must not leak");
+    }
+
+    #[test]
+    fn extract_plan_proposal_id_from_embedded_agent_message() {
+        let msg = serde_json::json!({
+            "status": "awaiting_approval",
+            "plan_id": "plan-abc",
+            "summary": "A plan."
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.collaborative"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        assert_eq!(
+            extract_plan_proposal_id(&e).as_deref(),
+            Some("plan-abc")
+        );
+    }
+
+    #[test]
+    fn render_spec_glued_diagnosis_summary_keeps_body_not_flat_headline() {
+        let summary = "I found the problem. Here's the diagnosis:Root CauseThe fibonacci-next agent fails with AttributeError.What's HappeningThe agent was built to use sdk.state.Evidence| Date | Status | |---|---|---| | Jun 6 | ok |Fix OptionsRewrite to use file-based state.";
+        let msg = serde_json::json!({
+            "status": "ok",
+            "summary": summary,
+            "result": { "agent_id": "fibonacci-next" }
+        });
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": msg }),
+        );
+        let spec = render_spec(&e);
+        assert!(
+            spec.headline.is_empty(),
+            "glued single-line diagnosis must not become a flat headline: {:?}",
+            spec.headline
+        );
+        let detail = spec.detail.expect("full summary in detail");
+        assert!(detail.contains("Root Cause") || detail.contains("diagnosis"));
+        assert!(detail.contains("[ok]"));
+        assert!(detail.contains("agent: fibonacci-next"));
+    }
+
+    #[test]
     fn render_spec_splits_pretty_printed_embedded_json_after_prose() {
         let structured = serde_json::json!({
             "status": "ok",
@@ -2517,6 +3074,67 @@ mod tests {
     }
 
     #[test]
+    fn agent_spawn_agent_id_from_completed_result_json() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "result": {
+                    "ok": true,
+                    "agent_id": "coder.default",
+                    "task_id": "t-1"
+                }
+            }),
+        );
+        assert_eq!(
+            agent_spawn_agent_id(&e).as_deref(),
+            Some("coder.default")
+        );
+    }
+
+    #[test]
+    fn agent_spawn_agent_id_from_completed_summary_text() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "summary": "spawned architect.default for s1"
+            }),
+        );
+        assert_eq!(
+            agent_spawn_agent_id(&e).as_deref(),
+            Some("architect.default")
+        );
+    }
+
+    #[test]
+    fn agent_spawn_agent_id_from_requested_arguments() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.requested",
+            Altitude::Detail,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "arguments": {
+                    "agent_id": "specialized_builder",
+                    "message": "build the skill"
+                }
+            }),
+        );
+        assert_eq!(
+            agent_spawn_agent_id(&e).as_deref(),
+            Some("specialized_builder")
+        );
+    }
+
+    #[test]
     fn render_spec_extracts_workflow_wait_task_ids() {
         let e = entry(
             SessionRole::Planner,
@@ -2560,6 +3178,7 @@ mod tests {
             headline: "headline here".into(),
             detail: Some("and a detail".into()),
             turn_id: None,
+            turn_index: None,
             in_flight: false,
             show_reasoning: true,
         };
@@ -2663,6 +3282,7 @@ mod tests {
             headline: "tool sandbox_exec".into(),
             detail: Some("hello world".into()),
             turn_id: None,
+            turn_index: None,
             in_flight: false,
             show_reasoning: true,
         };
