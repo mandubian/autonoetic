@@ -761,11 +761,11 @@ impl Default for ConstitutionConfig {
 }
 
 fn default_constitution_source_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.06.05/constitution.md")
+    PathBuf::from("docs/constitution/versions/2026.06.08/constitution.md")
 }
 
 fn default_constitution_lock_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.06.05/gateway-constitution.lock.json")
+    PathBuf::from("docs/constitution/versions/2026.06.08/gateway-constitution.lock.json")
 }
 
 fn default_require_constitution_signature() -> bool {
@@ -776,7 +776,7 @@ fn default_constitution_trusted_signers() -> HashMap<String, String> {
     let mut out = HashMap::new();
     out.insert(
         "autonoetic:constitution:v1".to_string(),
-        "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=".to_string(),
+        "y5gFAnYe92SDKpjEvudoK7k0Q73mOmoYt9vVIF8DJs4=".to_string(),
     );
     out
 }

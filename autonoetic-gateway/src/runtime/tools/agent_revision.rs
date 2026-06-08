@@ -2465,6 +2465,16 @@ impl NativeTool for AgentRevisionPromoteTool {
                 PromotionGateMode::FullJury => {}
             }
 
+            // P-2.26: All executed gate roles must pass.
+            if record.unit_test_runner_id.is_some() {
+                anyhow::ensure!(
+                    record.unit_test_runner_pass,
+                    "Promotion gate: unit_test_runner did not pass for artifact '{}' (P-2.26). \
+                     Fix the failing tests and re-run unit_test_runner.default.",
+                    artifact_id
+                );
+            }
+
             let has_unresolved = rev
                 .metadata_json
                 .get("has_unresolved_dependencies")
@@ -2492,7 +2502,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                 category: "revision".to_string(),
                 action: "revision.promotion_gate_enforced".to_string(),
                 status: "active".to_string(),
-                enforced_rules: vec!["P-2.8".to_string(), "P-2.17".to_string(), "P-2.22".to_string()],
+                enforced_rules: vec!["P-2.8".to_string(), "P-2.17".to_string(), "P-2.22".to_string(), "P-2.26".to_string()],
                 target: artifact_id.map(|s| s.to_string()),
                 payload: Some(
                     serde_json::json!({

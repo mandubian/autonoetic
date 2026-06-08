@@ -296,10 +296,16 @@ impl PromotionStore {
     pub fn is_fully_promoted(&self, artifact_id: &str) -> bool {
         let records = self.records.lock().unwrap();
         if let Some(record) = records.get(artifact_id) {
-            (record.evaluator_pass
+            let eval_ok = record.evaluator_pass
                 || record.sealed_evaluator_pass
-                || record.static_evaluator_pass)
-                && record.auditor_pass
+                || record.static_evaluator_pass;
+            let audit_ok = record.auditor_pass;
+            let unit_test_ok = record
+                .unit_test_runner_id
+                .as_ref()
+                .map(|_| record.unit_test_runner_pass)
+                .unwrap_or(true);
+            eval_ok && audit_ok && unit_test_ok
         } else {
             false
         }
