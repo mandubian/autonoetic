@@ -43,6 +43,38 @@ pub fn approve_plan_frame_operator(
         Some(&now),
     )?;
 
+    // Canonical timeline: close the plan gate (same event as `planframe_approve`).
+    {
+        use autonoetic_types::session_timeline::TimelineRefs;
+        let (principal, role) = crate::runtime::session_timeline::decider_seat(approved_by);
+        let refs = TimelineRefs {
+            plan_id: Some(plan.plan_id.clone()),
+            ..Default::default()
+        };
+        let event = crate::runtime::session_timeline::build_timeline_event(
+            plan.root_session_id.clone(),
+            plan.root_session_id.clone(),
+            None,
+            &principal,
+            &role,
+            "plan.approved",
+            None,
+            Some(serde_json::json!({
+                "plan_id": plan.plan_id,
+                "version": plan.version,
+                "approved_by": approved_by,
+            })),
+            refs,
+        );
+        if let Err(e) = store.create_live_digest_event(&event) {
+            tracing::debug!(
+                target: "session_timeline",
+                error = %e,
+                "plan.approved timeline emit failed (operator approve)"
+            );
+        }
+    }
+
     let event_id = {
         let bytes = uuid::Uuid::new_v4();
         format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))

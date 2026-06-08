@@ -319,6 +319,33 @@ pub struct ValidationWaiver {
     pub created_at: String,
 }
 
+/// Params for `planframes.list_pending` (Session Room / operator clients).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanFramesListPendingParams {
+    pub root_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanFramesListPendingResult {
+    pub plans: Vec<PlanFrame>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanFramesApproveParams {
+    pub plan_id: String,
+    #[serde(default = "default_plan_approver")]
+    pub approved_by: String,
+}
+
+fn default_plan_approver() -> String {
+    "operator".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanFramesApproveResult {
+    pub plan: PlanFrame,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

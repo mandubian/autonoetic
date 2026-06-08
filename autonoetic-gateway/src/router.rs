@@ -1229,6 +1229,90 @@ impl JsonRpcRouter {
                 }
             }
 
+            "planframes.list_pending" => {
+                let params: autonoetic_types::plan_frame::PlanFramesListPendingParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for planframes.list_pending: {}", e),
+                            );
+                        }
+                    };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::pending_plan_frames_for_root(
+                    store.as_ref(),
+                    &params.root_session_id,
+                ) {
+                    Ok(plans) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(
+                            autonoetic_types::plan_frame::PlanFramesListPendingResult { plans },
+                        )
+                        .unwrap_or_else(|_| serde_json::json!({"plans": []})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("planframes.list_pending failed: {}", e),
+                    ),
+                }
+            }
+
+            "planframes.approve" => {
+                let params: autonoetic_types::plan_frame::PlanFramesApproveParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for planframes.approve: {}", e),
+                            );
+                        }
+                    };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::approve_plan_frame_operator(
+                    self.config.as_ref(),
+                    store.as_ref(),
+                    &params.plan_id,
+                    &params.approved_by,
+                ) {
+                    Ok(plan) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(
+                            autonoetic_types::plan_frame::PlanFramesApproveResult { plan },
+                        )
+                        .unwrap_or(serde_json::Value::Null),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("planframes.approve failed: {}", e),
+                    ),
+                }
+            }
+
             "channel.bind" => {
                 // #393 (P3.c): bind an external conversation (Discord thread,
                 // WhatsApp chat) to a room so it survives reconnects and routes
