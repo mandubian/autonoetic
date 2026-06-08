@@ -20,178 +20,142 @@ A wiki contribution pipeline would let agents **reify knowledge** — promote se
 
 ## Design
 
-### Overview
+### Overview: Reuse the Existing Gate Pipeline
+
+Wiki proposals are **not** a new approval mechanism. They are a new `GateKind` variant that flows through the existing `GateService` pipeline — deduplication, session grants, approval flood cap, operator resolution, timeline events. Everything works the same way as `sandbox_exec` approvals or `user_ask` interactions.
 
 ```
-Agent → wiki.propose(id, title, content, tags) → review queue
-        └── Optional: wiki.withdraw(id) removes own pending proposal
-Operator/steward → wiki.promote(id)    — accept and publish
-                → wiki.reject(id)      — reject with optional reason
-                → wiki.list_proposals  — view the review queue
+Agent → wiki.propose(id, title, content, tags) → GateService.check()
+                                                     │
+                          ┌──────────────────────────┼──────────────────────┐
+                          ▼                          ▼                      ▼
+                     PolicyAllowed             AlreadyPending            Suspended
+                  (grant covers it)         (same id pending)       (new gate created)
+                                                                          │
+                                                         Operator → approvals.approve
+                                                                  → approvals.reject
+                                                                          │
+                                                          ┌───────────────┴───────────────┐
+                                                          ▼                               ▼
+                                                     Promoted                          Rejected
+                                               (materialize .md +                (gate dismissed,
+                                                update index.toml,             content discarded)
+                                                emit causal event)
 ```
 
-### Lifecycle State Machine
+### Single New Tool: `wiki.propose`
+
+This is the **only new tool**. No `wiki.promote`, `wiki.reject`, `wiki.withdraw`, or `wiki.list_proposals` — those are all covered by the existing gate infrastructure and operator CLI.
 
 ```
-                 wiki.propose
-    (none) ────────────────────► Pending
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ▼               │               ▼
-              Promoted          Cancelled       Rejected
-              (wiki.get        (withdraw/        (operator
-               returns it)     timeout)          rejects)
-```
-
-### Capability Model
-
-| Action | Required Capability | Tier |
-|--------|-------------------|------|
-| `wiki.list` / `wiki.get` | None (always available) | Core |
-| `wiki.propose` | `WikiContribute` | Workflow |
-| `wiki.withdraw` | Implicit (owner) | Workflow |
-| `wiki.list_proposals` | None (always available) | Core |
-| `wiki.promote` / `wiki.reject` | Operator-only (CLI / Room) | N/A |
-
-**Why `WikiContribute` is a capability**: Not every agent should be able to propose wiki pages. Writing durable documentation is a trust boundary — it requires judgment about what knowledge is valuable and accurate. The capability is declared in SKILL.md like any other:
-
-```yaml
-capabilities:
-  - type: "WikiContribute"
-```
-
-Agents without `WikiContribute` can still read the wiki (always available). The evolution steward and planner are natural candidates for this capability.
-
-### Tool Interface
-
-#### `wiki.propose`
-
-```json
-{
-  "tool": "wiki.propose",
-  "id": "runbook-agent-creation",
-  "title": "Agent Creation Runbook",
-  "content": "# Agent Creation Runbook\n\n...",
-  "tags": ["runbook", "agent-creation", "workflow"]
-}
+wiki.propose(id, title, content, tags?)
 ```
 
 **Parameters:**
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `id` | Yes | Unique page ID (lowercase, hyphenated, alphanumeric + `-`) |
+| `id` | Yes | Page ID. Must match `[a-z0-9]+(-[a-z0-9]+)*`. If the ID matches an existing page, this is an **edit**. |
 | `title` | Yes | Human-readable title |
-| `content` | Yes | Full markdown content of the page |
+| `content` | Yes | Full markdown content (non-empty, ≤ 64 KiB) |
 | `tags` | No | Tags for categorization and discovery |
 
-**Validation:**
-- `id` must match `[a-z0-9]+(-[a-z0-9]+)*` (kebab-case)
-- `id` must not collide with any existing wiki page or pending proposal
-- `content` must be non-empty and ≤ 64 KiB
-- `tags` array, each ≤ 64 chars
+**Returns immediately** — the tool does not suspend the agent. It creates a gate and returns the gate reference:
 
-**Return:**
 ```json
 {
   "ok": true,
   "id": "runbook-agent-creation",
+  "gate_id": "gate-abc123",
+  "is_edit": false,
   "status": "pending",
-  "proposed_by": {"agent_id": "planner.default", "session_id": "sess-abc123"},
   "proposed_at": "2026-06-08T12:00:00Z"
 }
 ```
 
-#### `wiki.withdraw`
+**Edition**: `wiki.propose` with an existing page ID is an edit. The gate description notes "edit proposal" instead of "new proposal". On promote, the existing `.md` file is overwritten and the `index.toml` entry is updated (title/tags may change). No separate version tracking — last promoted content wins.
 
-```json
-{
-  "tool": "wiki.withdraw",
-  "id": "runbook-agent-creation"
+**Deduplication**: Proposing the same `id` while a gate is already pending returns `AlreadyPending` — the existing gate ID is reused. The agent can see its proposal is still awaiting review.
+
+### Capability: `WikiContribute`
+
+```yaml
+capabilities:
+  - type: "WikiContribute"
+```
+
+Writing durable documentation is a trust boundary — not every agent should propose wiki pages. The capability is declared in SKILL.md. Agents without it can still read the wiki (always available, Core tier).
+
+Natural candidates: planner, evolution steward, governance author.
+
+### GateKind: `WikiProposal`
+
+A new variant on the existing `GateKind` enum:
+
+```rust
+GateKind::WikiProposal {
+    page_id: String,
+    title: String,
+    content: String,
+    content_sha256: String,  // for audit, not content-addressing
+    tags: Vec<String>,
+    is_edit: bool,
+    proposed_by_agent: String,
+    proposed_by_session: String,
 }
 ```
 
-Only the proposing agent (same `agent_id` and `root_session_id`) can withdraw.
+The `content_sha256` is computed by the gateway and stored in the gate payload. It is NOT used for content-addressing — wiki pages are files, not immutable artifacts. The hash is purely for audit: the `wiki.promoted` causal event records the hash so changes are traceable.
 
-#### `wiki.list_proposals`
+### Gate Resolution: Materialization
 
-```json
-{
-  "tool": "wiki.list_proposals"
-}
-```
+When the operator approves the gate (via existing `approvals.approve`), the resolution handler materializes the page:
 
-**Return:**
-```json
-{
-  "proposals": [
-    {
-      "id": "runbook-agent-creation",
-      "title": "Agent Creation Runbook",
-      "tags": ["runbook", "agent-creation"],
-      "status": "pending",
-      "proposed_by": {"agent_id": "planner.default"},
-      "proposed_at": "2026-06-08T12:00:00Z"
-    }
-  ]
-}
-```
+1. Write `{id}.md` to `.gateway/wiki/` (atomic: write-to-temp → rename)
+2. Update `index.toml`: add new entry or update existing entry for the ID
+3. Emit `wiki.promoted` causal event with `content_sha256`
+4. Reload the wiki index in-memory so `wiki.list` / `wiki.get` see the new page immediately
 
-#### Operator Actions (CLI / Room)
+When the operator rejects the gate (via `approvals.reject`):
 
-```
-gateway wiki proposals              # list all pending proposals
-gateway wiki promote <id>           # accept and publish
-gateway wiki reject <id> [reason]   # reject with optional reason
-```
+1. Emit `wiki.rejected` causal event
+2. Gate is dismissed, content is discarded
 
-Promoted proposals are written to `.gateway/wiki/` as new `.md` files and the `index.toml` is updated. This happens at runtime — no source-tree change needed.
+### Causal Events
+
+| Event | Trigger | Payload |
+|-------|---------|---------|
+| `wiki.proposed` | `wiki.propose` creates a gate | `page_id`, `title`, `content_sha256`, `is_edit`, `proposed_by_agent` |
+| `wiki.promoted` | Operator approves | `page_id`, `title`, `content_sha256`, `is_edit`, `approved_by` |
+| `wiki.rejected` | Operator rejects | `page_id`, `title`, `rejected_by`, `reason` |
+
+These appear on the session timeline and in the Room TUI alongside other gate events.
 
 ### Storage
 
-Proposals are stored in the gateway store (SQLite) alongside other durable records. They persist across gateway restarts.
-
-**Schema:**
-```sql
-wiki_proposals (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    tags TEXT,             -- JSON array
-    status TEXT NOT NULL,  -- 'pending', 'promoted', 'rejected', 'cancelled'
-    proposed_by_agent TEXT,
-    proposed_by_session TEXT,
-    proposed_at TEXT,      -- RFC 3339
-    decided_at TEXT,
-    decided_by TEXT,       -- operator identity
-    rejection_reason TEXT
-)
-```
+Wiki proposals live in the existing gate store — no new SQLite table. The gate payload carries all proposal metadata (`page_id`, `title`, `content`, `tags`, `content_sha256`, `is_edit`, `proposed_by_agent`). When the gate is resolved (approved/rejected/cancelled), the gate row is updated with the decision — same lifecycle as every other gate kind.
 
 ### Bootstrapping
 
-Promoted pages are materialized to `.gateway/wiki/`:
-1. A `.md` file is written (using the proposal `id` as filename)
-2. An entry is appended to `index.toml`
-3. The page is immediately available via `wiki.list` / `wiki.get`
+The bootstrap snapshot (`bootstrap_wiki_snapshot()`) copies `docs/wiki/` into `.gateway/wiki/` at startup — but only for pages that don't already exist in `.gateway/wiki/`. Promoted pages survive restarts because the materialized files are in the live directory, not the source tree.
 
-These materialized files survive restarts — the bootstrap snapshot only seeds initial pages; the live `.gateway/wiki/` directory is the authoritative source.
-
-### Timeout
-
-Pending proposals can be set to auto-expire after a configurable duration (default: 7 days). Expired proposals move to `cancelled` status with `rejection_reason: "expired"`.
+The authoritative wiki directory is `.gateway/wiki/`. The source tree `docs/wiki/` is a seed, not an override.
 
 ---
 
 ## Non-Goals
 
-1. **Agent-as-decider for wiki proposals.** The operator (human) always ratifies wiki contributions. This mirrors the constitution amendment pattern (`constitution_propose_amendment` → operator ratifies).
+1. **Agent-as-decider.** Operator always ratifies. Same pattern as every other gate kind.
 
-2. **Edit/update existing pages.** Proposals are new pages only. Editing existing pages (even agent-authored ones) requires a separate proposal. This avoids versioning complexity for now.
+2. **Page deletion.** Once promoted and materialized, pages are permanently available. Deletion is CLI-only, not agent-facing.
 
-3. **Page deletion.** Once promoted and materialized, pages are permanently available. Deletion is a separate concern (CLI-only, not agent-facing).
+3. **Wiki search.** `wiki.list` + tag-based navigation is sufficient. Semantic search can layer on top later.
 
-4. **Wiki search.** The existing `wiki.list` + index-based navigation is sufficient for ~20-50 pages. Semantic search can layer on top later.
+4. **Content-addressed storage.** Wiki pages are mutable files, not immutable artifacts. A SHA-256 hash in the causal event provides auditability without the complexity of content-addressed storage.
+
+5. **Constitutional rule.** Wiki pages are advisory documentation — they don't control agent behavior. Constitutional rules are mechanically enforced regardless of what wiki pages say. No constitutional surface to govern.
+
+6. **Version history.** Each promote overwrites the `.md` file. The causal event chain is the audit trail (who proposed what, when, with which hash).
 
 ---
 
@@ -199,36 +163,35 @@ Pending proposals can be set to auto-expire after a configurable duration (defau
 
 | System | Purpose | Wiki Contribution |
 |--------|---------|-------------------|
-| `knowledge_store` | Durable facts, session/private/global scope | Wiki = curated, discoverable, reviewed facts |
-| `constitution_propose_amendment` | Propose rule changes | Same pattern: agent proposes, human ratifies |
+| `knowledge_store` | Durable facts, session/private/global scope | Wiki = curated, discoverable, gated documentation |
+| `GateService` / `approvals.approve` | Operator approval pipeline | Wiki proposals use the same gate infrastructure |
 | `skill_install` | Install remote SKILL.md as new agent | Wiki = knowledge install, not agent install |
-| `observability_search` | Discover published session reports | Wiki = curated guidance, not raw reports |
+| `constitution_propose_amendment` | Propose rule changes | Different mechanism (constitution has its own pipeline). Wiki = simpler, gate-based. |
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: Core Pipeline (propose → promote/reject)
+### Phase 1: Core Pipeline
 
 - `WikiContribute` capability in `capability.rs`
-- `wiki_proposal` SQLite table in gateway store
-- `wiki.propose`, `wiki.withdraw`, `wiki.list_proposals` NativeTools
-- `wiki.promote` / `wiki.reject` RPC + CLI commands
-- Materialization to `.gateway/wiki/` on promote
+- `GateKind::WikiProposal` variant
+- `wiki.propose` NativeTool (gated on `WikiContribute`)
+- Materialization handler in gate resolution (`on_approval_resolved`)
+- Causal events: `wiki.proposed`, `wiki.promoted`, `wiki.rejected`
 - Policy enforcement: `WikiContribute` gating on propose
 
 ### Phase 2: Operator UX
 
-- Room UI: `/wiki proposals` slash command, approve/reject with keybindings
-- Gateway CLI: `wiki proposals`, `wiki promote`, `wiki reject`
-- Timeline events for proposal lifecycle
+- Room UI: wiki proposals appear as gates alongside approvals and interactions
+- Room keybindings for approve/reject on wiki gates (same y/n as other gates)
+- Gateway CLI: `gateway approvals approve <gate-id>` / `reject <gate-id>` (existing commands)
 
-### Phase 3: Quality and Governance
+### Phase 3: Quality Governance
 
-- Proposal timeout with configurable TTL
-- Quality heuristics: minimum length, required structure
+- Content quality heuristics on propose (warn, don't block)
 - Duplicate detection: similarity scoring against existing pages
-- Constitutional rule for wiki governance (if needed)
+- Gate auto-expiry for wiki proposals (reuse existing gate timeout infrastructure)
 
 ---
 
@@ -236,20 +199,8 @@ Pending proposals can be set to auto-expire after a configurable duration (defau
 
 1. **Content quality.** Agent-generated docs may be inaccurate. The operator review gate mitigates this — nothing enters the wiki without human approval.
 
-2. **Index bloat.** A large wiki makes `wiki.list` less useful. Tags and the `wiki.get` pattern mitigate this — agents discover by tag, not by scanning.
+2. **Index bloat.** A large wiki makes `wiki.list` less useful. Tags mitigate this — agents discover by tag, not by scanning.
 
-3. **Materialization race.** Two promoted proposals writing to the same file simultaneously. Mitigated by the id uniqueness constraint in the proposal store and the file write being atomic (write-to-temp → rename).
+3. **Materialization race.** Two promotions writing to the same file. Mitigated by gate dedup (same `page_id` reuses existing gate) and atomic file writes.
 
-4. **Constitution drift.** If wiki pages describe rules that contradict the constitution, agents may be confused. Mitigated by the review gate — operators validate accuracy before promoting.
-
----
-
-## Open Questions
-
-1. **Should wiki proposals attach to a constitution rule?** e.g., a runbook that explains how to comply with P-2.25. If so, the proposal could reference a rule ID.
-
-2. **Should promoted wiki pages trigger a causal event?** To maintain audit trail. Likely yes — `wiki.promoted` event with the page digest.
-
-3. **Should agents be able to propose edits to existing pages?** Currently scoped to new pages only. Edit proposals could follow the same pipeline with a `base_id` field.
-
-4. **Should wiki pages be content-addressed?** They're written to files currently; content-addressing would make them immutable and auditable, but adds complexity.
+4. **Index.toml corruption.** Concurrent promotions updating the TOML file. Mitigated by gate dedup (only one pending gate per `page_id`) and atomic write-to-temp → rename.
