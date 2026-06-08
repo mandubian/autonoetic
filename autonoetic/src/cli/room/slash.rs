@@ -11,6 +11,7 @@
 //! - `/session <id>` — switch the room to that root session id
 //! - `/session list [agent]` — list recent sessions (optionally filtered by agent)
 //! - `/session resume` — switch to the most recent session
+//! - `/cron` / `/cron list` — list scheduled jobs for the current session
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — show a one-line help summary
 //!
@@ -33,12 +34,14 @@ pub enum SlashCommand {
     Help,
     /// Run a test scenario to inject synthetic events (`/test <name>`).
     Test { name: String },
+    /// List scheduled cron jobs bound to the current root session.
+    ListCronJobs,
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
-pub const HELP_TEXT: &str = "/help for commands · /session · /test · /quit";
+pub const HELP_TEXT: &str = "/help for commands · /session · /cron · /test · /quit";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -52,7 +55,7 @@ pub fn help_lines() -> Vec<String> {
         "  G / End      jump to newest row".to_string(),
         "  f / Space    toggle follow (pin to newest)".to_string(),
         "  Enter        event detail · or answer pending question".to_string(),
-        "  Esc          close detail pane · quit from sub-modes".to_string(),
+        "  Esc          close detail pane · cancel quit prompt".to_string(),
         "  h / l        horizontal scroll in detail pane".to_string(),
         String::new(),
         "View".to_string(),
@@ -68,18 +71,20 @@ pub fn help_lines() -> Vec<String> {
         "Messaging".to_string(),
         "  i            compose operator message (multi-line editor)".to_string(),
         "               Enter send · Shift+Enter newline".to_string(),
-        "               ←→↑↓ edit · Ctrl+V paste · Ctrl+C copy".to_string(),
+        "               ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy"
+            .to_string(),
         String::new(),
         "Slash commands  (press / then type, Enter to run)".to_string(),
         "  /help  /?    this guide".to_string(),
-        "  /quit  /q    exit the room".to_string(),
+        "  /quit  /q    exit (press q twice to confirm)".to_string(),
         "  /session <id>           switch to a root session".to_string(),
         "  /session list [agent]   list recent sessions (1–9 to pick)".to_string(),
         "  /session resume [agent] jump to most recent session".to_string(),
+        "  /cron  /cron list       scheduled jobs for this session".to_string(),
         "  /test <scenario>        inject synthetic events (dev)".to_string(),
         "  /test help              list test scenarios".to_string(),
         String::new(),
-        "  q / Ctrl+C   quit".to_string(),
+        "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
         "Press Esc to close this pane.".to_string(),
     ]
@@ -104,6 +109,7 @@ pub fn parse(input: &str) -> SlashCommand {
     let tail = parts.next().unwrap_or("").trim();
     match head.as_str() {
         "session" => parse_session(tail),
+        "cron" => parse_cron(tail),
         "test" => {
             let name = tail.trim().to_string();
             SlashCommand::Test { name }
@@ -111,6 +117,16 @@ pub fn parse(input: &str) -> SlashCommand {
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         other => SlashCommand::Unknown(other.to_string()),
+    }
+}
+
+fn parse_cron(tail: &str) -> SlashCommand {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("list") || trimmed.eq_ignore_ascii_case("ls")
+    {
+        SlashCommand::ListCronJobs
+    } else {
+        SlashCommand::Unknown(format!("cron {trimmed}"))
     }
 }
 
@@ -185,6 +201,7 @@ mod tests {
     fn help_lines_covers_slash_commands_and_navigation() {
         let text = help_lines().join("\n");
         assert!(text.contains("/session list"));
+        assert!(text.contains("/cron"));
         assert!(text.contains("user.ask"));
         assert!(text.contains("i            compose"));
         assert!(text.contains("j / ↓"));
@@ -280,6 +297,17 @@ mod tests {
         assert_eq!(
             parse("/session foo bar"),
             SlashCommand::SwitchSession("foo bar".into())
+        );
+    }
+
+    #[test]
+    fn parse_cron_variants() {
+        assert_eq!(parse("/cron"), SlashCommand::ListCronJobs);
+        assert_eq!(parse("/cron list"), SlashCommand::ListCronJobs);
+        assert_eq!(parse("/cron ls"), SlashCommand::ListCronJobs);
+        assert_eq!(
+            parse("/cron pause foo"),
+            SlashCommand::Unknown("cron pause foo".into())
         );
     }
 

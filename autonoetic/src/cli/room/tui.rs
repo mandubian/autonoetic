@@ -586,6 +586,7 @@ pub fn run(
     limit: u32,
     target_agent_id: &mut Option<String>,
 ) -> anyhow::Result<()> {
+    crate::cli::terminal::require_interactive_terminal("Session Room")?;
     enable_raw_mode()?;
     // Guard constructed before entering the alternate screen, so raw mode is
     // restored even if `EnterAlternateScreen` (or anything after) fails.
@@ -2237,7 +2238,7 @@ fn draw(
     let viewport_offset = if follow {
         // Pin to the bottom; if the last row is multi-line, the offset
         // adjusts to keep the last row fully visible.
-        compute_viewport_offset(row_count - 1, list_height, &row_heights)
+        compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights)
     } else {
         compute_viewport_offset(safe_selected, list_height, &row_heights)
     };
@@ -2483,6 +2484,12 @@ mod tests {
         // selected=3 leaves the bottom window; viewport scrolls up to a
         // window that includes row 3 with rows 0..3 packed above.
         assert_eq!(compute_viewport_offset(3, 5, &h), 0);
+    }
+
+    #[test]
+    fn viewport_offset_follow_mode_empty_timeline_does_not_underflow() {
+        // Fresh session: row_count == 0 → follow uses saturating_sub(1) == 0.
+        assert_eq!(compute_viewport_offset(0, 10, &[]), 0);
     }
 
     #[test]

@@ -374,6 +374,7 @@ pub async fn handle_run(
     );
 
     if args.room {
+        super::terminal::require_interactive_terminal("Session Room")?;
         let resolved_target = resolved_agent_id.as_deref().unwrap_or("planner.default");
         let room_args = super::common::RoomArgs {
             root_session_id: Some(session_id),
@@ -399,6 +400,7 @@ pub async fn handle_run(
         return result;
     }
 
+    super::terminal::require_interactive_terminal("Chat")?;
     let result = super::chat::handle_chat(&config_path, &chat_args).await;
 
     gateway_handle.abort();
