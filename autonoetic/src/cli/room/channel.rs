@@ -23,6 +23,7 @@ pub struct GateRef {
 pub enum GateKind {
     Approval,
     Interaction,
+    Plan,
 }
 
 /// A resolution action a gate affords — the operator's intent, independent of
@@ -73,6 +74,7 @@ impl Channel for CliChannel {
         match gate.kind {
             GateKind::Approval => "(pending approval — resolve in `room --tui`)".into(),
             GateKind::Interaction => "(pending question — answer in `room --tui`)".into(),
+            GateKind::Plan => "(pending plan — approve in `room --tui` with y or /plan approve)".into(),
         }
     }
 }
@@ -89,6 +91,7 @@ impl Channel for TuiChannel {
         match gate.kind {
             GateKind::Approval => " · ⚠ APPROVAL PENDING — y/n".into(),
             GateKind::Interaction => " · ⚠ QUESTION PENDING — Enter/i/r to answer".into(),
+            GateKind::Plan => " · ⚠ PLAN PENDING — y to approve · /plan for details".into(),
         }
     }
 }

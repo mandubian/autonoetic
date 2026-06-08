@@ -12,6 +12,7 @@
 //! - `/session list [agent]` — list recent sessions (optionally filtered by agent)
 //! - `/session resume` — switch to the most recent session
 //! - `/cron` / `/cron list` — list scheduled jobs for the current session
+//! - `/plan` / `/plan approve [id]` — list or approve pending PlanFrames
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — show a one-line help summary
 //!
@@ -36,12 +37,16 @@ pub enum SlashCommand {
     Test { name: String },
     /// List scheduled cron jobs bound to the current root session.
     ListCronJobs,
+    /// List PlanFrames awaiting operator approval for this session.
+    ListPlans,
+    /// Approve a plan (`None` = latest pending).
+    ApprovePlan { plan_id: Option<String> },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
-pub const HELP_TEXT: &str = "/help for commands · /session · /cron · /test · /quit";
+pub const HELP_TEXT: &str = "/help for commands · /session · /plan · /cron · /test · /quit";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -65,6 +70,7 @@ pub fn help_lines() -> Vec<String> {
         String::new(),
         "Gates".to_string(),
         "  y / n        approve / reject selected pending approval".to_string(),
+        "  y            approve selected pending plan (plan.pending row)".to_string(),
         "  Enter/i/r    answer a pending user.ask (any row; newest ask wins)".to_string(),
         "  1–9          pick a numbered option while answering".to_string(),
         String::new(),
@@ -81,6 +87,7 @@ pub fn help_lines() -> Vec<String> {
         "  /session list [agent]   list recent sessions (1–9 to pick)".to_string(),
         "  /session resume [agent] jump to most recent session".to_string(),
         "  /cron  /cron list       scheduled jobs for this session".to_string(),
+        "  /plan  /plan approve [id]  pending PlanFrames (y on plan row also approves)".to_string(),
         "  /test <scenario>        inject synthetic events (dev)".to_string(),
         "  /test help              list test scenarios".to_string(),
         String::new(),
@@ -110,6 +117,7 @@ pub fn parse(input: &str) -> SlashCommand {
     match head.as_str() {
         "session" => parse_session(tail),
         "cron" => parse_cron(tail),
+        "plan" => parse_plan(tail),
         "test" => {
             let name = tail.trim().to_string();
             SlashCommand::Test { name }
@@ -127,6 +135,23 @@ fn parse_cron(tail: &str) -> SlashCommand {
         SlashCommand::ListCronJobs
     } else {
         SlashCommand::Unknown(format!("cron {trimmed}"))
+    }
+}
+
+fn parse_plan(tail: &str) -> SlashCommand {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        return SlashCommand::ListPlans;
+    }
+    let (sub, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((h, r)) => (h.to_ascii_lowercase(), r.trim()),
+        None => (trimmed.to_ascii_lowercase(), ""),
+    };
+    match sub.as_str() {
+        "approve" | "a" | "ok" => SlashCommand::ApprovePlan {
+            plan_id: (!rest.is_empty()).then(|| rest.to_string()),
+        },
+        _ => SlashCommand::Unknown(format!("plan {trimmed}")),
     }
 }
 
@@ -308,6 +333,31 @@ mod tests {
         assert_eq!(
             parse("/cron pause foo"),
             SlashCommand::Unknown("cron pause foo".into())
+        );
+    }
+
+    #[test]
+    fn parse_plan_variants() {
+        assert_eq!(parse("/plan"), SlashCommand::ListPlans);
+        assert_eq!(
+            parse("/plan approve"),
+            SlashCommand::ApprovePlan { plan_id: None }
+        );
+        assert_eq!(
+            parse("/plan approve plan-abc123"),
+            SlashCommand::ApprovePlan {
+                plan_id: Some("plan-abc123".into())
+            }
+        );
+        assert_eq!(
+            parse("/plan a plan-xyz"),
+            SlashCommand::ApprovePlan {
+                plan_id: Some("plan-xyz".into())
+            }
+        );
+        assert_eq!(
+            parse("/plan cancel"),
+            SlashCommand::Unknown("plan cancel".into())
         );
     }
 
