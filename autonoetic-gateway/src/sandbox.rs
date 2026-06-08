@@ -731,7 +731,8 @@ fn dispatch_sdk_method(
     gateway_dir: &std::path::Path,
     root_session_id: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
-    match method {
+    let method = method.replace('.', "_");
+    match method.as_str() {
         "memory_read" => {
             let path = params
                 .get("path")
