@@ -49,6 +49,8 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
     ensure_vault_key_for_bootstrap_workspace(config)?;
     write_gateway_identity(gateway_dir)?;
     bootstrap_constitution_snapshot(config, gateway_dir)?;
+    bootstrap_sdk_snapshot(gateway_dir)?;
+    crate::sandbox::init_sdk_deployed_path(gateway_dir);
 
     let store = GatewayStore::open(gateway_dir)?;
     let mut activated = 0usize;
@@ -87,6 +89,8 @@ pub fn bootstrap_single_agent(
     ensure_vault_key_for_bootstrap_workspace(config)?;
     write_gateway_identity(gateway_dir)?;
     bootstrap_constitution_snapshot(config, gateway_dir)?;
+    bootstrap_sdk_snapshot(gateway_dir)?;
+    crate::sandbox::init_sdk_deployed_path(gateway_dir);
     let store = GatewayStore::open(gateway_dir)?;
     bootstrap_agent_inner(config, gateway_dir, &store, agent_id)
 }
@@ -546,6 +550,69 @@ fn write_gateway_identity(gateway_dir: &Path) -> Result<()> {
 
     let json = serde_json::to_string_pretty(&identity)?;
     std::fs::write(gateway_dir.join("gateway.json"), json)?;
+    Ok(())
+}
+
+/// Materialize the Python (and optionally TypeScript) SDK into `.gateway/sdk/`
+/// so the runtime has a self-contained copy independent of the source tree.
+///
+/// Skips silently when the source SDK is not found (e.g. deployed binary
+/// without a source tree) — the env-var fallback in `resolve_python_sdk_path()`
+/// can still point to a custom location.
+pub fn bootstrap_sdk_snapshot(gateway_dir: &Path) -> Result<()> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk_root = manifest_dir.parent().map(|p| p.join("autonoetic-sdk"));
+
+    let Some(sdk_root) = sdk_root else { return Ok(()) };
+    if !sdk_root.exists() {
+        return Ok(());
+    }
+
+    let dest = gateway_dir.join("sdk");
+
+    // Python SDK
+    let py_src = sdk_root.join("python").join("autonoetic_sdk");
+    if py_src.exists() {
+        let py_dest = dest.join("python").join("autonoetic_sdk");
+        sync_dir(&py_src, &py_dest)?;
+    }
+
+    // TypeScript SDK
+    let ts_src = sdk_root.join("typescript");
+    if ts_src.exists() {
+        let ts_dest = dest.join("typescript");
+        sync_dir(&ts_src, &ts_dest)?;
+    }
+
+    Ok(())
+}
+
+/// Recursively copy files from `src` to `dst`. Idempotent — skips when
+/// destination already exists with matching content (by mtime + size).
+fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            sync_dir(&entry.path(), &dest_path)?;
+        } else if file_type.is_file() {
+            let src_meta = entry.metadata()?;
+            let should_copy = match dest_path.metadata() {
+                Ok(dst_meta) => {
+                    dst_meta.len() != src_meta.len()
+                        || dst_meta.modified().ok() != src_meta.modified().ok()
+                }
+                Err(_) => true,
+            };
+            if should_copy {
+                std::fs::copy(&entry.path(), &dest_path)?;
+            }
+        }
+    }
     Ok(())
 }
 

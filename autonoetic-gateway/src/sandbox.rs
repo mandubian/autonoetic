@@ -5,7 +5,7 @@ use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::SandboxConfig;
 use sha2::{Digest, Sha256};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -30,6 +30,7 @@ const BWRAP_DEV_MODE_ENV: &str = "AUTONOETIC_BWRAP_DEV_MODE";
 const ALLOW_SANDBOX_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES";
 
 static SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
+static SDK_DEPLOYED_PATH: OnceLock<String> = OnceLock::new();
 
 /// Per-execution overrides for bubblewrap isolation flags.
 /// Derived from the executing agent's capabilities.
@@ -112,6 +113,15 @@ impl SdkBridgeRateLimiter {
 /// AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
 pub fn init_sandbox_config(config: &SandboxConfig) {
     SANDBOX_CONFIG.get_or_init(|| config.clone());
+}
+
+/// Initialise the deployed-SDK path from the gateway directory so sandbox
+/// runners can find the SDK without relying on the source tree.
+pub fn init_sdk_deployed_path(gateway_dir: &Path) {
+    let py_sdk = gateway_dir.join("sdk").join("python");
+    if py_sdk.exists() {
+        let _ = SDK_DEPLOYED_PATH.set(py_sdk.to_string_lossy().to_string());
+    }
 }
 
 struct SdkBridgeGuard {
@@ -921,12 +931,21 @@ fn dispatch_sdk_method(
 }
 
 fn resolve_python_sdk_path() -> Option<String> {
+    // 1. Explicit env var override
     if let Ok(path) = std::env::var(PYTHON_SDK_PATH_ENV) {
         if !path.trim().is_empty() {
             return Some(path);
         }
     }
 
+    // 2. Deployed SDK snapshot in .gateway/sdk/python/ (set by bootstrap)
+    if let Some(path) = SDK_DEPLOYED_PATH.get() {
+        if Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    // 3. Fallback to source tree (developer mode)
     let local: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("autonoetic-sdk")

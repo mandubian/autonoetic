@@ -50,6 +50,14 @@ impl GatewayServer {
                     e
                 )
             })?;
+        crate::bootstrap::bootstrap_sdk_snapshot(&gateway_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "SDK bootstrap into gateway dir failed (target='{}'): {}",
+                gateway_dir.join("sdk").display(),
+                e
+            )
+        })?;
+        crate::sandbox::init_sdk_deployed_path(&gateway_dir);
 
         crate::constitution_digest::initialize_constitution(self.config.as_ref()).map_err(|e| {
             anyhow::anyhow!(
