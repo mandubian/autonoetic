@@ -1,9 +1,11 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::human_gate::{GateKind, GateRequest, GateResult, GateService};
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::capability::Capability;
 use autonoetic_types::wiki::{WikiGetResult, WikiListResult, WikiPageEntry};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -12,6 +14,7 @@ use std::sync::Arc;
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(WikiListTool));
     registry.register(Box::new(WikiGetTool));
+    registry.register(Box::new(WikiProposeTool));
 }
 
 pub fn resolve_wiki_dir(gateway_dir: Option<&Path>) -> Option<PathBuf> {
@@ -199,5 +202,187 @@ impl NativeTool for WikiGetTool {
         })?;
         let result = get_page(gateway_dir, &args.id)?;
         Ok(serde_json::to_string(&result)?)
+    }
+}
+
+pub struct WikiProposeTool;
+
+impl NativeTool for WikiProposeTool {
+    fn name(&self) -> &'static str {
+        "wiki.propose"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::WikiContribute))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Propose a new wiki page or edit an existing one. \
+                Requires WikiContribute capability. The proposal creates a gate \
+                that the operator must approve before the page is published. \
+                Returns immediately with the gate reference — the agent is NOT \
+                suspended. Use approval.status to check if the proposal is still \
+                pending, approved, or rejected."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                        "description": "Page ID (lowercase, hyphens allowed, e.g. 'runbook-agent-creation')"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Human-readable page title"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full markdown content (max 64 KiB)"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional tags for categorization"
+                    }
+                },
+                "required": ["id", "title", "content"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<Arc<GatewayStore>>,
+        run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct ProposeArgs {
+            id: String,
+            title: String,
+            content: String,
+            #[serde(default)]
+            tags: Vec<String>,
+        }
+        let args: ProposeArgs = serde_json::from_str(arguments_json).map_err(|e| {
+            anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e)
+        })?;
+
+        // Validate id pattern
+        let re = regex::Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").unwrap();
+        if !re.is_match(&args.id) {
+            anyhow::bail!(
+                "Invalid page id '{}': must match pattern [a-z0-9]+(-[a-z0-9]+)*",
+                args.id
+            );
+        }
+
+        // Validate content size
+        if args.content.is_empty() {
+            anyhow::bail!("Content must not be empty");
+        }
+        if args.content.len() > 65536 {
+            anyhow::bail!("Content exceeds maximum size of 64 KiB");
+        }
+
+        // Check if this is an edit (page already exists)
+        let is_edit = resolve_wiki_dir(gateway_dir)
+            .map(|dir| dir.join(format!("{}.md", &args.id)).exists())
+            .unwrap_or(false);
+
+        // Get session reference
+        let sid = session_id.unwrap_or("unknown").to_string();
+        let agent_id = manifest.agent.id.clone();
+
+        // Build GateKind
+        let kind = GateKind::WikiProposal {
+            page_id: args.id.clone(),
+            title: args.title.clone(),
+            content: args.content.clone(),
+            tags: args.tags.clone(),
+            is_edit,
+            proposed_by_agent: agent_id,
+            proposed_by_session: sid,
+        };
+
+        // Run through GateService
+        let store = gateway_store
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore not available"))?;
+        let gate = GateService::new(store);
+        let gate_req = GateRequest {
+            kind,
+            manifest,
+            session_id,
+            run_context,
+            config,
+            reason: if is_edit {
+                format!("Edit wiki page '{}': {}", args.id, args.title)
+            } else {
+                format!("Propose new wiki page '{}': {}", args.id, args.title)
+            },
+            summary: format!("Wiki proposal: {}", args.title),
+            approval_ref: None,
+            pre_validated: false,
+            turn_id: None,
+        };
+
+        let result = gate.check(gate_req)?;
+
+        match result {
+            GateResult::Cleared { .. } => {
+                // Should not happen for WikiProposal; return success with no gate_id
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "id": args.id,
+                    "is_edit": is_edit,
+                    "status": "approved"
+                })
+                .to_string())
+            }
+            GateResult::AlreadyPending { gate_id, .. } => {
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "id": args.id,
+                    "gate_id": gate_id,
+                    "is_edit": is_edit,
+                    "status": "pending",
+                    "proposed_at": chrono::Utc::now().to_rfc3339(),
+                })
+                .to_string())
+            }
+            GateResult::Suspended { gate_id, response_json, .. } => {
+                // Return the gate_id — the agent is NOT suspended for wiki proposals
+                let mut resp: serde_json::Value =
+                    serde_json::from_str(&response_json).unwrap_or_default();
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.insert("id".to_string(), serde_json::Value::String(args.id));
+                    obj.insert("is_edit".to_string(), serde_json::Value::Bool(is_edit));
+                }
+                Ok(resp.to_string())
+            }
+            GateResult::PolicyAllowed => {
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "id": args.id,
+                    "is_edit": is_edit,
+                    "status": "approved"
+                })
+                .to_string())
+            }
+        }
     }
 }

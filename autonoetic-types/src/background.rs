@@ -275,6 +275,20 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
+    /// Wiki page contribution proposal. Approval subject only — not executed
+    /// by the scheduler. On operator approval, the gateway materializes the
+    /// page into .gateway/wiki/.
+    WikiProposal {
+        page_id: String,
+        title: String,
+        content: String,
+        tags: Vec<String>,
+        #[serde(default)]
+        content_sha256: Option<String>,
+        proposed_by_agent: String,
+        #[serde(default)]
+        proposed_by_session: Option<String>,
+    },
 }
 
 impl ScheduledAction {
@@ -290,6 +304,7 @@ impl ScheduledAction {
                 | Self::SessionEscalate { .. }
                 | Self::LayerMount { .. }
                 | Self::RevisionPromote { .. }
+                | Self::WikiProposal { .. }
         )
     }
 
@@ -311,7 +326,8 @@ impl ScheduledAction {
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
-            | Self::RevisionPromote { .. } => true,
+            | Self::RevisionPromote { .. }
+            | Self::WikiProposal { .. } => true,
         }
     }
 
@@ -348,6 +364,7 @@ impl ScheduledAction {
             Self::SessionEscalate { .. } => "session_escalate",
             Self::LayerMount { .. } => "layer_mount",
             Self::RevisionPromote { .. } => "revision_promote",
+            Self::WikiProposal { .. } => "wiki_propose",
         }
     }
 
@@ -365,7 +382,8 @@ impl ScheduledAction {
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
-            | Self::RevisionPromote { .. } => None,
+            | Self::RevisionPromote { .. }
+            | Self::WikiProposal { .. } => None,
         }
     }
 
@@ -387,7 +405,8 @@ impl ScheduledAction {
             | Self::ProfileShare { .. }
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
-            | Self::RevisionPromote { .. } => {}
+            | Self::RevisionPromote { .. }
+            | Self::WikiProposal { .. } => {}
         }
         self
     }

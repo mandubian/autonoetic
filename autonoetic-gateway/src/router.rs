@@ -1362,6 +1362,168 @@ impl JsonRpcRouter {
                 }
             }
 
+            "wiki.propose" => {
+                #[derive(Deserialize)]
+                struct WikiProposeParams {
+                    id: String,
+                    title: String,
+                    content: String,
+                    #[serde(default)]
+                    tags: Vec<String>,
+                    #[serde(default)]
+                    session_id: Option<String>,
+                    #[serde(default)]
+                    turn_id: Option<String>,
+                    #[serde(default)]
+                    agent_id: Option<String>,
+                }
+
+                let params: WikiProposeParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for wiki.propose: {}", e),
+                        );
+                    }
+                };
+
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "GatewayStore not available".to_string(),
+                        );
+                    }
+                };
+
+                // Resolve agent_id from session binding or parameter
+                let resolved_agent_id = if let Some(aid) = &params.agent_id {
+                    aid.clone()
+                } else if let Some(sid) = &params.session_id {
+                    match store.get_session_agent_binding(sid) {
+                        Ok(Some(binding)) => binding.agent_id,
+                        _ => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                "Could not resolve agent_id from session; provide agent_id explicitly".to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "agent_id or session_id is required".to_string(),
+                    );
+                };
+
+                let (manifest, _agent_dir) = match self.execution.load_agent_manifest(&resolved_agent_id) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to load agent manifest for '{}': {}", resolved_agent_id, e),
+                        );
+                    }
+                };
+
+                let is_edit = crate::runtime::tools::wiki::resolve_wiki_dir(
+                    Some(&crate::execution::gateway_root_dir(self.config.as_ref())),
+                )
+                .map(|dir| dir.join(format!("{}.md", &params.id)).exists())
+                .unwrap_or(false);
+
+                let gate_kind = crate::runtime::human_gate::GateKind::WikiProposal {
+                    page_id: params.id.clone(),
+                    title: params.title.clone(),
+                    content: params.content.clone(),
+                    tags: params.tags.clone(),
+                    is_edit,
+                    proposed_by_agent: manifest.agent.id.clone(),
+                    proposed_by_session: params.session_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                };
+
+                let gate = crate::runtime::human_gate::GateService::new(store);
+                let gate_req = crate::runtime::human_gate::GateRequest {
+                    kind: gate_kind,
+                    manifest: &manifest,
+                    session_id: params.session_id.as_deref(),
+                    run_context: None,
+                    config: Some(self.config.as_ref()),
+                    reason: if is_edit {
+                        format!("Edit wiki page '{}': {}", params.id, params.title)
+                    } else {
+                        format!("Propose new wiki page '{}': {}", params.id, params.title)
+                    },
+                    summary: format!("Wiki proposal: {}", params.title),
+                    approval_ref: None,
+                    pre_validated: false,
+                    turn_id: params.turn_id.as_deref(),
+                };
+
+                match gate.check(gate_req) {
+                    Ok(result) => match result {
+                        crate::runtime::human_gate::GateResult::Cleared { .. }
+                        | crate::runtime::human_gate::GateResult::PolicyAllowed => {
+                            JsonRpcResponse::success(
+                                req.id,
+                                serde_json::json!({
+                                    "ok": true,
+                                    "id": params.id,
+                                    "is_edit": is_edit,
+                                    "status": "approved",
+                                }),
+                            )
+                        }
+                        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                            JsonRpcResponse::success(
+                                req.id,
+                                serde_json::json!({
+                                    "ok": true,
+                                    "id": params.id,
+                                    "gate_id": gate_id,
+                                    "is_edit": is_edit,
+                                    "status": "pending",
+                                    "proposed_at": chrono::Utc::now().to_rfc3339(),
+                                }),
+                            )
+                        }
+                        crate::runtime::human_gate::GateResult::Suspended { response_json, .. } => {
+                            match serde_json::from_str::<serde_json::Value>(&response_json) {
+                                Ok(mut resp) => {
+                                    if let Some(obj) = resp.as_object_mut() {
+                                        obj.insert("id".to_string(), serde_json::Value::String(params.id));
+                                        obj.insert("is_edit".to_string(), serde_json::Value::Bool(is_edit));
+                                    }
+                                    JsonRpcResponse::success(req.id, resp)
+                                }
+                                Err(_) => JsonRpcResponse::success(
+                                    req.id,
+                                    serde_json::json!({
+                                        "ok": true,
+                                        "id": params.id,
+                                        "gate_id": null,
+                                        "is_edit": is_edit,
+                                        "status": "pending",
+                                    }),
+                                ),
+                            }
+                        }
+                    },
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("wiki.propose failed: {}", e),
+                    ),
+                }
+            }
+
             "channel.bind" => {
                 // #393 (P3.c): bind an external conversation (Discord thread,
                 // WhatsApp chat) to a room so it survives reconnects and routes
