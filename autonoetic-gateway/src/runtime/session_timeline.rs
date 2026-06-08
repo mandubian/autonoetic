@@ -60,6 +60,103 @@ pub fn build_timeline_event(
 /// `role_floor` can only *raise* it — e.g. a Sentinel-seat message surfaces at
 /// `Attention`, honoring the module's raise-only invariant. The caller redacts
 /// the message text before passing it in.
+/// Whether an `event.ingest` chat payload is an automated workflow/gateway
+/// signal rather than a human or agent-authored chat line.
+pub fn is_signal_delivered_chat(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|m| m.get("signal_delivered"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Map an `event.ingest` chat line onto the canonical timeline.
+///
+/// Human/room/chat lines become `operator.message` (Normal). Automated workflow
+/// signals (`child_state_notification`, `workflow_join_satisfied`, …) become
+/// gateway-owned `workflow.*` rows at Detail so they don't drown out real
+/// operator conversation in the room.
+pub fn ingest_chat_timeline_event(
+    session_id: &str,
+    source_agent_id: Option<&str>,
+    message: &str,
+    metadata: Option<&serde_json::Value>,
+) -> Option<LiveDigestEventRecord> {
+    if is_signal_delivered_chat(metadata) {
+        return workflow_signal_timeline_event(session_id, message);
+    }
+    Some(operator_message_event(
+        session_id,
+        source_agent_id,
+        message,
+    ))
+}
+
+fn workflow_signal_timeline_event(
+    session_id: &str,
+    message: &str,
+) -> Option<LiveDigestEventRecord> {
+    let parsed = serde_json::from_str::<serde_json::Value>(message).ok()?;
+    let signal_type = parsed.get("type").and_then(|v| v.as_str())?;
+    let (principal, role) = actor_from_kind_id("system", "gateway");
+    let root = crate::runtime::content_store::root_session_id(session_id).to_string();
+
+    let (event_type, payload) = match signal_type {
+        "child_state_notification" => {
+            let notification = parsed.get("notification")?;
+            let child_status = notification
+                .get("child_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let summary = notification
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .map(crate::log_redaction::redact_text_for_logs)
+                .unwrap_or_default();
+            (
+                "workflow.child_state",
+                serde_json::json!({
+                    "signal_type": signal_type,
+                    "message": parsed.get("message").and_then(|v| v.as_str()),
+                    "child_status": child_status,
+                    "child_session_id": notification.get("child_session_id"),
+                    "task_id": notification.get("task_id"),
+                    "workflow_id": notification.get("workflow_id"),
+                    "failure_class": notification.get("failure_class"),
+                    "summary": summary,
+                }),
+            )
+        }
+        "workflow_join_satisfied" => (
+            "workflow.join_satisfied",
+            serde_json::json!({
+                "signal_type": signal_type,
+                "message": parsed.get("message").and_then(|v| v.as_str()),
+                "workflow_id": parsed.get("workflow_id"),
+                "join_task_ids": parsed.get("join_task_ids"),
+            }),
+        ),
+        other => (
+            "workflow.signal",
+            serde_json::json!({
+                "signal_type": other,
+                "message": parsed.get("message").and_then(|v| v.as_str()),
+            }),
+        ),
+    };
+
+    Some(build_timeline_event(
+        root,
+        session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        event_type,
+        Some(Altitude::Detail),
+        Some(payload),
+        TimelineRefs::default(),
+    ))
+}
+
 pub fn operator_message_event(
     session_id: &str,
     source_agent_id: Option<&str>,
@@ -91,7 +188,11 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // stays Detail and surfaces only when the operator dials down.
         // Extended-thinking "why" is verbose; hidable by default, surfaced on dial-down.
         "turn.start" | "turn.end" | "llm.round" | "tool.requested" | "agent.reasoning"
-        | "workbench.created" | "workbench.reconciled" | "workbench.discarded" => Altitude::Detail,
+        | "workbench.created" | "workbench.reconciled" | "workbench.discarded"
+        | "workflow.child_state" | "workflow.join_satisfied" | "workflow.signal"
+        | "scheduled_job.triggered" | "scheduled_job.completed" | "scheduled_job.failed" => {
+            Altitude::Detail
+        }
         "llm.request_failed" | "llm.empty_response" | "tool.failed" | "session.emergency_stop"
         | "security.sandbox_escape" | "guard.tripped" => Altitude::Error,
         // Gates awaiting the operator (conversational asks, RFC §3.5) and
@@ -176,6 +277,49 @@ pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ingest_chat_signal_emits_workflow_child_state_at_detail() {
+        let msg = serde_json::json!({
+            "type": "child_state_notification",
+            "message": "Workflow child failed",
+            "notification": {
+                "child_session_id": "sched-child-1",
+                "child_status": "failed",
+                "summary": "Script execution failed",
+                "task_id": "task-abc",
+                "workflow_id": "sched-sj-1"
+            }
+        });
+        let meta = serde_json::json!({ "signal_delivered": true });
+        let event = ingest_chat_timeline_event(
+            "session-1",
+            None,
+            &msg.to_string(),
+            Some(&meta),
+        )
+        .expect("signal should emit timeline row");
+        assert_eq!(event.event_type, "workflow.child_state");
+        assert_eq!(event.altitude.as_deref(), Some("detail"));
+        assert_eq!(event.role, Some(SessionRole::Runtime.to_storage()));
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["child_status"], "failed");
+        assert_eq!(payload["summary"], "Script execution failed");
+    }
+
+    #[test]
+    fn ingest_chat_human_stays_operator_message() {
+        let event = ingest_chat_timeline_event(
+            "session-1",
+            None,
+            "please fix the cron job",
+            Some(&serde_json::json!({ "source": "session_room" })),
+        )
+        .expect("human chat should emit");
+        assert_eq!(event.event_type, "operator.message");
+        assert_eq!(event.altitude.as_deref(), Some("normal"));
+    }
 
     #[test]
     fn operator_message_event_attributes_human_and_agent() {

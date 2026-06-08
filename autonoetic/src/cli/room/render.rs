@@ -583,6 +583,19 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 None => format!("escalation: {synthesis}"),
             }
         }
+        "workflow.child_state" => {
+            let status = field("child_status").unwrap_or_else(|| "unknown".into());
+            let task = field("task_id").map(|t| format!(" · {t}")).unwrap_or_default();
+            format!("workflow: child {status}{task}")
+        }
+        "workflow.join_satisfied" => {
+            let wf = field("workflow_id").map(|w| format!(" ({w})")).unwrap_or_default();
+            format!("workflow: join satisfied{wf}")
+        }
+        "workflow.signal" => one_line(
+            &field("message").unwrap_or_else(|| "workflow signal".into()),
+            100,
+        ),
         "scheduled_job.triggered" => format!(
             "scheduled call → {}",
             field("agent_id").unwrap_or_else(|| "agent".into())
@@ -787,6 +800,9 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
         // Agent/operator narrative bodies are assembled in `render_spec` via
         // [`narrative_body`] — not duplicated here.
         "agent.message" | "operator.message" => None,
+        "workflow.child_state" => s("summary")
+            .filter(|r| !r.is_empty())
+            .map(|r| cap_preview(&r, 200)),
         "scheduled_job.completed" | "scheduled_job.failed" => s("result_summary")
             .filter(|r| !r.is_empty())
             .map(|r| cap_preview(&r, 200)),
