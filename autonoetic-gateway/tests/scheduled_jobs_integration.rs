@@ -168,6 +168,39 @@ fn test_advance_next_run() -> anyhow::Result<()> {
 }
 
 #[test]
+fn test_list_scheduled_jobs_with_filters() -> anyhow::Result<()> {
+    let (_temp, store) = temp_gateway_store();
+
+    let now = Utc::now();
+    let mut job1 = make_job("sj-filter-001", "planner.default", &now.to_rfc3339());
+    job1.root_session_id = "root-a".to_string();
+    let mut job2 = make_job("sj-filter-002", "coder.default", &now.to_rfc3339());
+    job2.root_session_id = "root-b".to_string();
+    job2.status = autonoetic_types::scheduled_job::ScheduledJobStatus::Paused;
+
+    store.create_scheduled_job(&job1)?;
+    store.create_scheduled_job(&job2)?;
+
+    let root_a = store.list_scheduled_jobs(None, Some("root-a"), None, 50)?;
+    assert_eq!(root_a.len(), 1);
+    assert_eq!(root_a[0].job_id, "sj-filter-001");
+
+    let paused = store.list_scheduled_jobs(
+        None,
+        None,
+        Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Paused),
+        50,
+    )?;
+    assert_eq!(paused.len(), 1);
+    assert_eq!(paused[0].job_id, "sj-filter-002");
+
+    let planner = store.list_scheduled_jobs(Some("planner.default"), None, None, 50)?;
+    assert_eq!(planner.len(), 1);
+
+    Ok(())
+}
+
+#[test]
 fn test_list_scheduled_jobs_for_root() -> anyhow::Result<()> {
     let (_temp, store) = temp_gateway_store();
 

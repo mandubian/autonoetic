@@ -2069,6 +2069,103 @@ pub async fn handle_gateway_system_agents(
     Ok(())
 }
 
+pub async fn handle_gateway_cron(
+    config_path: &Path,
+    command: &super::common::GatewayCronCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        super::common::GatewayCronCommands::List {
+            status,
+            owner,
+            root_session,
+            limit,
+            json,
+        } => {
+            let status_filter = match status.as_deref() {
+                None => None,
+                Some("active") => {
+                    Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Active)
+                }
+                Some("paused") => {
+                    Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Paused)
+                }
+                Some("cancelled") => {
+                    Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Cancelled)
+                }
+                Some(other) => {
+                    anyhow::bail!(
+                        "invalid --status '{}': expected active | paused | cancelled",
+                        other
+                    );
+                }
+            };
+            let jobs = store.list_scheduled_jobs(
+                owner.as_deref(),
+                root_session.as_deref(),
+                status_filter,
+                *limit,
+            )?;
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&jobs)?);
+                return Ok(());
+            }
+
+            if jobs.is_empty() {
+                println!("No scheduled cron jobs match the filters.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<14} {:<22} {:<16} {:<10} {:<18} {:<38} {}",
+                "JOB_ID", "TARGET", "CRON", "STATUS", "OWNER", "ROOT_SESSION", "NEXT_RUN"
+            );
+            for job in &jobs {
+                let target = format!("{}@{}", job.target_agent_id, job.target_revision_id);
+                let target = truncate_field(&target, 22);
+                let cron = truncate_field(&job.cron_expr, 16);
+                let owner = truncate_field(&job.owner_agent_id, 18);
+                let root = truncate_field(&job.root_session_id, 38);
+                let next = truncate_field(&job.next_run_at, 24);
+                println!(
+                    "{:<14} {:<22} {:<16} {:<10} {:<18} {:<38} {}",
+                    truncate_field(&job.job_id, 14),
+                    target,
+                    cron,
+                    job.status,
+                    owner,
+                    root,
+                    next,
+                );
+                if let Some(err) = job.last_error.as_deref().filter(|s| !s.is_empty()) {
+                    println!("  last_error: {}", truncate_field(err, 120));
+                }
+            }
+            println!();
+            println!(
+                "Reconnect to a session timeline: autonoetic room <root_session_id> --tui"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn truncate_field(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max <= 3 {
+        s.chars().take(max).collect()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Constitution amendment proposals — R+++1 (issue #92)
 // ---------------------------------------------------------------------------

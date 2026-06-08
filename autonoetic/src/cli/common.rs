@@ -321,10 +321,10 @@ pub struct RunArgs {
     /// Enables PlanFrame, workbench projection, reconciliation, and the /return handoff.
     #[arg(short, long)]
     pub collaborative: bool,
-    /// Launch the Session Room TUI instead of the chat interface. The room shows
-    /// the canonical timeline, lets you resolve gates, and send messages to the
-    /// agent — all in a scrollable, live-tailing view.
-    #[arg(long)]
+    /// Launch the Session Room TUI (default). The room shows the canonical
+    /// timeline, lets you resolve gates, and send messages to the agent — all
+    /// in a scrollable, live-tailing view. Pass `--no-room` for the legacy chat TUI.
+    #[arg(long, default_value_t = true)]
     pub room: bool,
 }
 
@@ -382,6 +382,11 @@ pub enum GatewayCommands {
     SystemAgents {
         #[command(subcommand)]
         command: SystemAgentCommands,
+    },
+    /// List scheduled cron jobs and their root sessions.
+    Cron {
+        #[command(subcommand)]
+        command: GatewayCronCommands,
     },
     /// Manage agent-submitted constitutional amendment proposals (R+++1).
     Constitution {
@@ -666,6 +671,28 @@ pub enum SystemAgentCommands {
     Run {
         /// Agent ID to trigger.
         agent_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayCronCommands {
+    /// List scheduled cron jobs (optionally filtered).
+    List {
+        /// Filter by status (`active`, `paused`, `cancelled`).
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by owning agent id.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Filter by root session id.
+        #[arg(long)]
+        root_session: Option<String>,
+        /// Maximum number of results to return.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
 }
 

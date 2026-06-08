@@ -750,17 +750,24 @@ impl JsonRpcRouter {
                 // async_mode.
                 if params.event_type.trim() == "chat" && !params.message.trim().is_empty() {
                     if let Some(store) = self.execution.gateway_store() {
-                        let event = crate::runtime::session_timeline::operator_message_event(
-                            &session_id,
-                            params.source_agent_id.as_deref(),
-                            &crate::log_redaction::redact_text_for_logs(&params.message),
-                        );
-                        if let Err(e) = store.create_live_digest_event(&event) {
-                            tracing::debug!(
-                                target: "session_timeline",
-                                error = %e,
-                                "operator.message timeline emit failed"
-                            );
+                        let redacted =
+                            crate::log_redaction::redact_text_for_logs(&params.message);
+                        if let Some(event) =
+                            crate::runtime::session_timeline::ingest_chat_timeline_event(
+                                &session_id,
+                                params.source_agent_id.as_deref(),
+                                &redacted,
+                                params.metadata.as_ref(),
+                            )
+                        {
+                            if let Err(e) = store.create_live_digest_event(&event) {
+                                tracing::debug!(
+                                    target: "session_timeline",
+                                    error = %e,
+                                    event_type = %event.event_type,
+                                    "ingest chat timeline emit failed"
+                                );
+                            }
                         }
                     }
                 }
@@ -1094,6 +1101,72 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         format!("session.timeline.list failed: {}", e),
+                    ),
+                }
+            }
+
+            "scheduled_jobs.list" => {
+                let params: autonoetic_types::scheduled_job::ScheduledJobsListParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for scheduled_jobs.list: {}", e),
+                            );
+                        }
+                    };
+                let status = match params.status.as_deref() {
+                    None => None,
+                    Some("active") => {
+                        Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Active)
+                    }
+                    Some("paused") => {
+                        Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Paused)
+                    }
+                    Some("cancelled") => {
+                        Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Cancelled)
+                    }
+                    Some(other) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!(
+                                "Invalid status for scheduled_jobs.list: '{}' (expected active|paused|cancelled)",
+                                other
+                            ),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let limit = params.limit.clamp(1, 500) as usize;
+                match store.list_scheduled_jobs(
+                    params.owner_agent_id.as_deref(),
+                    params.root_session_id.as_deref(),
+                    status,
+                    limit,
+                ) {
+                    Ok(jobs) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(
+                            autonoetic_types::scheduled_job::ScheduledJobsListResult { jobs },
+                        )
+                        .unwrap_or_else(|_| serde_json::json!({"jobs": []})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("scheduled_jobs.list failed: {}", e),
                     ),
                 }
             }

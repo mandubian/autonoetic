@@ -150,6 +150,9 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::SystemAgents { command } => {
                 cli::gateway::handle_gateway_system_agents(&config_path, command).await?;
             }
+            cli::common::GatewayCommands::Cron { command } => {
+                cli::gateway::handle_gateway_cron(&config_path, command).await?;
+            }
             cli::common::GatewayCommands::Constitution { command } => {
                 cli::gateway::handle_gateway_constitution(&config_path, command).await?;
             }

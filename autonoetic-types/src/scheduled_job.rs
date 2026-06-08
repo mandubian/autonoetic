@@ -50,6 +50,33 @@ pub struct CreateScheduledJobRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Parameters for `scheduled_jobs.list` — operator discovery of cron jobs
+/// bound to root sessions (reconnect via `autonoetic room <root_session_id> --tui`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledJobsListParams {
+    /// Filter by owning agent (e.g. `planner.default`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
+    /// Filter by root session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_session_id: Option<String>,
+    /// Filter by status (`active`, `paused`, `cancelled`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Max entries to return. Clamped to 1..=500 by the gateway.
+    #[serde(default = "default_scheduled_jobs_list_limit")]
+    pub limit: u32,
+}
+
+fn default_scheduled_jobs_list_limit() -> u32 {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledJobsListResult {
+    pub jobs: Vec<ScheduledJob>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledJobTriggerEvent {
     pub event_id: String,

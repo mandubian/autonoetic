@@ -269,6 +269,45 @@ pub fn delete_scheduled_job(conn: &Connection, job_id: &str) -> Result<bool> {
     Ok(deleted > 0)
 }
 
+const JOB_SELECT_COLUMNS: &str = "job_id, owner_agent_id, root_session_id, target_agent_id, \
+    target_revision_id, message, metadata_json, cron_expr, timezone, next_run_at, \
+    last_run_at, status, created_at, updated_at, last_error, generation";
+
+pub fn list_scheduled_jobs(
+    conn: &Connection,
+    owner_agent_id: Option<&str>,
+    root_session_id: Option<&str>,
+    status: Option<ScheduledJobStatus>,
+    limit: usize,
+) -> Result<Vec<ScheduledJob>> {
+    let mut sql = format!("SELECT {JOB_SELECT_COLUMNS} FROM scheduled_jobs WHERE 1=1");
+    let mut param_vals: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(owner) = owner_agent_id {
+        sql.push_str(" AND owner_agent_id = ?");
+        param_vals.push(Box::new(owner.to_string()));
+    }
+    if let Some(root) = root_session_id {
+        sql.push_str(" AND root_session_id = ?");
+        param_vals.push(Box::new(root.to_string()));
+    }
+    if let Some(st) = status {
+        sql.push_str(" AND status = ?");
+        param_vals.push(Box::new(st.to_string()));
+    }
+    sql.push_str(" ORDER BY next_run_at ASC LIMIT ?");
+    param_vals.push(Box::new(limit as i64));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_vals.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row_to_job(row)?);
+    }
+    Ok(out)
+}
+
 fn row_to_job(row: &rusqlite::Row<'_>) -> Result<ScheduledJob> {
     let status_str: String = row.get(11)?;
     let status = match status_str.as_str() {
