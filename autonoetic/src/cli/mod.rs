@@ -13,5 +13,6 @@ pub mod security;
 pub mod sentinel_experiment;
 pub mod improve;
 pub mod session;
+pub mod terminal;
 pub mod trace;
 pub mod watchdog;
