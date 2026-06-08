@@ -260,6 +260,19 @@ class _StateApi:
     def __init__(self, rpc: _RpcClient) -> None:
         self._rpc = rpc
 
+    def get(self, key: str, default: Any = None) -> Any:
+        blob = self._rpc.request("state.get_checkpoint", {}).get("data")
+        if blob is None or not isinstance(blob, dict):
+            return default
+        return blob.get(key, default)
+
+    def set(self, key: str, value: Any) -> Any:
+        blob = self._rpc.request("state.get_checkpoint", {}).get("data")
+        if blob is None or not isinstance(blob, dict):
+            blob = {}
+        blob[key] = value
+        return self._rpc.request("state.checkpoint", {"data": blob})
+
     def checkpoint(self, data: Any) -> Any:
         return self._rpc.request("state.checkpoint", {"data": data})
 

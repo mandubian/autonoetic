@@ -27,8 +27,10 @@ metadata = invocation.metadata
 
 | Method | Signature | Description |
 |---|---|---|
-| `checkpoint` | `sdk.state.checkpoint(data: dict) -> dict` | Persist a state checkpoint (e.g., progress tracking). |
-| `get_checkpoint` | `sdk.state.get_checkpoint() -> dict` | Retrieve the last saved checkpoint. Returns `{}` if none exists. |
+| `get` | `sdk.state.get(key: str, default=None) -> Any` | Read a single key from persisted state. Returns `default` if key is missing or no state exists. |
+| `set` | `sdk.state.set(key: str, value: Any) -> dict` | Write a single key-value pair to persisted state (read-modify-write). |
+| `checkpoint` | `sdk.state.checkpoint(data: dict) -> dict` | Replace the entire state blob with `data`. |
+| `get_checkpoint` | `sdk.state.get_checkpoint() -> dict` | Retrieve the full state blob. Returns `None` if none exists. |
 
 ## Event Operations (`sdk.events`)
 
@@ -44,14 +46,14 @@ import autonoetic_sdk
 sdk = autonoetic_sdk.init()
 
 def main():
-    state = sdk.state.get_checkpoint() or {}
-    a = state.get("a", 0)
-    b = state.get("b", 1)
+    a = sdk.state.get("a", 0)
+    b = sdk.state.get("b", 1)
 
     next_fib = a + b
     print(f"Next Fibonacci number: {next_fib}")
 
-    sdk.state.checkpoint({"a": b, "b": next_fib})
+    sdk.state.set("a", b)
+    sdk.state.set("b", next_fib)
 
 if __name__ == "__main__":
     main()
@@ -61,7 +63,7 @@ if __name__ == "__main__":
 
 - **There is no `sdk.knowledge` module.** Use `sdk.memory.remember()` / `sdk.memory.recall()` for persistence.
 - **Memory visibility**: `sdk.memory.remember()` stores data with `session` visibility by default — any agent in the same root session can read it via `sdk.memory.recall()` or the native `knowledge_recall`/`knowledge_search` tools. Use Tier 1 `sdk.memory.write()` for private scratch data that should not be shared.
-- The SDK bridge only supports the methods listed above. Calling unsupported methods (e.g., `sdk.secrets.get`, `sdk.message.send`) will raise `AutonoeticSdkError`.
+- The SDK bridge only supports the methods listed in the tables above. Do not invent or guess method names — every available method is documented here. Unsupported calls raise `AutonoeticSdkError`.
 - The SDK is injected via `PYTHONPATH` and communicates with the gateway over a Unix socket. No network access is required.
 - Script agents can read normalized runtime input via `autonoetic_sdk.load_input()` / `load_invocation()`. Delegation metadata, when present, is exposed separately via `invocation.metadata`.
 
