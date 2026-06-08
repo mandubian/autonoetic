@@ -13,8 +13,8 @@ use super::slash::SlashCommand;
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -122,6 +122,35 @@ fn compute_viewport_offset(selected: usize, list_height: usize, row_heights: &[u
         new_offset = i;
     }
     new_offset
+}
+
+/// Map a mouse click's terminal row to a timeline row index.
+/// Returns `None` if the click is outside the list area.
+fn click_to_row_index(
+    click_y: u16,
+    list_area_y: u16,
+    list_height: usize,
+    viewport_offset: usize,
+    row_heights: &[usize],
+) -> Option<usize> {
+    if click_y < list_area_y {
+        return None;
+    }
+    let rel_y = (click_y - list_area_y) as usize;
+    if rel_y >= list_height {
+        return None;
+    }
+    let mut acc = 0usize;
+    let mut i = viewport_offset;
+    while i < row_heights.len() {
+        let h = row_heights[i];
+        if acc + h > rel_y {
+            return Some(i);
+        }
+        acc += h;
+        i += 1;
+    }
+    None
 }
 
 /// Lines visible in the detail pane for the current terminal height.
@@ -573,7 +602,7 @@ struct TerminalRestore;
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
     }
 }
 
@@ -599,7 +628,7 @@ pub fn run(
     // Guard constructed before entering the alternate screen, so raw mode is
     // restored even if `EnterAlternateScreen` (or anything after) fails.
     let _restore = TerminalRestore;
-    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     let mut entries: Vec<SessionTimelineEntry> = Vec::new();
@@ -734,6 +763,39 @@ pub fn run(
         spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
         let spinner_glyph = SPINNER_FRAMES[spinner_frame];
         let session_stats = compute_session_stats(&entries);
+
+        let term_size = terminal.size()?;
+        let compose_open = compose.is_some() && detail.is_none();
+        let list_area_height = if compose_open {
+            term_size.height.saturating_sub(1 + 1 + COMPOSE_PANEL_HEIGHT as u16)
+        } else {
+            term_size.height.saturating_sub(1 + 1)
+        };
+        let list_height = list_area_height as usize;
+        let width = term_size.width as usize;
+        let rail_w = 2usize;
+        let glyph_w = 3usize;
+        let label_w = 12usize.min(width / 4);
+        let content_w = width.saturating_sub(rail_w + glyph_w + label_w + 2);
+        let row_heights: Vec<usize> = (0..rows.len())
+            .map(|i| match &rows[i] {
+                RenderedRow::Line(spec) => {
+                    build_rich_row_lines(
+                        spec, i, &turn_boundaries, content_w, glyph_w, rail_w, label_w,
+                        spinner_glyph, show_reasoning,
+                    )
+                    .len()
+                }
+                RenderedRow::Collapsed { .. } => 1,
+            })
+            .collect();
+        let row_count = rows.len();
+        let safe_selected = selected.min(row_count.saturating_sub(1));
+        let viewport_offset = if follow {
+            compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights)
+        } else {
+            compute_viewport_offset(safe_selected, list_height, &row_heights)
+        };
 
         terminal.draw(|f| {
             draw(
@@ -1264,6 +1326,49 @@ pub fn run(
                     }
                     _ => {}
                 }
+                }
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            if detail.is_some() {
+                                detail_scroll = detail_scroll.saturating_sub(1);
+                            } else if selected > 0 {
+                                selected = selected.saturating_sub(1);
+                                follow = false;
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if detail.is_some() {
+                                detail_scroll = detail_scroll.saturating_add(1);
+                            } else if selected < row_count.saturating_sub(1) {
+                                selected = (selected + 1).min(row_count.saturating_sub(1));
+                                follow = false;
+                            }
+                        }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            let click_row = click_to_row_index(
+                                mouse.row,
+                                1u16,
+                                list_height,
+                                viewport_offset,
+                                &row_heights,
+                            );
+                            if let Some(idx) = click_row {
+                                if detail.is_some() {
+                                    detail = None;
+                                    detail_scroll = 0;
+                                    detail_h_scroll = 0;
+                                } else {
+                                    selected = idx;
+                                    follow = false;
+                                    detail = indexed.get(idx).map(|(_, src)| detail_for(&visible, *src));
+                                    detail_scroll = 0;
+                                    detail_h_scroll = 0;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 _ => {}
             }
