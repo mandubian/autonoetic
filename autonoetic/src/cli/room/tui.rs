@@ -29,8 +29,14 @@ use std::io;
 use std::time::{Duration, Instant};
 
 /// Spinner frames — a gentle breathing indicator on the in-flight row. The
-/// current frame is rotated on each TUI tick (the existing 250 ms poll loop).
+/// current frame is rotated on each TUI frame tick.
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Main-loop frame budget — input is drained at 0 ms; this caps idle spin rate.
+const FRAME_MS: u64 = 50;
+/// How often to pull new timeline events from the gateway (not every frame).
+const TIMELINE_POLL_MS: u64 = 400;
+/// How often to poll `session.status` for async ingest still `processing`.
+const SESSION_STATUS_POLL_MS: u64 = 2000;
 
 /// Hard cap on plumbing/tool rows — keeps the list scannable.
 const MAX_ROW_LINES: usize = 8;
@@ -153,6 +159,32 @@ fn click_to_row_index(
     None
 }
 
+/// Milliseconds within which two left-clicks on the same row count as a double-click.
+const DOUBLE_CLICK_MS: u128 = 450;
+
+/// Returns true when this click completes a double-click on the same row.
+fn click_opens_detail(
+    last: &mut Option<(Instant, usize, u16, u16)>,
+    now: Instant,
+    row_index: usize,
+    column: u16,
+    row: u16,
+) -> bool {
+    const MAX_DRIFT: i16 = 3;
+    let is_double = last.is_some_and(|(t, idx, lc, lr)| {
+        idx == row_index
+            && now.duration_since(t).as_millis() <= DOUBLE_CLICK_MS
+            && (column as i16 - lc as i16).abs() <= MAX_DRIFT
+            && (row as i16 - lr as i16).abs() <= MAX_DRIFT
+    });
+    if is_double {
+        *last = None;
+    } else {
+        *last = Some((now, row_index, column, row));
+    }
+    is_double
+}
+
 /// Lines visible in the detail pane for the current terminal height.
 fn detail_page_step(terminal_height: u16) -> u16 {
     // header(1) + footer(1) + detail block borders(2)
@@ -171,6 +203,12 @@ impl ComposeInput {
             buffer: String::new(),
             cursor_pos: 0,
         }
+    }
+
+    fn with_prefill(text: &str) -> Self {
+        let buffer = text.to_string();
+        let cursor_pos = buffer.len();
+        Self { buffer, cursor_pos }
     }
 
     fn insert_char(&mut self, c: char) {
@@ -374,6 +412,57 @@ fn copy_clipboard(compose: &ComposeInput, clipboard: &mut Option<arboard::Clipbo
     }
 }
 
+/// Drill-down pane: raw event metadata or a structured plan review.
+struct DetailPane {
+    lines: Vec<String>,
+    /// When set, the pane is a plan review (not event metadata).
+    plan_id: Option<String>,
+    /// When set, the pane title names the `agent_spawn` target.
+    spawn_agent_id: Option<String>,
+}
+
+impl DetailPane {
+    fn event(lines: Vec<String>, spawn_agent_id: Option<String>) -> Self {
+        Self {
+            lines,
+            plan_id: None,
+            spawn_agent_id,
+        }
+    }
+
+    fn plan_review(plan_id: String, lines: Vec<String>) -> Self {
+        Self {
+            lines,
+            plan_id: Some(plan_id),
+            spawn_agent_id: None,
+        }
+    }
+
+    fn is_plan_review(&self) -> bool {
+        self.plan_id.is_some()
+    }
+
+    fn block_title(&self) -> String {
+        if self.is_plan_review() {
+            return " plan review ".to_string();
+        }
+        if let Some(id) = &self.spawn_agent_id {
+            return format!(" agent_spawn → {id} ");
+        }
+        " event detail ".to_string()
+    }
+}
+
+fn clear_detail(
+    detail: &mut Option<DetailPane>,
+    scroll: &mut u16,
+    h_scroll: &mut u16,
+) {
+    *detail = None;
+    *scroll = 0;
+    *h_scroll = 0;
+}
+
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
 /// and `GateAction` are the channel-neutral primitives, shared from
@@ -387,6 +476,34 @@ struct GateInput {
     options: Vec<GateOption>,
     /// Whether free-text is accepted alongside any options (interactions).
     allow_freeform: bool,
+    /// Rejections always require motivation (§O). Approvals may require it for
+    /// elevated/external actions — the gateway enforces that on submit.
+    motivation_required: bool,
+}
+
+fn gate_commit_validation_error(gi: &GateInput) -> Option<&'static str> {
+    if matches!(gi.action, GateAction::Approve | GateAction::Reject)
+        && gi.motivation_required
+        && gi.buffer.trim().is_empty()
+    {
+        Some("✗ motivation required — type a reason and press Enter")
+    } else {
+        None
+    }
+}
+
+fn gate_input_label(gi: &GateInput) -> &'static str {
+    match gi.action {
+        GateAction::Answer => "ANSWER",
+        GateAction::Approve => {
+            if gi.motivation_required {
+                "APPROVE — motivation (required)"
+            } else {
+                "APPROVE — motivation (optional)"
+            }
+        }
+        GateAction::Reject => "REJECT — motivation (required)",
+    }
 }
 
 /// Render detail lines, detecting markdown content in string values
@@ -399,43 +516,56 @@ fn render_detail_lines(raw: &[String]) -> Vec<Line<'static>> {
     let mut md_buf: Vec<String> = Vec::new();
 
     for line in raw {
-        // Detect start of a multi-line string value (indented content after a key)
-        // that looks like markdown. The render_payload_lines formatter outputs
-        // string values split on \n with 6-space indent.
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
 
+        if trimmed == markdown::NARRATIVE_MD_START
+            || trimmed.ends_with(markdown::NARRATIVE_MD_START)
+        {
+            in_markdown_block = true;
+            md_buf.clear();
+            continue;
+        }
+        if trimmed.starts_with(markdown::NARRATIVE_MD_END) {
+            let md_text = md_buf.join("\n");
+            out.extend(markdown::render_markdown(
+                &markdown::normalize_narrative_prose(&md_text),
+            ));
+            in_markdown_block = false;
+            md_buf.clear();
+            continue;
+        }
+
         if in_markdown_block {
-            // End of multi-line string: a line with less indent or a comma/closing brace
-            if indent <= 4 && (trimmed.starts_with('}') || trimmed.starts_with(',') || trimmed.is_empty()) {
-                // Flush markdown buffer
+            if indent <= 4
+                && (trimmed.starts_with('}') || trimmed.starts_with(',') || trimmed.is_empty())
+            {
                 let md_text = md_buf.join("\n");
                 out.extend(markdown::render_markdown(
                     &markdown::normalize_narrative_prose(&md_text),
                 ));
                 in_markdown_block = false;
                 md_buf.clear();
-                out.push(Line::from(line.clone()));
+                if !trimmed.is_empty() {
+                    out.push(Line::from(line.clone()));
+                }
             } else {
                 md_buf.push(trimmed.to_string());
             }
             continue;
         }
 
-        // Detect a key followed by split multi-line content (from render_payload_lines)
-        // Pattern: `    "key":` followed by indented lines
-        // Or detect markdown in a single string value
-        if indent == 6
+        // Legacy: indented multiline strings without narrative markers.
+        if indent >= 6
             && !trimmed.is_empty()
             && !trimmed.starts_with('"')
             && !trimmed.starts_with('{')
             && !trimmed.starts_with('[')
+            && markdown::looks_like_narrative_content(trimmed)
         {
-            if markdown::looks_like_markdown(trimmed) {
-                in_markdown_block = true;
-                md_buf.push(trimmed.to_string());
-                continue;
-            }
+            in_markdown_block = true;
+            md_buf.push(trimmed.to_string());
+            continue;
         }
 
         out.push(Line::from(line.clone()));
@@ -489,6 +619,63 @@ fn plan_id_for(entry: &SessionTimelineEntry) -> Option<String> {
         .plan_id
         .clone()
         .or_else(|| payload_field_str(entry, "plan_id"))
+}
+
+/// Unresolved pending plan ids still visible in the timeline (newest first).
+fn unresolved_pending_plan_ids(
+    entries: &[SessionTimelineEntry],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for e in entries.iter().rev() {
+        let id = if e.event_type == "plan.pending" {
+            plan_id_for(e)
+        } else {
+            render::extract_plan_proposal_id(e)
+        };
+        if let Some(id) = id {
+            if !resolved.contains(&id) && !acted.contains(&id) && seen.insert(id.clone()) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// Map a visible timeline index to a rendered row index (post-coalesce).
+fn row_index_for_visible(
+    indexed: &[(RenderedRow, RowSource)],
+    visible_index: usize,
+) -> Option<usize> {
+    indexed.iter().position(|(_, src)| match src {
+        RowSource::Single(i) => *i == visible_index,
+        RowSource::Run { start, len } => (*start..start + len).contains(&visible_index),
+    })
+}
+
+/// Newest unresolved plan gate row in the current view (`plan.pending` preferred).
+fn newest_pending_plan_event(
+    visible: &[SessionTimelineEntry],
+    indexed: &[(RenderedRow, RowSource)],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Option<(usize, String, String)> {
+    for (vis_idx, e) in visible.iter().enumerate().rev() {
+        let id = if e.event_type == "plan.pending" {
+            plan_id_for(e)
+        } else {
+            render::extract_plan_proposal_id(e)
+        };
+        let Some(id) = id else { continue };
+        if resolved.contains(&id) || acted.contains(&id) {
+            continue;
+        }
+        let row_idx = row_index_for_visible(indexed, vis_idx)?;
+        return Some((row_idx, id, e.event_id.clone()));
+    }
+    None
 }
 
 fn notification_approval_id(entry: &SessionTimelineEntry) -> Option<String> {
@@ -637,7 +824,7 @@ pub fn run(
     let mut squash = true;
     let mut follow = true; // pin to newest
     let mut selected: usize = 0;
-    let mut detail: Option<Vec<String>> = None; // drill-down pane content
+    let mut detail: Option<DetailPane> = None;
     let mut detail_scroll: u16 = 0; // vertical scroll offset for detail pane
     let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
     let mut input: Option<GateInput> = None; // in-flight gate decision
@@ -656,11 +843,722 @@ pub fn run(
     let mut show_reasoning = true;
     let mut spinner_frame: usize = 0;
     let mut quit_armed_until: Option<Instant> = None;
+    let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
+    let mut last_announced_plan_event: Option<String> = None;
+    let mut last_session_status_poll = Instant::now();
+    let mut last_timeline_poll = Instant::now();
+    let mut force_timeline_refresh = true;
+    let mut session_async_processing = false;
+    // Last rendered frame — input is drained before the next timeline fetch.
+    let mut view_rows: Vec<RenderedRow> = Vec::new();
+    let mut view_indexed: Vec<(RenderedRow, RowSource)> = Vec::new();
+    let mut view_visible: Vec<SessionTimelineEntry> = Vec::new();
+    let mut view_gate: Option<GateRef> = None;
+    let mut view_row_count = 0usize;
+    let mut view_row_heights: Vec<usize> = Vec::new();
+    let mut view_viewport_offset = 0usize;
+    let mut view_list_height = 0usize;
 
-    loop {
-        // Fetch at most one page per tick via the gateway API. On error (gateway
-        // down), surface it and keep retrying — don't crash the UI.
-        match rpc(
+    'room: loop {
+        // Drain pending input before any blocking gateway work so arrows / wheel
+        // stay responsive even when timeline RPCs are slow.
+        while event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                Event::Paste(text) => {
+                    if let Some(c) = compose.as_mut() {
+                        c.insert_str(&text);
+                    } else if let Some(gi) = input.as_mut() {
+                        if gi.allow_freeform {
+                            gi.buffer.push_str(&text.replace('\r', ""));
+                        }
+                    }
+                }
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    // Compose mode: multi-line editor with cursor + clipboard (#405).
+                    if let Some(c) = compose.as_mut() {
+                        match handle_compose_key(c, &key, &mut clipboard) {
+                            ComposeKeyResult::Continue => {}
+                            ComposeKeyResult::Cancel => compose = None,
+                            ComposeKeyResult::Send(text) => {
+                                status = Some(send_message(
+                                    client,
+                                    root_session_id,
+                                    &text,
+                                    target_agent_id.as_deref(),
+                                ));
+                                compose = None;
+                                follow = true;
+                                force_timeline_refresh = true;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Slash mode: capture a command and dispatch on Enter. Lives
+                    // before the other key handlers so `:` and `?` can also
+                    // enter it (matching vim/Discord conventions). The parser
+                    // classifies the buffer; we never execute a raw string.
+                    if let Some(buf) = slash.as_mut() {
+                        match key.code {
+                            KeyCode::Esc => slash = None,
+                            KeyCode::Enter => {
+                                let cmdline = buf.trim().to_string();
+                                slash = None;
+                                match super::slash::parse(&cmdline) {
+                                    SlashCommand::Quit => {
+                                        arm_quit(&mut quit_armed_until, &mut status);
+                                    }
+                                    SlashCommand::Help => {
+                                        detail = Some(DetailPane::event(super::slash::help_lines(), None));
+                                        detail_scroll = 0;
+                                        detail_h_scroll = 0;
+                                        session_pick_list = None;
+                                        status = Some("help: Esc to close".to_string());
+                                    }
+                                    SlashCommand::Test { name } => {
+                                        if name.is_empty() || name == "help" {
+                                            detail = Some(DetailPane::event(
+                                                super::test_scenarios::scenario_help()
+                                                    .lines()
+                                                    .map(String::from)
+                                                    .collect(),
+                                                None,
+                                            ));
+                                            detail_scroll = 0;
+                                            detail_h_scroll = 0;
+                                            status = Some("test: pick a scenario, e.g. /test full-session".to_string());
+                                        } else if let Some(events) =
+                                            super::test_scenarios::run(&name, &root_session_id)
+                                        {
+                                            let count = events.len();
+                                            entries.extend(events);
+                                            status = Some(format!(
+                                                "✓ injected {count} test events for '{name}'"
+                                            ));
+                                        } else {
+                                            status = Some(format!(
+                                                "✗ unknown test scenario '{name}' — /test help to list"
+                                            ));
+                                        }
+                                    }
+                                    SlashCommand::SwitchSession(new_id) => {
+                                        if new_id.is_empty() {
+                                            let (lines, ids) = list_sessions_detail(client, None);
+                                            detail = Some(DetailPane::event(lines, None));
+                                            session_pick_list = Some(ids);
+                                        } else if new_id == *root_session_id {
+                                            status = Some(format!("→ already viewing {new_id}"));
+                                        } else {
+                                            switch_session(
+                                                client,
+                                                &mut entries,
+                                                &mut cursor,
+                                                &mut selected,
+                                                &mut detail,
+                                                &mut follow,
+                                                &mut resolved,
+                                                &mut acted,
+                                                &mut floor,
+                                                root_session_id,
+                                                target_agent_id,
+                                                limit,
+                                                &new_id,
+                                                &mut force_timeline_refresh,
+                                            );
+                                            status = Some(format!("→ switched to session {new_id}"));
+                                        }
+                                    }
+                                    SlashCommand::ListSessions { agent } => {
+                                        let (lines, ids) = list_sessions_detail(client, agent.as_deref());
+                                        detail = Some(DetailPane::event(lines, None));
+                                        session_pick_list = Some(ids);
+                                    }
+                                    SlashCommand::ListCronJobs => {
+                                        detail = Some(DetailPane::event(list_cron_detail(client, root_session_id), None));
+                                        session_pick_list = None;
+                                    }
+                                    SlashCommand::ListPlans => {
+                                        detail = Some(DetailPane::event(list_plans_detail(client, root_session_id), None));
+                                        session_pick_list = None;
+                                        status = Some(
+                                            "plan list: Enter/p on row for review · y approve · Esc close"
+                                                .to_string(),
+                                        );
+                                    }
+                                    SlashCommand::ApprovePlan { plan_id } => {
+                                        let target = match plan_id {
+                                            Some(id) if !id.is_empty() => id,
+                                            _ => match latest_pending_plan_id(client, root_session_id) {
+                                                Some(id) => id,
+                                                None => {
+                                                    detail = Some(DetailPane::event(list_plans_detail(
+                                                        client, root_session_id,
+                                                    ), None));
+                                                    status = Some(
+                                                        "✗ no pending plan — /plan to list".to_string(),
+                                                    );
+                                                    continue;
+                                                }
+                                            },
+                                        };
+                                        match approve_plan_and_wake(
+                                            client,
+                                            root_session_id,
+                                            &target,
+                                            target_agent_id.as_deref(),
+                                        ) {
+                                            Ok(msg) => {
+                                                acted.insert(target.clone());
+                                                resolved.insert(target.clone());
+                                                if detail
+                                                    .as_ref()
+                                                    .is_some_and(|d| d.plan_id.as_deref() == Some(target.as_str()))
+                                                {
+                                                    clear_detail(
+                                                        &mut detail,
+                                                        &mut detail_scroll,
+                                                        &mut detail_h_scroll,
+                                                    );
+                                                }
+                                                status = Some(msg);
+                                                follow = true;
+                                                force_timeline_refresh = true;
+                                            }
+                                            Err(e) => status = Some(e),
+                                        }
+                                    }
+                                    SlashCommand::ResumeSession { agent } => {
+                                        if let Some(resolved_id) =
+                                            resolve_latest_session(client, agent.as_deref())
+                                        {
+                                            if resolved_id == *root_session_id {
+                                                status = Some(format!("→ already viewing {resolved_id}"));
+                                            } else {
+                                                switch_session(
+                                                    client,
+                                                    &mut entries,
+                                                    &mut cursor,
+                                                    &mut selected,
+                                                    &mut detail,
+                                                    &mut follow,
+                                                    &mut resolved,
+                                                    &mut acted,
+                                                    &mut floor,
+                                                    root_session_id,
+                                                    target_agent_id,
+                                                    limit,
+                                                    &resolved_id,
+                                                    &mut force_timeline_refresh,
+                                                );
+                                                status = Some(format!("→ resumed session {resolved_id}"));
+                                            }
+                                        } else {
+                                            status = Some(
+                                                "✗ /session resume: no sessions found".to_string(),
+                                            );
+                                        }
+                                    }
+                                    SlashCommand::Unknown(verb) => {
+                                        let v = if verb.is_empty() {
+                                            "(empty)".to_string()
+                                        } else {
+                                            format!("/{verb}")
+                                        };
+                                        status = Some(format!("✗ unknown command {v} — type /help"));
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                buf.pop();
+                            }
+                            KeyCode::Char(c) => buf.push(c),
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Text-capture mode takes over all input while open.
+                    if let Some(gi) = input.as_mut() {
+                        // Instant single-digit pick — only when it's unambiguous: a
+                        // pure-choice question (no free-text) with ≤9 options and an
+                        // empty buffer. Otherwise digits go into the buffer so multi-
+                        // digit ordinals (>9 options) and free-text starting with a
+                        // digit still work; Enter then resolves the ordinal.
+                        let chosen = if gi.action == GateAction::Answer
+                            && gi.buffer.is_empty()
+                            && !gi.allow_freeform
+                            && gi.options.len() <= 9
+                        {
+                            if let KeyCode::Char(c @ '1'..='9') = key.code {
+                                gi.options.get((c as usize) - ('1' as usize)).cloned()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        // Number selection and Enter both commit; share the resolve path.
+                        let commit = chosen.is_some() || key.code == KeyCode::Enter;
+                        if commit {
+                            let gi = input.take().unwrap();
+                            if let Some(err) = gate_commit_validation_error(&gi) {
+                                status = Some(err.to_string());
+                                input = Some(gi);
+                                continue;
+                            }
+                            if gi.id.starts_with("test-") {
+                                acted.insert(gi.id.clone());
+                                let verb = match gi.action {
+                                    GateAction::Approve => "approved",
+                                    GateAction::Reject => "rejected",
+                                    GateAction::Answer => "answered",
+                                };
+                                let answer_text = chosen
+                                    .as_ref()
+                                    .map(|o| o.label.as_str())
+                                    .or_else(|| {
+                                        let b = gi.buffer.trim();
+                                        (!b.is_empty()).then_some(b)
+                                    });
+                                let followup = super::test_scenarios::resolve_followup(
+                                    &gi.id,
+                                    gi.action == GateAction::Approve,
+                                    answer_text,
+                                    &root_session_id,
+                                );
+                                let n = followup.len();
+                                entries.extend(followup);
+                                status = Some(format!(
+                                    "✓ {verb} {} (test) — {n} follow-up events injected",
+                                    gi.id
+                                ));
+                            } else {
+                                match resolve_gate(client, &gi, chosen.as_ref()) {
+                                    Ok(msg) => {
+                                        acted.insert(gi.id.clone());
+                                        status = Some(msg);
+                                        follow = true;
+                                        force_timeline_refresh = true;
+                                    }
+                                    Err(msg) => {
+                                        status = Some(msg);
+                                        input = Some(gi);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        match key.code {
+                            KeyCode::Esc => input = None,
+                            KeyCode::Backspace => {
+                                gi.buffer.pop();
+                            }
+                            KeyCode::Char(c) => gi.buffer.push(c),
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    let ctrl_c = key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL);
+                    if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
+                        if quit_armed(&quit_armed_until) {
+                            break 'room;
+                        }
+                        arm_quit(&mut quit_armed_until, &mut status);
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Esc => {
+                            if detail.is_some() {
+                                detail = None;
+                                detail_scroll = 0;
+                                detail_h_scroll = 0;
+                                session_pick_list = None;
+                            } else {
+                                disarm_quit(&mut quit_armed_until, &mut status);
+                            }
+                        }
+                        // Number pick from session list: when the detail pane is
+                        // showing a numbered session list, a digit 1-9 switches
+                        // to that session instantly.
+                        KeyCode::Char(c @ '1'..='9') => {
+                            if let Some(ref ids) = session_pick_list {
+                                let idx = (c as usize) - ('1' as usize);
+                                if let Some(picked_id) = ids.get(idx).cloned() {
+                                    if picked_id != *root_session_id {
+                                        switch_session(
+                                            client,
+                                            &mut entries,
+                                            &mut cursor,
+                                            &mut selected,
+                                            &mut detail,
+                                            &mut follow,
+                                            &mut resolved,
+                                            &mut acted,
+                                            &mut floor,
+                                            root_session_id,
+                                            target_agent_id,
+                                            limit,
+                                            &picked_id,
+                                            &mut force_timeline_refresh,
+                                        );
+                                        status = Some(format!("→ switched to session {picked_id}"));
+                                    } else {
+                                        status = Some(format!("→ already viewing {picked_id}"));
+                                    }
+                                    detail = None;
+                                    session_pick_list = None;
+                                }
+                            }
+                        }
+                        // y/n: approve/reject the selected pending approval; y on a
+                        // plan row (or in the plan review pane) approves the PlanFrame.
+                        KeyCode::Char('y') | KeyCode::Char('n') => {
+                            let plan_target = detail
+                                .as_ref()
+                                .and_then(|d| d.plan_id.clone())
+                                .or_else(|| {
+                                    view_gate
+                                        .as_ref()
+                                        .filter(|g| g.kind == GateKind::Plan)
+                                        .map(|g| g.id.clone())
+                                });
+                            if let Some(plan_id) = plan_target {
+                                clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
+                                if key.code == KeyCode::Char('y') {
+                                    match approve_plan_and_wake(
+                                        client,
+                                        root_session_id,
+                                        &plan_id,
+                                        target_agent_id.as_deref(),
+                                    ) {
+                                        Ok(msg) => {
+                                            acted.insert(plan_id.clone());
+                                            resolved.insert(plan_id);
+                                            status = Some(msg);
+                                            follow = true;
+                                            force_timeline_refresh = true;
+                                        }
+                                        Err(e) => status = Some(e),
+                                    }
+                                } else {
+                                    compose = Some(ComposeInput::with_prefill(&format!(
+                                        "Please revise plan {plan_id}: "
+                                    )));
+                                    status = Some(
+                                        "revision request — edit and Enter to send to planner"
+                                            .to_string(),
+                                    );
+                                }
+                            } else if let Some(g) =
+                                view_gate.as_ref().filter(|g| g.kind == GateKind::Approval)
+                            {
+                                clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
+                                input = Some(GateInput {
+                                    action: if key.code == KeyCode::Char('y') {
+                                        GateAction::Approve
+                                    } else {
+                                        GateAction::Reject
+                                    },
+                                    id: g.id.clone(),
+                                    buffer: String::new(),
+                                    options: Vec::new(),
+                                    allow_freeform: true,
+                                    motivation_required: key.code == KeyCode::Char('n'),
+                                });
+                                status = None;
+                                continue;
+                            }
+                        }
+                        // r: reply to the selected pending interaction (user.ask) —
+                        // load its pre-digested choices so a number key picks one.
+                        KeyCode::Char('r') => {
+                            if let Some(g) =
+                                view_gate.as_ref().filter(|g| g.kind == GateKind::Interaction)
+                            {
+                                detail = None;
+                                let (options, allow_freeform) = interaction_choices(&entries, &g.id);
+                                input = Some(GateInput {
+                                    action: GateAction::Answer,
+                                    id: g.id.clone(),
+                                    buffer: String::new(),
+                                    options,
+                                    allow_freeform,
+                                    motivation_required: false,
+                                });
+                                status = None;
+                            }
+                        }
+                        KeyCode::Char('p') => {
+                            if let Some(g) =
+                                view_gate.as_ref().filter(|g| g.kind == GateKind::Plan)
+                            {
+                                if open_plan_review(
+                                    client,
+                                    root_session_id,
+                                    &g.id,
+                                    &mut detail,
+                                    &mut detail_scroll,
+                                    &mut detail_h_scroll,
+                                ) {
+                                    status = Some(format!("plan review: {}", g.id));
+                                } else {
+                                    status = Some(format!("✗ could not load plan {}", g.id));
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if detail.is_some() {
+                                clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
+                            } else if let Some(g) =
+                                view_gate.as_ref().filter(|g| g.kind == GateKind::Plan)
+                            {
+                                if open_plan_review(
+                                    client,
+                                    root_session_id,
+                                    &g.id,
+                                    &mut detail,
+                                    &mut detail_scroll,
+                                    &mut detail_h_scroll,
+                                ) {
+                                    status = Some(format!("plan review: {}", g.id));
+                                } else {
+                                    status = Some(format!("✗ could not load plan {}", g.id));
+                                }
+                            } else if let Some(g) =
+                                view_gate.as_ref().filter(|g| g.kind == GateKind::Interaction)
+                            {
+                                let (options, allow_freeform) = interaction_choices(&entries, &g.id);
+                                input = Some(GateInput {
+                                    action: GateAction::Answer,
+                                    id: g.id.clone(),
+                                    buffer: String::new(),
+                                    options,
+                                    allow_freeform,
+                                    motivation_required: false,
+                                });
+                                status = None;
+                            } else {
+                                detail = view_indexed.get(selected).map(|(_, src)| {
+                                    DetailPane::event(
+                                        detail_for(&view_visible, *src),
+                                        spawn_agent_for_row_source(&view_visible, *src),
+                                    )
+                                });
+                                detail_scroll = 0;
+                                detail_h_scroll = 0;
+                            }
+                        }
+                        KeyCode::Char('a') => {
+                            // Pure view change now (we always fetch at `detail`) — no
+                            // reload, so already-fetched history re-filters instantly.
+                            floor = cycle_floor(floor);
+                            detail = None;
+                        }
+                        KeyCode::Char('s') => squash = !squash,
+                        // R: toggle the 💭 reasoning prefix on/off everywhere. Off
+                        // hides the prefix; the reasoning row itself stays visible
+                        // (it's a Detail-altitude event, so it's normally hidden
+                        // by the floor or by squash — but the toggle matters for
+                        // any channel that doesn't filter on altitude).
+                        KeyCode::Char('R') => show_reasoning = !show_reasoning,
+                        // i: compose a free-form message into the session (#405).
+                        KeyCode::Char('i') => {
+                            if let Some(g) =
+                                view_gate.as_ref().filter(|g| g.kind == GateKind::Interaction)
+                            {
+                                let (options, allow_freeform) = interaction_choices(&entries, &g.id);
+                                detail = None;
+                                input = Some(GateInput {
+                                    action: GateAction::Answer,
+                                    id: g.id.clone(),
+                                    buffer: String::new(),
+                                    options,
+                                    allow_freeform,
+                                    motivation_required: false,
+                                });
+                                status = None;
+                            } else {
+                                detail = None;
+                                compose = Some(ComposeInput::new());
+                                status = None;
+                            }
+                        }
+                        // /: slash-command mode (vim/Discord convention). `:`
+                        // and `?` are accepted aliases for muscle memory.
+                        KeyCode::Char('/') | KeyCode::Char(':') | KeyCode::Char('?') => {
+                            detail = None;
+                            slash = Some(String::new());
+                            status = None;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if detail.is_some() {
+                                detail_scroll = detail_scroll.saturating_add(1);
+                            } else {
+                                follow = false;
+                                selected =
+                                    (selected + 1).min(view_rows.len().saturating_sub(1));
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if detail.is_some() {
+                                detail_scroll = detail_scroll.saturating_sub(1);
+                            } else {
+                                follow = false;
+                                selected = selected.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            if detail.is_some() {
+                                if let Ok(size) = terminal.size() {
+                                    let step = detail_page_step(size.height);
+                                    detail_scroll = detail_scroll.saturating_add(step);
+                                }
+                            } else {
+                                follow = false;
+                                if let Ok(size) = terminal.size() {
+                                    let step = main_list_page_step(size.height, compose.is_some());
+                                    selected = (selected + step)
+                                        .min(view_rows.len().saturating_sub(1));
+                                }
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            if detail.is_some() {
+                                if let Ok(size) = terminal.size() {
+                                    let step = detail_page_step(size.height);
+                                    detail_scroll = detail_scroll.saturating_sub(step);
+                                }
+                            } else {
+                                follow = false;
+                                if let Ok(size) = terminal.size() {
+                                    let step = main_list_page_step(size.height, compose.is_some());
+                                    selected = selected.saturating_sub(step);
+                                }
+                            }
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            if detail.is_some() {
+                                detail_h_scroll = detail_h_scroll.saturating_add(4);
+                            }
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            if detail.is_some() {
+                                detail_h_scroll = detail_h_scroll.saturating_sub(4);
+                            }
+                        }
+                        KeyCode::Char('g') | KeyCode::Home => {
+                            follow = false;
+                            detail = None;
+                            selected = 0;
+                        }
+                        KeyCode::Char('G') | KeyCode::End => {
+                            follow = true;
+                            detail = None;
+                        }
+                        KeyCode::Char('f') | KeyCode::Char(' ') => {
+                            follow = !follow;
+                            if follow {
+                                detail = None;
+                            }
+                            status = Some(if follow { "following newest".into() } else { "follow paused".into() });
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            if detail.is_some() {
+                                detail_scroll = detail_scroll.saturating_sub(1);
+                            } else if selected > 0 {
+                                selected = selected.saturating_sub(1);
+                                follow = false;
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if detail.is_some() {
+                                detail_scroll = detail_scroll.saturating_add(1);
+                            } else if selected < view_row_count.saturating_sub(1) {
+                                selected =
+                                    (selected + 1).min(view_row_count.saturating_sub(1));
+                                follow = false;
+                            }
+                        }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            let click_row = click_to_row_index(
+                                mouse.row,
+                                1u16,
+                                view_list_height,
+                                view_viewport_offset,
+                                &view_row_heights,
+                            );
+                            if let Some(idx) = click_row {
+                                selected = idx;
+                                follow = false;
+                                if detail.is_some() {
+                                    clear_detail(
+                                        &mut detail,
+                                        &mut detail_scroll,
+                                        &mut detail_h_scroll,
+                                    );
+                                    last_mouse_click = None;
+                                } else if click_opens_detail(
+                                    &mut last_mouse_click,
+                                    Instant::now(),
+                                    idx,
+                                    mouse.column,
+                                    mouse.row,
+                                ) {
+                                    let gate_at_row = selectable_gate(
+                                        &view_visible,
+                                        view_indexed.get(idx),
+                                        &resolved,
+                                        &acted,
+                                    );
+                                    if let Some(g) = gate_at_row
+                                        .filter(|g| g.kind == GateKind::Plan)
+                                    {
+                                        let _ = open_plan_review(
+                                            client,
+                                            root_session_id,
+                                            &g.id,
+                                            &mut detail,
+                                            &mut detail_scroll,
+                                            &mut detail_h_scroll,
+                                        );
+                                    } else {
+                                        detail = view_indexed.get(idx).map(|(_, src)| {
+                                            DetailPane::event(
+                                                detail_for(&view_visible, *src),
+                                                spawn_agent_for_row_source(&view_visible, *src),
+                                            )
+                                        });
+                                        detail_scroll = 0;
+                                        detail_h_scroll = 0;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if force_timeline_refresh
+            || last_timeline_poll.elapsed() >= Duration::from_millis(TIMELINE_POLL_MS)
+        {
+            last_timeline_poll = Instant::now();
+            force_timeline_refresh = false;
+            // Fetch at most one page per poll via the gateway API. On error (gateway
+            // down), surface it and keep retrying — don't crash the UI.
+            match rpc(
             client,
             "session.timeline.list",
             serde_json::json!({
@@ -703,6 +1601,7 @@ pub fn run(
                 Err(e) => status = Some(format!("✗ bad timeline response: {e}")),
             },
             Err(e) => status = Some(format!("✗ gateway: {e}")),
+            }
         }
 
         // `entries` holds everything (fetched at `detail`); the display floor is
@@ -745,14 +1644,60 @@ pub fn run(
         // for the **most recent** row in an open turn — earlier rows of the
         // same turn stay in their normal altitude glyph so the operator can
         // read the chain.
+        if last_session_status_poll.elapsed()
+            >= Duration::from_millis(SESSION_STATUS_POLL_MS)
+        {
+            last_session_status_poll = Instant::now();
+            session_async_processing = session_is_async_processing(client, root_session_id);
+        }
+        let mut extra_inflight_rows = HashSet::new();
+        if let Some(gate) = find_active_gate(&entries, &resolved, &acted) {
+            if let Some(row_idx) =
+                newest_gate_row_index(&visible, &indexed, &entries, &resolved, &acted, &gate)
+            {
+                extra_inflight_rows.insert(row_idx);
+            }
+        }
+        if session_async_processing {
+            if let Some(row_idx) = last_line_row_index(&indexed) {
+                extra_inflight_rows.insert(row_idx);
+            }
+        }
         let turn_boundaries = annotate_turns_and_in_flight(
             &mut indexed,
             &open_turns,
             show_reasoning,
+            &extra_inflight_rows,
         );
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
+        let pending_plan_count =
+            unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
 
-        if follow {
+        let new_plan = if input.is_none() && compose.is_none() {
+            newest_pending_plan_event(&visible, &indexed, &resolved, &acted)
+        } else {
+            None
+        };
+        if let Some((row_idx, plan_id, event_id)) = new_plan {
+            if last_announced_plan_event.as_deref() != Some(event_id.as_str()) {
+                last_announced_plan_event = Some(event_id);
+                selected = row_idx;
+                follow = false;
+                if open_plan_review(
+                    client,
+                    root_session_id,
+                    &plan_id,
+                    &mut detail,
+                    &mut detail_scroll,
+                    &mut detail_h_scroll,
+                ) && !status.as_deref().is_some_and(|s| s.starts_with("✗"))
+                {
+                    status = Some(format!(
+                        "⚠ Plan {plan_id} awaiting approval — y approve · n revise · Esc close"
+                    ));
+                }
+            }
+        } else if follow {
             selected = rows.len().saturating_sub(1);
         } else {
             selected = selected.min(rows.len().saturating_sub(1));
@@ -791,6 +1736,9 @@ pub fn run(
             .collect();
         let row_count = rows.len();
         let safe_selected = selected.min(row_count.saturating_sub(1));
+        let selected_spawn_agent = indexed
+            .get(safe_selected)
+            .and_then(|(_, src)| spawn_agent_for_row_source(&visible, *src));
         let viewport_offset = if follow {
             compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights)
         } else {
@@ -806,7 +1754,7 @@ pub fn run(
                 follow,
                 &rows,
                 selected,
-                detail.as_deref(),
+                detail.as_ref(),
                 detail_scroll,
                 detail_h_scroll,
                 input.as_ref(),
@@ -818,564 +1766,25 @@ pub fn run(
                 &turn_boundaries,
                 show_reasoning,
                 &session_stats,
+                pending_plan_count,
+                selected_spawn_agent.as_deref(),
             )
         })?;
 
-        if event::poll(Duration::from_millis(250))? {
-            match event::read()? {
-                Event::Paste(text) => {
-                    if let Some(c) = compose.as_mut() {
-                        c.insert_str(&text);
-                    } else if let Some(gi) = input.as_mut() {
-                        if gi.allow_freeform {
-                            gi.buffer.push_str(&text.replace('\r', ""));
-                        }
-                    }
-                }
-                Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                // Compose mode: multi-line editor with cursor + clipboard (#405).
-                if let Some(c) = compose.as_mut() {
-                    match handle_compose_key(c, &key, &mut clipboard) {
-                        ComposeKeyResult::Continue => {}
-                        ComposeKeyResult::Cancel => compose = None,
-                        ComposeKeyResult::Send(text) => {
-                            status = Some(send_message(
-                                client,
-                                root_session_id,
-                                &text,
-                                target_agent_id.as_deref(),
-                            ));
-                            compose = None;
-                            follow = true;
-                        }
-                    }
-                    continue;
-                }
+        view_rows = rows;
+        view_indexed = indexed;
+        view_visible = visible;
+        view_gate = gate;
+        view_row_count = row_count;
+        view_row_heights = row_heights;
+        view_viewport_offset = viewport_offset;
+        view_list_height = list_height;
 
-                // Slash mode: capture a command and dispatch on Enter. Lives
-                // before the other key handlers so `:` and `?` can also
-                // enter it (matching vim/Discord conventions). The parser
-                // classifies the buffer; we never execute a raw string.
-                if let Some(buf) = slash.as_mut() {
-                    match key.code {
-                        KeyCode::Esc => slash = None,
-                        KeyCode::Enter => {
-                            let cmdline = buf.trim().to_string();
-                            slash = None;
-                            match super::slash::parse(&cmdline) {
-                                SlashCommand::Quit => {
-                                    arm_quit(&mut quit_armed_until, &mut status);
-                                }
-                                SlashCommand::Help => {
-                                    detail = Some(super::slash::help_lines());
-                                    detail_scroll = 0;
-                                    detail_h_scroll = 0;
-                                    session_pick_list = None;
-                                    status = Some("help: Esc to close".to_string());
-                                }
-                                SlashCommand::Test { name } => {
-                                    if name.is_empty() || name == "help" {
-                                        detail = Some(
-                                            super::test_scenarios::scenario_help()
-                                                .lines()
-                                                .map(String::from)
-                                                .collect(),
-                                        );
-                                        detail_scroll = 0;
-                                        detail_h_scroll = 0;
-                                        status = Some("test: pick a scenario, e.g. /test full-session".to_string());
-                                    } else if let Some(events) =
-                                        super::test_scenarios::run(&name, &root_session_id)
-                                    {
-                                        let count = events.len();
-                                        entries.extend(events);
-                                        status = Some(format!(
-                                            "✓ injected {count} test events for '{name}'"
-                                        ));
-                                    } else {
-                                        status = Some(format!(
-                                            "✗ unknown test scenario '{name}' — /test help to list"
-                                        ));
-                                    }
-                                }
-                                SlashCommand::SwitchSession(new_id) => {
-                                    if new_id.is_empty() {
-                                        let (lines, ids) = list_sessions_detail(client, None);
-                                        detail = Some(lines);
-                                        session_pick_list = Some(ids);
-                                    } else if new_id == *root_session_id {
-                                        status = Some(format!("→ already viewing {new_id}"));
-                                    } else {
-                                        switch_session(
-                                            client,
-                                            &mut entries,
-                                            &mut cursor,
-                                            &mut selected,
-                                            &mut detail,
-                                            &mut follow,
-                                            &mut resolved,
-                                            &mut acted,
-                                            &mut floor,
-                                            root_session_id,
-                                            target_agent_id,
-                                            limit,
-                                            &new_id,
-                                        );
-                                        status = Some(format!("→ switched to session {new_id}"));
-                                    }
-                                }
-                                SlashCommand::ListSessions { agent } => {
-                                    let (lines, ids) = list_sessions_detail(client, agent.as_deref());
-                                    detail = Some(lines);
-                                    session_pick_list = Some(ids);
-                                }
-                                SlashCommand::ListCronJobs => {
-                                    detail = Some(list_cron_detail(client, root_session_id));
-                                    session_pick_list = None;
-                                }
-                                SlashCommand::ListPlans => {
-                                    detail = Some(list_plans_detail(client, root_session_id));
-                                    session_pick_list = None;
-                                    status = Some("plan: Esc to close · y on plan row to approve".to_string());
-                                }
-                                SlashCommand::ApprovePlan { plan_id } => {
-                                    let target = match plan_id {
-                                        Some(id) if !id.is_empty() => id,
-                                        _ => match latest_pending_plan_id(client, root_session_id) {
-                                            Some(id) => id,
-                                            None => {
-                                                detail = Some(list_plans_detail(client, root_session_id));
-                                                status = Some(
-                                                    "✗ no pending plan — /plan to list".to_string(),
-                                                );
-                                                continue;
-                                            }
-                                        },
-                                    };
-                                    match approve_plan_rpc(client, &target) {
-                                        Ok(msg) => {
-                                            acted.insert(target.clone());
-                                            resolved.insert(target);
-                                            status = Some(msg);
-                                        }
-                                        Err(e) => status = Some(e),
-                                    }
-                                }
-                                SlashCommand::ResumeSession { agent } => {
-                                    if let Some(resolved_id) =
-                                        resolve_latest_session(client, agent.as_deref())
-                                    {
-                                        if resolved_id == *root_session_id {
-                                            status = Some(format!("→ already viewing {resolved_id}"));
-                                        } else {
-                                            switch_session(
-                                                client,
-                                                &mut entries,
-                                                &mut cursor,
-                                                &mut selected,
-                                                &mut detail,
-                                                &mut follow,
-                                                &mut resolved,
-                                                &mut acted,
-                                                &mut floor,
-                                                root_session_id,
-                                                target_agent_id,
-                                                limit,
-                                                &resolved_id,
-                                            );
-                                            status = Some(format!("→ resumed session {resolved_id}"));
-                                        }
-                                    } else {
-                                        status = Some(
-                                            "✗ /session resume: no sessions found".to_string(),
-                                        );
-                                    }
-                                }
-                                SlashCommand::Unknown(verb) => {
-                                    let v = if verb.is_empty() {
-                                        "(empty)".to_string()
-                                    } else {
-                                        format!("/{verb}")
-                                    };
-                                    status = Some(format!("✗ unknown command {v} — type /help"));
-                                }
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            buf.pop();
-                        }
-                        KeyCode::Char(c) => buf.push(c),
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                // Text-capture mode takes over all input while open.
-                if let Some(gi) = input.as_mut() {
-                    // Instant single-digit pick — only when it's unambiguous: a
-                    // pure-choice question (no free-text) with ≤9 options and an
-                    // empty buffer. Otherwise digits go into the buffer so multi-
-                    // digit ordinals (>9 options) and free-text starting with a
-                    // digit still work; Enter then resolves the ordinal.
-                    let chosen = if gi.action == GateAction::Answer
-                        && gi.buffer.is_empty()
-                        && !gi.allow_freeform
-                        && gi.options.len() <= 9
-                    {
-                        if let KeyCode::Char(c @ '1'..='9') = key.code {
-                            gi.options.get((c as usize) - ('1' as usize)).cloned()
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    // Number selection and Enter both commit; share the resolve path.
-                    let commit = chosen.is_some() || key.code == KeyCode::Enter;
-                    if commit {
-                        let gi = input.take().unwrap();
-                        if gi.id.starts_with("test-") {
-                            acted.insert(gi.id.clone());
-                            let verb = match gi.action {
-                                GateAction::Approve => "approved",
-                                GateAction::Reject => "rejected",
-                                GateAction::Answer => "answered",
-                            };
-                            let answer_text = chosen
-                                .as_ref()
-                                .map(|o| o.label.as_str())
-                                .or_else(|| {
-                                    let b = gi.buffer.trim();
-                                    (!b.is_empty()).then_some(b)
-                                });
-                            let followup = super::test_scenarios::resolve_followup(
-                                &gi.id,
-                                gi.action == GateAction::Approve,
-                                answer_text,
-                                &root_session_id,
-                            );
-                            let n = followup.len();
-                            entries.extend(followup);
-                            status = Some(format!(
-                                "✓ {verb} {} (test) — {n} follow-up events injected",
-                                gi.id
-                            ));
-                        } else {
-                            match resolve_gate(client, &gi, chosen.as_ref()) {
-                                Ok(msg) => {
-                                    acted.insert(gi.id.clone());
-                                    status = Some(msg);
-                                }
-                                Err(msg) => {
-                                    status = Some(msg);
-                                    input = Some(gi);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    match key.code {
-                        KeyCode::Esc => input = None,
-                        KeyCode::Backspace => {
-                            gi.buffer.pop();
-                        }
-                        KeyCode::Char(c) => gi.buffer.push(c),
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                let ctrl_c = key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL);
-                if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
-                    if quit_armed(&quit_armed_until) {
-                        break;
-                    }
-                    arm_quit(&mut quit_armed_until, &mut status);
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Esc => {
-                        if detail.is_some() {
-                            detail = None;
-                            detail_scroll = 0;
-                            detail_h_scroll = 0;
-                            session_pick_list = None;
-                        } else {
-                            disarm_quit(&mut quit_armed_until, &mut status);
-                        }
-                    }
-                    // Number pick from session list: when the detail pane is
-                    // showing a numbered session list, a digit 1-9 switches
-                    // to that session instantly.
-                    KeyCode::Char(c @ '1'..='9') => {
-                        if let Some(ref ids) = session_pick_list {
-                            let idx = (c as usize) - ('1' as usize);
-                            if let Some(picked_id) = ids.get(idx).cloned() {
-                                if picked_id != *root_session_id {
-                                    switch_session(
-                                        client,
-                                        &mut entries,
-                                        &mut cursor,
-                                        &mut selected,
-                                        &mut detail,
-                                        &mut follow,
-                                        &mut resolved,
-                                        &mut acted,
-                                        &mut floor,
-                                        root_session_id,
-                                        target_agent_id,
-                                        limit,
-                                        &picked_id,
-                                    );
-                                    status = Some(format!("→ switched to session {picked_id}"));
-                                } else {
-                                    status = Some(format!("→ already viewing {picked_id}"));
-                                }
-                                detail = None;
-                                session_pick_list = None;
-                            }
-                        }
-                    }
-                    // y/n: approve/reject the selected pending approval; y on a
-                    // plan row approves the PlanFrame.
-                    KeyCode::Char('y') | KeyCode::Char('n') => {
-                        if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Plan) {
-                            detail = None;
-                            if key.code == KeyCode::Char('y') {
-                                match approve_plan_rpc(client, &g.id) {
-                                    Ok(msg) => {
-                                        acted.insert(g.id.clone());
-                                        resolved.insert(g.id.clone());
-                                        status = Some(msg);
-                                    }
-                                    Err(e) => status = Some(e),
-                                }
-                            } else {
-                                status = Some(
-                                    "Plan reject: send a message to the planner to request changes."
-                                        .to_string(),
-                                );
-                            }
-                        } else if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Approval) {
-                            detail = None;
-                            input = Some(GateInput {
-                                action: if key.code == KeyCode::Char('y') {
-                                    GateAction::Approve
-                                } else {
-                                    GateAction::Reject
-                                },
-                                id: g.id.clone(),
-                                buffer: String::new(),
-                                options: Vec::new(),
-                                allow_freeform: true,
-                            });
-                            status = None;
-                        }
-                    }
-                    // r: reply to the selected pending interaction (user.ask) —
-                    // load its pre-digested choices so a number key picks one.
-                    KeyCode::Char('r') => {
-                        if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Interaction) {
-                            detail = None;
-                            let (options, allow_freeform) = interaction_choices(&entries, &g.id);
-                            input = Some(GateInput {
-                                action: GateAction::Answer,
-                                id: g.id.clone(),
-                                buffer: String::new(),
-                                options,
-                                allow_freeform,
-                            });
-                            status = None;
-                        }
-                    }
-                    KeyCode::Enter => {
-                        if detail.is_some() {
-                            detail = None;
-                            detail_scroll = 0;
-                            detail_h_scroll = 0;
-                        } else if let Some(g) =
-                            gate.as_ref().filter(|g| g.kind == GateKind::Interaction)
-                        {
-                            let (options, allow_freeform) = interaction_choices(&entries, &g.id);
-                            input = Some(GateInput {
-                                action: GateAction::Answer,
-                                id: g.id.clone(),
-                                buffer: String::new(),
-                                options,
-                                allow_freeform,
-                            });
-                            status = None;
-                        } else {
-                            detail = indexed.get(selected).map(|(_, src)| detail_for(&visible, *src));
-                            detail_scroll = 0;
-                            detail_h_scroll = 0;
-                        }
-                    }
-                    KeyCode::Char('a') => {
-                        // Pure view change now (we always fetch at `detail`) — no
-                        // reload, so already-fetched history re-filters instantly.
-                        floor = cycle_floor(floor);
-                        detail = None;
-                    }
-                    KeyCode::Char('s') => squash = !squash,
-                    // R: toggle the 💭 reasoning prefix on/off everywhere. Off
-                    // hides the prefix; the reasoning row itself stays visible
-                    // (it's a Detail-altitude event, so it's normally hidden
-                    // by the floor or by squash — but the toggle matters for
-                    // any channel that doesn't filter on altitude).
-                    KeyCode::Char('R') => show_reasoning = !show_reasoning,
-                    // i: compose a free-form message into the session (#405).
-                    KeyCode::Char('i') => {
-                        if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Interaction) {
-                            let (options, allow_freeform) = interaction_choices(&entries, &g.id);
-                            detail = None;
-                            input = Some(GateInput {
-                                action: GateAction::Answer,
-                                id: g.id.clone(),
-                                buffer: String::new(),
-                                options,
-                                allow_freeform,
-                            });
-                            status = None;
-                        } else {
-                            detail = None;
-                            compose = Some(ComposeInput::new());
-                            status = None;
-                        }
-                    }
-                    // /: slash-command mode (vim/Discord convention). `:`
-                    // and `?` are accepted aliases for muscle memory.
-                    KeyCode::Char('/') | KeyCode::Char(':') | KeyCode::Char('?') => {
-                        detail = None;
-                        slash = Some(String::new());
-                        status = None;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if detail.is_some() {
-                            detail_scroll = detail_scroll.saturating_add(1);
-                        } else {
-                            follow = false;
-                            selected = (selected + 1).min(rows.len().saturating_sub(1));
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if detail.is_some() {
-                            detail_scroll = detail_scroll.saturating_sub(1);
-                        } else {
-                            follow = false;
-                            selected = selected.saturating_sub(1);
-                        }
-                    }
-                    KeyCode::PageDown => {
-                        if detail.is_some() {
-                            if let Ok(size) = terminal.size() {
-                                let step = detail_page_step(size.height);
-                                detail_scroll = detail_scroll.saturating_add(step);
-                            }
-                        } else {
-                            follow = false;
-                            if let Ok(size) = terminal.size() {
-                                let step = main_list_page_step(size.height, compose.is_some());
-                                selected = (selected + step).min(rows.len().saturating_sub(1));
-                            }
-                        }
-                    }
-                    KeyCode::PageUp => {
-                        if detail.is_some() {
-                            if let Ok(size) = terminal.size() {
-                                let step = detail_page_step(size.height);
-                                detail_scroll = detail_scroll.saturating_sub(step);
-                            }
-                        } else {
-                            follow = false;
-                            if let Ok(size) = terminal.size() {
-                                let step = main_list_page_step(size.height, compose.is_some());
-                                selected = selected.saturating_sub(step);
-                            }
-                        }
-                    }
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        if detail.is_some() {
-                            detail_h_scroll = detail_h_scroll.saturating_add(4);
-                        }
-                    }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        if detail.is_some() {
-                            detail_h_scroll = detail_h_scroll.saturating_sub(4);
-                        }
-                    }
-                    KeyCode::Char('g') | KeyCode::Home => {
-                        follow = false;
-                        detail = None;
-                        selected = 0;
-                    }
-                    KeyCode::Char('G') | KeyCode::End => {
-                        follow = true;
-                        detail = None;
-                    }
-                    KeyCode::Char('f') | KeyCode::Char(' ') => {
-                        follow = !follow;
-                        if follow {
-                            detail = None;
-                        }
-                        status = Some(if follow { "following newest".into() } else { "follow paused".into() });
-                    }
-                    _ => {}
-                }
-                }
-                Event::Mouse(mouse) => {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            if detail.is_some() {
-                                detail_scroll = detail_scroll.saturating_sub(1);
-                            } else if selected > 0 {
-                                selected = selected.saturating_sub(1);
-                                follow = false;
-                            }
-                        }
-                        MouseEventKind::ScrollDown => {
-                            if detail.is_some() {
-                                detail_scroll = detail_scroll.saturating_add(1);
-                            } else if selected < row_count.saturating_sub(1) {
-                                selected = (selected + 1).min(row_count.saturating_sub(1));
-                                follow = false;
-                            }
-                        }
-                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                            let click_row = click_to_row_index(
-                                mouse.row,
-                                1u16,
-                                list_height,
-                                viewport_offset,
-                                &row_heights,
-                            );
-                            if let Some(idx) = click_row {
-                                if detail.is_some() {
-                                    detail = None;
-                                    detail_scroll = 0;
-                                    detail_h_scroll = 0;
-                                } else {
-                                    selected = idx;
-                                    follow = false;
-                                    detail = indexed.get(idx).map(|(_, src)| detail_for(&visible, *src));
-                                    detail_scroll = 0;
-                                    detail_h_scroll = 0;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
+        let _ = event::poll(Duration::from_millis(FRAME_MS))?;
     }
     Ok(())
 }
+
 
 /// Annotate a row list with turn-boundary flags and in-flight markers. The
 /// in-flight spinner is reserved for the **most recent** row of each open
@@ -1388,13 +1797,70 @@ pub fn run(
 ///
 /// Returns the per-row `turn_boundaries` map (true → draw divider above the
 /// row) so the renderer can decorate the boundary.
+/// True when an async `event.ingest` for this session is still running.
+fn session_is_async_processing(client: &RoomClient, session_id: &str) -> bool {
+    match rpc(
+        client,
+        "session.status",
+        serde_json::json!({ "session_id": session_id }),
+    ) {
+        Ok(value) => value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == "processing"),
+        Err(_) => false,
+    }
+}
+
+/// Newest rendered row that matches an unresolved gate (plan / approval / ask).
+fn newest_gate_row_index(
+    visible: &[SessionTimelineEntry],
+    indexed: &[(RenderedRow, RowSource)],
+    entries: &[SessionTimelineEntry],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+    gate: &GateRef,
+) -> Option<usize> {
+    for (vis_idx, e) in visible.iter().enumerate().rev() {
+        if let Some(entry_gate) = gate_for_entry(e, resolved, acted) {
+            if entry_gate.kind == gate.kind && entry_gate.id == gate.id {
+                return row_index_for_visible(indexed, vis_idx);
+            }
+        }
+    }
+    // Embedded plan proposals live on `agent.message` rows outside `visible`
+    // when the altitude floor filters sibling events — scan full history.
+    if gate.kind == GateKind::Plan {
+        for (entry_idx, e) in entries.iter().enumerate().rev() {
+            if render::extract_plan_proposal_id(e).as_deref() == Some(gate.id.as_str()) {
+                if let Some(vis_idx) = visible.iter().position(|v| v.event_id == e.event_id) {
+                    return row_index_for_visible(indexed, vis_idx);
+                }
+                let _ = entry_idx;
+            }
+        }
+    }
+    None
+}
+
+fn last_line_row_index(indexed: &[(RenderedRow, RowSource)]) -> Option<usize> {
+    indexed
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, (row, _))| matches!(row, RenderedRow::Line(_)).then_some(i))
+}
+
 fn annotate_turns_and_in_flight(
     rows: &mut [(RenderedRow, RowSource)],
     open_turns: &HashSet<String>,
     show_reasoning: bool,
+    extra_inflight_rows: &HashSet<usize>,
 ) -> HashMap<usize, bool> {
     let mut last_turn: Option<String> = None;
     let mut last_row_for_turn: HashMap<String, usize> = HashMap::new();
+    let mut turn_ordinals: HashMap<String, u32> = HashMap::new();
+    let mut next_turn_index: u32 = 0;
     let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
     for (i, (row, _)) in rows.iter().enumerate() {
         if let RenderedRow::Line(spec) = row {
@@ -1412,9 +1878,19 @@ fn annotate_turns_and_in_flight(
     for (i, (row, _)) in rows.iter_mut().enumerate() {
         if let RenderedRow::Line(spec) = row {
             if let Some(t) = &spec.turn_id {
-                if last_row_for_turn.get(t).copied() == Some(i) {
-                    spec.in_flight = true;
-                }
+                let ordinal = *turn_ordinals.entry(t.clone()).or_insert_with(|| {
+                    next_turn_index += 1;
+                    next_turn_index
+                });
+                spec.turn_index = Some(ordinal);
+            } else {
+                spec.turn_index = None;
+            }
+            let open_turn_row = spec.turn_id.as_ref().is_some_and(|t| {
+                open_turns.contains(t) && last_row_for_turn.get(t).copied() == Some(i)
+            });
+            if open_turn_row || extra_inflight_rows.contains(&i) {
+                spec.in_flight = true;
             }
             if !show_reasoning && spec.headline.contains('\u{1F4AD}') {
                 spec.show_reasoning = false;
@@ -1486,6 +1962,12 @@ fn gate_for_entry(
                 id,
             })
         }
+        "agent.message" => render::extract_plan_proposal_id(e).and_then(|id| {
+            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
+                kind: GateKind::Plan,
+                id,
+            })
+        }),
         _ => None,
     }
 }
@@ -1606,6 +2088,21 @@ fn send_message(
     }
 }
 
+/// Target agent for an `agent_spawn` row (single event or first match in a run).
+fn spawn_agent_for_row_source(
+    visible: &[SessionTimelineEntry],
+    src: RowSource,
+) -> Option<String> {
+    match src {
+        RowSource::Single(i) => visible.get(i).and_then(render::agent_spawn_agent_id),
+        RowSource::Run { start, len } => visible
+            .iter()
+            .skip(start)
+            .take(len)
+            .find_map(render::agent_spawn_agent_id),
+    }
+}
+
 /// Drill-down detail for a selected row's source: a single event's full
 /// metadata/payload/refs, or what a collapsed run folds. (Deep ref-following —
 /// fetching the referenced approval/plan/workbench object — needs RPC read
@@ -1641,6 +2138,25 @@ fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
 }
 
 /// Build the styled `Line`s for a single row. Capped at `MAX_ROW_LINES`
+/// Actor label column — includes a `T{n}` prefix when the row belongs to a turn.
+fn format_row_label(spec: &RowSpec, label_w: usize) -> String {
+    let label_text = match spec.turn_index {
+        Some(n) => {
+            let prefix = format!("T{n}·");
+            let inner_budget = label_w.saturating_sub(prefix.chars().count() + 2);
+            format!(
+                "[{prefix}{}]",
+                truncate(&spec.actor_label, inner_budget)
+            )
+        }
+        None => format!(
+            "[{}]",
+            truncate(&spec.actor_label, label_w.saturating_sub(2))
+        ),
+    };
+    format!("{label_text:>label_w$}")
+}
+
 /// physical lines; longer content gets a `…` ellipsis on the last line. The
 /// actor rail on the left uses the actor's color, giving an at-a-glance map of
 /// "who said what." Used by the custom render loop in `draw` so we can
@@ -1659,7 +2175,14 @@ fn build_rich_row_lines(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if turn_boundaries.contains_key(&row_index) {
-        let bar = "─".repeat(content_w + glyph_w + label_w + rail_w + 2);
+        let total_w = content_w + glyph_w + label_w + rail_w + 2;
+        let bar = if let Some(n) = spec.turn_index {
+            let prefix = format!("── turn {n} ");
+            let fill = total_w.saturating_sub(prefix.chars().count());
+            format!("{prefix}{}", "─".repeat(fill))
+        } else {
+            "─".repeat(total_w)
+        };
         lines.push(Line::from(Span::styled(
             bar,
             Style::default().fg(Color::DarkGray),
@@ -1669,14 +2192,12 @@ fn build_rich_row_lines(
     let rail_block = "▌".repeat(rail_w);
     let glyph = if spec.in_flight {
         spinner_glyph
+    } else if spec.tone == RowTone::OperatorGate {
+        "◆"
     } else {
         render::altitude_glyph(spec.altitude)
     };
-    let label_text = format!(
-        "[{}]",
-        truncate(&spec.actor_label, label_w.saturating_sub(2))
-    );
-    let label_padded = format!("{label_text:>label_w$}");
+    let label_padded = format_row_label(spec, label_w);
     let head_style = row_headline_style(spec);
     let label_style = row_label_style(spec);
     let detail_style = row_detail_style(spec);
@@ -1725,10 +2246,16 @@ fn build_rich_row_lines(
                     if sub.trim().is_empty() {
                         continue;
                     }
-                    let prefix = if i == 0 { "  ↳ " } else { "    " };
+                    let prefix = if spec.tone == RowTone::OperatorGate {
+                        "    "
+                    } else if i == 0 {
+                        "  ↳ "
+                    } else {
+                        "    "
+                    };
                     let avail = content_w.saturating_sub(prefix.chars().count());
                     for (j, chunk) in word_wrap_text(sub.trim_end(), avail).into_iter().enumerate() {
-                        let line_prefix = if i == 0 && j == 0 { prefix } else { "    " };
+                        let line_prefix = if j == 0 { prefix } else { "    " };
                         lines.push(Line::from(vec![
                             Span::raw(cont_pad.clone()),
                             Span::styled(format!("{line_prefix}{chunk}"), detail_style),
@@ -1750,6 +2277,7 @@ fn build_rich_row_lines(
         .collect();
     let max_lines = match spec.tone {
         RowTone::AgentNarrative => MAX_NARRATIVE_ROW_LINES,
+        RowTone::OperatorGate => 8,
         _ => MAX_ROW_LINES,
     };
     if physical.len() > max_lines {
@@ -1918,6 +2446,17 @@ fn push_wrapped_markdown_body(
             lines.push(Line::from(Span::raw(cont_pad.to_string())));
             continue;
         }
+        if markdown::line_is_code_block(&md_line) {
+            push_markdown_line(
+                lines,
+                &md_line,
+                cont_pad,
+                &mut first_prefix,
+                content_w,
+                false,
+            );
+            continue;
+        }
         let style = md_line
             .spans
             .iter()
@@ -1935,6 +2474,48 @@ fn push_wrapped_markdown_body(
                     Span::styled(chunk, style),
                 ]));
             }
+        }
+    }
+}
+
+/// Push one rendered markdown line, optionally word-wrapping prose lines.
+fn push_markdown_line(
+    lines: &mut Vec<Line<'static>>,
+    md_line: &Line<'static>,
+    cont_pad: &str,
+    first_prefix: &mut Option<Vec<Span<'static>>>,
+    content_w: usize,
+    wrap: bool,
+) {
+    if !wrap {
+        if let Some(prefix) = first_prefix.take() {
+            let mut spans = prefix;
+            spans.extend(md_line.spans.clone());
+            lines.push(Line::from(spans));
+        } else {
+            let mut spans = vec![Span::raw(cont_pad.to_string())];
+            spans.extend(md_line.spans.clone());
+            lines.push(Line::from(spans));
+        }
+        return;
+    }
+    let text = line_display_text(md_line);
+    let style = md_line
+        .spans
+        .iter()
+        .find(|s| !s.content.is_empty())
+        .map(|s| s.style)
+        .unwrap_or_default();
+    for chunk in word_wrap_text(text.trim_end(), content_w) {
+        if let Some(prefix) = first_prefix.take() {
+            let mut spans = prefix;
+            spans.push(Span::styled(chunk, style));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(cont_pad.to_string()),
+                Span::styled(chunk, style),
+            ]));
         }
     }
 }
@@ -1977,6 +2558,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// blue so they read as plumbing, not speech.
 fn row_rail_color(spec: &RowSpec) -> Color {
     match spec.tone {
+        RowTone::OperatorGate => Color::Yellow,
         RowTone::ToolCall => Color::Blue,
         RowTone::Reasoning => Color::DarkGray,
         RowTone::AgentNarrative | RowTone::Default => actor_color(spec.actor),
@@ -1987,6 +2569,10 @@ fn row_rail_color(spec: &RowSpec) -> Color {
 fn row_headline_style(spec: &RowSpec) -> Style {
     let alt = altitude_style(spec.altitude);
     match spec.tone {
+        RowTone::OperatorGate => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
         RowTone::AgentNarrative => alt
             .fg(actor_color(spec.actor))
             .add_modifier(Modifier::BOLD),
@@ -1998,6 +2584,7 @@ fn row_headline_style(spec: &RowSpec) -> Style {
 
 fn row_label_style(spec: &RowSpec) -> Style {
     match spec.tone {
+        RowTone::OperatorGate => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         RowTone::ToolCall => Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
         RowTone::Reasoning => Style::default().fg(Color::DarkGray),
         RowTone::AgentNarrative | RowTone::Default => {
@@ -2008,6 +2595,7 @@ fn row_label_style(spec: &RowSpec) -> Style {
 
 fn row_detail_style(spec: &RowSpec) -> Style {
     match spec.tone {
+        RowTone::OperatorGate => Style::default().fg(Color::LightYellow),
         RowTone::ToolCall => Style::default().fg(Color::Indexed(67)),
         RowTone::AgentNarrative => Style::default().fg(Color::Gray),
         _ => Style::default().fg(Color::DarkGray),
@@ -2066,7 +2654,7 @@ fn switch_session(
     entries: &mut Vec<SessionTimelineEntry>,
     cursor: &mut Option<String>,
     selected: &mut usize,
-    detail: &mut Option<Vec<String>>,
+    detail: &mut Option<DetailPane>,
     follow: &mut bool,
     resolved: &mut HashSet<String>,
     acted: &mut HashSet<String>,
@@ -2075,6 +2663,7 @@ fn switch_session(
     _target_agent_id: &mut Option<String>,
     _limit: u32,
     new_id: &str,
+    force_timeline_refresh: &mut bool,
 ) {
     *root_session_id = new_id.to_string();
     entries.clear();
@@ -2084,6 +2673,7 @@ fn switch_session(
     *follow = true;
     resolved.clear();
     acted.clear();
+    *force_timeline_refresh = true;
     // Don't reset `floor` — the operator's altitude dial is a view preference,
     // not a session property. Keep the previous setting.
     let _ = floor;
@@ -2111,11 +2701,108 @@ fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<St
 /// returned as (display lines, pickable session ids). Rows are numbered [1]-[9]
 /// so the operator can switch by pressing a single digit while the detail pane
 /// is open.
+/// Format one pending PlanFrame for the review pane or `/plan` list.
+fn format_plan_frame_lines(plan: &autonoetic_types::plan_frame::PlanFrame, for_review: bool) -> Vec<String> {
+    use autonoetic_types::plan_frame::ValidationRequirement;
+    let mut lines = Vec::new();
+    if for_review {
+        lines.push("── plan review ──".to_string());
+        lines.push(String::new());
+    }
+    let amend = plan
+        .parent_version
+        .map(|v| format!(" (amended from v{v})"))
+        .unwrap_or_default();
+    let indent = if for_review { "" } else { "  " };
+    lines.push(format!(
+        "{indent}{} v{} — {}{}",
+        plan.plan_id, plan.version, plan.title, amend
+    ));
+    if let Some(reason) = &plan.reason {
+        if !reason.trim().is_empty() {
+            lines.push(format!("{indent}  reason: {reason}"));
+        }
+    }
+    if !plan.objective.is_empty() {
+        lines.push(format!("{indent}  objective: {}", plan.objective));
+    }
+    lines.push(String::new());
+    lines.push(format!("{indent}steps:"));
+    for (i, step) in plan.steps.iter().enumerate() {
+        let agent = step
+            .resolved_agent_id()
+            .map(|a| format!(" → {a}"))
+            .unwrap_or_default();
+        lines.push(format!("{indent}  {}. {}{}", i + 1, step.title, agent));
+        if let Some(notes) = &step.notes {
+            if !notes.trim().is_empty() {
+                lines.push(format!("{indent}     notes: {}", render::one_line(notes, 120)));
+            }
+        }
+    }
+    let required: Vec<_> = plan
+        .validation_policy
+        .entries
+        .iter()
+        .filter(|v| v.requirement == ValidationRequirement::Required)
+        .map(|v| v.title.as_str())
+        .collect();
+    let advisory: Vec<_> = plan
+        .validation_policy
+        .entries
+        .iter()
+        .filter(|v| v.requirement == ValidationRequirement::Advisory)
+        .map(|v| v.title.as_str())
+        .collect();
+    if !required.is_empty() {
+        lines.push(format!("{indent}  required validations: {}", required.join(", ")));
+    }
+    if !advisory.is_empty() {
+        lines.push(format!("{indent}  advisory validations: {}", advisory.join(", ")));
+    }
+    if for_review {
+        lines.push(String::new());
+        lines.push("→ y approve · n request changes (opens message compose)".to_string());
+    }
+    lines
+}
+
+fn fetch_pending_plan(
+    client: &RoomClient,
+    root_session_id: &str,
+    plan_id: &str,
+) -> Option<autonoetic_types::plan_frame::PlanFrame> {
+    use autonoetic_types::plan_frame::PlanFramesListPendingResult;
+    let params = serde_json::json!({ "root_session_id": root_session_id });
+    let value = rpc(client, "planframes.list_pending", params).ok()?;
+    let parsed: PlanFramesListPendingResult = serde_json::from_value(value).ok()?;
+    parsed
+        .plans
+        .into_iter()
+        .find(|p| p.plan_id == plan_id)
+}
+
+fn open_plan_review(
+    client: &RoomClient,
+    root_session_id: &str,
+    plan_id: &str,
+    detail: &mut Option<DetailPane>,
+    scroll: &mut u16,
+    h_scroll: &mut u16,
+) -> bool {
+    let Some(plan) = fetch_pending_plan(client, root_session_id, plan_id) else {
+        return false;
+    };
+    let lines = format_plan_frame_lines(&plan, true);
+    *detail = Some(DetailPane::plan_review(plan_id.to_string(), lines));
+    *scroll = 0;
+    *h_scroll = 0;
+    true
+}
+
 /// Build a multi-line plan list for `/plan`, returned as detail-pane lines.
 fn list_plans_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
-    use autonoetic_types::plan_frame::{
-        PlanFramesListPendingResult, ValidationRequirement,
-    };
+    use autonoetic_types::plan_frame::PlanFramesListPendingResult;
     let params = serde_json::json!({ "root_session_id": root_session_id });
     match rpc(client, "planframes.list_pending", params) {
         Ok(value) => match serde_json::from_value::<PlanFramesListPendingResult>(value) {
@@ -2128,48 +2815,12 @@ fn list_plans_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> 
                 let mut lines = vec![format!("plans awaiting approval ({root_session_id}):")];
                 for plan in &parsed.plans {
                     lines.push(String::new());
-                    lines.push(format!(
-                        "  {} v{} — {}",
-                        plan.plan_id, plan.version, plan.title
-                    ));
-                    if !plan.objective.is_empty() {
-                        lines.push(format!("    objective: {}", plan.objective));
-                    }
-                    for (i, step) in plan.steps.iter().enumerate() {
-                        let agent = step
-                            .resolved_agent_id()
-                            .map(|a| format!(" → {a}"))
-                            .unwrap_or_default();
-                        lines.push(format!(
-                            "    {}. {}{}",
-                            i + 1,
-                            step.title,
-                            agent
-                        ));
-                    }
-                    let required: Vec<_> = plan
-                        .validation_policy
-                        .entries
-                        .iter()
-                        .filter(|v| v.requirement == ValidationRequirement::Required)
-                        .map(|v| v.title.as_str())
-                        .collect();
-                    let advisory: Vec<_> = plan
-                        .validation_policy
-                        .entries
-                        .iter()
-                        .filter(|v| v.requirement == ValidationRequirement::Advisory)
-                        .map(|v| v.title.as_str())
-                        .collect();
-                    if !required.is_empty() {
-                        lines.push(format!("    required: {}", required.join(", ")));
-                    }
-                    if !advisory.is_empty() {
-                        lines.push(format!("    advisory: {}", advisory.join(", ")));
-                    }
+                    lines.extend(format_plan_frame_lines(plan, false));
                 }
                 lines.push(String::new());
-                lines.push("→ /plan approve [plan_id]  or select plan row and press y".to_string());
+                lines.push(
+                    "→ Enter/p on plan row for review · y approve · n request changes".to_string(),
+                );
                 lines
             }
             Err(e) => vec![format!("✗ malformed planframes.list_pending response: {e}")],
@@ -2186,22 +2837,52 @@ fn latest_pending_plan_id(client: &RoomClient, root_session_id: &str) -> Option<
     parsed.plans.last().map(|p| p.plan_id.clone())
 }
 
-fn approve_plan_rpc(client: &RoomClient, plan_id: &str) -> Result<String, String> {
+/// Operator message that resumes the planner after plan approval (mirrors chat
+/// TUI inline approve — the planner ends its turn at `awaiting_approval`).
+fn plan_execution_wake_message(plan: &autonoetic_types::plan_frame::PlanFrame) -> String {
+    plan.execution_wake_hint().unwrap_or_else(|| {
+        format!(
+            "[Operator approved plan {}] \"{}\" (v{}) is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list.",
+            plan.plan_id, plan.title, plan.version
+        )
+    })
+}
+
+/// Approve a pending plan and wake the planner session so execution continues.
+fn approve_plan_and_wake(
+    client: &RoomClient,
+    root_session_id: &str,
+    plan_id: &str,
+    target_agent_id: Option<&str>,
+) -> Result<String, String> {
     match rpc(
         client,
         "planframes.approve",
         serde_json::json!({ "plan_id": plan_id, "approved_by": "operator" }),
     ) {
         Ok(value) => {
-            let title = value
+            let plan: Option<autonoetic_types::plan_frame::PlanFrame> = value
                 .get("plan")
-                .and_then(|p| p.get("title"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
-            if title.is_empty() {
-                Ok(format!("✓ plan approved: {plan_id}"))
+                .and_then(|p| serde_json::from_value(p.clone()).ok());
+            let title = plan.as_ref().map(|p| p.title.as_str()).unwrap_or("");
+            let approval_msg = if title.is_empty() {
+                format!("✓ plan approved: {plan_id}")
             } else {
-                Ok(format!("✓ plan approved: {plan_id} — \"{title}\""))
+                format!("✓ plan approved: {plan_id} — \"{title}\"")
+            };
+            let wake = plan
+                .as_ref()
+                .map(plan_execution_wake_message)
+                .unwrap_or_else(|| {
+                    format!(
+                        "[Operator approved plan {plan_id}] Plan is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list."
+                    )
+                });
+            let wake_status = send_message(client, root_session_id, &wake, target_agent_id);
+            if wake_status.starts_with('✓') {
+                Ok(format!("{approval_msg} — planner notified"))
+            } else {
+                Ok(format!("{approval_msg} — wake failed: {wake_status}"))
             }
         }
         Err(e) => Err(format!("✗ {e}")),
@@ -2324,7 +3005,7 @@ fn draw(
     follow: bool,
     rows: &[RenderedRow],
     selected: usize,
-    detail: Option<&[String]>,
+    detail: Option<&DetailPane>,
     detail_scroll: u16,
     detail_h_scroll: u16,
     input: Option<&GateInput>,
@@ -2336,6 +3017,8 @@ fn draw(
     turn_boundaries: &HashMap<usize, bool>,
     show_reasoning: bool,
     stats: &SessionStats,
+    pending_plan_count: usize,
+    selected_spawn_agent: Option<&str>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -2373,8 +3056,16 @@ fn draw(
     } else {
         String::new()
     };
+    let plan_chip = if pending_plan_count > 0 {
+        format!("   ⚠ {pending_plan_count} plan(s) pending")
+    } else {
+        String::new()
+    };
+    let spawn_chip = selected_spawn_agent
+        .map(|id| format!("   ↳ agent_spawn → {id}"))
+        .unwrap_or_default();
     let header = format!(
-        " Session Room [{}] — {root}   floor: {}   squash: {}   reasoning: {}   {} rows{stats_tag}{}{}",
+        " Session Room [{}] — {root}   floor: {}   squash: {}   reasoning: {}   {} rows{spawn_chip}{plan_chip}{stats_tag}{}{}",
         TuiChannel.kind(),
         floor.as_str(),
         if squash { "on" } else { "off" },
@@ -2388,32 +3079,42 @@ fn draw(
         chunks[0],
     );
 
-    if let Some(lines) = detail {
-        let inner_width = chunks[list_idx].width.saturating_sub(2);
-        let inner_height = chunks[list_idx].height.saturating_sub(2) as usize;
-        let text = render_detail_lines(lines);
-        let total_lines = detail_wrap_line_count(&text, inner_width);
-        let max_scroll = total_lines.saturating_sub(inner_height) as u16;
-        let scroll = detail_scroll.min(max_scroll);
-        let h = detail_h_scroll;
-        f.render_widget(
-            Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL).title(" event detail "))
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, h)),
-            chunks[list_idx],
-        );
-        let scroll_hint = if max_scroll > 0 || h > 0 {
-            format!(" · j/k ↓↑ ({}/{}) · PgUp/PgDn · h/l ←→ ({})", scroll, max_scroll, h)
-        } else {
-            String::new()
-        };
-        f.render_widget(
-            Paragraph::new(format!(" Esc/Enter close · q quit (2×){scroll_hint}"))
-                .style(Style::default().fg(Color::DarkGray)),
-            chunks[footer_idx],
-        );
-        return;
+    // Gate-input mode owns the screen — never let the detail pane hide the
+    // motivation/answer prompt (otherwise Enter appears to do nothing).
+    if input.is_none() {
+        if let Some(pane) = detail {
+            let inner_width = chunks[list_idx].width.saturating_sub(2);
+            let inner_height = chunks[list_idx].height.saturating_sub(2) as usize;
+            let text = render_detail_lines(&pane.lines);
+            let total_lines = detail_wrap_line_count(&text, inner_width);
+            let max_scroll = total_lines.saturating_sub(inner_height) as u16;
+            let scroll = detail_scroll.min(max_scroll);
+            let h = detail_h_scroll;
+            let block_title = pane.block_title();
+            f.render_widget(
+                Paragraph::new(text)
+                    .block(Block::default().borders(Borders::ALL).title(block_title))
+                    .wrap(Wrap { trim: false })
+                    .scroll((scroll, h)),
+                chunks[list_idx],
+            );
+            let scroll_hint = if max_scroll > 0 || h > 0 {
+                format!(" · j/k ↓↑ ({}/{}) · PgUp/PgDn · h/l ←→ ({})", scroll, max_scroll, h)
+            } else {
+                String::new()
+            };
+            let action_hint = if pane.is_plan_review() {
+                " y approve · n request changes · Esc/Enter close"
+            } else {
+                " Esc/Enter close"
+            };
+            f.render_widget(
+                Paragraph::new(format!("{action_hint} · q quit (2×){scroll_hint}"))
+                    .style(Style::default().fg(Color::DarkGray)),
+                chunks[footer_idx],
+            );
+            return;
+        }
     }
 
     // The terminal width caps each line. Reserve 2 cells for the actor rail
@@ -2537,11 +3238,7 @@ fn draw(
         )
         .style(Style::default().fg(Color::Green))
     } else if let Some(gi) = input {
-        let label = match gi.action {
-            GateAction::Approve => "APPROVE — motivation (optional)",
-            GateAction::Reject => "REJECT — motivation (optional)",
-            GateAction::Answer => "ANSWER",
-        };
+        let label = gate_input_label(gi);
         // For an interaction with pre-digested choices, list them so a number
         // key picks one (the §3.5 one-tap path); free-text stays available when
         // the question allows it.
@@ -2561,15 +3258,23 @@ fn draw(
         } else {
             format!("{choices}   [number choose · Esc cancel]")
         };
-        Paragraph::new(format!(" {label}: {}▏   {hint}", gi.buffer))
+        let err = status
+            .filter(|s| s.starts_with('✗'))
+            .map(|s| format!("   {s}"))
+            .unwrap_or_default();
+        Paragraph::new(format!(" {label}: {}▏{err}   {hint}", gi.buffer))
             .style(Style::default().fg(Color::Cyan))
     } else {
         // The gate affordance hint is the channel's concern (#393) — route it
         // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         let follow_indicator = if follow { " ● following" } else { " ○ paused" };
+        let turn_hint = rows.get(safe_selected).and_then(|r| match r {
+            RenderedRow::Line(s) => s.turn_index.map(|n| format!(" · turn {n}")),
+            _ => None,
+        }).unwrap_or_default();
         Paragraph::new(format!(
-            " q quit (2×) · j/k scroll · PgUp/PgDn page · f/Space follow{follow_indicator} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · ⏎ detail{gate_hint}"
+            " q quit (2×) · j/k scroll · PgUp/PgDn page · f/Space follow{follow_indicator}{turn_hint} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · Enter/p plan review{gate_hint}"
         ))
         .style(Style::default().fg(Color::DarkGray))
     };
@@ -2762,6 +3467,7 @@ mod tests {
                 headline: "x".into(),
                 detail: None,
                 turn_id: None,
+                turn_index: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -2831,6 +3537,7 @@ mod tests {
                 headline: "tool done".into(),
                 detail: None,
                 turn_id: None,
+                turn_index: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -2845,6 +3552,22 @@ mod tests {
     }
 
     #[test]
+    fn gate_commit_validation_requires_motivation_for_reject() {
+        let gi = GateInput {
+            action: GateAction::Reject,
+            id: "apr-1".into(),
+            buffer: String::new(),
+            options: Vec::new(),
+            allow_freeform: true,
+            motivation_required: true,
+        };
+        assert!(gate_commit_validation_error(&gi).is_some());
+        let mut ok = gi;
+        ok.buffer = "out of scope".into();
+        assert!(gate_commit_validation_error(&ok).is_none());
+    }
+
+    #[test]
     fn empty_interaction_answer_is_rejected_before_any_rpc() {
         // An empty answer is rejected locally (the gateway requires non-empty),
         // so the caller never marks the gate acted on a doomed submission.
@@ -2855,6 +3578,7 @@ mod tests {
             buffer: "   ".into(), // whitespace-only ⇒ empty after trim
             options: Vec::new(),
             allow_freeform: true,
+            motivation_required: false,
         };
         let err = resolve_gate(&client, &gi, None).unwrap_err();
         assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
@@ -2872,6 +3596,7 @@ mod tests {
             buffer: buffer.into(),
             options,
             allow_freeform,
+            motivation_required: false,
         };
 
         // A typed number selects the matching option — even when free-text is
@@ -2901,6 +3626,36 @@ mod tests {
         // Plain free-text with no options ⇒ answer_text.
         let p = answer_params(&mk("ship it", Vec::new(), true), None).unwrap();
         assert_eq!(p["answer_text"], "ship it");
+    }
+
+    #[test]
+    fn click_opens_detail_on_double_click_same_row() {
+        let t0 = Instant::now();
+        let mut last = None;
+        assert!(!click_opens_detail(&mut last, t0, 3, 10, 5));
+        assert!(click_opens_detail(
+            &mut last,
+            t0 + Duration::from_millis(200),
+            3,
+            10,
+            5
+        ));
+        assert!(last.is_none());
+    }
+
+    #[test]
+    fn click_opens_detail_ignores_slow_second_click() {
+        let t0 = Instant::now();
+        let mut last = None;
+        assert!(!click_opens_detail(&mut last, t0, 1, 4, 2));
+        assert!(!click_opens_detail(
+            &mut last,
+            t0 + Duration::from_millis(DOUBLE_CLICK_MS as u64 + 50),
+            1,
+            4,
+            2
+        ));
+        assert!(last.is_some());
     }
 
     #[test]
@@ -3004,6 +3759,7 @@ mod tests {
                 headline: headline.into(),
                 detail: None,
                 turn_id: turn.map(str::to_string),
+                turn_index: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -3021,7 +3777,7 @@ mod tests {
             spec_with_turn(Some("A"), "third"),
         ];
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        let boundaries = annotate_turns_and_in_flight(&mut rows, &open, true);
+        let boundaries = annotate_turns_and_in_flight(&mut rows, &open, true, &HashSet::new());
         // Boundary only at the start of the turn (i=0).
         assert!(boundaries.contains_key(&0));
         assert!(!boundaries.contains_key(&1));
@@ -3035,6 +3791,67 @@ mod tests {
             })
             .collect();
         assert_eq!(inflight, vec![false, false, true]);
+        let indices: Vec<Option<u32>> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.turn_index,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(indices, vec![Some(1), Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn turn_index_increments_for_each_distinct_turn_id() {
+        let mut rows = vec![
+            spec_with_turn(Some("A"), "t1"),
+            spec_with_turn(Some("A"), "t1b"),
+            spec_with_turn(Some("B"), "t2"),
+            spec_with_turn(None, "no turn"),
+            spec_with_turn(Some("C"), "t3"),
+        ];
+        annotate_turns_and_in_flight(&mut rows, &HashSet::new(), true, &HashSet::new());
+        let indices: Vec<Option<u32>> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.turn_index,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(indices, vec![Some(1), Some(1), Some(2), None, Some(3)]);
+    }
+
+    #[test]
+    fn extra_inflight_rows_spin_gate_after_turn_ends() {
+        let mut rows = vec![
+            spec_with_turn(Some("A"), "tool done"),
+            (
+                RenderedRow::Line(render::RowSpec {
+                    altitude: Altitude::Attention,
+                    actor: render::ActorKind::Planner,
+                    tone: render::RowTone::OperatorGate,
+                    actor_label: "planner".into(),
+                    headline: "📋 PLAN AWAITING APPROVAL".into(),
+                    detail: None,
+                    turn_id: Some("A".into()),
+                    turn_index: None,
+                    in_flight: false,
+                    show_reasoning: true,
+                }),
+                RowSource::Single(1),
+            ),
+        ];
+        let open: HashSet<String> = HashSet::new();
+        let extra: HashSet<usize> = [1].into_iter().collect();
+        annotate_turns_and_in_flight(&mut rows, &open, true, &extra);
+        let inflight: Vec<bool> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.in_flight,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(inflight, vec![false, true]);
     }
 
     #[test]
@@ -3045,7 +3862,7 @@ mod tests {
             spec_with_turn(Some("B"), "late"),
         ];
         let open: HashSet<String> = HashSet::new();
-        annotate_turns_and_in_flight(&mut rows, &open, true);
+        annotate_turns_and_in_flight(&mut rows, &open, true, &HashSet::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -3065,7 +3882,7 @@ mod tests {
             spec_with_turn(Some("A"), "\u{1F4AD} thinking out loud"),
         ];
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &open, false);
+        annotate_turns_and_in_flight(&mut rows, &open, false, &HashSet::new());
         let shown: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -3074,6 +3891,114 @@ mod tests {
             })
             .collect();
         assert_eq!(shown, vec![true, false]);
+    }
+
+    #[test]
+    fn plan_execution_wake_message_uses_hint_when_plan_is_approved() {
+        use autonoetic_types::plan_frame::{
+            PlanFrame, PlanStatus, PlanStep, StepOwner, ValidationPolicy,
+        };
+        let plan = PlanFrame {
+            plan_id: "plan-abc".into(),
+            version: 1,
+            parent_version: None,
+            workflow_id: "wf".into(),
+            root_session_id: "sess".into(),
+            title: "Fix bug".into(),
+            objective: "Patch SDK init".into(),
+            status: PlanStatus::Approved,
+            steps: vec![PlanStep {
+                step_id: "s1".into(),
+                title: "Implement fix".into(),
+                owner: StepOwner::Agent,
+                depends_on: Vec::new(),
+                agent_id: Some("coder.default".into()),
+                notes: None,
+            }],
+            validation_policy: ValidationPolicy::default(),
+            approved_by: Some("operator".into()),
+            approved_at: Some("t".into()),
+            created_by_agent_id: "planner.default".into(),
+            reason: None,
+            created_at: "t".into(),
+        };
+        let wake = plan_execution_wake_message(&plan);
+        assert!(wake.contains("coder.default"));
+        assert!(wake.contains("agent_spawn"));
+        assert!(wake.to_lowercase().contains("do not call agent_list"));
+    }
+
+    #[test]
+    fn format_plan_frame_lines_includes_steps_validations_and_review_hints() {
+        use autonoetic_types::plan_frame::{
+            PlanFrame, PlanStep, PlanStatus, ValidationClass, ValidationEntry,
+            ValidationPolicy, ValidationRequirement,
+        };
+        let plan = PlanFrame {
+            plan_id: "plan-abc".into(),
+            version: 2,
+            parent_version: Some(1),
+            workflow_id: "wf".into(),
+            root_session_id: "sess".into(),
+            title: "Ship feature".into(),
+            objective: "Deliver the widget".into(),
+            status: PlanStatus::AwaitingApproval,
+            steps: vec![
+                PlanStep {
+                    step_id: "s1".into(),
+                    title: "Research APIs".into(),
+                    owner: autonoetic_types::plan_frame::StepOwner::Agent,
+                    depends_on: Vec::new(),
+                    agent_id: Some("researcher.default".into()),
+                    notes: None,
+                },
+                PlanStep {
+                    step_id: "s2".into(),
+                    title: "Implement".into(),
+                    owner: autonoetic_types::plan_frame::StepOwner::Agent,
+                    depends_on: Vec::new(),
+                    agent_id: None,
+                    notes: Some("Keep it small".into()),
+                },
+            ],
+            validation_policy: ValidationPolicy {
+                entries: vec![
+                    ValidationEntry {
+                        validation_id: "v1".into(),
+                        title: "Tests pass".into(),
+                        class: ValidationClass::CorrectnessCheck,
+                        requirement: ValidationRequirement::Required,
+                    },
+                    ValidationEntry {
+                        validation_id: "v2".into(),
+                        title: "Docs updated".into(),
+                        class: ValidationClass::QualityCheck,
+                        requirement: ValidationRequirement::Advisory,
+                    },
+                ],
+            },
+            approved_by: None,
+            approved_at: None,
+            created_by_agent_id: "planner.default".into(),
+            reason: Some("Tighten scope".into()),
+            created_at: "t".into(),
+        };
+        let list = format_plan_frame_lines(&plan, false);
+        let joined = list.join("\n");
+        assert!(joined.contains("plan-abc v2"));
+        assert!(joined.contains("amended from v1"));
+        assert!(joined.contains("Tighten scope"));
+        assert!(joined.contains("Research APIs → researcher.default"));
+        assert!(joined.contains("notes: Keep it small"));
+        assert!(joined.contains("required validations: Tests pass"));
+        assert!(joined.contains("advisory validations: Docs updated"));
+        assert!(!joined.contains("plan review"));
+
+        let review = format_plan_frame_lines(&plan, true);
+        let review_text = review.join("\n");
+        assert!(review_text.contains("── plan review ──"));
+        assert!(review_text.contains("→ y approve · n request changes"));
+        assert!(review_text.starts_with("── plan review ──"));
     }
 
     #[test]

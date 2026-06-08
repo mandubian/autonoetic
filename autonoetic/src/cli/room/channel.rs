@@ -91,7 +91,7 @@ impl Channel for TuiChannel {
         match gate.kind {
             GateKind::Approval => " · ⚠ APPROVAL PENDING — y/n".into(),
             GateKind::Interaction => " · ⚠ QUESTION PENDING — Enter/i/r to answer".into(),
-            GateKind::Plan => " · ⚠ PLAN PENDING — y to approve · /plan for details".into(),
+            GateKind::Plan => " · ⚠ PLAN PENDING — Enter/p review · y approve · n revise".into(),
         }
     }
 }
