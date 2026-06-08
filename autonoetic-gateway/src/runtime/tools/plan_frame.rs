@@ -901,6 +901,43 @@ impl NativeTool for PlanFrameAmendTool {
 
         store.save_plan_frame(&new_revision)?;
 
+        // Canonical timeline: an amended revision re-opens the operator gate.
+        {
+            let root_session_id = new_revision.root_session_id.clone();
+            let session_id = _session_id
+                .map(str::to_string)
+                .unwrap_or_else(|| root_session_id.clone());
+            let role =
+                crate::runtime::session_timeline::derive_role(&new_revision.created_by_agent_id);
+            let principal = autonoetic_types::principal::Principal::agent(
+                new_revision.created_by_agent_id.clone(),
+            );
+            let refs = autonoetic_types::session_timeline::TimelineRefs {
+                plan_id: Some(new_revision.plan_id.clone()),
+                ..Default::default()
+            };
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                root_session_id,
+                session_id,
+                _turn_id.map(str::to_string),
+                &principal,
+                &role,
+                "plan.pending",
+                None,
+                Some(serde_json::json!({
+                    "plan_id": new_revision.plan_id,
+                    "version": new_revision.version,
+                    "parent_version": new_revision.parent_version,
+                    "title": new_revision.title,
+                    "reason": new_revision.reason,
+                })),
+                refs,
+            );
+            if let Err(e) = store.create_live_digest_event(&event) {
+                tracing::debug!(target: "session_timeline", error = %e, "plan.pending timeline emit failed (amend)");
+            }
+        }
+
         if let Some(config) = config {
             let wf = crate::scheduler::workflow_store::load_workflow_run(
                 config,
