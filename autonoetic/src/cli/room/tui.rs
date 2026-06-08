@@ -382,7 +382,7 @@ fn render_detail_lines(raw: &[String]) -> Vec<Line<'static>> {
                 // Flush markdown buffer
                 let md_text = md_buf.join("\n");
                 out.extend(markdown::render_markdown(
-                    &markdown::normalize_prose_sections(&md_text),
+                    &markdown::normalize_narrative_prose(&md_text),
                 ));
                 in_markdown_block = false;
                 md_buf.clear();
@@ -415,7 +415,7 @@ fn render_detail_lines(raw: &[String]) -> Vec<Line<'static>> {
     if in_markdown_block && !md_buf.is_empty() {
         let md_text = md_buf.join("\n");
         out.extend(markdown::render_markdown(
-            &markdown::normalize_prose_sections(&md_text),
+            &markdown::normalize_narrative_prose(&md_text),
         ));
     }
 
@@ -452,6 +452,14 @@ fn approval_id_for(entry: &SessionTimelineEntry) -> Option<String> {
         .approval_request_id
         .clone()
         .or_else(|| payload_field_str(entry, "request_id"))
+}
+
+fn plan_id_for(entry: &SessionTimelineEntry) -> Option<String> {
+    entry
+        .refs
+        .plan_id
+        .clone()
+        .or_else(|| payload_field_str(entry, "plan_id"))
 }
 
 fn notification_approval_id(entry: &SessionTimelineEntry) -> Option<String> {
@@ -650,6 +658,11 @@ pub fn run(
                         ) {
                             if let Some(id) = &e.refs.approval_request_id {
                                 resolved.insert(id.clone());
+                            }
+                        }
+                        if e.event_type == "plan.approved" {
+                            if let Some(id) = plan_id_for(e) {
+                                resolved.insert(id);
                             }
                         }
                     }
@@ -861,6 +874,34 @@ pub fn run(
                                     detail = Some(list_cron_detail(client, root_session_id));
                                     session_pick_list = None;
                                 }
+                                SlashCommand::ListPlans => {
+                                    detail = Some(list_plans_detail(client, root_session_id));
+                                    session_pick_list = None;
+                                    status = Some("plan: Esc to close · y on plan row to approve".to_string());
+                                }
+                                SlashCommand::ApprovePlan { plan_id } => {
+                                    let target = match plan_id {
+                                        Some(id) if !id.is_empty() => id,
+                                        _ => match latest_pending_plan_id(client, root_session_id) {
+                                            Some(id) => id,
+                                            None => {
+                                                detail = Some(list_plans_detail(client, root_session_id));
+                                                status = Some(
+                                                    "✗ no pending plan — /plan to list".to_string(),
+                                                );
+                                                continue;
+                                            }
+                                        },
+                                    };
+                                    match approve_plan_rpc(client, &target) {
+                                        Ok(msg) => {
+                                            acted.insert(target.clone());
+                                            resolved.insert(target);
+                                            status = Some(msg);
+                                        }
+                                        Err(e) => status = Some(e),
+                                    }
+                                }
                                 SlashCommand::ResumeSession { agent } => {
                                     if let Some(resolved_id) =
                                         resolve_latest_session(client, agent.as_deref())
@@ -1037,9 +1078,27 @@ pub fn run(
                             }
                         }
                     }
-                    // y/n: approve/reject the selected pending approval.
+                    // y/n: approve/reject the selected pending approval; y on a
+                    // plan row approves the PlanFrame.
                     KeyCode::Char('y') | KeyCode::Char('n') => {
-                        if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Approval) {
+                        if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Plan) {
+                            detail = None;
+                            if key.code == KeyCode::Char('y') {
+                                match approve_plan_rpc(client, &g.id) {
+                                    Ok(msg) => {
+                                        acted.insert(g.id.clone());
+                                        resolved.insert(g.id.clone());
+                                        status = Some(msg);
+                                    }
+                                    Err(e) => status = Some(e),
+                                }
+                            } else {
+                                status = Some(
+                                    "Plan reject: send a message to the planner to request changes."
+                                        .to_string(),
+                                );
+                            }
+                        } else if let Some(g) = gate.as_ref().filter(|g| g.kind == GateKind::Approval) {
                             detail = None;
                             input = Some(GateInput {
                                 action: if key.code == KeyCode::Char('y') {
@@ -1301,6 +1360,13 @@ fn gate_for_entry(
                 id,
             })
         }
+        "plan.pending" => {
+            let id = plan_id_for(e)?;
+            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
+                kind: GateKind::Plan,
+                id,
+            })
+        }
         "user.ask.pending" => {
             let id = interaction_id_for(e)?;
             (!acted.contains(&id)).then_some(GateRef {
@@ -1519,48 +1585,15 @@ fn build_rich_row_lines(
     ];
 
     if spec.tone == RowTone::AgentNarrative {
-        let mut wrote = false;
-        if !spec.headline.is_empty() {
-            push_wrapped_narrative(
-                &mut lines,
-                &spec.headline,
-                content_w,
-                &cont_pad,
-                first_prefix.clone(),
-                head_style,
-            );
-            wrote = true;
-        }
-        if let Some(body) = spec.detail.as_deref().filter(|s| !s.is_empty()) {
-            if wrote {
-                push_agent_message_detail(
-                    &mut lines,
-                    body,
-                    content_w,
-                    &cont_pad,
-                    detail_style,
-                    head_style,
-                );
-            } else {
-                push_wrapped_narrative(
-                    &mut lines,
-                    body,
-                    content_w,
-                    &cont_pad,
-                    first_prefix,
-                    head_style,
-                );
-            }
-        } else if !wrote {
-            push_wrapped_narrative(
-                &mut lines,
-                "",
-                content_w,
-                &cont_pad,
-                first_prefix,
-                head_style,
-            );
-        }
+        push_agent_narrative_row(
+            &mut lines,
+            spec,
+            content_w,
+            &cont_pad,
+            first_prefix,
+            head_style,
+            detail_style,
+        );
     } else {
         let mut headline = spec.headline.clone();
         if !show_reasoning && headline.starts_with('💭') {
@@ -1692,6 +1725,77 @@ fn line_display_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
+/// Compact metadata sub-line from structured agent messages (`[ok] · agent: …`).
+fn is_compact_meta_line(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty()
+        && t.starts_with('[')
+        && t.contains(']')
+        && !t.contains('\n')
+        && t.chars().count() <= 160
+}
+
+/// Split structured `[status] · …` metadata from narrative prose in a row spec.
+fn split_agent_narrative_content(headline: &str, detail: Option<&str>) -> (Option<String>, String) {
+    let mut prose_parts = Vec::new();
+    if !headline.trim().is_empty() {
+        prose_parts.push(headline.trim().to_string());
+    }
+    let mut meta = None;
+    if let Some(d) = detail.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((first, rest)) = d.split_once("\n\n") {
+            if is_compact_meta_line(first) {
+                meta = Some(first.trim().to_string());
+                if !rest.trim().is_empty() {
+                    prose_parts.push(rest.trim().to_string());
+                }
+            } else {
+                prose_parts.push(d.to_string());
+            }
+        } else if is_compact_meta_line(d) {
+            meta = Some(d.to_string());
+        } else {
+            prose_parts.push(d.to_string());
+        }
+    }
+    (meta, prose_parts.join("\n\n"))
+}
+
+/// Render an agent/operator narrative row: optional compact metadata, then
+/// markdown-formatted prose (same normalization as the detail pane).
+fn push_agent_narrative_row(
+    lines: &mut Vec<Line<'static>>,
+    spec: &RowSpec,
+    content_w: usize,
+    cont_pad: &str,
+    first_prefix: Vec<Span<'static>>,
+    body_style: Style,
+    detail_style: Style,
+) {
+    let (meta, prose) = split_agent_narrative_content(&spec.headline, spec.detail.as_deref());
+    let mut prefix = Some(first_prefix);
+    if let Some(meta_line) = meta {
+        push_wrapped_detail_lines(lines, &meta_line, content_w, cont_pad, detail_style);
+        prefix = None;
+    }
+    if prose.trim().is_empty() {
+        if prefix.is_some() {
+            let mut spans = prefix.take().unwrap();
+            spans.push(Span::styled(String::new(), body_style));
+            lines.push(Line::from(spans));
+        }
+        return;
+    }
+    push_wrapped_markdown_body(
+        lines,
+        &prose,
+        content_w,
+        cont_pad,
+        prefix,
+        body_style,
+    );
+}
+
 /// Render markdown prose into wrapped list rows with optional rail/glyph prefix.
 fn push_wrapped_markdown_body(
     lines: &mut Vec<Line<'static>>,
@@ -1702,7 +1806,7 @@ fn push_wrapped_markdown_body(
     default_style: Style,
 ) {
     use super::markdown;
-    let normalized = markdown::normalize_prose_sections(body);
+    let normalized = markdown::normalize_narrative_prose(body);
     for md_line in markdown::render_markdown(&normalized) {
         let text = line_display_text(&md_line);
         if text.trim().is_empty() {
@@ -1730,42 +1834,6 @@ fn push_wrapped_markdown_body(
     }
 }
 
-/// Render structured agent-message detail: optional `[status]` subline, then prose/markdown body.
-fn push_agent_message_detail(
-    lines: &mut Vec<Line<'static>>,
-    text: &str,
-    content_w: usize,
-    cont_pad: &str,
-    detail_style: Style,
-    body_style: Style,
-) {
-    if let Some((subline, body)) = text.split_once("\n\n") {
-        if !subline.trim().is_empty() {
-            push_wrapped_detail_lines(lines, subline, content_w, cont_pad, detail_style);
-        }
-        if !body.trim().is_empty() {
-            if super::markdown::looks_like_markdown(body) {
-                push_wrapped_markdown_body(lines, body, content_w, cont_pad, None, body_style);
-            } else {
-                push_wrapped_narrative(
-                    lines,
-                    body,
-                    content_w,
-                    cont_pad,
-                    vec![Span::raw(cont_pad.to_string())],
-                    body_style,
-                );
-            }
-        }
-        return;
-    }
-    if super::markdown::looks_like_markdown(text) {
-        push_wrapped_markdown_body(lines, text, content_w, cont_pad, None, body_style);
-    } else {
-        push_wrapped_detail_lines(lines, text, content_w, cont_pad, detail_style);
-    }
-}
-
 /// Render compact sub-lines under a narrative headline (`↳ sketch · …`).
 fn push_wrapped_detail_lines(
     lines: &mut Vec<Line<'static>>,
@@ -1787,54 +1855,6 @@ fn push_wrapped_detail_lines(
                 Span::styled(format!("{line_prefix}{chunk}"), detail_style),
             ]));
         }
-    }
-}
-
-/// Render agent/operator narrative: preserve paragraph breaks, wrap each block.
-fn push_wrapped_narrative(
-    lines: &mut Vec<Line<'static>>,
-    text: &str,
-    content_w: usize,
-    cont_pad: &str,
-    first_prefix: Vec<Span<'static>>,
-    body_style: Style,
-) {
-    if super::markdown::looks_like_markdown(text) {
-        push_wrapped_markdown_body(
-            lines,
-            text,
-            content_w,
-            cont_pad,
-            Some(first_prefix),
-            body_style,
-        );
-        return;
-    }
-    let mut first = true;
-    for paragraph in text.split('\n') {
-        let chunks = if paragraph.is_empty() {
-            vec![String::new()]
-        } else {
-            word_wrap_text(paragraph, content_w)
-        };
-        for chunk in chunks {
-            if first {
-                let mut spans = first_prefix.clone();
-                spans.push(Span::styled(chunk, body_style));
-                lines.push(Line::from(spans));
-                first = false;
-            } else {
-                lines.push(Line::from(vec![
-                    Span::raw(cont_pad.to_string()),
-                    Span::styled(chunk, body_style),
-                ]));
-            }
-        }
-    }
-    if first {
-        let mut spans = first_prefix;
-        spans.push(Span::styled(String::new(), body_style));
-        lines.push(Line::from(spans));
     }
 }
 
@@ -1986,6 +2006,103 @@ fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<St
 /// returned as (display lines, pickable session ids). Rows are numbered [1]-[9]
 /// so the operator can switch by pressing a single digit while the detail pane
 /// is open.
+/// Build a multi-line plan list for `/plan`, returned as detail-pane lines.
+fn list_plans_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
+    use autonoetic_types::plan_frame::{
+        PlanFramesListPendingResult, ValidationRequirement,
+    };
+    let params = serde_json::json!({ "root_session_id": root_session_id });
+    match rpc(client, "planframes.list_pending", params) {
+        Ok(value) => match serde_json::from_value::<PlanFramesListPendingResult>(value) {
+            Ok(parsed) if parsed.plans.is_empty() => vec![
+                format!("(no plans awaiting approval for session '{root_session_id}')"),
+                "When the planner proposes a PlanFrame, it appears here and on the timeline."
+                    .to_string(),
+            ],
+            Ok(parsed) => {
+                let mut lines = vec![format!("plans awaiting approval ({root_session_id}):")];
+                for plan in &parsed.plans {
+                    lines.push(String::new());
+                    lines.push(format!(
+                        "  {} v{} — {}",
+                        plan.plan_id, plan.version, plan.title
+                    ));
+                    if !plan.objective.is_empty() {
+                        lines.push(format!("    objective: {}", plan.objective));
+                    }
+                    for (i, step) in plan.steps.iter().enumerate() {
+                        let agent = step
+                            .resolved_agent_id()
+                            .map(|a| format!(" → {a}"))
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "    {}. {}{}",
+                            i + 1,
+                            step.title,
+                            agent
+                        ));
+                    }
+                    let required: Vec<_> = plan
+                        .validation_policy
+                        .entries
+                        .iter()
+                        .filter(|v| v.requirement == ValidationRequirement::Required)
+                        .map(|v| v.title.as_str())
+                        .collect();
+                    let advisory: Vec<_> = plan
+                        .validation_policy
+                        .entries
+                        .iter()
+                        .filter(|v| v.requirement == ValidationRequirement::Advisory)
+                        .map(|v| v.title.as_str())
+                        .collect();
+                    if !required.is_empty() {
+                        lines.push(format!("    required: {}", required.join(", ")));
+                    }
+                    if !advisory.is_empty() {
+                        lines.push(format!("    advisory: {}", advisory.join(", ")));
+                    }
+                }
+                lines.push(String::new());
+                lines.push("→ /plan approve [plan_id]  or select plan row and press y".to_string());
+                lines
+            }
+            Err(e) => vec![format!("✗ malformed planframes.list_pending response: {e}")],
+        },
+        Err(e) => vec![format!("✗ planframes.list_pending failed: {e}")],
+    }
+}
+
+fn latest_pending_plan_id(client: &RoomClient, root_session_id: &str) -> Option<String> {
+    let params = serde_json::json!({ "root_session_id": root_session_id });
+    let value = rpc(client, "planframes.list_pending", params).ok()?;
+    let parsed: autonoetic_types::plan_frame::PlanFramesListPendingResult =
+        serde_json::from_value(value).ok()?;
+    parsed.plans.last().map(|p| p.plan_id.clone())
+}
+
+fn approve_plan_rpc(client: &RoomClient, plan_id: &str) -> Result<String, String> {
+    match rpc(
+        client,
+        "planframes.approve",
+        serde_json::json!({ "plan_id": plan_id, "approved_by": "operator" }),
+    ) {
+        Ok(value) => {
+            let title = value
+                .get("plan")
+                .and_then(|p| p.get("title"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            if title.is_empty() {
+                Ok(format!("✓ plan approved: {plan_id}"))
+            } else {
+                Ok(format!("✓ plan approved: {plan_id} — \"{title}\""))
+            }
+        }
+        Err(e) => Err(format!("✗ {e}")),
+    }
+}
+
 fn list_cron_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
     let params = serde_json::json!({
         "root_session_id": root_session_id,
@@ -2551,6 +2668,13 @@ mod tests {
         let appr = vec![gate_entry("approval.pending")];
         let g = selectable_gate(&appr, Some(&single), &empty, &empty).unwrap();
         assert!(g.kind == GateKind::Approval && g.id == "apr-1");
+
+        // plan.pending → resolvable Plan gate.
+        let mut plan_evt = gate_entry("plan.pending");
+        plan_evt.refs.plan_id = Some("plan-549".into());
+        let plan = vec![plan_evt];
+        let g = selectable_gate(&plan, Some(&single), &empty, &empty).unwrap();
+        assert!(g.kind == GateKind::Plan && g.id == "plan-549");
 
         // user.ask.pending → resolvable Interaction gate.
         let ask = vec![gate_entry("user.ask.pending")];

@@ -2,6 +2,15 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use std::sync::LazyLock;
+
+static INLINE_SECTION_LABEL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"([.!?\)])([ \t]*)((?:What|My|How|Why|When|Where|Who)\s+[^:\n]{2,50}:)",
+    )
+    .expect("inline section label regex")
+});
+
 /// Detect whether a string looks like it contains markdown formatting
 /// (headers, bold, italic, code fences, lists, links).
 pub fn looks_like_markdown(s: &str) -> bool {
@@ -54,6 +63,19 @@ pub fn strip_markdown(input: &str) -> String {
     // Collapse whitespace
     let collapsed: String = out.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed
+}
+
+/// Break run-on section labels glued to preceding prose (`agents.What I do:Plan`).
+pub(crate) fn normalize_inline_section_labels(input: &str) -> String {
+    INLINE_SECTION_LABEL
+        .replace_all(input, "$1\n\n$2$3")
+        .into_owned()
+}
+
+/// Full narrative normalization for list/detail panes: inline section breaks,
+/// then promote standalone `Label:` lines to `###` headings.
+pub(crate) fn normalize_narrative_prose(input: &str) -> String {
+    normalize_prose_sections(&normalize_inline_section_labels(input))
 }
 
 /// Promote plain section labels (`What it does:`) to markdown headings when the
@@ -228,5 +250,14 @@ mod tests {
         let out = normalize_prose_sections("What it does:\n\nSome prose.\n\nHow it works:\n\nDetails.");
         assert!(out.contains("### What it does"));
         assert!(out.contains("### How it works"));
+    }
+
+    #[test]
+    fn normalize_inline_section_labels_breaks_run_on_headers() {
+        let raw = "I'm your planner for specialist agents.What I do:Plan & coordinate.";
+        let out = normalize_narrative_prose(raw);
+        assert!(out.contains("What I do"));
+        assert!(out.contains("### What I do") || out.contains("What I do:"));
+        assert!(out.contains("Plan & coordinate"));
     }
 }
