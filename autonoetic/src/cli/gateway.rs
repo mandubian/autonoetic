@@ -2371,3 +2371,98 @@ fn decide_proposal(
     }
     Ok(())
 }
+
+pub async fn handle_gateway_wiki(
+    config_path: &Path,
+    command: &super::common::GatewayWikiCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        super::common::GatewayWikiCommands::Proposals { json } => {
+            let approvals = autonoetic_gateway::scheduler::load_approval_requests(
+                &config,
+                Some(&gateway_store),
+            )?;
+            let wiki: Vec<_> = approvals
+                .into_iter()
+                .filter(|a| {
+                    matches!(
+                        a.action,
+                        autonoetic_types::background::ScheduledAction::WikiProposal { .. }
+                    )
+                })
+                .collect();
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&wiki)?);
+                return Ok(());
+            }
+            if wiki.is_empty() {
+                println!("No pending wiki proposals.");
+                return Ok(());
+            }
+            println!("{:<38} {:<20} {:<20} {}", "REQUEST ID", "AGENT", "TITLE", "PAGE ID");
+            for a in &wiki {
+                let (title, page_id) = match &a.action {
+                    autonoetic_types::background::ScheduledAction::WikiProposal {
+                        title, page_id, ..
+                    } => (title.as_str(), page_id.as_str()),
+                    _ => unreachable!(),
+                };
+                println!(
+                    "{:<38} {:<20} {:<20} {}",
+                    a.request_id, a.agent_id, title, page_id
+                );
+            }
+        }
+        super::common::GatewayWikiCommands::Promote { request_id, reason } => {
+            let decision = autonoetic_gateway::scheduler::approve_request_with_options(
+                &config,
+                Some(&gateway_store),
+                request_id,
+                "cli",
+                reason.clone(),
+                None,
+                None,
+                None,
+                autonoetic_gateway::scheduler::ApproveOptions::default(),
+            )?;
+            println!(
+                "Wiki proposal promoted: {} — {}",
+                decision.request_id,
+                if let autonoetic_types::background::ScheduledAction::WikiProposal { title, .. } =
+                    &decision.action
+                {
+                    title.as_str()
+                } else {
+                    "(unknown)"
+                }
+            );
+        }
+        super::common::GatewayWikiCommands::Reject { request_id, reason } => {
+            let decision = autonoetic_gateway::scheduler::reject_request(
+                &config,
+                Some(&gateway_store),
+                request_id,
+                "cli",
+                reason.clone(),
+                None,
+            )?;
+            println!(
+                "Wiki proposal rejected: {} — {}",
+                decision.request_id,
+                if let autonoetic_types::background::ScheduledAction::WikiProposal { title, .. } =
+                    &decision.action
+                {
+                    title.as_str()
+                } else {
+                    "(unknown)"
+                }
+            );
+        }
+    }
+    Ok(())
+}

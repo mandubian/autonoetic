@@ -833,6 +833,7 @@ pub fn run(
         std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None);
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
     let mut session_pick_list: Option<Vec<String>> = None; // ids from /session list for number-pick
+    let mut wiki_request_ids: Option<Vec<String>> = None; // ids from /wiki proposals for number-detail
     let mut status: Option<String> = None; // last action / connection result
     // Gates no longer offerable: approvals resolved on the timeline, plus
     // anything the operator just acted on (covers interactions, which have no
@@ -916,6 +917,7 @@ pub fn run(
                                         detail_scroll = 0;
                                         detail_h_scroll = 0;
                                         session_pick_list = None;
+                                        wiki_request_ids = None;
                                         status = Some("help: Esc to close".to_string());
                                     }
                                     SlashCommand::Test { name } => {
@@ -979,12 +981,25 @@ pub fn run(
                                     SlashCommand::ListCronJobs => {
                                         detail = Some(DetailPane::event(list_cron_detail(client, root_session_id), None));
                                         session_pick_list = None;
+                                        wiki_request_ids = None;
                                     }
                                     SlashCommand::ListPlans => {
                                         detail = Some(DetailPane::event(list_plans_detail(client, root_session_id), None));
                                         session_pick_list = None;
+                                        wiki_request_ids = None;
                                         status = Some(
                                             "plan list: Enter/p on row for review · y approve · Esc close"
+                                                .to_string(),
+                                        );
+                                    }
+                                    SlashCommand::ListWikiProposals => {
+                                        let (lines, ids) = list_wiki_proposals_detail(client, root_session_id);
+                                        detail = Some(DetailPane::event(lines, None));
+                                        session_pick_list = None;
+                                        wiki_request_ids = None;
+                                        wiki_request_ids = Some(ids);
+                                        status = Some(
+                                            "wiki proposals: press number to view details · Esc close"
                                                 .to_string(),
                                         );
                                     }
@@ -1086,6 +1101,7 @@ pub fn run(
                                                     &mut force_timeline_refresh,
                                                 );
                                                 session_pick_list = None;
+                                        wiki_request_ids = None;
                                                 status = Some(format!(
                                                     "→ forked at turn {fork_turn} → {new_id} · send a message to continue this branch"
                                                 ));
@@ -1210,6 +1226,7 @@ pub fn run(
                                 detail_scroll = 0;
                                 detail_h_scroll = 0;
                                 session_pick_list = None;
+                                        wiki_request_ids = None;
                             } else {
                                 disarm_quit(&mut quit_armed_until, &mut status);
                             }
@@ -1244,6 +1261,18 @@ pub fn run(
                                     }
                                     detail = None;
                                     session_pick_list = None;
+                                        wiki_request_ids = None;
+                                }
+                            } else if let Some(ref ids) = wiki_request_ids {
+                                let idx = (c as usize) - ('1' as usize);
+                                if let Some(request_id) = ids.get(idx).cloned() {
+                                    detail = Some(DetailPane::event(
+                                        wiki_proposal_detail(client, &request_id),
+                                        None,
+                                    ));
+                                    detail_scroll = 0;
+                                    detail_h_scroll = 0;
+                                    status = Some(format!("wiki proposal {request_id} — Esc to close"));
                                 }
                             }
                         }
@@ -1427,6 +1456,7 @@ pub fn run(
                                                 &mut force_timeline_refresh,
                                             );
                                             session_pick_list = None;
+                                        wiki_request_ids = None;
                                             status = Some(format!(
                                                 "→ forked at turn {fork_turn} → {new_id} · send a message to continue this branch"
                                             ));
@@ -3083,6 +3113,116 @@ fn list_cron_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
             Err(e) => vec![format!("✗ malformed scheduled_jobs.list response: {e}")],
         },
         Err(e) => vec![format!("✗ scheduled_jobs.list failed: {e}")],
+    }
+}
+
+fn list_wiki_proposals_detail(client: &RoomClient, root_session_id: &str) -> (Vec<String>, Vec<String>) {
+    let params = serde_json::json!({
+        "root_session_id": root_session_id,
+        "limit": 50,
+    });
+    match rpc(client, "wiki.proposals_pending", params) {
+        Ok(value) => {
+            let proposals = value
+                .get("proposals")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if proposals.is_empty() {
+                return (
+                    vec![format!("(no pending wiki proposals for '{root_session_id}')")],
+                    Vec::new(),
+                );
+            }
+            let mut lines = vec![format!("pending wiki proposals for {root_session_id}:")];
+            let mut ids = Vec::new();
+            for (i, p) in proposals.iter().enumerate() {
+                let request_id = p
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                ids.push(request_id.to_string());
+                let agent_id = p
+                    .get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let title = p
+                    .get("action")
+                    .and_then(|a| a.get("title"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let page_id = p
+                    .get("action")
+                    .and_then(|a| a.get("page_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                lines.push(format!("  [{}] {} [{}] {} -> {}", i + 1, request_id, agent_id, title, page_id));
+            }
+            lines.push("→ press a number to view proposal details".to_string());
+            (lines, ids)
+        }
+        Err(e) => (vec![format!("✗ wiki.proposals_pending failed: {e}")], Vec::new()),
+    }
+}
+
+fn wiki_proposal_detail(client: &RoomClient, request_id: &str) -> Vec<String> {
+    match rpc(client, "wiki.proposals_pending", serde_json::json!({})) {
+        Ok(value) => {
+            let proposals = value
+                .get("proposals")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let prop = proposals.into_iter().find(|p| {
+                p.get("request_id")
+                    .and_then(|v| v.as_str())
+                    == Some(request_id)
+            });
+            match prop {
+                Some(p) => {
+                    let mut lines = vec![format!("── wiki proposal: {request_id} ──")];
+                    lines.push(String::new());
+                    if let Some(v) = p.get("agent_id").and_then(|v| v.as_str()) {
+                        lines.push(format!("agent:       {v}"));
+                    }
+                    if let Some(v) = p.get("session_id").and_then(|v| v.as_str()) {
+                        lines.push(format!("session:     {v}"));
+                    }
+                    if let Some(v) = p.get("created_at").and_then(|v| v.as_str()) {
+                        lines.push(format!("created:     {v}"));
+                    }
+                    if let Some(action) = p.get("action") {
+                        lines.push(String::new());
+                        lines.push("── proposal details ──".to_string());
+                        if let Some(v) = action.get("title").and_then(|v| v.as_str()) {
+                            lines.push(format!("title:       {v}"));
+                        }
+                        if let Some(v) = action.get("page_id").and_then(|v| v.as_str()) {
+                            lines.push(format!("page_id:     {v}"));
+                        }
+                        if let Some(v) = action.get("content_sha256").and_then(|v| v.as_str()) {
+                            lines.push(format!("content:     {v} (SHA-256)"));
+                        }
+                        if let Some(tags) = action.get("tags").and_then(|v| v.as_array()) {
+                            let tag_str: Vec<&str> = tags.iter()
+                                .filter_map(|t| t.as_str())
+                                .collect();
+                            if !tag_str.is_empty() {
+                                lines.push(format!("tags:        {}", tag_str.join(", ")));
+                            }
+                        }
+                        if let Some(v) = action.get("reason").and_then(|v| v.as_str()) {
+                            if !v.is_empty() {
+                                lines.push(format!("reason:      {v}"));
+                            }
+                        }
+                    }
+                    lines
+                }
+                None => vec![format!("✗ proposal {request_id} not found")],
+            }
+        }
+        Err(e) => vec![format!("✗ wiki.proposals_pending failed: {e}")],
     }
 }
 

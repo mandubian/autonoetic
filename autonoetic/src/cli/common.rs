@@ -393,6 +393,11 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayConstitutionCommands,
     },
+    /// Manage wiki proposals (promote, reject, list).
+    Wiki {
+        #[command(subcommand)]
+        command: GatewayWikiCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -470,6 +475,32 @@ pub enum GatewayConstitutionProposalCommands {
     Defer {
         /// Proposal identifier.
         proposal_id: String,
+        /// Optional reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayWikiCommands {
+    /// List pending wiki proposals.
+    Proposals {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve/promote a pending wiki proposal.
+    Promote {
+        /// Approval request ID (e.g. apr-xxxx).
+        request_id: String,
+        /// Optional reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Reject a pending wiki proposal.
+    Reject {
+        /// Approval request ID (e.g. apr-xxxx).
+        request_id: String,
         /// Optional reason.
         #[arg(long)]
         reason: Option<String>,

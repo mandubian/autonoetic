@@ -48,12 +48,14 @@ pub enum SlashCommand {
         at_turn: Option<u64>,
         message: Option<String>,
     },
+    /// List pending wiki proposals for this session.
+    ListWikiProposals,
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
-pub const HELP_TEXT: &str = "/help for commands · /session · /fork · /plan · /cron · /test · /quit";
+pub const HELP_TEXT: &str = "/help for commands · /session · /fork · /plan · /cron · /wiki · /test · /quit";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -97,6 +99,7 @@ pub fn help_lines() -> Vec<String> {
         "  /fork [--at-turn N] [msg]  branch this session and switch to it".to_string(),
         "  /cron  /cron list       scheduled jobs for this session".to_string(),
         "  /plan  /plan approve [id]  list or approve pending PlanFrames".to_string(),
+        "  /wiki proposals         list pending wiki proposals".to_string(),
         "  /test <scenario>        inject synthetic events (dev)".to_string(),
         "  /test help              list test scenarios".to_string(),
         String::new(),
@@ -128,6 +131,7 @@ pub fn parse(input: &str) -> SlashCommand {
         "fork" => parse_fork(tail),
         "cron" => parse_cron(tail),
         "plan" => parse_plan(tail),
+        "wiki" => parse_wiki(tail),
         "test" => {
             let name = tail.trim().to_string();
             SlashCommand::Test { name }
@@ -193,6 +197,19 @@ fn parse_plan(tail: &str) -> SlashCommand {
             plan_id: (!rest.is_empty()).then(|| rest.to_string()),
         },
         _ => SlashCommand::Unknown(format!("plan {trimmed}")),
+    }
+}
+
+fn parse_wiki(tail: &str) -> SlashCommand {
+    let trimmed = tail.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("proposals")
+        || trimmed.eq_ignore_ascii_case("list")
+        || trimmed.eq_ignore_ascii_case("ls")
+    {
+        SlashCommand::ListWikiProposals
+    } else {
+        SlashCommand::Unknown(format!("wiki {trimmed}"))
     }
 }
 
@@ -444,6 +461,18 @@ mod tests {
         assert_eq!(
             parse("/fork --at-turn abc"),
             SlashCommand::Unknown("fork --at-turn abc".into())
+        );
+    }
+
+    #[test]
+    fn parse_wiki_variants() {
+        assert_eq!(parse("/wiki"), SlashCommand::ListWikiProposals);
+        assert_eq!(parse("/wiki proposals"), SlashCommand::ListWikiProposals);
+        assert_eq!(parse("/wiki list"), SlashCommand::ListWikiProposals);
+        assert_eq!(parse("/wiki ls"), SlashCommand::ListWikiProposals);
+        assert_eq!(
+            parse("/wiki approve"),
+            SlashCommand::Unknown("wiki approve".into())
         );
     }
 

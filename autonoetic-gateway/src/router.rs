@@ -1313,6 +1313,34 @@ impl JsonRpcRouter {
                 }
             }
 
+            "wiki.proposals_pending" => {
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "GatewayStore not available for wiki.proposals_pending",
+                        );
+                    }
+                };
+                let proposals = store
+                    .get_pending_approvals()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|a| {
+                        matches!(
+                            a.action,
+                            autonoetic_types::background::ScheduledAction::WikiProposal { .. }
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({ "proposals": proposals }),
+                )
+            }
+
             "wiki.list" => {
                 let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
                 let wiki_root = gateway_dir.join("wiki");
