@@ -78,6 +78,7 @@ fn evolution_manifest() -> AgentManifest {
             max_children: 10,
             max_spawn_depth: 0,
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

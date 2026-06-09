@@ -1588,6 +1588,93 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.inference.get" => {
+                #[derive(Deserialize)]
+                struct InferenceGetParams {
+                    session_id: String,
+                    agent_id: String,
+                }
+                let params: InferenceGetParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.inference.get: {}", e),
+                        );
+                    }
+                };
+                match self.execution.get_session_inference(&params.session_id, &params.agent_id) {
+                    Ok(v) => JsonRpcResponse::success(req.id, v),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+                }
+            }
+
+            "session.inference.set" => {
+                #[derive(Deserialize)]
+                struct InferenceSetParams {
+                    session_id: String,
+                    agent_id: String,
+                    preset: String,
+                    #[serde(default)]
+                    reason: Option<String>,
+                    #[serde(default = "default_operator_set_by")]
+                    set_by: String,
+                }
+                fn default_operator_set_by() -> String {
+                    "operator:rpc".to_string()
+                }
+                let params: InferenceSetParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.inference.set: {}", e),
+                        );
+                    }
+                };
+                match self.execution.set_session_inference_override(
+                    &params.session_id,
+                    &params.agent_id,
+                    &params.preset,
+                    params.reason.as_deref(),
+                    &params.set_by,
+                ) {
+                    Ok(v) => JsonRpcResponse::success(req.id, v),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+                }
+            }
+
+            "session.inference.clear" => {
+                #[derive(Deserialize)]
+                struct InferenceClearParams {
+                    session_id: String,
+                    #[serde(default = "default_operator_clear_by")]
+                    set_by: String,
+                }
+                fn default_operator_clear_by() -> String {
+                    "operator:rpc".to_string()
+                }
+                let params: InferenceClearParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.inference.clear: {}", e),
+                        );
+                    }
+                };
+                match self
+                    .execution
+                    .clear_session_inference_override(&params.session_id, &params.set_by)
+                {
+                    Ok(v) => JsonRpcResponse::success(req.id, v),
+                    Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+                }
+            }
+
             // Session fork - fork a session from a snapshot
             "session.fork" => {
                 #[derive(Deserialize)]

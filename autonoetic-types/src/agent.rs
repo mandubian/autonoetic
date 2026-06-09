@@ -150,6 +150,9 @@ pub struct AgentManifest {
     pub agent: AgentIdentity,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
+    /// Named preset in gateway `llm_presets` (preferred over inline provider/model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_config: Option<LlmConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

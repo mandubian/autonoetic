@@ -178,6 +178,7 @@ mod tests {
                 description: "Test".to_string(),
             },
             capabilities: vec![],
+            llm_preset: None,
             llm_config: None,
             limits: None,
             background: None,

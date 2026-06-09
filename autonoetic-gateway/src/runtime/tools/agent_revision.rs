@@ -400,6 +400,7 @@ struct RevisionCreateFromIntentArgs {
     #[serde(default)]
     script_input_mode: Option<ScriptInputMode>,
     #[serde(default)]
+    llm_preset: Option<String>,
     llm_config: Option<LlmConfig>,
     #[serde(default)]
     io: Option<AgentIO>,
@@ -1493,6 +1494,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 description: args.description.clone(),
             },
             capabilities: args.capabilities.clone(),
+            llm_preset: None,
             llm_config: args.llm_config.clone(),
             limits: None,
             background: None,
@@ -3775,6 +3777,7 @@ mod capability_lenient_deser_tests {
             capabilities: vec![Capability::AgentRevision {
                 patterns: vec!["*".to_string()],
             }],
+            llm_preset: None,
             llm_config: None,
             limits: None,
             background: None,
