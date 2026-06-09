@@ -1840,6 +1840,17 @@ pub fn handle_agent_import_skill(
         if let Some(ref preset) = target_manifest.llm_preset {
             lines.push(format!("    llm_preset: {}", preset));
         }
+        if let Some(ref overrides) = target_manifest.llm_overrides {
+            if let Ok(yaml) = serde_yaml::to_string(overrides) {
+                let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
+                if !yaml.trim().is_empty() {
+                    lines.push("    llm_overrides:".to_string());
+                    for line in yaml.lines() {
+                        lines.push(format!("      {}", line));
+                    }
+                }
+            }
+        }
         if let Some(ref llm) = target_manifest.llm_config {
             lines.push("    llm_config:".to_string());
             lines.push(format!("      provider: \"{}\"", llm.provider));

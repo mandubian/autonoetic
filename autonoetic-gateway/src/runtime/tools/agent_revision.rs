@@ -426,11 +426,16 @@ struct RevisionCreateFromIntentArgs {
     credential_services: Vec<String>,
 }
 
-fn revision_declares_inference(args: &RevisionCreateFromIntentArgs) -> bool {
-    args.llm_preset
+fn normalized_llm_preset(preset: &Option<String>) -> Option<String> {
+    preset
         .as_ref()
-        .is_some_and(|s| !s.trim().is_empty())
-        || args.llm_config.is_some()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn revision_declares_inference(args: &RevisionCreateFromIntentArgs) -> bool {
+    normalized_llm_preset(&args.llm_preset).is_some() || args.llm_config.is_some()
 }
 
 #[derive(Debug)]
@@ -1508,13 +1513,9 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 description: args.description.clone(),
             },
             capabilities: args.capabilities.clone(),
-            llm_preset: args.llm_preset.clone(),
+            llm_preset: normalized_llm_preset(&args.llm_preset),
             llm_overrides: args.llm_overrides.clone(),
-            llm_config: if args
-                .llm_preset
-                .as_ref()
-                .is_some_and(|s| !s.trim().is_empty())
-            {
+            llm_config: if normalized_llm_preset(&args.llm_preset).is_some() {
                 None
             } else {
                 args.llm_config.clone()

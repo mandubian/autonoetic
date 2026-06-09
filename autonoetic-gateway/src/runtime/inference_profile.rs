@@ -106,15 +106,15 @@ pub fn resolve_inference_profile(
             })?;
         let mut cfg = base;
         cfg.routing_preset = Some(preset_name.clone());
-        apply_llm_overrides(&mut cfg, manifest.llm_overrides.as_ref());
         merge_manifest_llm_hints(&mut cfg, manifest_fallback);
+        apply_llm_overrides(&mut cfg, manifest.llm_overrides.as_ref());
         cfg
     } else {
         let mut cfg = resolve_fixed_preset(preset).ok_or_else(|| {
             anyhow::anyhow!("Preset '{}' is not a fixed provider/model preset", preset_name)
         })?;
-        apply_llm_overrides(&mut cfg, manifest.llm_overrides.as_ref());
         merge_manifest_llm_hints(&mut cfg, manifest_fallback);
+        apply_llm_overrides(&mut cfg, manifest.llm_overrides.as_ref());
         cfg
     };
 
@@ -365,6 +365,44 @@ mod tests {
         .unwrap();
         assert_eq!(profile.preset_source, PresetSource::LegacyInline);
         assert_eq!(profile.llm_config.model, "gpt-4o");
+    }
+
+    #[test]
+    fn llm_overrides_win_over_legacy_thinking_hints() {
+        use autonoetic_types::agent::{ThinkingConfig, ThinkingEffort};
+
+        let mut manifest = test_manifest();
+        manifest.llm_preset = Some("sonnet".to_string());
+        manifest.llm_config = Some(LlmConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: 0.2,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: false,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            routing_preset: None,
+            thinking: Some(ThinkingConfig {
+                effort: ThinkingEffort::Low,
+                budget_tokens: None,
+            }),
+        });
+        manifest.llm_overrides = Some(LlmOverrides {
+            temperature: None,
+            thinking: Some(ThinkingConfig {
+                effort: ThinkingEffort::High,
+                budget_tokens: None,
+            }),
+            context_window_tokens: None,
+        });
+        let profile =
+            resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
+        assert_eq!(
+            profile.llm_config.thinking.as_ref().map(|t| t.effort),
+            Some(ThinkingEffort::High)
+        );
     }
 
     #[test]
