@@ -186,6 +186,50 @@ async fn clone_timeline_for_fork_mirrors_history_up_to_turn() {
 }
 
 #[tokio::test]
+async fn clone_timeline_for_fork_excludes_later_turn_sharing_cutoff_timestamp() {
+    // Regression: a later turn's event with the SAME created_at as the fork
+    // turn must not leak in. The created_at cutoff alone would include it; the
+    // turn_id ceiling guard excludes it.
+    let env = shared();
+    let src = "root-fork-tie";
+    let mk = |turn: &str, ts: &str| LiveDigestEventRecord {
+        event_id: format!("ev-{}", uuid::Uuid::new_v4()),
+        root_session_id: src.to_string(),
+        source_session_id: src.to_string(),
+        turn_id: Some(turn.to_string()),
+        source_agent_id: Some("planner.default".to_string()),
+        source_node_id: "gateway".to_string(),
+        event_type: "turn.start".to_string(),
+        payload: Some("{}".to_string()),
+        created_at: ts.to_string(),
+        principal_kind: Some("autonoetic_agent".to_string()),
+        principal_id: Some("planner.default".to_string()),
+        role: Some("planner".to_string()),
+        altitude: Some("normal".to_string()),
+        refs_json: None,
+    };
+    for ev in [
+        mk("turn-000001", "2026-06-01T11:00:00+00:00"),
+        mk("turn-000002", "2026-06-01T11:00:02+00:00"),
+        // Turn 3 shares turn 2's timestamp — the cutoff value when forking at 2.
+        mk("turn-000003", "2026-06-01T11:00:02+00:00"),
+    ] {
+        env.store.create_live_digest_event(&ev).unwrap();
+    }
+
+    let fork_root = "root-fork-tie-branch";
+    let copied = env.store.clone_timeline_for_fork(src, fork_root, 2).unwrap();
+    assert_eq!(copied, 2, "only turns 1 and 2 — not the tie-timestamp turn 3");
+
+    let result = env
+        .store
+        .list_session_timeline(fork_root, None, 100, None, None)
+        .unwrap();
+    let turns: Vec<Option<String>> = result.entries.iter().map(|e| e.turn_id.clone()).collect();
+    assert!(!turns.contains(&Some("turn-000003".to_string())));
+}
+
+#[tokio::test]
 async fn session_timeline_list_rejects_invalid_min_altitude() {
     let env = shared();
     let resp = env

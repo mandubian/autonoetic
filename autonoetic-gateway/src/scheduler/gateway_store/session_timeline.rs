@@ -142,17 +142,25 @@ impl GatewayStore {
             None => return Ok(0), // no in-range turn events → nothing to mirror
         };
 
+        // Two guards, both needed:
+        //   * `created_at <= cutoff` bounds turn-less rows (operator messages,
+        //     session start) to those before the fork point.
+        //   * `turn_id <= ceiling` excludes events from *later* turns even if
+        //     they happen to share the cutoff timestamp — without it, two turns
+        //     with an identical `created_at` could leak a turn > up_to_turn row
+        //     into the fork.
         let mut stmt = conn.prepare(
             "SELECT event_id, source_session_id, turn_id, source_agent_id, source_node_id,
                     event_type, payload, created_at, principal_kind, principal_id,
                     role, altitude, refs_json
              FROM live_digest_events
              WHERE root_session_id = ?1 AND created_at <= ?2
+               AND (turn_id IS NULL OR turn_id <= ?3)
              ORDER BY created_at ASC, event_id ASC",
         )?;
         let rows = stmt
             .query_map(
-                rusqlite::params![source_root_session_id, &cutoff],
+                rusqlite::params![source_root_session_id, &cutoff, &turn_ceiling],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,         // original event_id
