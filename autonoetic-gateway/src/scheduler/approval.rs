@@ -522,9 +522,13 @@ pub fn approve_request_with_options(
         }
     }
 
-    // Emit causal event after the decision is recorded.
+    // Emit timeline + causal events after the decision is recorded.
     if let Some(meta) = wiki_materialized {
         if matches!(decision.status, ApprovalStatus::Approved) {
+            // Session timeline event
+            emit_wiki_timeline_event(gateway_store, &decision, "wiki.promoted", None);
+
+            // Causal event for observability
             let causal_logger = crate::execution::init_gateway_causal_logger(config)?;
             let mut trace_session = crate::tracing::TraceSession::create_with_session_id(
                 crate::tracing::SessionId::from_string(decision.session_id.clone()),
@@ -616,6 +620,9 @@ pub fn reject_request(
         let _ = crate::runtime::continuation::delete_continuation(config, task_id);
     }
 
+    // Emit wiki.rejected timeline event for wiki proposals.
+    emit_wiki_timeline_event(gateway_store, &decision, "wiki.rejected", Some(&decision.decided_by));
+
     Ok(decision)
 }
 
@@ -641,6 +648,9 @@ pub fn cancel_request(
     if let Some(ref task_id) = decision.task_id {
         let _ = crate::runtime::continuation::delete_continuation(config, task_id);
     }
+
+    // Emit wiki.rejected timeline event for cancelled wiki proposals.
+    emit_wiki_timeline_event(gateway_store, &decision, "wiki.rejected", Some(cancelled_by));
 
     Ok(decision)
 }
@@ -1158,6 +1168,49 @@ fn unblock_task_on_approval(
                 }
             }
         }
+    }
+}
+
+/// Emit a session timeline event (`wiki.rejected`) for wiki proposals.
+/// Silently skips non-WikiProposal actions.
+fn emit_wiki_timeline_event(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    decision: &ApprovalDecision,
+    event_type: &str,
+    cancelled_by: Option<&str>,
+) {
+    let ScheduledAction::WikiProposal { ref page_id, ref title, .. } = decision.action else {
+        return;
+    };
+    let Some(store) = gateway_store else { return };
+
+    let role = crate::runtime::session_timeline::derive_role(&decision.agent_id);
+    let principal = autonoetic_types::principal::Principal::agent(decision.agent_id.clone());
+    let refs = autonoetic_types::session_timeline::TimelineRefs::default();
+    let mut payload = serde_json::json!({
+        "page_id": page_id,
+        "title": title,
+        "decided_by": decision.decided_by,
+        "reason": decision.reason,
+    });
+    if let Some(d) = cancelled_by {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("cancelled_by".into(), serde_json::json!(d));
+        }
+    }
+    let event = crate::runtime::session_timeline::build_timeline_event(
+        decision.root_session_id.clone().unwrap_or_else(|| decision.session_id.clone()),
+        decision.session_id.clone(),
+        None,
+        &principal,
+        &role,
+        event_type,
+        None,
+        Some(payload),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(target: "session_timeline", error = %e, "{event_type} timeline emit failed");
     }
 }
 

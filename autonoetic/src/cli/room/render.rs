@@ -825,6 +825,26 @@ fn wiki_proposal_gate_card(entry: &SessionTimelineEntry) -> (String, Option<Stri
     (headline, Some(lines.join("\n")))
 }
 
+/// Card for wiki lifecycle events (wiki.proposed, wiki.rejected).
+fn wiki_lifecycle_card(entry: &SessionTimelineEntry, heading: &str) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let title = field("title").unwrap_or_default();
+    let page_id = field("page_id").unwrap_or_default();
+    let headline = format!("{heading} — {}", one_line(&title, 88));
+    let mut lines = vec![format!("  page: {page_id}")];
+    if let Some(agent) = field("proposed_by_agent") {
+        lines.push(format!("  proposed by: {agent}"));
+    }
+    if let Some(by) = field("decided_by").or_else(|| field("cancelled_by")) {
+        lines.push(format!("  decided by: {by}"));
+    }
+    if let Some(reason) = field("reason").filter(|r| !r.trim().is_empty()) {
+        lines.push(format!("  reason: {}", one_line(&reason, 120)));
+    }
+    (headline, Some(lines.join("\n")))
+}
+
 /// Build list-row headline + detail for an agent/operator message event.
 pub(crate) fn message_list_rows(entry: &SessionTimelineEntry, key: &str) -> (String, Option<String>) {
     let Some(p) = entry
@@ -1006,6 +1026,9 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "approval.cancelled" => format!("approval cancelled ({})", field("request_id").unwrap_or_default()),
         "plan.pending" => format!("plan proposed: {}", field("title").unwrap_or_default()),
         "plan.approved" => format!("plan approved ({})", field("plan_id").unwrap_or_default()),
+        "wiki.proposed" => format!("wiki proposed: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
+        "wiki.promoted" => format!("wiki promoted: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
+        "wiki.rejected" => format!("wiki rejected: {} — {}", field("title").unwrap_or_default(), field("reason").unwrap_or_else(|| "no reason".into())),
         "divergence.intervention" => format!(
             "divergence: {} (turn {})",
             field("level").unwrap_or_else(|| "?".into()),
@@ -1414,6 +1437,9 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
         "user.ask.pending" => interaction_gate_card(entry),
         "plan.pending" => plan_gate_card(entry),
         "escalation.pending" => escalation_gate_card(entry),
+        "wiki.proposed" => wiki_lifecycle_card(entry, "📝 WIKI PROPOSED"),
+        "wiki.promoted" => wiki_lifecycle_card(entry, "✅ WIKI PROMOTED"),
+        "wiki.rejected" => wiki_lifecycle_card(entry, "❌ WIKI REJECTED"),
         _ => (summarize(entry), detail_preview(entry)),
     };
     let actor = actor_kind(&entry.role);
@@ -1496,7 +1522,8 @@ pub fn row_tone(event_type: &str) -> RowTone {
 /// Tone for a full timeline entry — includes embedded plan proposals in messages.
 pub fn tone_for_entry(entry: &SessionTimelineEntry) -> RowTone {
     match entry.event_type.as_str() {
-        "plan.pending" | "approval.pending" | "user.ask.pending" | "escalation.pending" => {
+        "plan.pending" | "approval.pending" | "user.ask.pending" | "escalation.pending"
+        | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" => {
             RowTone::OperatorGate
         }
         "agent.message" | "operator.message" if extract_plan_proposal_id(entry).is_some() => {

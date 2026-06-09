@@ -478,7 +478,7 @@ impl GateService {
         hasher.update(content.as_bytes());
         let content_sha256 = Some(format!("{:x}", hasher.finalize()));
 
-        // 4. Create approval row.
+        // 4. Create approval row + timeline event.
         let action = ScheduledAction::WikiProposal {
             page_id: page_id.clone(),
             title: title.clone(),
@@ -490,7 +490,39 @@ impl GateService {
         };
         let gate_id = self.create_approval_row(req, &action)?;
 
-        // 5. Seed enrichment message.
+        // 5. Surface on timeline.
+        {
+            let role = crate::runtime::session_timeline::derive_role(&req.manifest.agent.id);
+            let principal =
+                autonoetic_types::principal::Principal::agent(req.manifest.agent.id.clone());
+            let refs = autonoetic_types::session_timeline::TimelineRefs {
+                approval_request_id: Some(gate_id.clone()),
+                ..Default::default()
+            };
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                req.session_id.unwrap_or("unknown").to_string(),
+                req.session_id.unwrap_or("unknown").to_string(),
+                req.turn_id.map(str::to_string),
+                &principal,
+                &role,
+                "wiki.proposed",
+                None,
+                Some(serde_json::json!({
+                    "page_id": page_id,
+                    "title": title,
+                    "is_edit": is_edit,
+                    "tags": tags,
+                    "proposed_by_agent": proposed_by_agent,
+                    "gate_id": gate_id,
+                })),
+                refs,
+            );
+            if let Err(e) = self.store.create_live_digest_event(&event) {
+                tracing::debug!(target: "session_timeline", error = %e, "wiki.proposed timeline emit failed");
+            }
+        }
+
+        // 6. Seed enrichment message.
         let edit_label = if *is_edit { "edit" } else { "new" };
         let seed = format!(
             "Wiki proposal ({}) — page_id: {}, title: {}, proposed by: {}",
