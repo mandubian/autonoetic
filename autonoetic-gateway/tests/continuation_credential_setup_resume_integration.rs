@@ -26,6 +26,7 @@ fn test_manifest(agent_id: &str) -> AgentManifest {
         capabilities: vec![Capability::CredentialAccess {
             services: vec!["*".to_string()],
         }],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

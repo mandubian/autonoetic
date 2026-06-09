@@ -1285,13 +1285,10 @@ fn test_revision_create_from_intent_requires_reasoning_llm_config() {
         None,
     );
 
-    assert!(result.is_err());
+    let response = result.expect("tool should return validation envelope");
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("llm_config is required"),
-        "reasoning mode should enforce llm_config"
+        response.contains("llm_preset or llm_config is required"),
+        "reasoning mode should enforce inference declaration, got: {response}"
     );
 }
 

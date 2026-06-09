@@ -37,6 +37,7 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: caps,
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

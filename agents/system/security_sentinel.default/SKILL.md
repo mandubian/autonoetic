@@ -15,9 +15,8 @@ metadata:
       id: "security_sentinel.default"
       name: "Security Sentinel"
       description: "Audits autonoetic's agents, artifacts, and gateway state for security issues. Produces structured SecurityFinding records. Never modifies state — read-only by capability profile."
-    llm_config:
-      provider: "openrouter"
-      model: "anthropic/claude-opus-4"
+    llm_preset: budget
+    llm_overrides:
       temperature: 0.0
     capabilities:
       - type: "ReadAccess"

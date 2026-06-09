@@ -317,11 +317,11 @@ patching of inline models.
 
 ### Phase 2 — Manifest migration
 
-- [ ] Convert in-repo `agents/**/SKILL.md` to `llm_preset` (+ optional `llm_overrides`)
-- [ ] Update `specialized_builder` / `agent-factory` install contracts to emit
+- [x] Convert in-repo `agents/**/SKILL.md` to `llm_preset` (+ optional `llm_overrides`)
+- [x] Update `specialized_builder` / `agent-factory` install contracts to emit
       `llm_preset` only
-- [ ] Remove `apply_llm_preset_to_skill()` provider/model regex patching
-- [ ] Update `docs/AGENTS.md`, `docs/config-reference.md`, config template
+- [x] Remove `apply_llm_preset_to_skill()` provider/model regex patching
+- [x] Update `docs/AGENTS.md`, `docs/config-reference.md`, config template
 
 ### Phase 3 — Failover polish
 

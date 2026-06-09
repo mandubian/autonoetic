@@ -15,10 +15,7 @@ metadata:
       id: "agent-factory.default"
       name: "Agent Factory Default"
       description: "Owns the full agent creation pipeline: architect (if design needed) → coder or reasoning intent → packager (if deps) → evaluator + auditor (if gates required) → specialized_builder installs."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.2
+    llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "agent.", "artifact.", "content."]
@@ -189,7 +186,7 @@ Install a new reasoning agent called '<agent_id>':
 - instructions: <same markdown body that was bundled in step 1>
 - Capabilities: <intended_capabilities as capability objects>
 - Execution mode: reasoning
-- llm_config: { provider: "openrouter", model: "google/gemini-3-flash-preview", temperature: 0.2 }
+- llm_preset: agentic
 - io: { returns: { type: "object", required: ["status"], properties: { status: { type: "string" } } } }
 - Gating: none (reasoning-only, no CodeExecution/AgentSpawn)
 ```
@@ -314,7 +311,7 @@ This separation exists by design (see `docs/protected-agents.md`, recursive trus
 Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
 - `artifact_ref` (for code agents) or omit (for reasoning agents)
 - `instructions`, `description`, `capabilities`, `execution_mode`
-- `llm_config` (for reasoning mode)
+- `llm_preset` (for reasoning mode — gateway `llm_presets` key)
 - `script_entry` (for script mode)
 - `credential_services` (for script-mode agents that need credentials at spawn time, e.g. `["my-service"]` — pass the service name from the planner's delegation message)
 - Promotion evidence (evaluator_pass + auditor_pass) when gates applied, OR `Gating: none`

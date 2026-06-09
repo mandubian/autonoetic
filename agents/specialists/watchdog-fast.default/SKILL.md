@@ -15,9 +15,8 @@ metadata:
       id: "watchdog-fast.default"
       name: "Watchdog (Fast)"
       description: "Observer-only divergence judge that produces a verdict in a single LLM completion. No tool calls, no side effects."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: haiku
+    llm_overrides:
       temperature: 0.0
     # No capabilities declared. NOTE: this alone does NOT make the agent
     # tool-free — several native tools (e.g. `execution_search`,

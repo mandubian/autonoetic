@@ -15,9 +15,8 @@ metadata:
       id: "registration.default"
       name: "Registration Default"
       description: "Focused agent for suspended credential flows; does not cold-start onboarding from remote skill URLs."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: agentic
+    llm_overrides:
       temperature: 0.0
     capabilities:
       - type: "CredentialAccess"

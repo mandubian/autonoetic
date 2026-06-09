@@ -31,6 +31,7 @@ fn test_manifest() -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
         }],
+        llm_overrides: None,
         llm_preset: Some("sonnet".to_string()),
         llm_config: None,
         limits: None,

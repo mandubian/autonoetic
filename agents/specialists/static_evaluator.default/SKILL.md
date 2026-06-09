@@ -15,10 +15,7 @@ metadata:
       id: "static_evaluator.default"
       name: "Static Evaluator Default"
       description: "Reviews artifact source code for correctness, behavioral contracts, credential flow, and URL pattern analysis. No sandbox execution, no network."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.1
+    llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"
         # Prefixes match canonical tool ids (`knowledge_store`, `promotion_record`) for P-1.1.

@@ -18,9 +18,8 @@ metadata:
         Takes a failed session, reads causal events and digest, identifies
         gateway-code-level root cause, and files a well-scoped GitHub issue
         via github.issue.create. Never edits code, never opens PRs.
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: agentic
+    llm_overrides:
       temperature: 0.1
     capabilities:
       - type: "ReadAccess"

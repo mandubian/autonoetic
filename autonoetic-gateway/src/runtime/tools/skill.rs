@@ -211,6 +211,7 @@ impl NativeTool for SkillInstallTool {
                 description: parsed_manifest.agent.description.clone(),
             },
             capabilities,
+            llm_overrides: parsed_manifest.llm_overrides.clone(),
             llm_preset: parsed_manifest.llm_preset.clone(),
             llm_config,
             limits: parsed_manifest.limits.clone(),

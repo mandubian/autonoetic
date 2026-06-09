@@ -81,6 +81,7 @@ fn manifest(agent_id: &str) -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: vec![],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

@@ -15,14 +15,9 @@ metadata:
       id: "security_sentinel_baseline.default"
       name: "Security Sentinel Baseline"
       description: "Minimal, deterministic-heavy sentinel frozen in the gateway image. Runs Phase 1 checks only (no LLM). Provides a stable reference for detecting sentinel regression."
-    llm_config:
-      provider: "openrouter"
-      model: "anthropic/claude-haiku-4-5-20251001"
+    llm_preset: haiku
+    llm_overrides:
       temperature: 0.0
-      # NOTE: The gateway-side SentinelRunner executes all Phase 1 deterministic
-      # checks without LLM calls. This llm_config is retained for the thin
-      # orchestration layer that formats structured findings output. The baseline
-      # does NOT perform LLM-judgment checks (Phase 2+).
     capabilities:
       - type: "ReadAccess"
         scopes: ["*"]

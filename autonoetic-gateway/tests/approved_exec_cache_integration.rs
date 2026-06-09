@@ -53,6 +53,7 @@ fn test_agent_manifest() -> AgentManifest {
             patterns: vec!["*".to_string()],
             commands: vec![],
         }],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

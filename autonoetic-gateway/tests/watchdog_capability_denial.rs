@@ -46,6 +46,7 @@ fn watchdog_manifest() -> AgentManifest {
                 patterns: vec!["*".to_string()],
             },
         ],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

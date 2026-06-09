@@ -401,6 +401,8 @@ struct RevisionCreateFromIntentArgs {
     script_input_mode: Option<ScriptInputMode>,
     #[serde(default)]
     llm_preset: Option<String>,
+    #[serde(default)]
+    llm_overrides: Option<autonoetic_types::agent::LlmOverrides>,
     llm_config: Option<LlmConfig>,
     #[serde(default)]
     io: Option<AgentIO>,
@@ -422,6 +424,18 @@ struct RevisionCreateFromIntentArgs {
     /// script-mode agents that read credentials from env vars.
     #[serde(default)]
     credential_services: Vec<String>,
+}
+
+fn normalized_llm_preset(preset: &Option<String>) -> Option<String> {
+    preset
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn revision_declares_inference(args: &RevisionCreateFromIntentArgs) -> bool {
+    normalized_llm_preset(&args.llm_preset).is_some() || args.llm_config.is_some()
 }
 
 #[derive(Debug)]
@@ -1121,7 +1135,9 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "execution_mode": { "type": "string", "enum": ["reasoning", "script"] },
                     "script_entry": { "type": "string" },
                     "script_input_mode": { "type": "string", "enum": ["stdin", "args"], "description": "How normalized task input is delivered to script agents: 'stdin' (default) writes the payload to stdin; 'args' passes the same payload as the first positional CLI argument ($1)." },
-                    "llm_config": { "type": "object" },
+                    "llm_preset": { "type": "string", "description": "Named preset in gateway llm_presets (preferred for reasoning agents)" },
+                    "llm_overrides": { "type": "object", "description": "Optional temperature/thinking overrides merged onto the resolved preset" },
+                    "llm_config": { "type": "object", "description": "Legacy inline provider/model — prefer llm_preset" },
                     "capabilities": {
                         "type": "array",
                         "description": "Each item must be a tagged Capability object — bare strings are rejected. Examples: {\"type\":\"NetworkAccess\",\"hosts\":[\"*\"]}, {\"type\":\"ReadAccess\",\"scopes\":[\"self.*\"]}, {\"type\":\"SandboxFunctions\",\"allowed\":[\"content.\",\"knowledge.\"]}, {\"type\":\"EmergencyStop\"}."
@@ -1183,11 +1199,14 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             )
             .into());
         }
-        // Explicit reasoning mode must always declare llm_config, regardless of artifact shape.
         if matches!(args.execution_mode, Some(ExecutionMode::Reasoning))
-            && args.llm_config.is_none()
+            && !revision_declares_inference(&args)
         {
-            return Ok(ToolError::validation("llm_config is required when execution_mode is 'reasoning'", None::<String>).to_error_response());
+            return Ok(ToolError::validation(
+                "llm_preset or llm_config is required when execution_mode is 'reasoning'",
+                None::<String>,
+            )
+            .to_error_response());
         }
 
         let Some(gateway_store) = gateway_store else {
@@ -1359,7 +1378,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             let resolved_mode = if !execution_mode_explicit
                 && requested_mode == ExecutionMode::Reasoning
                 && args.script_entry.is_none()
-                && args.llm_config.is_none()
+                && !revision_declares_inference(&args)
             {
                 if bundle.entrypoints.len() == 1 {
                     tracing::info!(
@@ -1389,8 +1408,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     );
                 }
                 ExecutionMode::Reasoning => anyhow::ensure!(
-                    args.llm_config.is_some(),
-                    "llm_config is required when execution_mode is 'reasoning'"
+                    revision_declares_inference(&args),
+                    "llm_preset or llm_config is required when execution_mode is 'reasoning'"
                 ),
             }
 
@@ -1451,8 +1470,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 "script_entry requires an artifact_ref or artifact_id — pure reasoning agents have no scripts"
             );
             anyhow::ensure!(
-                args.llm_config.is_some(),
-                "llm_config is required for pure reasoning agents (no artifact_ref/artifact_id)"
+                revision_declares_inference(&args),
+                "llm_preset or llm_config is required for pure reasoning agents (no artifact_ref/artifact_id)"
             );
             let forbidden_cap = args
                 .capabilities
@@ -1494,8 +1513,13 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 description: args.description.clone(),
             },
             capabilities: args.capabilities.clone(),
-            llm_preset: args.llm_preset.clone(),
-            llm_config: args.llm_config.clone(),
+            llm_preset: normalized_llm_preset(&args.llm_preset),
+            llm_overrides: args.llm_overrides.clone(),
+            llm_config: if normalized_llm_preset(&args.llm_preset).is_some() {
+                None
+            } else {
+                args.llm_config.clone()
+            },
             limits: None,
             background: None,
             disclosure: None,
@@ -3778,6 +3802,7 @@ mod capability_lenient_deser_tests {
                 patterns: vec!["*".to_string()],
             }],
             llm_preset: None,
+            llm_overrides: None,
             llm_config: None,
             limits: None,
             background: None,

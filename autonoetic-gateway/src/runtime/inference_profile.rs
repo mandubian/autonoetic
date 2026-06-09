@@ -2,7 +2,7 @@
 //!
 //! See `docs/rfc/llm-preset-inference-profiles.md`.
 
-use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmConfig};
+use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmConfig, LlmOverrides};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use serde::{Deserialize, Serialize};
@@ -107,12 +107,14 @@ pub fn resolve_inference_profile(
         let mut cfg = base;
         cfg.routing_preset = Some(preset_name.clone());
         merge_manifest_llm_hints(&mut cfg, manifest_fallback);
+        apply_llm_overrides(&mut cfg, manifest.llm_overrides.as_ref());
         cfg
     } else {
         let mut cfg = resolve_fixed_preset(preset).ok_or_else(|| {
             anyhow::anyhow!("Preset '{}' is not a fixed provider/model preset", preset_name)
         })?;
         merge_manifest_llm_hints(&mut cfg, manifest_fallback);
+        apply_llm_overrides(&mut cfg, manifest.llm_overrides.as_ref());
         cfg
     };
 
@@ -141,6 +143,21 @@ fn legacy_inline_profile(manifest: &AgentManifest) -> ResolvedInferenceProfile {
                 Some(!name.is_empty())
             })
             .unwrap_or(false),
+    }
+}
+
+fn apply_llm_overrides(cfg: &mut LlmConfig, overrides: Option<&LlmOverrides>) {
+    let Some(o) = overrides else {
+        return;
+    };
+    if let Some(temp) = o.temperature {
+        cfg.temperature = temp;
+    }
+    if o.thinking.is_some() {
+        cfg.thinking = o.thinking.clone();
+    }
+    if let Some(tokens) = o.context_window_tokens {
+        cfg.context_window_tokens = Some(tokens);
     }
 }
 
@@ -244,6 +261,7 @@ mod tests {
                 allowed: vec!["content.".to_string()],
             }],
             llm_preset: None,
+            llm_overrides: None,
             llm_config: None,
             limits: None,
             background: None,
@@ -338,10 +356,67 @@ mod tests {
             routing_preset: None,
             thinking: None,
         });
-        let profile =
-            resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
+        let profile = resolve_inference_profile(
+            "legacy.unmapped.agent",
+            &manifest,
+            &fixed_config(),
+            None,
+        )
+        .unwrap();
         assert_eq!(profile.preset_source, PresetSource::LegacyInline);
         assert_eq!(profile.llm_config.model, "gpt-4o");
+    }
+
+    #[test]
+    fn llm_overrides_win_over_legacy_thinking_hints() {
+        use autonoetic_types::agent::{ThinkingConfig, ThinkingEffort};
+
+        let mut manifest = test_manifest();
+        manifest.llm_preset = Some("sonnet".to_string());
+        manifest.llm_config = Some(LlmConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: 0.2,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: false,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            routing_preset: None,
+            thinking: Some(ThinkingConfig {
+                effort: ThinkingEffort::Low,
+                budget_tokens: None,
+            }),
+        });
+        manifest.llm_overrides = Some(LlmOverrides {
+            temperature: None,
+            thinking: Some(ThinkingConfig {
+                effort: ThinkingEffort::High,
+                budget_tokens: None,
+            }),
+            context_window_tokens: None,
+        });
+        let profile =
+            resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
+        assert_eq!(
+            profile.llm_config.thinking.as_ref().map(|t| t.effort),
+            Some(ThinkingEffort::High)
+        );
+    }
+
+    #[test]
+    fn llm_overrides_apply_temperature() {
+        let mut manifest = test_manifest();
+        manifest.llm_preset = Some("sonnet".to_string());
+        manifest.llm_overrides = Some(LlmOverrides {
+            temperature: Some(0.0),
+            thinking: None,
+            context_window_tokens: None,
+        });
+        let profile =
+            resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
+        assert_eq!(profile.llm_config.temperature, 0.0);
     }
 
     #[test]

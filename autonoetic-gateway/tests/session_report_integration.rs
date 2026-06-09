@@ -63,6 +63,7 @@ fn test_manifest() -> AgentManifest {
             description: "session report integration".to_string(),
         },
         capabilities: vec![],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),

@@ -139,9 +139,8 @@ metadata:
       id: "agent.id"
       name: "Human Name"
       description: "Detailed description"
-    llm_config:
-      provider: "openai"       # openai, anthropic, gemini, openrouter, etc.
-      model: "gpt-4o"
+    llm_preset: smart          # Names a key in gateway config llm_presets
+    llm_overrides:             # Optional: merge onto resolved preset
       temperature: 0.1
       thinking:                # Optional: enable extended thinking (see below)
         effort: medium         # "low", "medium" (default), "high"
@@ -185,8 +184,9 @@ Markdown body with natural language instructions.
 | `name` | Yes | Fully qualified agent ID |
 | `description` | Yes | One-line description |
 | `metadata.autonoetic.agent.id` | Yes | Agent ID (must match directory name) |
-| `metadata.autonoetic.llm_config` | For reasoning | LLM provider/model |
-| `metadata.autonoetic.llm_config.thinking` | No | Extended thinking configuration (see below) |
+| `metadata.autonoetic.llm_preset` | For reasoning | Named inference preset (`llm_presets` in config) |
+| `metadata.autonoetic.llm_overrides` | No | Temperature/thinking overrides on the resolved preset |
+| `metadata.autonoetic.llm_config` | Legacy | Inline provider/model (deprecated; gateway resolves presets) |
 | `metadata.autonoetic.capabilities` | No | Permission declarations |
 | `metadata.autonoetic.execution_mode` | No | `"reasoning"` (default) or `"script"` |
 | `metadata.autonoetic.script_entry` | For script mode | Entry script path |

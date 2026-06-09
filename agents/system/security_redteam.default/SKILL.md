@@ -15,10 +15,7 @@ metadata:
       id: "security_redteam.default"
       name: "Security Red-Team Agent"
       description: "Proposes attack patterns that the sentinel should detect. Each accepted pattern grows the sentinel's check corpus. Read-only access profile — no enforcement actions."
-    llm_config:
-      provider: "openrouter"
-      model: "anthropic/claude-opus-4"
-      temperature: 0.1
+    llm_preset: coding
     capabilities:
       - type: "SecurityRedTeam"
       - type: "ReadAccess"

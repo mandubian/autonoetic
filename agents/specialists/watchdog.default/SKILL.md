@@ -15,9 +15,8 @@ metadata:
       id: "watchdog.default"
       name: "Watchdog"
       description: "Observer that reviews agent sessions for trajectory divergence. Read-only — no execution capabilities."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: budget
+    llm_overrides:
       temperature: 0.0
     capabilities:
       # digest_query gates on ReadAccess (see knowledge.rs::DigestQueryTool).

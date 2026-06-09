@@ -15,10 +15,7 @@ metadata:
       id: "researcher.default"
       name: "Researcher Default"
       description: "Collects evidence, compares sources, and reports uncertainty explicitly."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.3
+    llm_preset: research
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "web.", "mcp_"]

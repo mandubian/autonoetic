@@ -175,6 +175,38 @@ pub fn resolve_llm_config(
     }
 }
 
+pub fn resolve_preset_name_for_init(
+    config: &GatewayConfig,
+    agent_id: &str,
+    template: Option<&str>,
+    explicit_preset: Option<&str>,
+) -> String {
+    if let Some(p) = explicit_preset.filter(|s| !s.trim().is_empty()) {
+        return p.to_string();
+    }
+    if let Some(name) = autonoetic_gateway::runtime::llm_preset_resolver::resolve_preset_name_for_agent(
+        agent_id,
+        &config.llm_preset_mapping,
+    ) {
+        return name.to_string();
+    }
+    if let Some(t) = template {
+        if let Some(name) =
+            autonoetic_gateway::runtime::llm_preset_resolver::resolve_preset_name_for_agent(
+                t,
+                &config.llm_preset_mapping,
+            )
+        {
+            return name.to_string();
+        }
+    }
+    config
+        .llm_preset_mapping
+        .get("default")
+        .cloned()
+        .unwrap_or_else(|| "fallback".to_string())
+}
+
 pub fn init_agent_scaffold(
     config_path: &Path,
     agent_id: &str,
@@ -185,7 +217,7 @@ pub fn init_agent_scaffold(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!agent_id.trim().is_empty(), "agent_id must not be empty");
 
-    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let mut config = autonoetic_gateway::config::load_config(config_path)?;
     std::fs::create_dir_all(&config.agents_dir)?;
 
     let agent_dir = config.agents_dir.join(agent_id);
@@ -201,8 +233,37 @@ pub fn init_agent_scaffold(
     std::fs::create_dir_all(agent_dir.join("skills"))?;
     std::fs::create_dir_all(agent_dir.join("scripts"))?;
 
-    let llm_config = resolve_llm_config(&config, template, preset, provider, model);
-    let skill_md = render_skill_template(agent_id, template, &llm_config);
+    let (preset_name, temperature_override) = if let Some(p) = provider {
+        let local_name = format!("_local.{agent_id}");
+        config.llm_presets.insert(
+            local_name.clone(),
+            autonoetic_types::config::LlmPreset {
+                provider: Some(p.to_string()),
+                model: Some(model.unwrap_or("gpt-4o").to_string()),
+                temperature: Some(0.2),
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                api_key_env: None,
+                thinking: None,
+                routing: None,
+            },
+        );
+        autonoetic_gateway::config::save_config(config_path, &config)?;
+        (local_name, None)
+    } else {
+        (
+            resolve_preset_name_for_init(&config, agent_id, template, preset),
+            template_temperature_override(template),
+        )
+    };
+
+    let skill_md = render_skill_template(agent_id, template, &preset_name, temperature_override);
     std::fs::write(agent_dir.join("SKILL.md"), skill_md)?;
     std::fs::write(
         agent_dir.join("runtime.lock"),
@@ -210,19 +271,27 @@ pub fn init_agent_scaffold(
     )?;
 
     println!(
-        "Initialized agent '{}' in {} (llm: {}/{})",
+        "Initialized agent '{}' in {} (llm_preset: {})",
         agent_id,
         agent_dir.display(),
-        llm_config.provider,
-        llm_config.model,
+        preset_name,
     );
     Ok(())
+}
+
+fn template_temperature_override(template: Option<&str>) -> Option<f64> {
+    match template.unwrap_or("generic") {
+        "coder" | "evaluator" | "auditor" => Some(0.1),
+        "researcher" => Some(0.3),
+        _ => None,
+    }
 }
 
 pub fn render_skill_template(
     agent_id: &str,
     template: Option<&str>,
-    llm_config: &LlmTemplateConfig,
+    preset_name: &str,
+    temperature_override: Option<f64>,
 ) -> String {
     let (name_suffix, description, body) = match template.unwrap_or("generic") {
         "planner" => (
@@ -251,20 +320,8 @@ pub fn render_skill_template(
             "You are an autonomous agent. Plan clearly and execute safely.",
         ),
     };
-    let chat_only_line = if llm_config.chat_only {
-        "\n      chat_only: true"
-    } else {
-        ""
-    };
-    let base_url_line = llm_config
-        .base_url
-        .as_ref()
-        .map(|u| format!("\n      base_url: \"{u}\""))
-        .unwrap_or_default();
-    let api_key_env_line = llm_config
-        .api_key_env
-        .as_ref()
-        .map(|e| format!("\n      api_key_env: \"{e}\""))
+    let overrides_block = temperature_override
+        .map(|t| format!("\n    llm_overrides:\n      temperature: {t}"))
         .unwrap_or_default();
 
     format!(
@@ -285,21 +342,14 @@ metadata:
       id: "{agent_id}"
       name: "{agent_id} {name_suffix}"
       description: "{description}"
-    llm_config:
-      provider: "{provider}"
-      model: "{model}"
-      temperature: {temperature}{chat_only}{base_url}{api_key_env}
+    llm_preset: {preset}{overrides}
 ---
 # {agent_id}
 
 {body}
 "#,
-        provider = llm_config.provider,
-        model = llm_config.model,
-        temperature = llm_config.temperature,
-        chat_only = chat_only_line,
-        base_url = base_url_line,
-        api_key_env = api_key_env_line,
+        preset = preset_name,
+        overrides = overrides_block,
     )
 }
 
@@ -523,6 +573,7 @@ fn admin_revision_manifest() -> AgentManifest {
             patterns: vec!["*".to_string()],
         }],
         llm_preset: None,
+        llm_overrides: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -901,7 +952,6 @@ pub fn handle_agent_bootstrap(
     let mut copied = 0_usize;
     let mut overwritten = 0_usize;
     let mut skipped = 0_usize;
-    let mut patched = 0_usize;
 
     for bundle in bundles {
         let agent_id = bundle
@@ -932,30 +982,6 @@ pub fn handle_agent_bootstrap(
         println!("Installed '{}' from {}", agent_id, bundle.display());
     }
 
-    // Apply LLM presets from config to all installed agents
-    if !config.llm_presets.is_empty() || !config.llm_preset_mapping.is_empty() {
-        for entry in std::fs::read_dir(&config.agents_dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let skill_path = entry.path().join("SKILL.md");
-            if !skill_path.exists() {
-                continue;
-            }
-            let agent_dir_name = entry.file_name().to_string_lossy().to_string();
-
-            if let Ok(content) = std::fs::read_to_string(&skill_path) {
-                if let Some(updated) = apply_llm_preset_to_skill(&content, &config, &agent_dir_name)
-                {
-                    std::fs::write(&skill_path, &updated)?;
-                    patched += 1;
-                    println!("  Patched LLM config for '{}'", agent_dir_name);
-                }
-            }
-        }
-    }
-
     if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
         println!(
             "Created vault master key at {} — back it up; without it encrypted credentials cannot be decrypted.",
@@ -966,156 +992,15 @@ pub fn handle_agent_bootstrap(
     let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
 
     println!(
-        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} patched, {} activated (target: {}).",
+        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} activated (target: {}).",
         copied,
         overwritten,
         skipped,
-        patched,
         activated,
         config.agents_dir.display()
     );
 
     Ok(())
-}
-
-/// First YAML frontmatter slice (between the opening `---` and the next `---` line).
-fn skill_frontmatter_for_llm_patch(content: &str) -> Option<&str> {
-    let s = content.trim_start();
-    if !s.starts_with("---") {
-        return None;
-    }
-    let mut rest = s.get(3..)?;
-    if rest.starts_with('\r') {
-        rest = rest.get(1..)?;
-    }
-    rest = rest.strip_prefix('\n')?;
-    let end = rest.find("\n---")?;
-    Some(&rest[..end])
-}
-
-fn skill_frontmatter_declares_base_url(content: &str) -> bool {
-    skill_frontmatter_for_llm_patch(content)
-        .map(|fm| fm.contains("base_url:"))
-        .unwrap_or(false)
-}
-
-/// Apply LLM preset from config to a SKILL.md frontmatter
-pub(crate) fn apply_llm_preset_to_skill(
-    content: &str,
-    config: &GatewayConfig,
-    agent_id: &str,
-) -> Option<String> {
-    // Resolve via llm_preset_mapping using the full agent id (bootstrap uses the same order).
-    let llm = resolve_llm_config(config, Some(agent_id), None, None, None);
-
-    // Check if current content already has the right LLM
-    if content.contains(&format!("model: \"{}\"", llm.model))
-        && content.contains(&format!("provider: \"{}\"", llm.provider))
-    {
-        // Even if model/provider match, check chat_only, base_url, and api_key_env
-        let chat_only_match = !llm.chat_only || content.contains("chat_only");
-        // If the preset omits base_url, SKILL must not keep a stale proxy (e.g. localhost:8080);
-        // otherwise `refresh_models` / bootstrap would skip patching while the runtime still
-        // pointed at the old URL.
-        let base_url_match = match &llm.base_url {
-            None => !skill_frontmatter_declares_base_url(content),
-            Some(url) => content.contains(url),
-        };
-        let api_key_env_match = llm.api_key_env.is_none()
-            || llm
-                .api_key_env
-                .as_ref()
-                .map_or(true, |e| content.contains(&format!("api_key_env: \"{e}\"")));
-        if chat_only_match && base_url_match && api_key_env_match {
-            return None; // Already correct
-        }
-    }
-
-    // Replace llm_config section
-    let re_provider = regex::Regex::new(r#"(provider:\s*)"[^"]*""#).ok()?;
-    let re_model = regex::Regex::new(r#"(model:\s*)"[^"]*""#).ok()?;
-    let re_temp = regex::Regex::new(r#"(temperature:\s*)[0-9.]+ "#).ok()?;
-
-    let mut updated = content.to_string();
-    updated = re_provider
-        .replace(&updated, format!("${{1}}\"{}\"", llm.provider))
-        .to_string();
-    updated = re_model
-        .replace(&updated, format!("${{1}}\"{}\"", llm.model))
-        .to_string();
-    updated = re_temp
-        .replace(&updated, format!("${{1}}{} ", llm.temperature))
-        .to_string();
-
-    // Handle chat_only
-    if llm.chat_only {
-        if !updated.contains("chat_only") {
-            let re_after_temp = regex::Regex::new(r#"(temperature:\s*[0-9.]+\s*\n)"#).ok()?;
-            updated = re_after_temp
-                .replace(&updated, format!("${{1}}      chat_only: true\n"))
-                .to_string();
-        } else {
-            let re_co = regex::Regex::new(r#"(chat_only:\s*)(true|false)"#).ok()?;
-            updated = re_co.replace(&updated, "${1}true").to_string();
-        }
-    }
-
-    // Handle base_url
-    if let Some(ref url) = llm.base_url {
-        let re_base_url = regex::Regex::new(r#"(base_url:\s*)"[^"]*""#).ok();
-        if let Some(re) = re_base_url {
-            if updated.contains("base_url:") {
-                updated = re
-                    .replace(&updated, format!("${{1}}\"{}\"", url))
-                    .to_string();
-            } else {
-                // Add base_url after chat_only or temperature line
-                let insert_after = if updated.contains("chat_only") {
-                    regex::Regex::new(r#"(chat_only:\s*(?:true|false)\s*\n)"#).ok()
-                } else {
-                    regex::Regex::new(r#"(temperature:\s*[0-9.]+\s*\n)"#).ok()
-                };
-                if let Some(re_after) = insert_after {
-                    updated = re_after
-                        .replace(&updated, format!("${{1}}      base_url: \"{}\"\n", url))
-                        .to_string();
-                }
-            }
-        }
-    } else if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\s*\n"#).ok() {
-        updated = re.replace_all(&updated, "").to_string();
-    }
-
-    // Handle api_key_env
-    if let Some(ref env_var) = llm.api_key_env {
-        let re_api_key = regex::Regex::new(r#"(api_key_env:\s*)"[^"]*""#).ok();
-        if let Some(re) = re_api_key {
-            if updated.contains("api_key_env:") {
-                updated = re
-                    .replace(&updated, format!("${{1}}\"{}\"", env_var))
-                    .to_string();
-            } else {
-                // Add api_key_env after base_url, chat_only, or temperature line
-                let insert_after = if updated.contains("base_url:") {
-                    regex::Regex::new(r#"(base_url:\s*"[^"]*"\s*\n)"#).ok()
-                } else if updated.contains("chat_only") {
-                    regex::Regex::new(r#"(chat_only:\s*(?:true|false)\s*\n)"#).ok()
-                } else {
-                    regex::Regex::new(r#"(temperature:\s*[0-9.]+\s*\n)"#).ok()
-                };
-                if let Some(re_after) = insert_after {
-                    updated = re_after
-                        .replace(
-                            &updated,
-                            format!("${{1}}      api_key_env: \"{}\"\n", env_var),
-                        )
-                        .to_string();
-                }
-            }
-        }
-    }
-
-    Some(updated)
 }
 
 fn resolve_reference_agents_dir(from: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
@@ -1370,11 +1255,14 @@ pub async fn run_agent_with_runtime(
         manifest
     };
 
-    let llm_config = manifest
-        .llm_config
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
-    let driver = autonoetic_gateway::llm::build_driver(llm_config, reqwest::Client::new())?;
+    let profile = autonoetic_gateway::runtime::inference_profile::resolve_inference_profile(
+        agent_id,
+        &manifest,
+        &gateway_config,
+        None,
+    )?;
+    let driver =
+        autonoetic_gateway::llm::build_driver(profile.llm_config, reqwest::Client::new())?;
     run_agent_with_runtime_with_driver(
         manifest,
         instructions,
@@ -1863,6 +1751,7 @@ pub fn handle_agent_import_skill(
         },
         capabilities,
         llm_preset: parsed_manifest.llm_preset.clone(),
+        llm_overrides: parsed_manifest.llm_overrides.clone(),
         llm_config,
         limits: parsed_manifest.limits.clone(),
         background: parsed_manifest.background.clone(),
@@ -1946,6 +1835,20 @@ pub fn handle_agent_import_skill(
             for cap in &target_manifest.capabilities {
                 let cap_yaml = serde_json::to_string(cap).unwrap_or_default();
                 lines.push(format!("      - {}", cap_yaml));
+            }
+        }
+        if let Some(ref preset) = target_manifest.llm_preset {
+            lines.push(format!("    llm_preset: {}", preset));
+        }
+        if let Some(ref overrides) = target_manifest.llm_overrides {
+            if let Ok(yaml) = serde_yaml::to_string(overrides) {
+                let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
+                if !yaml.trim().is_empty() {
+                    lines.push("    llm_overrides:".to_string());
+                    for line in yaml.lines() {
+                        lines.push(format!("      {}", line));
+                    }
+                }
             }
         }
         if let Some(ref llm) = target_manifest.llm_config {
@@ -2475,9 +2378,9 @@ Use tools when needed.
 
     #[test]
     fn test_render_skill_template_supports_planner_template() {
-        let llm = LlmTemplateConfig::default();
-        let skill = render_skill_template("planner.default", Some("planner"), &llm);
+        let skill = render_skill_template("planner.default", Some("planner"), "smart", None);
         assert!(skill.contains("agent:\n      id: \"planner.default\""));
+        assert!(skill.contains("llm_preset: smart"));
         assert!(skill.contains("Front-door lead agent for ambiguous goals."));
         assert!(skill.contains("You are a planner agent."));
     }
@@ -2564,49 +2467,6 @@ Use tools when needed.
             .insert("planner".to_string(), "local".to_string());
         let llm = resolve_llm_config(&config, Some("planner.collaborative"), None, None, None);
         assert_eq!(llm.provider, "llamacpp");
-    }
-
-    #[test]
-    fn test_apply_llm_preset_strips_stale_base_url_when_preset_has_none() {
-        let mut config = GatewayConfig::default();
-        config.llm_presets.insert(
-            "default".to_string(),
-            autonoetic_types::config::LlmPreset {
-                provider: Some("openrouter".to_string()),
-                model: Some("z-ai/glm-5-turbo".to_string()),
-                temperature: Some(0.2),
-                fallback_provider: None,
-                fallback_model: None,
-                chat_only: None,
-                context_window_tokens: None,
-                base_url: None,
-                tier: None,
-                cost: None,
-                latency: None,
-                api_key_env: None,
-                thinking: None,
-                routing: None,
-            },
-        );
-
-        let skill = r#"---
-metadata:
-  autonoetic:
-    agent:
-      id: "specialized_builder.default"
-    llm_config:
-      provider: "openrouter"
-      model: "z-ai/glm-5-turbo"
-      temperature: 0.2
-      base_url: "http://localhost:8080/v1/chat/completions"
----
-"#;
-
-        let updated =
-            apply_llm_preset_to_skill(skill, &config, "specialized_builder.default")
-                .expect("should remove stale base_url");
-        assert!(!updated.contains("localhost:8080"));
-        assert!(!updated.contains("base_url:"));
     }
 
     #[test]

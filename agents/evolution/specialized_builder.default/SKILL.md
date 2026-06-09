@@ -15,10 +15,7 @@ metadata:
       id: "specialized_builder.default"
       name: "Specialized Builder Default"
       description: "Installs new durable agents from specifications."
-    llm_config:
-      provider: "openrouter"
-      model: "z-ai/glm-5-turbo"
-      temperature: 0.2
+    llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "agent."]
@@ -108,11 +105,7 @@ For agents that only use existing gateway tools (`credential_request`, `memory.*
      "description": "Operational Moltbook agent — posts to feed and monitors replies",
      "instructions": "# Moltbook Operations\n\n...",
      "execution_mode": "reasoning",
-     "llm_config": {
-       "provider": "openrouter",
-       "model": "google/gemini-3-flash-preview",
-       "temperature": 0.2
-     },
+     "llm_preset": "agentic",
      "capabilities": [
        {"type": "CredentialAccess", "services": ["moltbook"]},
        {"type": "NetworkAccess", "hosts": ["localhost"]},
@@ -137,7 +130,7 @@ For agents that only use existing gateway tools (`credential_request`, `memory.*
 
 **Rules for artifact-free agents:**
 - `execution_mode` must be `reasoning` (script agents always need artifacts)
-- `llm_config` is required
+- `llm_preset` is required (names a gateway `llm_presets` key)
 - `CodeExecution` and `AgentSpawn` are forbidden (these require code review)
 - All other capabilities work: `CredentialAccess`, `NetworkAccess`, `ReadAccess`,
   `WriteAccess`, `MemoryAccess`, `BackgroundReevaluation`, `SchedulerAccess`
@@ -160,14 +153,8 @@ Use `agent_revision_create_from_intent` as the canonical install path.
     {"type": "ReadAccess", "scopes": ["self.*"]},
     {"type": "WriteAccess", "scopes": ["self.*"]}
   ],
-  "llm_config": {
-    "provider": "openrouter",
-    "model": "google/gemini-3-flash-preview",
-    "temperature": 0.1,
-    "fallback_provider": null,
-    "fallback_model": null,
-    "chat_only": false
-  },
+  "llm_preset": "coding",
+  "llm_overrides": { "temperature": 0.1 },
   "io": {
     "accepts": {
       "type": "object",
@@ -209,7 +196,7 @@ Activates the created revision.
 | `description` | required; gateway writes canonical metadata from this intent |
 | `instructions` | required; free-form markdown body provided by agent. **Must match the SKILL body that was bundled in the `artifact_ref`** for pure-reasoning installs — agent-factory ensures this. |
 | `capabilities` | declared capabilities for the agent |
-| `llm_config` | required when `execution_mode=reasoning`; **OMIT entirely for `execution_mode=script`** |
+| `llm_preset` | required when `execution_mode=reasoning` (gateway `llm_presets` key); **OMIT for `execution_mode=script`** |
 | `io` | optional; pass through from delegation as-is. The gateway stores it verbatim — no validation, no inference. For reasoning agents: include `io.returns` (output contract) but NOT `io.accepts` (over-constrains callers). For script agents: include both `io.accepts` and `io.returns` when the script has clear input/output shapes. Keep schemas minimal: `{ type: "object", required: ["task"], properties: { task: { type: "string" } } }` |
 
 ### Key Rules:
@@ -308,7 +295,7 @@ For `execution_mode: "script"` on `agent_revision_create_from_intent`, you MUST 
   "credential_services": ["my-service"]  // OPTIONAL - service names for credential env injection at spawn time (derived from the service name in the planner's hand-off)
 }
 ```
-**Missing `script_entry` will cause install to fail! Also: do NOT include `llm_config` for script agents — including it with a missing `model` field will cause install to fail.**
+**Missing `script_entry` will cause install to fail! Also: do NOT include `llm_preset` for script agents.**
 
 ### Required: promotion_gate
 
@@ -349,7 +336,7 @@ The install request shape for `audit_only`:
   "instructions": "<same SKILL body that was bundled>",
   "capabilities": [...],
   "execution_mode": "reasoning",
-  "llm_config": {...},
+  "llm_preset": "agentic",
   "promotion_gate": {
     "auditor_pass": true,
     "evaluator_pass": null,

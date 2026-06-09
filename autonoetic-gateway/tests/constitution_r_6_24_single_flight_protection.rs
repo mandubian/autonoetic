@@ -30,6 +30,7 @@ fn planner_manifest() -> AgentManifest {
             max_children: 2,
             max_spawn_depth: 0,
         }],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

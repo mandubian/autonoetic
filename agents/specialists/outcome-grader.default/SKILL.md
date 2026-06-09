@@ -15,9 +15,8 @@ metadata:
       id: "outcome-grader.default"
       name: "Outcome Grader"
       description: "Independent judge of session completion. Reads a structured SessionOverview and emits a single Completion verdict (achieved | partially_achieved | failed | aborted). Observer-only — no tools, no side effects."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: coding
+    llm_overrides:
       temperature: 0.0
     # No declared capabilities. The harness constructs the executor
     # with an empty NativeToolRegistry, so this agent has no callable

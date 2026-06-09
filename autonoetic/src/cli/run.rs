@@ -261,43 +261,12 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
         resolved.provider, resolved.model, resolved.base_url
     );
 
-    let mut patched = 0usize;
-    let mut unchanged = 0usize;
-    for entry in std::fs::read_dir(&config.agents_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let skill_path = entry.path().join("SKILL.md");
-        if !skill_path.exists() {
-            continue;
-        }
-        let agent_dir_name = entry.file_name().to_string_lossy().to_string();
-        let content = std::fs::read_to_string(&skill_path)?;
-        if let Some(patched_content) = super::agent::apply_llm_preset_to_skill(
-            &content, &config, &agent_dir_name,
-        ) {
-            std::fs::write(&skill_path, &patched_content)?;
-            patched += 1;
-            eprintln!("  Patched model for '{}'", agent_dir_name);
-        } else {
-            unchanged += 1;
-        }
-    }
-
-    if patched > 0 {
-        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-        let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
-        eprintln!(
-            "  Models refreshed: {} patched, {} unchanged, {} new revisions.",
-            patched, unchanged, activated
-        );
-    } else {
-        eprintln!(
-            "  All agents already use the configured model ({} checked).",
-            patched + unchanged
-        );
-    }
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
+    eprintln!(
+        "  Re-activated {} agent revision(s) with updated config presets.",
+        activated
+    );
     Ok(())
 }
 

@@ -26,6 +26,20 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
     }
 }
 
+/// Persist a `GatewayConfig` to a YAML file (used for operator-local preset injection).
+///
+/// Rewrites the file from structured data — inline comments and formatting are not preserved.
+pub fn save_config(path: &Path, config: &GatewayConfig) -> anyhow::Result<()> {
+    let yaml = serde_yaml::to_string(config)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
+    let body = format!(
+        "# WARNING: Rewritten by autonoetic — comments and manual formatting were not preserved.\n\
+         # Re-merge from config/config-template.yaml or your backup before editing further.\n\n{yaml}"
+    );
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 /// Push the configured `chars_per_token` override (if any) into the
 /// process-wide atomic that the prompt-budget estimator reads. Called from
 /// `load_config` so every code path that consumes a `GatewayConfig` ends up
