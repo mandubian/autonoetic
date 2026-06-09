@@ -6,9 +6,11 @@ passes (P-2.8) but silently ignored the `unit_test_runner` verdict.
 Enforcement already shipped in this PR; design:
 `docs/design/promotion-completeness-invariant.md`.
 
-> ⚠️ The `gateway-constitution.lock.json` in this directory has been
-> regenerated and signed by the operator as part of this PR.
-> **The agent never signs the lock; this is the operator's step.**
+> ⚠️ The `gateway-constitution.lock.json` in this directory was regenerated
+> and signed as part of this PR. Before activation, **verify** the lock
+> matches the canonical digest and counts (step 6) — a re-sign is only
+> needed if verification fails. **The agent never signs the lock; this is
+> the operator's step.**
 
 Only **P-2.26** was added vs. 2026.06.05. Rule count: **173 → 174** rules
 (rights unchanged at 14). Signer is unchanged
@@ -19,13 +21,17 @@ not change.
 
 1. **Review** the diff: the single new row `P-2.26` in §2, and the design doc.
 
-2. **Recompute + sign the lock** (requires PyNaCl and your signing key):
+2. **Verify the lock** — the file was signed during the PR:
+   ```bash
+   cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_counts
+   ```
+   If verification fails, **recompute + sign** (requires PyNaCl and your signing key):
    ```bash
    python3 docs/constitution/recompute_lock.py --version 2026.06.08 \
      --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
    ```
-   This regenerates `2026.06.08/gateway-constitution.lock.json` with the new
-   digest + counts and a fresh signature.
+   Re-signing regenerates `2026.06.08/gateway-constitution.lock.json` with the
+   correct digest + counts and a fresh signature.
 
 3. **Activate** — point the gateway at 2026.06.08 (three places):
    - `autonoetic-types/src/config.rs` — `default_constitution_source_path()` /

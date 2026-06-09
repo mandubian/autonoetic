@@ -576,16 +576,46 @@ pub fn bootstrap_sdk_snapshot(gateway_dir: &Path) -> Result<()> {
     let py_src = sdk_root.join("python").join("autonoetic_sdk");
     if py_src.exists() {
         let py_dest = dest.join("python").join("autonoetic_sdk");
-        seed_missing(&py_src, &py_dest)?;
+        sync_dir(&py_src, &py_dest)?;
     }
 
     // TypeScript SDK
     let ts_src = sdk_root.join("typescript");
     if ts_src.exists() {
         let ts_dest = dest.join("typescript");
-        seed_missing(&ts_src, &ts_dest)?;
+        sync_dir(&ts_src, &ts_dest)?;
     }
 
+    Ok(())
+}
+
+/// Recursively copy files from `src` to `dst`. Overwrites when the destination
+/// file differs in size or mtime. Used for the SDK snapshot — on upgrade the
+/// SDK must be refreshed so the gateway can always find the latest bindings.
+fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            sync_dir(&entry.path(), &dest_path)?;
+        } else if file_type.is_file() {
+            let src_meta = entry.metadata()?;
+            let should_copy = match dest_path.metadata() {
+                Ok(dst_meta) => {
+                    dst_meta.len() != src_meta.len()
+                        || dst_meta.modified().ok() != src_meta.modified().ok()
+                }
+                Err(_) => true,
+            };
+            if should_copy {
+                std::fs::copy(&entry.path(), &dest_path)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -607,6 +637,69 @@ pub fn bootstrap_wiki_snapshot(gateway_dir: &Path) -> Result<()> {
 
     let dest = gateway_dir.join("wiki");
     seed_missing(&wiki_src, &dest)?;
+
+    // Merge new built-in index entries into the existing index so new pages
+    // shipped in binary upgrades become discoverable without overwriting
+    // operator-promoted entries.
+    let src_index = wiki_src.join("index.toml");
+    let dst_index = dest.join("index.toml");
+    if src_index.exists() {
+        merge_index_toml(&src_index, &dst_index)?;
+    }
+
+    Ok(())
+}
+
+/// Merge page entries from `src` index.toml into `dst` index.toml. Entries in
+/// `dst` whose `id` matches an entry in `src` are kept as-is (operator edits
+/// or promotions win). New entries from `src` that have no matching `id` in
+/// `dst` are appended, ensuring built-in pages shipped in upgrades become
+/// discoverable without destroying operator-promoted state.
+fn merge_index_toml(src: &Path, dst: &Path) -> Result<()> {
+    let src_content = std::fs::read_to_string(src)?;
+    let src_val: toml::Value = src_content.parse()?;
+    let src_pages = src_val
+        .get("pages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut dst_pages: Vec<toml::Value> = if dst.exists() {
+        let dst_content = std::fs::read_to_string(dst)?;
+        match dst_content.parse::<toml::Value>() {
+            Ok(v) => v.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default(),
+            Err(_) => {
+                tracing::warn!(
+                    target: "bootstrap",
+                    "wiki index.toml parse error, rebuilding from source: {}",
+                    dst.display(),
+                );
+                src_pages.clone()
+            }
+        }
+    } else {
+        src_pages.clone()
+    };
+
+    let existing_ids: std::collections::HashSet<String> = dst_pages
+        .iter()
+        .filter_map(|p| p.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+
+    for entry in &src_pages {
+        if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+            if !existing_ids.contains(id) {
+                dst_pages.push(entry.clone());
+            }
+        }
+    }
+
+    let merged = toml::Value::Table(
+        vec![("pages".to_string(), toml::Value::Array(dst_pages))]
+            .into_iter()
+            .collect(),
+    );
+    std::fs::write(dst, merged.to_string())?;
     Ok(())
 }
 

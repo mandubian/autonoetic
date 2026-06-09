@@ -406,6 +406,88 @@ pub fn approve_request_with_options(
         );
     }
 
+    // WikiProposal materialization — must happen before the decision is
+    // committed so that an I/O failure leaves the request pending (operator
+    // can retry) rather than marking it Approved with partial materialization.
+    let wiki_materialized = if let ScheduledAction::WikiProposal {
+        page_id,
+        title,
+        content,
+        tags,
+        content_sha256,
+        proposed_by_agent,
+        proposed_by_session,
+    } = &req.action
+    {
+        let wiki_dir = crate::execution::gateway_root_dir(config).join("wiki");
+        std::fs::create_dir_all(&wiki_dir)?;
+        // Write .md file atomically via temp rename
+        let md_path = wiki_dir.join(format!("{}.md", page_id));
+        let tmp_path = wiki_dir.join(format!("{}.md.tmp", page_id));
+        std::fs::write(&tmp_path, content.as_bytes())?;
+        if let Err(e) = std::fs::rename(&tmp_path, &md_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            anyhow::bail!("Failed to rename wiki page: {}", e);
+        }
+        // Update index.toml
+        let index_path = wiki_dir.join("index.toml");
+        let mut index: Vec<toml::Value> = if index_path.exists() {
+            let index_content = std::fs::read_to_string(&index_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read wiki index '{}': {}", index_path.display(), e)
+            })?;
+            let parsed: toml::Value = index_content.parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse wiki index '{}': {}", index_path.display(), e)
+            })?;
+            parsed.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let entry = toml::Value::Table({
+            let mut m = toml::map::Map::new();
+            m.insert("id".to_string(), toml::Value::String(page_id.clone()));
+            m.insert("title".to_string(), toml::Value::String(title.clone()));
+            m.insert("file".to_string(), toml::Value::String(format!("{}.md", page_id)));
+            m.insert("tags".to_string(), toml::Value::Array(
+                tags.iter().map(|t| toml::Value::String(t.clone())).collect()
+            ));
+            m
+        });
+        if let Some(pos) = index.iter().position(|e| {
+            e.get("id").and_then(|v| v.as_str()) == Some(page_id.as_str())
+        }) {
+            index[pos] = entry;
+        } else {
+            index.push(entry);
+        }
+        let index_content = toml::Value::Table({
+            let mut m = toml::map::Map::new();
+            m.insert("pages".to_string(), toml::Value::Array(index));
+            m
+        });
+        let toml_str = index_content.to_string();
+        let tmp_index = wiki_dir.join("index.toml.tmp");
+        std::fs::write(&tmp_index, &toml_str)?;
+        if let Err(e) = std::fs::rename(&tmp_index, &index_path) {
+            let _ = std::fs::remove_file(&tmp_index);
+            anyhow::bail!("Failed to rename index.toml: {}", e);
+        }
+        tracing::info!(
+            target: "approval",
+            page_id = %page_id,
+            title = %title,
+            "Wiki page promoted via approval"
+        );
+        Some(serde_json::json!({
+            "page_id": page_id,
+            "title": title,
+            "content_sha256": content_sha256,
+            "proposed_by_agent": proposed_by_agent,
+            "proposed_by_session": proposed_by_session,
+        }))
+    } else {
+        None
+    };
+
     let decision = decide_request_with_options(
         config,
         gateway_store,
@@ -440,83 +522,9 @@ pub fn approve_request_with_options(
         }
     }
 
-    // WikiProposal materialization
-    if let ScheduledAction::WikiProposal {
-        page_id,
-        title,
-        content,
-        tags,
-        content_sha256,
-        proposed_by_agent,
-        proposed_by_session,
-    } = &decision.action
-    {
+    // Emit causal event after the decision is recorded.
+    if let Some(meta) = wiki_materialized {
         if matches!(decision.status, ApprovalStatus::Approved) {
-            let wiki_dir = crate::execution::gateway_root_dir(config).join("wiki");
-            if let Err(e) = std::fs::create_dir_all(&wiki_dir) {
-                anyhow::bail!("Failed to create wiki directory: {}", e);
-            }
-            // Write .md file atomically via temp rename
-            let md_path = wiki_dir.join(format!("{}.md", page_id));
-            let tmp_path = wiki_dir.join(format!("{}.md.tmp", page_id));
-            if let Err(e) = std::fs::write(&tmp_path, content.as_bytes()) {
-                anyhow::bail!("Failed to write wiki page: {}", e);
-            }
-            if let Err(e) = std::fs::rename(&tmp_path, &md_path) {
-                let _ = std::fs::remove_file(&tmp_path);
-                anyhow::bail!("Failed to rename wiki page: {}", e);
-            }
-            // Update index.toml
-            let index_path = wiki_dir.join("index.toml");
-            let mut index: Vec<toml::Value> = if index_path.exists() {
-                let index_content = std::fs::read_to_string(&index_path).map_err(|e| {
-                    anyhow::anyhow!("Failed to read wiki index '{}': {}", index_path.display(), e)
-                })?;
-                let parsed: toml::Value = index_content.parse().map_err(|e| {
-                    anyhow::anyhow!("Failed to parse wiki index '{}': {}", index_path.display(), e)
-                })?;
-                parsed.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let entry = toml::Value::Table({
-                let mut m = toml::map::Map::new();
-                m.insert("id".to_string(), toml::Value::String(page_id.clone()));
-                m.insert("title".to_string(), toml::Value::String(title.clone()));
-                m.insert("file".to_string(), toml::Value::String(format!("{}.md", page_id)));
-                m.insert("tags".to_string(), toml::Value::Array(
-                    tags.iter().map(|t| toml::Value::String(t.clone())).collect()
-                ));
-                m
-            });
-            if let Some(pos) = index.iter().position(|e| {
-                e.get("id").and_then(|v| v.as_str()) == Some(page_id.as_str())
-            }) {
-                index[pos] = entry;
-            } else {
-                index.push(entry);
-            }
-            let index_content = toml::Value::Table({
-                let mut m = toml::map::Map::new();
-                m.insert("pages".to_string(), toml::Value::Array(index));
-                m
-            });
-            let toml_str = index_content.to_string();
-            let tmp_index = wiki_dir.join("index.toml.tmp");
-            if let Err(e) = std::fs::write(&tmp_index, &toml_str) {
-                anyhow::bail!("Failed to write index.toml: {}", e);
-            }
-            if let Err(e) = std::fs::rename(&tmp_index, &index_path) {
-                let _ = std::fs::remove_file(&tmp_index);
-                anyhow::bail!("Failed to rename index.toml: {}", e);
-            }
-            tracing::info!(
-                target: "approval",
-                page_id = %page_id,
-                title = %title,
-                "Wiki page promoted via approval"
-            );
-            // Emit causal event
             let causal_logger = crate::execution::init_gateway_causal_logger(config)?;
             let mut trace_session = crate::tracing::TraceSession::create_with_session_id(
                 crate::tracing::SessionId::from_string(decision.session_id.clone()),
@@ -528,20 +536,18 @@ pub fn approve_request_with_options(
                 "wiki.promoted",
                 None,
                 Some(serde_json::json!({
-                    "page_id": page_id,
-                    "title": title,
-                    "content_sha256": content_sha256,
-                    "proposed_by_agent": proposed_by_agent,
-                    "proposed_by_session": proposed_by_session,
+                    "page_id": meta["page_id"],
+                    "title": meta["title"],
+                    "content_sha256": meta["content_sha256"],
+                    "proposed_by_agent": meta["proposed_by_agent"],
+                    "proposed_by_session": meta["proposed_by_session"],
                     "approved_by": decision.decided_by,
                 })),
             );
         } else {
             tracing::info!(
                 target: "approval",
-                page_id = %page_id,
-                status = ?decision.status,
-                "Wiki proposal rejected or cancelled; content discarded"
+                "Wiki proposal rejected or cancelled; files written beforehand discarded"
             );
         }
     }
