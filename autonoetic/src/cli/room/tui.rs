@@ -1061,6 +1061,38 @@ pub fn run(
                                             );
                                         }
                                     }
+                                    SlashCommand::ForkSession { at_turn, message } => {
+                                        match fork_session(
+                                            client,
+                                            root_session_id,
+                                            at_turn,
+                                            message.as_deref(),
+                                        ) {
+                                            Ok((new_id, fork_turn)) => {
+                                                switch_session(
+                                                    client,
+                                                    &mut entries,
+                                                    &mut cursor,
+                                                    &mut selected,
+                                                    &mut detail,
+                                                    &mut follow,
+                                                    &mut resolved,
+                                                    &mut acted,
+                                                    &mut floor,
+                                                    root_session_id,
+                                                    target_agent_id,
+                                                    limit,
+                                                    &new_id,
+                                                    &mut force_timeline_refresh,
+                                                );
+                                                session_pick_list = None;
+                                                status = Some(format!(
+                                                    "→ forked at turn {fork_turn} → {new_id} · send a message to continue this branch"
+                                                ));
+                                            }
+                                            Err(e) => status = Some(e),
+                                        }
+                                    }
                                     SlashCommand::Unknown(verb) => {
                                         let v = if verb.is_empty() {
                                             "(empty)".to_string()
@@ -1366,6 +1398,50 @@ pub fn run(
                         // by the floor or by squash — but the toggle matters for
                         // any channel that doesn't filter on altitude).
                         KeyCode::Char('R') => show_reasoning = !show_reasoning,
+                        // F: fork the session from the selected row's turn and
+                        // switch to the new branch — backtrack to a past state to
+                        // try a different approach. Checkpoints exist only at
+                        // yield points, so the gateway rejects turns it has no
+                        // checkpoint for (it lists the forkable ones).
+                        KeyCode::Char('F') => {
+                            match selected_turn_id(&view_indexed, &view_visible, selected)
+                                .and_then(|tid| turn_number_of(&tid))
+                            {
+                                Some(turn) => {
+                                    match fork_session(client, root_session_id, Some(turn), None) {
+                                        Ok((new_id, fork_turn)) => {
+                                            switch_session(
+                                                client,
+                                                &mut entries,
+                                                &mut cursor,
+                                                &mut selected,
+                                                &mut detail,
+                                                &mut follow,
+                                                &mut resolved,
+                                                &mut acted,
+                                                &mut floor,
+                                                root_session_id,
+                                                target_agent_id,
+                                                limit,
+                                                &new_id,
+                                                &mut force_timeline_refresh,
+                                            );
+                                            session_pick_list = None;
+                                            status = Some(format!(
+                                                "→ forked at turn {fork_turn} → {new_id} · send a message to continue this branch"
+                                            ));
+                                        }
+                                        Err(e) => status = Some(e),
+                                    }
+                                }
+                                None => {
+                                    status = Some(
+                                        "✗ select a row with a turn to fork from (or use /fork --at-turn N)"
+                                            .to_string(),
+                                    )
+                                }
+                            }
+                        }
                         // i: compose a free-form message into the session (#405).
                         KeyCode::Char('i') => {
                             if let Some(g) =
@@ -2682,10 +2758,77 @@ fn switch_session(
 
 /// Fetch the most recent session id, optionally filtered by agent. Returns
 /// `None` when the gateway has no matching session.
+/// System sessions (e.g. scheduled system agents, auto-learning jobs, the
+/// sentinel) are recorded under the reserved `"system"` root id. The operator
+/// can't resume or switch into them, so `/session` hides them.
+fn is_system_session(root_session_id: &str) -> bool {
+    root_session_id == "system"
+}
+
+/// Turn id of the timeline row the cursor is on, if any. Maps the view cursor
+/// (`selected`) through the rendered-row → source-entry indirection; collapsed
+/// runs resolve to their first entry. Returns `None` for rows with no turn
+/// (operator messages, session-level events), which can't be forked from.
+fn selected_turn_id(
+    view_indexed: &[(RenderedRow, RowSource)],
+    view_visible: &[SessionTimelineEntry],
+    selected: usize,
+) -> Option<String> {
+    let (_, src) = view_indexed.get(selected)?;
+    let idx = match src {
+        RowSource::Single(i) => *i,
+        RowSource::Run { start, .. } => *start,
+    };
+    view_visible.get(idx)?.turn_id.clone()
+}
+
+/// Parse the numeric turn from a `turn-000003` id. Turn ids are zero-padded,
+/// but `parse::<u64>` handles the leading zeros directly.
+fn turn_number_of(turn_id: &str) -> Option<u64> {
+    turn_id.strip_prefix("turn-").and_then(|n| n.parse::<u64>().ok())
+}
+
+/// Fork the current root session into a new branch via `session.fork`.
+/// Returns `(new_session_id, fork_turn)` on success, or a ready-to-display
+/// `✗ …` status string on failure. `at_turn = None` forks from the latest
+/// checkpoint; checkpoints exist only at yield points, so the gateway rejects
+/// turns it has no checkpoint for (its error — listing forkable turns — is
+/// surfaced verbatim).
+fn fork_session(
+    client: &RoomClient,
+    source_session_id: &str,
+    at_turn: Option<u64>,
+    branch_message: Option<&str>,
+) -> Result<(String, u64), String> {
+    let mut params = serde_json::json!({ "source_session_id": source_session_id });
+    if let Some(turn) = at_turn {
+        params["at_turn"] = serde_json::json!(turn);
+    }
+    if let Some(msg) = branch_message {
+        params["branch_message"] = serde_json::json!(msg);
+    }
+    match rpc(client, "session.fork", params) {
+        Ok(value) => {
+            let new_id = value
+                .get("new_session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    "✗ session.fork: malformed response (no new_session_id)".to_string()
+                })?;
+            let fork_turn = value.get("fork_turn").and_then(|v| v.as_u64()).unwrap_or(0);
+            Ok((new_id, fork_turn))
+        }
+        Err(e) => Err(format!("✗ /fork failed: {e}")),
+    }
+}
+
 fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<String> {
+    // Fetch a small batch (not just 1) so a leading system session doesn't
+    // shadow the most recent operator-resumable one.
     let params = serde_json::json!({
         "agent_id": agent,
-        "limit": 1,
+        "limit": 16,
     });
     let value = rpc(client, "session.list", params).ok()?;
     let parsed: serde_json::Result<autonoetic_types::session_timeline::SessionListResult> =
@@ -2694,8 +2837,8 @@ fn resolve_latest_session(client: &RoomClient, agent: Option<&str>) -> Option<St
         .ok()?
         .sessions
         .into_iter()
-        .next()
         .map(|e| e.root_session_id)
+        .find(|id| !is_system_session(id))
 }
 
 /// Build a multi-line session list for `/session` and `/session list [agent]`,
@@ -2946,40 +3089,53 @@ fn list_cron_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
 fn list_sessions_detail(client: &RoomClient, agent: Option<&str>) -> (Vec<String>, Vec<String>) {
     let params = serde_json::json!({
         "agent_id": agent,
-        "limit": 9,
+        // Over-fetch a little so dropping non-resumable system sessions still
+        // leaves a full page of operator-resumable rows. Sessions arrive
+        // already ordered by most-recent activity (gateway: `last_ts DESC`).
+        "limit": 25,
     });
     match rpc(client, "session.list", params) {
         Ok(value) => match serde_json::from_value::<
             autonoetic_types::session_timeline::SessionListResult,
         >(value)
         {
-            Ok(parsed) if parsed.sessions.is_empty() => {
-                let hint = agent
-                    .map(|a| format!(" for agent '{a}'"))
-                    .unwrap_or_default();
-                (
-                    vec![format!("(no sessions{hint}) — /session <id> or start one with `autonoetic run`")],
-                    Vec::new(),
-                )
-            }
             Ok(parsed) => {
+                // System sessions can't be resumed/switched into — hide them.
+                // The remaining rows keep their most-recent-first ordering.
+                let sessions: Vec<_> = parsed
+                    .sessions
+                    .into_iter()
+                    .filter(|s| !is_system_session(&s.root_session_id))
+                    .take(9)
+                    .collect();
+                if sessions.is_empty() {
+                    let hint = agent
+                        .map(|a| format!(" for agent '{a}'"))
+                        .unwrap_or_default();
+                    return (
+                        vec![format!("(no sessions{hint}) — /session <id> or start one with `autonoetic run`")],
+                        Vec::new(),
+                    );
+                }
                 let mut lines = if let Some(a) = agent {
                     vec![format!("sessions for agent '{a}':")]
                 } else {
                     vec!["recent sessions:".to_string()]
                 };
-                let ids: Vec<String> = parsed
-                    .sessions
+                let ids: Vec<String> = sessions
                     .iter()
                     .map(|s| s.root_session_id.clone())
                     .collect();
-                for (i, s) in parsed.sessions.iter().enumerate() {
+                for (i, s) in sessions.iter().enumerate() {
+                    // The first row is the most recently active one — flag it.
+                    let latest = if i == 0 { "  ← latest" } else { "" };
                     lines.push(format!(
-                        "  [{}] {} [{}] @ {}",
+                        "  [{}] {} [{}] @ {}{}",
                         i + 1,
                         s.root_session_id,
                         s.agent_id,
-                        s.last_active_at
+                        s.last_active_at,
+                        latest
                     ));
                 }
                 lines.push("→ press a number to switch, or /session <id>".to_string());
@@ -3371,6 +3527,15 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_sessions_are_hidden_from_session_list() {
+        // The reserved `"system"` root id is used by scheduled system agents,
+        // auto-learning jobs, and the sentinel — none are operator-resumable.
+        assert!(is_system_session("system"));
+        assert!(!is_system_session("session-abc123"));
+        assert!(!is_system_session("systematic-session"));
+    }
 
     #[test]
     fn main_list_page_step_accounts_for_chrome() {

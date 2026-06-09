@@ -1853,6 +1853,11 @@ impl JsonRpcRouter {
                     new_session_id: Option<String>,
                     #[serde(default)]
                     target_agent_id: Option<String>,
+                    /// Optional turn number to branch from. When omitted, forks
+                    /// from the latest checkpoint. Checkpoints exist only at
+                    /// yield points, so not every turn is forkable.
+                    #[serde(default)]
+                    at_turn: Option<u64>,
                 }
 
                 let params: ForkParams = match serde_json::from_value(req.params.clone()) {
@@ -1866,13 +1871,53 @@ impl JsonRpcRouter {
                     }
                 };
 
-                // Fork from the latest checkpoint of the source session
-                let fork = match crate::runtime::checkpoint::SessionFork::fork(
-                    &self.config,
-                    &params.source_session_id,
-                    params.new_session_id.as_deref(),
-                    params.branch_message.as_deref(),
-                ) {
+                // Fork from a specific historical turn when requested, else
+                // from the latest checkpoint of the source session.
+                let fork_result = if let Some(turn) = params.at_turn {
+                    match crate::runtime::checkpoint::load_checkpoint(
+                        &self.config,
+                        &params.source_session_id,
+                        &crate::runtime::checkpoint::turn_id_for(turn),
+                    ) {
+                        Ok(Some(checkpoint)) => {
+                            crate::runtime::checkpoint::SessionFork::fork_from_checkpoint(
+                                &self.config,
+                                &checkpoint,
+                                params.new_session_id.as_deref(),
+                                params.branch_message.as_deref(),
+                            )
+                        }
+                        Ok(None) => {
+                            let available = crate::runtime::checkpoint::list_checkpoints(
+                                &self.config,
+                                &params.source_session_id,
+                            )
+                            .unwrap_or_default();
+                            let hint = if available.is_empty() {
+                                " (no checkpoints exist for this session)".to_string()
+                            } else {
+                                format!(" — forkable turns: {}", available.join(", "))
+                            };
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!(
+                                    "No checkpoint found for session '{}' at turn {}{}",
+                                    params.source_session_id, turn, hint
+                                ),
+                            );
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    crate::runtime::checkpoint::SessionFork::fork(
+                        &self.config,
+                        &params.source_session_id,
+                        params.new_session_id.as_deref(),
+                        params.branch_message.as_deref(),
+                    )
+                };
+                let fork = match fork_result {
                     Ok(f) => f,
                     Err(e) => {
                         return JsonRpcResponse::error(
@@ -1882,6 +1927,28 @@ impl JsonRpcRouter {
                         );
                     }
                 };
+
+                // Mirror the source timeline into the forked session up to the
+                // fork turn (best effort) so the Session Room shows the inherited
+                // history immediately instead of an empty timeline. A fork writes
+                // a checkpoint but no `live_digest_events` of its own.
+                let mut mirrored_events = 0usize;
+                if let Some(store) = self.execution.gateway_store() {
+                    match store.clone_timeline_for_fork(
+                        &params.source_session_id,
+                        &fork.new_session_id,
+                        fork.fork_turn as u64,
+                    ) {
+                        Ok(n) => mirrored_events = n,
+                        Err(e) => tracing::warn!(
+                            target: "session.fork",
+                            source = %params.source_session_id,
+                            new = %fork.new_session_id,
+                            error = %e,
+                            "Failed to mirror source timeline into fork"
+                        ),
+                    }
+                }
 
                 // Determine target agent
                 let target_agent_id = params
@@ -1922,6 +1989,7 @@ impl JsonRpcRouter {
                         "fork_turn": fork.fork_turn,
                         "history_handle": fork.history_handle,
                         "message_count": fork.initial_history.len(),
+                        "mirrored_events": mirrored_events,
                     }),
                 )
             }

@@ -496,6 +496,16 @@ autonoetic trace fork session-123 --new-session-id my-fork --agent researcher.de
 | `--interactive` | Start interactive chat session after forking |
 | `--json` | Machine-readable JSON output |
 
+The fork writes a fresh checkpoint under the new session id, so the branch is
+immediately **runnable** — sending it a message resumes from the fork point
+with the full branch-point context. Checkpoints exist only at yield points
+(hibernation, approval, budget, escalation…), not at every turn, so `--at-turn`
+can only target a turn that has a checkpoint; otherwise it errors and lists the
+forkable turns. The same branch can be created from the Session Room with
+`/fork [--at-turn N] [message]` (it forks the current session and switches to
+the new one). See `docs/session-forking.md` for the full mechanism, including
+the timeline-mirroring design choice (copy vs reuse-by-reference).
+
 ### `autonoetic trace history`
 
 Show conversation history for a session.

@@ -1481,13 +1481,27 @@ pub async fn handle_trace_fork(
         let checkpoint = autonoetic_gateway::runtime::checkpoint::load_checkpoint(
             &config,
             source_session_id,
-            &format!("turn-{:04}", turn),
+            &autonoetic_gateway::runtime::checkpoint::turn_id_for(turn as u64),
         )?
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No checkpoint found for session '{}' at turn {}",
+            // Checkpoints exist only at yield points (hibernation, approval,
+            // budget, escalation…), not at every turn — so list the turns that
+            // can actually be forked from.
+            let available = autonoetic_gateway::runtime::checkpoint::list_checkpoints(
+                &config,
                 source_session_id,
-                turn
+            )
+            .unwrap_or_default();
+            let hint = if available.is_empty() {
+                " (no checkpoints exist for this session)".to_string()
+            } else {
+                format!(" — forkable turns: {}", available.join(", "))
+            };
+            anyhow::anyhow!(
+                "No checkpoint found for session '{}' at turn {}{}",
+                source_session_id,
+                turn,
+                hint
             )
         })?;
         autonoetic_gateway::runtime::checkpoint::SessionFork::fork_from_checkpoint(
@@ -1504,6 +1518,19 @@ pub async fn handle_trace_fork(
             branch_message,
         )?
     };
+
+    // Mirror the source timeline into the fork (best effort) so the Session Room
+    // shows the inherited history immediately rather than an empty timeline.
+    let gateway_dir = config.agents_dir.join(".gateway");
+    if let Ok(store) = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir) {
+        if let Err(e) = store.clone_timeline_for_fork(
+            &fork.source_session_id,
+            &fork.new_session_id,
+            fork.fork_turn as u64,
+        ) {
+            eprintln!("warning: could not mirror source timeline into fork: {e}");
+        }
+    }
 
     if !json_output {
         println!("Session forked successfully!");
