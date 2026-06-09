@@ -15,10 +15,7 @@ metadata:
       id: "executor.default"
       name: "Executor Default"
       description: "Executes small deterministic shell and script tasks without durable artifact expectations."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.1
+    llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "sandbox.", "credential."]

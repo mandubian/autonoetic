@@ -173,6 +173,7 @@ mod tests {
                 description: "test".to_string(),
             },
             capabilities: vec![],
+            llm_overrides: None,
             llm_preset: None,
             llm_config: context_window_tokens.map(|w| autonoetic_types::agent::LlmConfig {
                 provider: "llamacpp".to_string(),

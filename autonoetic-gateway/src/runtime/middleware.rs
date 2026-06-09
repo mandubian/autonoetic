@@ -314,6 +314,7 @@ mod tests {
                 description: "test".to_string(),
             },
             capabilities,
+            llm_overrides: None,
             llm_preset: None,
             llm_config: None,
             limits: None,

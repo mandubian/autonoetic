@@ -15,10 +15,7 @@ metadata:
       id: "unit_test_runner.default"
       name: "Unit Test Runner Default"
       description: "Discovers and runs artifact test suites in a no-network sandbox. If no tests exist, skips without recording a verdict."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.1
+    llm_preset: coding
     sandbox_network: normal
     capabilities:
       - type: "SandboxFunctions"

@@ -606,6 +606,7 @@ async fn handle_propose_code_fix(
         capabilities: vec![Capability::GithubIssueCreate {
             patterns: vec!["*".into()],
         }],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,
@@ -775,6 +776,7 @@ fn run_ab_replay(
         capabilities: vec![Capability::Evaluation {
             patterns: vec!["*".into()],
         }],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,
@@ -882,6 +884,7 @@ fn promote_manifest() -> AgentManifest {
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".into()],
         }],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

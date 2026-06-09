@@ -687,6 +687,7 @@ mod agentskills_bridging_tests {
                 description: "Test".to_string(),
             },
             capabilities: vec![],
+            llm_overrides: None,
             llm_preset: None,
             llm_config: None,
             limits: None,

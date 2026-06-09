@@ -556,7 +556,7 @@ Unified registry for all LLM configurations. Each preset is either **fixed** (co
 | `context_window_tokens` | u32 | `null` | Context window size for CLI "% of context" display. |
 | `base_url` | string | `null` | Optional base URL for OpenAI-compatible providers (e.g., LM Studio, Ollama). |
 | `api_key_env` | string | `null` | Environment variable name for the API key. Overrides the provider's default (e.g., set to `"MY_API_KEY"` for a custom OpenAI-compatible provider instead of `"OPENAI_API_KEY"`). |
-| `thinking` | object | `null` | Extended thinking configuration (see `docs/AGENTS.md#extended-thinking`). When set here, all agents using this preset inherit the thinking config unless they override it in SKILL.md. |
+| `thinking` | object | `null` | Extended thinking configuration (see `docs/AGENTS.md#extended-thinking`). When set here, all agents using this preset inherit the thinking config unless they override it via `llm_overrides` in SKILL.md. |
 | `tier` | string | `null` | Capability tier: `"economy"`, `"standard"`, `"premium"`. Used when referenced by routing presets. |
 | `cost.input_per_million` | float | `null` | Cost per million input tokens (USD). |
 | `cost.output_per_million` | float | `null` | Cost per million output tokens (USD). |

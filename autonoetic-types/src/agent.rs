@@ -133,6 +133,18 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
+/// Per-agent overrides merged onto a resolved `llm_preset` at runtime.
+/// Must not carry `provider` / `model` — those live in gateway `llm_presets`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct LlmOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
+}
+
 /// Resource limits enforced by the Gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
@@ -153,6 +165,9 @@ pub struct AgentManifest {
     /// Named preset in gateway `llm_presets` (preferred over inline provider/model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_preset: Option<String>,
+    /// Optional fields merged onto the resolved preset (temperature, thinking, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_overrides: Option<LlmOverrides>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_config: Option<LlmConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

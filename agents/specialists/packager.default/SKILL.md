@@ -15,9 +15,8 @@ metadata:
       id: "packager.default"
       name: "Packager Default"
       description: "Resolves and packages build-time dependencies into artifact layers."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: agentic
+    llm_overrides:
       temperature: 0.1
     capabilities:
       - type: "SandboxFunctions"

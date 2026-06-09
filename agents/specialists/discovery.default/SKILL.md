@@ -15,9 +15,8 @@ metadata:
       id: "discovery.default"
       name: "Discovery Default"
       description: "Semantic agent discovery: calls agent_list, reasons about descriptions + capabilities vs task intent, returns ranked candidates with a recommendation."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: research
+    llm_overrides:
       temperature: 0.0
     capabilities:
       - type: "SandboxFunctions"

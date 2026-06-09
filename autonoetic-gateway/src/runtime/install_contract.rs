@@ -183,9 +183,7 @@ agent:
   id: "my.agent"
   name: "My Agent"
   description: "What this agent does"
-llm_config:
-  provider: "openai"
-  model: "gpt-4o"
+llm_preset: smart
 capabilities:
   - type: "ReadAccess"
     scopes: ["*"]
@@ -284,7 +282,7 @@ pub fn install_schema_description() -> String {
 - Markdown body of SKILL.md (instructions, role, workflow notes)
 
 **Agent-provided (semantic intent):**
-- agent.id, description, execution_mode, script_entry, llm_config, capabilities
+- agent.id, description, execution_mode, script_entry, llm_preset (+ optional llm_overrides), capabilities
 - Optional: io (including io.output_policy), middleware
 
 **Gateway-owned (canonicalized):**
@@ -1236,6 +1234,7 @@ artifacts: "not_a_sequence"
                 description: "Round trip".to_string(),
             },
             capabilities: vec![],
+            llm_overrides: None,
             llm_preset: None,
             llm_config: None,
             limits: None,
@@ -1424,6 +1423,7 @@ artifacts: "not_a_sequence"
                 description: "Tests null field omission".to_string(),
             },
             capabilities: vec![],
+            llm_overrides: None,
             llm_preset: None,
             llm_config: None,
             limits: None,

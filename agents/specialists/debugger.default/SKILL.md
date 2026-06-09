@@ -15,10 +15,7 @@ metadata:
       id: "debugger.default"
       name: "Debugger Default"
       description: "Isolates root causes and proposes targeted fixes."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.1
+    llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "sandbox."]

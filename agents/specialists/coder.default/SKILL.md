@@ -15,10 +15,7 @@ metadata:
       id: "coder.default"
       name: "Coder Default"
       description: "Produces tested, minimal, and auditable code changes intended for reuse, review, or installation."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.1
+    llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "sandbox."]

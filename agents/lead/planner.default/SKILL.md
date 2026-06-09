@@ -15,10 +15,7 @@ metadata:
       id: "planner.default"
       name: "Planner Default"
       description: "Front-door lead agent for ambiguous goals. Interprets requests, routes to specialists, and synthesizes responses."
-    llm_config:
-      provider: "openrouter"
-      model: "nvidia/nemotron-3-super-120b-a12b:free"
-      temperature: 0.2
+    llm_preset: smart
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "agent.", "credential."]

@@ -15,10 +15,7 @@ metadata:
       id: "auditor.default"
       name: "Auditor Default"
       description: "Reviews for correctness, risks, reproducibility, and serves as promotion gate for agent installs."
-    llm_config:
-      provider: "openrouter"
-      model: "z-ai/glm-5-turbo"
-      temperature: 0.1
+    llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"
         # Prefixes match canonical tool ids (`knowledge_store`, `promotion_record`) for P-1.1.
@@ -191,7 +188,7 @@ contract. Audit it as such:
   `prohibited_text_patterns` covers obvious leak markers
   (`BEGIN RSA PRIVATE KEY`, `aws_secret_access_key`, etc.), and that
   `max_reply_length_chars` is reasonable.
-- **Manifest hygiene** — `runtime.lock` pinned; `llm_config` model
+- **Manifest hygiene** — `runtime.lock` pinned; `llm_preset` names inference profile
   pinned, not a moving alias; `description` matches the SKILL body's
   declared purpose.
 

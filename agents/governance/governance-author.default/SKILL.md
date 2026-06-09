@@ -15,9 +15,8 @@ metadata:
       id: "governance-author.default"
       name: "Governance Author Default"
       description: "Author of constitutional proposals from operator intent; reads the constitution and proposes amendments via governed tooling."
-    llm_config:
-      provider: "openrouter"
-      model: "nvidia/nemotron-3-super-120b-a12b:free"
+    llm_preset: smart
+    llm_overrides:
       temperature: 0.1
     capabilities:
       - type: "ConstitutionalProposal"

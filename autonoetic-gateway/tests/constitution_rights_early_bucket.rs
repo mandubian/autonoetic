@@ -48,6 +48,7 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: caps,
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,
@@ -223,6 +224,7 @@ fn ri_0_7_manifest() -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: vec![],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),

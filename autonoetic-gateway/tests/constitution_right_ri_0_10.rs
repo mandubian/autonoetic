@@ -34,6 +34,7 @@ fn no_capability_manifest() -> AgentManifest {
         },
         // The whole point of Ri-0.10: NO capabilities required to read the law.
         capabilities: vec![],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

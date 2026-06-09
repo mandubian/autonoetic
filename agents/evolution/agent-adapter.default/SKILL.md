@@ -15,10 +15,7 @@ metadata:
       id: "agent-adapter.default"
       name: "Agent Adapter Default"
       description: "Generates wrapper agents for bridging I/O gaps."
-    llm_config:
-      provider: "openai"
-      model: "gpt-4o"
-      temperature: 0.2
+    llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "sandbox."]

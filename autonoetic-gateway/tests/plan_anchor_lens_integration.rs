@@ -37,6 +37,7 @@ fn planner_manifest() -> AgentManifest {
             Capability::WriteAccess { scopes: vec!["*".to_string()] },
             Capability::PlanFrameAccess { patterns: vec!["*".to_string()] },
         ],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

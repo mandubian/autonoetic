@@ -33,6 +33,7 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
             description: "digest query test reader".to_string(),
         },
         capabilities: vec![Capability::ReadAccess { scopes: vec![] }],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),

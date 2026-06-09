@@ -15,10 +15,7 @@ metadata:
       id: "sealed_evaluator.default"
       name: "Sealed Evaluator Default"
       description: "Runs artifact code in a sealed (fixture-proxied) sandbox for deterministic evaluation. Operator-invokable diagnostic tool."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
-      temperature: 0.1
+    llm_preset: coding
     sandbox_network: sealed
     remote_access:
       approval_mode: preapproved

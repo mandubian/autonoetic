@@ -15,9 +15,8 @@ metadata:
       id: "architect.default"
       name: "Architect Default"
       description: "Defines structure, interfaces, trade-offs, and decomposes tasks into implementable sub-tasks."
-    llm_config:
-      provider: "openrouter"
-      model: "z-ai/glm-5-turbo"
+    llm_preset: coding
+    llm_overrides:
       temperature: 0.2
     capabilities:
       - type: "SandboxFunctions"

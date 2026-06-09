@@ -15,9 +15,8 @@ metadata:
       id: "evolution-orchestrator.default"
       name: "Evolution Orchestrator Default"
       description: "Root cron-driven orchestrator of the cross-session learning and agent-evolution pipeline. Spawns memory-curator and evolution-steward, creates admin proposals for systemic gaps."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: agentic
+    llm_overrides:
       temperature: 0.1
     capabilities:
       - type: "ReadAccess"

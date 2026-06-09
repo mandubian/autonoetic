@@ -37,6 +37,7 @@ fn manifest(agent_id: &str) -> AgentManifest {
                 scopes: vec!["*".to_string()],
             },
         ],
+        llm_overrides: None,
         llm_preset: None,
         llm_config: None,
         limits: None,

@@ -15,11 +15,7 @@ metadata:
       id: "planner.collaborative"
       name: "Collaborative Planner"
       description: "PlanFrame-aware lead agent. Proposes structured plans before building, offers workbench projection for human co-editing, and treats the operator as a co-builder."
-    llm_config:
-      # Overridden from config.yaml llm_presets / llm_preset_mapping at agent bootstrap.
-      provider: "openrouter"
-      model: "nvidia/nemotron-3-super-120b-a12b:free"
-      temperature: 0.2
+    llm_preset: smart
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge.", "agent.", "credential."]

@@ -15,9 +15,8 @@ metadata:
       id: "builder_agent"
       name: "Specialized Builder"
       description: "Installs durable specialist agents and recurring workers from user requests."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: agentic
+    llm_overrides:
       temperature: 0.0
     capabilities:
       - type: "AgentSpawn"

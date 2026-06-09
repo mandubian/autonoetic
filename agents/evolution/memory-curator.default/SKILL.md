@@ -15,9 +15,8 @@ metadata:
       id: "memory-curator.default"
       name: "Memory Curator Default"
       description: "Distills cross-session learnings from completed sessions, scores agent performance using multi-signal analysis, and identifies systemic gaps."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: agentic
+    llm_overrides:
       temperature: 0.1
     capabilities:
       - type: "ReadAccess"

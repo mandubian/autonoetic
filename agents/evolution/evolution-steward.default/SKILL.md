@@ -15,9 +15,8 @@ metadata:
       id: "evolution-steward.default"
       name: "Evolution Steward Default"
       description: "Decides whether to evolve a flagged agent, classifies the root cause, and delegates to agent-factory for revision creation."
-    llm_config:
-      provider: "openrouter"
-      model: "google/gemini-3-flash-preview"
+    llm_preset: agentic
+    llm_overrides:
       temperature: 0.1
     capabilities:
       - type: "ReadAccess"
