@@ -793,6 +793,38 @@ fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>
     (headline, Some(lines.join("\n")))
 }
 
+/// High-visibility wiki proposal gate card (approval.pending with action=wiki_propose).
+fn wiki_proposal_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let request_id = field("request_id")
+        .or_else(|| entry.refs.approval_request_id.clone())
+        .unwrap_or_default();
+    let title = field("title").unwrap_or_default();
+    let page_id = field("page_id").unwrap_or_default();
+    let headline = format!("📝 WIKI PROPOSAL — {}", one_line(&title, 88));
+    let mut lines = vec![format!("  page: {page_id}")];
+    lines.push(format!("  request: {request_id}"));
+    if let Some(sha) = field("content_sha256") {
+        lines.push(format!("  content_sha256: {sha}"));
+    }
+    if let Some(tags_str) = p
+        .as_ref()
+        .and_then(|v| v.get("tags"))
+        .and_then(|v| v.as_array())
+    {
+        let joined: Vec<_> = tags_str
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        if !joined.is_empty() {
+            lines.push(format!("  tags: {}", joined.join(", ")));
+        }
+    }
+    lines.push("  ↳ y approve · n reject".to_string());
+    (headline, Some(lines.join("\n")))
+}
+
 /// Build list-row headline + detail for an agent/operator message event.
 pub(crate) fn message_list_rows(entry: &SessionTimelineEntry, key: &str) -> (String, Option<String>) {
     let Some(p) = entry
@@ -1367,7 +1399,18 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
                 None => (headline, notif_detail),
             }
         }
-        "approval.pending" => approval_gate_card(entry),
+        "approval.pending" => {
+            let is_wiki = entry
+                .payload
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .is_some_and(|v| v.get("action").and_then(|a| a.as_str()) == Some("wiki_propose"));
+            if is_wiki {
+                wiki_proposal_gate_card(entry)
+            } else {
+                approval_gate_card(entry)
+            }
+        }
         "user.ask.pending" => interaction_gate_card(entry),
         "plan.pending" => plan_gate_card(entry),
         "escalation.pending" => escalation_gate_card(entry),
