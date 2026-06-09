@@ -24,6 +24,7 @@ pub enum GateKind {
     Approval,
     Interaction,
     Plan,
+    WikiProposal,
 }
 
 /// A resolution action a gate affords — the operator's intent, independent of
@@ -75,6 +76,7 @@ impl Channel for CliChannel {
             GateKind::Approval => "(pending approval — resolve in `room --tui`)".into(),
             GateKind::Interaction => "(pending question — answer in `room --tui`)".into(),
             GateKind::Plan => "(pending plan — approve in `room --tui` with y or /plan approve)".into(),
+            GateKind::WikiProposal => "(pending wiki proposal — resolve in `room --tui`)".into(),
         }
     }
 }
@@ -92,6 +94,7 @@ impl Channel for TuiChannel {
             GateKind::Approval => " · ⚠ APPROVAL PENDING — y/n".into(),
             GateKind::Interaction => " · ⚠ QUESTION PENDING — Enter/i/r to answer".into(),
             GateKind::Plan => " · ⚠ PLAN PENDING — Enter/p review · y approve · n revise".into(),
+            GateKind::WikiProposal => " · ⚠ WIKI PROPOSAL — y/n".into(),
         }
     }
 }
@@ -104,14 +107,17 @@ mod tests {
     fn channels_name_themselves_and_prompt_per_gate() {
         let appr = GateRef { kind: GateKind::Approval, id: "apr-1".into() };
         let ask = GateRef { kind: GateKind::Interaction, id: "int-1".into() };
+        let wiki = GateRef { kind: GateKind::WikiProposal, id: "apr-2".into() };
 
         assert_eq!(TuiChannel.kind(), "tui");
         assert!(TuiChannel.gate_prompt(&appr).contains("APPROVAL"));
         assert!(TuiChannel.gate_prompt(&ask).contains("QUESTION"));
         assert!(TuiChannel.gate_prompt(&ask).contains("Enter"));
+        assert!(TuiChannel.gate_prompt(&wiki).contains("WIKI"));
 
         assert_eq!(CliChannel.kind(), "cli");
         // The viewer can't resolve; it points at the interactive shell.
         assert!(CliChannel.gate_prompt(&appr).contains("--tui"));
+        assert!(CliChannel.gate_prompt(&wiki).contains("--tui"));
     }
 }

@@ -1255,7 +1255,7 @@ pub fn run(
                                     );
                                 }
                             } else if let Some(g) =
-                                view_gate.as_ref().filter(|g| g.kind == GateKind::Approval)
+                                view_gate.as_ref().filter(|g| matches!(g.kind, GateKind::Approval | GateKind::WikiProposal))
                             {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
                                 input = Some(GateInput {
@@ -1936,8 +1936,9 @@ fn gate_for_entry(
     match e.event_type.as_str() {
         "approval.pending" => {
             let id = approval_id_for(e)?;
+            let is_wiki = payload_field_str(e, "action").as_deref() == Some("wiki_propose");
             (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
-                kind: GateKind::Approval,
+                kind: if is_wiki { GateKind::WikiProposal } else { GateKind::Approval },
                 id,
             })
         }
@@ -3512,6 +3513,46 @@ mod tests {
         // A non-gate event is not resolvable.
         let other = vec![gate_entry("tool.completed")];
         assert!(selectable_gate(&other, Some(&single), &empty, &empty).is_none());
+    }
+
+    #[test]
+    fn selectable_gate_resolves_wiki_proposal_from_approval_pending() {
+        let single = (
+            RenderedRow::Line(render::RowSpec {
+                altitude: Altitude::Attention,
+                actor: render::ActorKind::Planner,
+                tone: RowTone::Default,
+                actor_label: "planner".into(),
+                headline: "x".into(),
+                detail: None,
+                turn_id: None,
+                turn_index: None,
+                in_flight: false,
+                show_reasoning: true,
+            }),
+            RowSource::Single(0),
+        );
+        let empty = HashSet::new();
+        let mut wiki = gate_entry("approval.pending");
+        // approval_request_id from refs is "apr-1" (set by gate_entry helper);
+        // the action field in payload distinguishes wiki proposals.
+        wiki.payload = Some(
+            serde_json::json!({ "action": "wiki_propose", "page_id": "my-page", "title": "My Page" }).to_string(),
+        );
+        let entries = vec![wiki];
+        let g = selectable_gate(&entries, Some(&single), &empty, &empty).unwrap();
+        assert_eq!(g.kind, GateKind::WikiProposal);
+        assert_eq!(g.id, "apr-1");
+
+        // A regular approval.pending (no wiki_propose action) stays Approval.
+        let mut reg = gate_entry("approval.pending");
+        reg.payload = Some(
+            serde_json::json!({ "action": "sandbox_exec" }).to_string(),
+        );
+        let entries2 = vec![reg];
+        let g2 = selectable_gate(&entries2, Some(&single), &empty, &empty).unwrap();
+        assert_eq!(g2.kind, GateKind::Approval);
+        assert_eq!(g2.id, "apr-1");
     }
 
     #[test]

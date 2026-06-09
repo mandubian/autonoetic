@@ -589,26 +589,9 @@ pub fn bootstrap_sdk_snapshot(gateway_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Materialize the wiki docs corpus into `.gateway/wiki/` so agents can
-/// discover and read platform documentation at runtime.
-pub fn bootstrap_wiki_snapshot(gateway_dir: &Path) -> Result<()> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let wiki_src = manifest_dir
-        .parent()
-        .map(|p| p.join("docs").join("wiki"));
-
-    let Some(wiki_src) = wiki_src else { return Ok(()) };
-    if !wiki_src.exists() {
-        return Ok(());
-    }
-
-    let dest = gateway_dir.join("wiki");
-    sync_dir(&wiki_src, &dest)?;
-    Ok(())
-}
-
-/// Recursively copy files from `src` to `dst`. Idempotent — skips when
-/// destination already exists with matching content (by mtime + size).
+/// Recursively copy files from `src` to `dst`. Overwrites when the destination
+/// file differs in size or mtime. Used for the SDK snapshot — on upgrade the
+/// SDK must be refreshed so the gateway can always find the latest bindings.
 fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
     if !dst.exists() {
         std::fs::create_dir_all(dst)?;
@@ -631,6 +614,110 @@ fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
             if should_copy {
                 std::fs::copy(&entry.path(), &dest_path)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Materialize the wiki docs corpus into `.gateway/wiki/` so agents can
+/// discover and read platform documentation at runtime.
+///
+/// Only seeds pages that don't already exist — operator-promoted pages are
+/// never overwritten on restart.
+pub fn bootstrap_wiki_snapshot(gateway_dir: &Path) -> Result<()> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let wiki_src = manifest_dir
+        .parent()
+        .map(|p| p.join("docs").join("wiki"));
+
+    let Some(wiki_src) = wiki_src else { return Ok(()) };
+    if !wiki_src.exists() {
+        return Ok(());
+    }
+
+    let dest = gateway_dir.join("wiki");
+    seed_missing(&wiki_src, &dest)?;
+
+    // Merge new built-in index entries into the existing index so new pages
+    // shipped in binary upgrades become discoverable without overwriting
+    // operator-promoted entries.
+    let src_index = wiki_src.join("index.toml");
+    let dst_index = dest.join("index.toml");
+    if src_index.exists() {
+        merge_index_toml(&src_index, &dst_index)?;
+    }
+
+    Ok(())
+}
+
+/// Merge page entries from `src` index.toml into `dst` index.toml. Entries in
+/// `dst` whose `id` matches an entry in `src` are kept as-is (operator edits
+/// or promotions win). New entries from `src` that have no matching `id` in
+/// `dst` are appended, ensuring built-in pages shipped in upgrades become
+/// discoverable without destroying operator-promoted state.
+fn merge_index_toml(src: &Path, dst: &Path) -> Result<()> {
+    let src_content = std::fs::read_to_string(src)?;
+    let src_val: toml::Value = src_content.parse()?;
+    let src_pages = src_val
+        .get("pages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut dst_pages: Vec<toml::Value> = if dst.exists() {
+        let dst_content = std::fs::read_to_string(dst)?;
+        match dst_content.parse::<toml::Value>() {
+            Ok(v) => v.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default(),
+            Err(_) => {
+                tracing::warn!(
+                    target: "bootstrap",
+                    "wiki index.toml parse error, rebuilding from source: {}",
+                    dst.display(),
+                );
+                src_pages.clone()
+            }
+        }
+    } else {
+        src_pages.clone()
+    };
+
+    let existing_ids: std::collections::HashSet<String> = dst_pages
+        .iter()
+        .filter_map(|p| p.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+
+    for entry in &src_pages {
+        if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+            if !existing_ids.contains(id) {
+                dst_pages.push(entry.clone());
+            }
+        }
+    }
+
+    let merged = toml::Value::Table(
+        vec![("pages".to_string(), toml::Value::Array(dst_pages))]
+            .into_iter()
+            .collect(),
+    );
+    std::fs::write(dst, merged.to_string())?;
+    Ok(())
+}
+
+/// Copy files from `src` to `dst` only when the destination file is missing.
+/// Never overwrites existing files — operator-promoted wiki pages and index
+/// entries survive restarts.
+fn seed_missing(src: &Path, dst: &Path) -> Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            seed_missing(&entry.path(), &dest_path)?;
+        } else if file_type.is_file() && !dest_path.exists() {
+            std::fs::copy(&entry.path(), &dest_path)?;
         }
     }
     Ok(())
