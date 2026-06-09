@@ -503,7 +503,8 @@ with the full branch-point context. Checkpoints exist only at yield points
 can only target a turn that has a checkpoint; otherwise it errors and lists the
 forkable turns. The same branch can be created from the Session Room with
 `/fork [--at-turn N] [message]` (it forks the current session and switches to
-the new one).
+the new one). See `docs/session-forking.md` for the full mechanism, including
+the timeline-mirroring design choice (copy vs reuse-by-reference).
 
 ### `autonoetic trace history`
 
