@@ -2,8 +2,8 @@
 
 use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
-    list_checkpoints, prune_checkpoints, save_checkpoint, SessionCheckpoint, SessionFork,
-    YieldReason,
+    list_checkpoints, load_latest_checkpoint, prune_checkpoints, save_checkpoint, turn_id_for,
+    SessionCheckpoint, SessionFork, YieldReason,
 };
 use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::runtime::guard::LoopGuardState;
@@ -221,6 +221,53 @@ fn test_multi_level_fork() {
     assert_eq!(fork_c.initial_history[0].content, "Original");
     assert_eq!(fork_c.initial_history[1].content, "Branch 1");
     assert_eq!(fork_c.initial_history[2].content, "Branch 2");
+}
+
+/// A fork must be *runnable*: the execution engine seeds a session's LLM
+/// context from its latest checkpoint, so forking has to write one under the
+/// new session id (cloned history, marked Hibernation). Without it, the branch
+/// would resume from a blank history and the fork point would be lost.
+#[test]
+fn test_fork_writes_runnable_checkpoint_for_new_session() {
+    let temp = tempdir().unwrap();
+    let config = test_config(&temp);
+
+    let history = vec![
+        Message::user("Plan the migration"),
+        Message::assistant("Step 1: inventory the call sites"),
+    ];
+    // Source checkpoint was an ApprovalRequired yield with pending state — the
+    // fork must NOT inherit that; it should be a clean Hibernation checkpoint.
+    let mut cp = test_checkpoint("source-session", &turn_id_for(3), history.clone(), 3);
+    cp.yield_reason = YieldReason::ApprovalRequired {
+        approval_request_id: "apr-xyz".to_string(),
+    };
+    cp.suspended_at = Some("2024-01-01T00:00:01Z".to_string());
+    save_checkpoint(&config, &cp).unwrap();
+
+    let fork = SessionFork::fork_from_checkpoint(
+        &config,
+        &cp,
+        Some("branch-session"),
+        Some("Try approach B instead"),
+    )
+    .unwrap();
+    assert_eq!(fork.new_session_id, "branch-session");
+
+    // The forked session now has a checkpoint the engine can resume from.
+    let forked_cp = load_latest_checkpoint(&config, "branch-session")
+        .unwrap()
+        .expect("fork must write a checkpoint under the new session id");
+
+    assert_eq!(forked_cp.session_id, "branch-session");
+    // Branch point preserved: full history + the branch message appended.
+    assert_eq!(forked_cp.history.len(), 3);
+    assert_eq!(forked_cp.history[2].content, "Try approach B instead");
+    assert_eq!(forked_cp.turn_counter, 3);
+    // Clean, auto-resumable yield — no inherited approval/pending state.
+    assert!(matches!(forked_cp.yield_reason, YieldReason::Hibernation));
+    assert!(forked_cp.pending_tool_state.is_none());
+    assert!(forked_cp.suspended_at.is_none());
 }
 
 /// Test fork fails without any checkpoint.

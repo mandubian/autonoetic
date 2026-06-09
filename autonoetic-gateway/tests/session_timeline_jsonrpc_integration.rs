@@ -133,6 +133,59 @@ async fn session_timeline_list_requires_root_session_id() {
 }
 
 #[tokio::test]
+async fn clone_timeline_for_fork_mirrors_history_up_to_turn() {
+    let env = shared();
+    let src = "root-fork-src";
+
+    // Build a source timeline spanning four turns, with an interleaved
+    // turn-less operator message between turns 1 and 2.
+    let mk = |turn: Option<&str>, ts: &str, etype: &str| LiveDigestEventRecord {
+        event_id: format!("ev-{}", uuid::Uuid::new_v4()),
+        root_session_id: src.to_string(),
+        source_session_id: src.to_string(),
+        turn_id: turn.map(|t| t.to_string()),
+        source_agent_id: Some("planner.default".to_string()),
+        source_node_id: "gateway".to_string(),
+        event_type: etype.to_string(),
+        payload: Some("{}".to_string()),
+        created_at: ts.to_string(),
+        principal_kind: Some("autonoetic_agent".to_string()),
+        principal_id: Some("planner.default".to_string()),
+        role: Some("planner".to_string()),
+        altitude: Some("normal".to_string()),
+        refs_json: None,
+    };
+    for ev in [
+        mk(Some("turn-000001"), "2026-06-01T10:00:00+00:00", "turn.start"),
+        mk(None, "2026-06-01T10:00:01+00:00", "operator.message"),
+        mk(Some("turn-000002"), "2026-06-01T10:00:02+00:00", "turn.start"),
+        mk(Some("turn-000003"), "2026-06-01T10:00:03+00:00", "turn.start"),
+        mk(Some("turn-000004"), "2026-06-01T10:00:04+00:00", "turn.start"),
+    ] {
+        env.store.create_live_digest_event(&ev).unwrap();
+    }
+
+    // Fork at turn 2: turns 1–2 plus the turn-less message before the cutoff
+    // should be mirrored; turns 3 and 4 must not.
+    let fork_root = "root-fork-branch";
+    let copied = env.store.clone_timeline_for_fork(src, fork_root, 2).unwrap();
+    assert_eq!(copied, 3, "turns 1, 2 and the interleaved op message");
+
+    let result = env
+        .store
+        .list_session_timeline(fork_root, None, 100, None, None)
+        .unwrap();
+    assert_eq!(result.entries.len(), 3);
+    let turns: Vec<Option<String>> = result.entries.iter().map(|e| e.turn_id.clone()).collect();
+    assert!(turns.contains(&Some("turn-000001".to_string())));
+    assert!(turns.contains(&Some("turn-000002".to_string())));
+    assert!(turns.contains(&None), "turn-less operator message mirrored");
+    assert!(!turns.contains(&Some("turn-000003".to_string())));
+    assert!(!turns.contains(&Some("turn-000004".to_string())));
+    assert!(result.entries.iter().all(|e| e.root_session_id == fork_root));
+}
+
+#[tokio::test]
 async fn session_timeline_list_rejects_invalid_min_altitude() {
     let env = shared();
     let resp = env

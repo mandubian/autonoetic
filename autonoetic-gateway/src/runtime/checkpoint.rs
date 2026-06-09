@@ -238,6 +238,14 @@ pub fn checkpoints_dir(config: &GatewayConfig) -> PathBuf {
     config.agents_dir.join(".gateway").join("checkpoints")
 }
 
+/// Canonical turn-id string for a turn number. This is the single source of
+/// truth for the on-disk checkpoint filename stem (`turn-000003`), shared by
+/// the lifecycle (which writes checkpoints) and any caller that wants to load a
+/// checkpoint by turn number (e.g. `trace fork --at-turn N`, `session.fork`).
+pub fn turn_id_for(turn: u64) -> String {
+    format!("turn-{:06}", turn)
+}
+
 fn checkpoint_path(config: &GatewayConfig, session_id: &str, turn_id: &str) -> PathBuf {
     checkpoints_dir(config)
         .join(sanitize_path_component(session_id))
@@ -513,10 +521,32 @@ impl SessionFork {
             history.push(crate::llm::Message::user(msg_text));
         }
 
-        // Copy history to new session
+        // Copy history to new session (consumed by chat/trace history display).
         let history_json = serde_json::to_string(&history)?;
         let history_handle = store.write(history_json.as_bytes())?;
         store.register_name(&new_session_id, "session_history", &history_handle)?;
+
+        // Write a checkpoint under the new session id so the fork is actually
+        // *runnable*. The execution engine seeds a session's LLM context from
+        // its latest checkpoint (not from the `session_history` content name —
+        // that only feeds the UI), so without this the agent would resume the
+        // branch from a blank history and the fork point would be lost.
+        //
+        // We mark it `Hibernation` (a normal, auto-resumable yield point) and
+        // strip any pending-tool / approval state inherited from the source
+        // checkpoint, so the next message to the forked session resumes cleanly
+        // with the full branch-point context (plus the branch message, if any).
+        let forked_checkpoint = SessionCheckpoint {
+            history: history.clone(),
+            session_id: new_session_id.clone(),
+            yield_reason: YieldReason::Hibernation,
+            pending_tool_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            ..checkpoint.clone()
+        };
+        save_checkpoint(config, &forked_checkpoint)?;
 
         Ok(SessionFork {
             new_session_id,

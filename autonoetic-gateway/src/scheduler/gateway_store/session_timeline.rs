@@ -101,6 +101,107 @@ impl GatewayStore {
             has_more,
         })
     }
+
+    /// Copy a source session's timeline rows into a forked session's root id, up
+    /// to and including the fork turn. A fork writes a checkpoint (LLM history)
+    /// but no `live_digest_events` of its own, so without this the Session Room
+    /// shows an empty timeline until the branch first runs. This mirrors the
+    /// parent's narrative spine up to the branch point so the operator sees the
+    /// inherited history immediately.
+    ///
+    /// Rows get fresh `event_id`s (the column is the primary key); their
+    /// `created_at`, ordering, and attribution columns are preserved verbatim,
+    /// so the copied timeline renders identically to the source. The cutoff is
+    /// the end-of-fork-turn timestamp (the latest event carrying a turn id `<=`
+    /// the fork turn), which also pulls in interleaved turn-less rows (operator
+    /// messages, session start) that belong before the branch point. Returns the
+    /// number of rows copied.
+    pub fn clone_timeline_for_fork(
+        &self,
+        source_root_session_id: &str,
+        new_root_session_id: &str,
+        up_to_turn: u64,
+    ) -> Result<usize> {
+        use rusqlite::OptionalExtension;
+
+        let conn = self.conn.lock().unwrap();
+        // Turn ids are zero-padded to a fixed width (`turn-000003`), so a plain
+        // lexicographic `<=` comparison is also a numeric one.
+        let turn_ceiling = crate::runtime::checkpoint::turn_id_for(up_to_turn);
+        let cutoff: Option<String> = conn
+            .query_row(
+                "SELECT MAX(created_at) FROM live_digest_events
+                 WHERE root_session_id = ?1 AND turn_id IS NOT NULL AND turn_id <= ?2",
+                rusqlite::params![source_root_session_id, &turn_ceiling],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let cutoff = match cutoff {
+            Some(c) => c,
+            None => return Ok(0), // no in-range turn events → nothing to mirror
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT event_id, source_session_id, turn_id, source_agent_id, source_node_id,
+                    event_type, payload, created_at, principal_kind, principal_id,
+                    role, altitude, refs_json
+             FROM live_digest_events
+             WHERE root_session_id = ?1 AND created_at <= ?2
+             ORDER BY created_at ASC, event_id ASC",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![source_root_session_id, &cutoff],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,         // original event_id
+                        row.get::<_, String>(1)?,         // source_session_id
+                        row.get::<_, Option<String>>(2)?, // turn_id
+                        row.get::<_, Option<String>>(3)?, // source_agent_id
+                        row.get::<_, String>(4)?,         // source_node_id
+                        row.get::<_, String>(5)?,         // event_type
+                        row.get::<_, Option<String>>(6)?, // payload
+                        row.get::<_, String>(7)?,         // created_at
+                        row.get::<_, Option<String>>(8)?, // principal_kind
+                        row.get::<_, Option<String>>(9)?, // principal_id
+                        row.get::<_, Option<String>>(10)?, // role
+                        row.get::<_, Option<String>>(11)?, // altitude
+                        row.get::<_, Option<String>>(12)?, // refs_json
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        for (i, r) in rows.iter().enumerate() {
+            // Fresh, collision-free event id scoped to the forked session.
+            let new_event_id = format!("{new_root_session_id}-evt-{i:06}");
+            conn.execute(
+                "INSERT INTO live_digest_events (
+                    event_id, root_session_id, source_session_id, turn_id, source_agent_id,
+                    source_node_id, event_type, payload, created_at,
+                    principal_kind, principal_id, role, altitude, refs_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                rusqlite::params![
+                    new_event_id,
+                    new_root_session_id,
+                    r.1,
+                    r.2,
+                    r.3,
+                    r.4,
+                    r.5,
+                    r.6,
+                    r.7,
+                    r.8,
+                    r.9,
+                    r.10,
+                    r.11,
+                    r.12,
+                ],
+            )?;
+        }
+        Ok(rows.len())
+    }
 }
 
 fn min_altitude_rank(min: Option<Altitude>) -> i64 {

@@ -119,7 +119,7 @@ fn build_critical_divergence_interaction(
         session_id: session_id.to_string(),
         root_session_id,
         agent_id: agent_id.to_string(),
-        turn_id: format!("turn-{:06}", turn_counter),
+        turn_id: crate::runtime::checkpoint::turn_id_for(turn_counter),
         kind: autonoetic_types::background::UserInteractionKind::DivergenceSentinel,
         question: format!(
             "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge, continue, stop, or enter a note.",
@@ -491,7 +491,7 @@ impl AgentExecutor {
 
     fn next_turn_id(&mut self) -> String {
         self.turn_counter += 1;
-        format!("turn-{:06}", self.turn_counter)
+        crate::runtime::checkpoint::turn_id_for(self.turn_counter)
     }
 
     fn approved_session_continue_count(&self, session_id: &str) -> anyhow::Result<u64> {

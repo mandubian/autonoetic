@@ -41,12 +41,19 @@ pub enum SlashCommand {
     ListPlans,
     /// Approve a plan (`None` = latest pending).
     ApprovePlan { plan_id: Option<String> },
+    /// Fork the current session into a new branch and switch to it.
+    /// `at_turn` = `None` forks from the latest checkpoint; `message` is an
+    /// optional branch message appended to the forked history.
+    ForkSession {
+        at_turn: Option<u64>,
+        message: Option<String>,
+    },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
-pub const HELP_TEXT: &str = "/help for commands · /session · /plan · /cron · /test · /quit";
+pub const HELP_TEXT: &str = "/help for commands · /session · /fork · /plan · /cron · /test · /quit";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -67,6 +74,7 @@ pub fn help_lines() -> Vec<String> {
         "  a            cycle altitude floor (detail → normal → attention → error)".to_string(),
         "  s            toggle squash (fold routine detail events)".to_string(),
         "  R            toggle 💭 reasoning prefix on agent rows".to_string(),
+        "  F            fork from selected row's turn & switch to the branch".to_string(),
         String::new(),
         "Gates".to_string(),
         "  y / n        approve/reject approval · approve/request plan changes".to_string(),
@@ -86,6 +94,7 @@ pub fn help_lines() -> Vec<String> {
         "  /session <id>           switch to a root session".to_string(),
         "  /session list [agent]   list recent sessions (1–9 to pick)".to_string(),
         "  /session resume [agent] jump to most recent session".to_string(),
+        "  /fork [--at-turn N] [msg]  branch this session and switch to it".to_string(),
         "  /cron  /cron list       scheduled jobs for this session".to_string(),
         "  /plan  /plan approve [id]  list or approve pending PlanFrames".to_string(),
         "  /test <scenario>        inject synthetic events (dev)".to_string(),
@@ -116,6 +125,7 @@ pub fn parse(input: &str) -> SlashCommand {
     let tail = parts.next().unwrap_or("").trim();
     match head.as_str() {
         "session" => parse_session(tail),
+        "fork" => parse_fork(tail),
         "cron" => parse_cron(tail),
         "plan" => parse_plan(tail),
         "test" => {
@@ -126,6 +136,37 @@ pub fn parse(input: &str) -> SlashCommand {
         "help" | "?" => SlashCommand::Help,
         other => SlashCommand::Unknown(other.to_string()),
     }
+}
+
+fn parse_fork(tail: &str) -> SlashCommand {
+    // `/fork`                         — fork current session from latest checkpoint
+    // `/fork <message>`               — fork latest, append branch message
+    // `/fork --at-turn N`             — fork from a specific turn's checkpoint
+    // `/fork --at-turn N <message>`   — fork from turn N, append branch message
+    let trimmed = tail.trim();
+    let mut at_turn = None;
+    let mut rest = trimmed;
+    if let Some(after) = rest
+        .strip_prefix("--at-turn")
+        .or_else(|| rest.strip_prefix("--turn"))
+    {
+        let after = after.trim_start();
+        let (num, remainder) = match after.split_once(char::is_whitespace) {
+            Some((n, r)) => (n, r.trim()),
+            None => (after, ""),
+        };
+        match num.parse::<u64>() {
+            Ok(n) => {
+                at_turn = Some(n);
+                rest = remainder;
+            }
+            // `--at-turn` with no/invalid number is a usage error, not a branch
+            // message — surface it rather than silently forking from latest.
+            Err(_) => return SlashCommand::Unknown(format!("fork {trimmed}")),
+        }
+    }
+    let message = (!rest.trim().is_empty()).then(|| rest.trim().to_string());
+    SlashCommand::ForkSession { at_turn, message }
 }
 
 fn parse_cron(tail: &str) -> SlashCommand {
@@ -358,6 +399,51 @@ mod tests {
         assert_eq!(
             parse("/plan cancel"),
             SlashCommand::Unknown("plan cancel".into())
+        );
+    }
+
+    #[test]
+    fn parse_fork_variants() {
+        assert_eq!(
+            parse("/fork"),
+            SlashCommand::ForkSession {
+                at_turn: None,
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/fork try approach B"),
+            SlashCommand::ForkSession {
+                at_turn: None,
+                message: Some("try approach B".into())
+            }
+        );
+        assert_eq!(
+            parse("/fork --at-turn 5"),
+            SlashCommand::ForkSession {
+                at_turn: Some(5),
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/fork --at-turn 5 try approach B"),
+            SlashCommand::ForkSession {
+                at_turn: Some(5),
+                message: Some("try approach B".into())
+            }
+        );
+        assert_eq!(
+            parse("/fork --turn 3"),
+            SlashCommand::ForkSession {
+                at_turn: Some(3),
+                message: None
+            }
+        );
+        // `--at-turn` with no/invalid number is a usage error.
+        assert_eq!(parse("/fork --at-turn"), SlashCommand::Unknown("fork --at-turn".into()));
+        assert_eq!(
+            parse("/fork --at-turn abc"),
+            SlashCommand::Unknown("fork --at-turn abc".into())
         );
     }
 
