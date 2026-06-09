@@ -40,6 +40,7 @@ fn manifest(agent_id: &str) -> AgentManifest {
             patterns: vec!["*".to_string()],
             commands: vec![],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

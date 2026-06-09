@@ -39,6 +39,7 @@ fn test_manifest_no_network() -> AgentManifest {
             name: "Test Agent".to_string(),
             description: "Test agent".to_string(),
         },
+        llm_preset: None,
         llm_config: None,
         limits: None,
         capabilities: vec![Capability::CodeExecution {

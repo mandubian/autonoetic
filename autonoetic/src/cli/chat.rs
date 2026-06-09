@@ -289,6 +289,10 @@ enum SlashCommand {
     ReturnToAgent { force: bool, message: Option<String> },
     /// `/plan` lists pending plans; `/plan approve [plan_id]` approves one.
     PlanApprove(Option<String>),
+    /// `/model` shows resolved inference; `/model <preset>` overrides; `/model clear` resets.
+    ModelShow,
+    ModelSet { preset: String, reason: Option<String> },
+    ModelClear,
 }
 
 #[derive(Debug, Clone)]
@@ -1144,6 +1148,22 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
                 )),
             }
         }
+        "/model" => {
+            let rest: Vec<&str> = parts.collect();
+            if rest.is_empty() {
+                return Ok(SlashCommand::ModelShow);
+            }
+            if rest[0].eq_ignore_ascii_case("clear") {
+                return Ok(SlashCommand::ModelClear);
+            }
+            let preset = rest[0].to_string();
+            let reason = if rest.len() > 1 {
+                Some(rest[1..].join(" "))
+            } else {
+                None
+            };
+            Ok(SlashCommand::ModelSet { preset, reason })
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -1164,6 +1184,9 @@ fn format_help_card() -> String {
         "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
         "  /policy <text>          Route natural language governance requests to governance-author.default",
         "  /persona [text]        Show or set session persona (user context/preferences)",
+        "  /model                 Show resolved LLM preset for this session",
+        "  /model <preset> [why]  Override inference preset until cleared",
+        "  /model clear           Remove session inference override",
         "  /cancel                Leave the current picker/prompt",
         "  /quit                  Exit chat",
     ]
@@ -1692,6 +1715,101 @@ fn handle_prompt_submission(
     }
 }
 
+fn handle_model_slash_command(
+    app: &App,
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: Option<&GatewayStore>,
+    command: SlashCommand,
+) -> String {
+    let store = match gateway_store {
+        Some(s) => s,
+        None => return "Gateway store unavailable.".to_string(),
+    };
+    let agent_id = app.target_hint.trim();
+    if agent_id.is_empty() {
+        return "No target agent selected for this session.".to_string();
+    }
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config);
+    let repo = autonoetic_gateway::AgentRepository::from_config(config);
+    let loaded = match repo.get_sync_from_store(agent_id, &gateway_dir, Some(store)) {
+        Ok(v) => v,
+        Err(e) => return format!("Failed to load agent '{agent_id}': {e}"),
+    };
+    let root =
+        autonoetic_gateway::runtime::content_store::root_session_id(&app.session_id).to_string();
+    let binding = store
+        .get_session_inference_binding(&root)
+        .ok()
+        .flatten();
+    let resolve = || {
+        autonoetic_gateway::runtime::inference_profile::resolve_inference_profile(
+            agent_id,
+            &loaded.manifest,
+            config,
+            binding.as_ref(),
+        )
+    };
+    match command {
+        SlashCommand::ModelShow => match resolve() {
+            Ok(profile) => format!(
+                "Inference profile for session {}:\n  preset: {} ({})\n  override: {}\n  provider: {}\n  model: {}",
+                app.session_id,
+                profile.preset_name.as_deref().unwrap_or("(none)"),
+                profile.snapshot_preset_source(),
+                profile
+                    .session_override_preset
+                    .as_deref()
+                    .unwrap_or("(none)"),
+                profile.llm_config.provider,
+                profile.llm_config.model,
+            ),
+            Err(e) => format!("Failed to resolve inference profile: {e}"),
+        },
+        SlashCommand::ModelSet { preset, reason } => {
+            if let Err(e) = autonoetic_gateway::runtime::inference_profile::validate_inference_override(
+                &loaded.manifest,
+                config,
+                &preset,
+            ) {
+                return format!("Failed to set model override: {e}");
+            }
+            match store.upsert_session_inference_binding(
+                &root,
+                Some(&preset),
+                reason.as_deref(),
+                "operator:chat",
+            ) {
+                Ok(new_binding) => {
+                    match autonoetic_gateway::runtime::inference_profile::resolve_inference_profile(
+                        agent_id,
+                        &loaded.manifest,
+                        config,
+                        Some(&new_binding),
+                    ) {
+                        Ok(profile) => format!(
+                            "Session inference override set to preset '{preset}' → {}/{}. Applies on the next agent turn.",
+                            profile.llm_config.provider, profile.llm_config.model
+                        ),
+                        Err(e) => format!("Override saved but resolution failed on replay: {e}"),
+                    }
+                }
+                Err(e) => format!("Failed to set model override: {e}"),
+            }
+        }
+        SlashCommand::ModelClear => match store.delete_session_inference_binding(&root) {
+            Ok(cleared) => {
+                if cleared {
+                    "Session inference override cleared.".to_string()
+                } else {
+                    "No session inference override was set.".to_string()
+                }
+            }
+            Err(e) => format!("Failed to clear model override: {e}"),
+        },
+        _ => "Internal error: unexpected /model command".to_string(),
+    }
+}
+
 fn handle_slash_command_submission(
     app: &mut App,
     config_path: &Path,
@@ -1994,6 +2112,11 @@ fn handle_slash_command_submission(
                     );
                 }
             }
+            true
+        }
+        SlashCommand::ModelShow | SlashCommand::ModelSet { .. } | SlashCommand::ModelClear => {
+            let message = handle_model_slash_command(app, config, gateway_store, command);
+            app.add_message(MessageRole::System, message);
             true
         }
     }
@@ -6112,6 +6235,9 @@ async fn handle_chat_test_mode(
                  }
                  Ok(SlashCommand::PlanApprove(_)) => {
                      println!("/plan is not supported in test mode.");
+                 }
+                 Ok(SlashCommand::ModelShow | SlashCommand::ModelSet { .. } | SlashCommand::ModelClear) => {
+                     println!("/model is not supported in test mode.");
                  }
                  Err(error) => {
                     println!("{}", error);

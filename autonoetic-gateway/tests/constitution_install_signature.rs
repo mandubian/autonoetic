@@ -40,6 +40,7 @@ fn test_manifest() -> AgentManifest {
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

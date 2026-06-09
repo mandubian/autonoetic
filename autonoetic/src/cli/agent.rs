@@ -522,6 +522,7 @@ fn admin_revision_manifest() -> AgentManifest {
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -1861,6 +1862,7 @@ pub fn handle_agent_import_skill(
             description: parsed_manifest.agent.description.clone(),
         },
         capabilities,
+        llm_preset: parsed_manifest.llm_preset.clone(),
         llm_config,
         limits: parsed_manifest.limits.clone(),
         background: parsed_manifest.background.clone(),

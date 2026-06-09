@@ -45,6 +45,7 @@ fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
                 hosts: vec!["*".to_string()],
             },
         ],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -83,6 +84,7 @@ fn manifest_without_network() -> AgentManifest {
             patterns: vec!["*".to_string()],
             commands: vec![],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -306,6 +308,7 @@ fn test_artifact_exec_tool_registered_and_gated() {
         capabilities: vec![Capability::NetworkAccess {
             hosts: vec!["*".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

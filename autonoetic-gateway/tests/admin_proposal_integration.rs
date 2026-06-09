@@ -32,6 +32,7 @@ fn test_manifest_with_approval_queue() -> AgentManifest {
         capabilities: vec![Capability::ApprovalQueue {
             patterns: vec!["admin.proposal.*".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -69,6 +70,7 @@ fn test_manifest_with_read_access() -> AgentManifest {
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -104,6 +106,7 @@ fn test_manifest_no_caps() -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: vec![],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

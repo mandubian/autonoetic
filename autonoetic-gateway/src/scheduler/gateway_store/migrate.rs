@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 48;
+const SCHEMA_VERSION_LATEST: i64 = 49;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -533,6 +533,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_timeline_v46(conn)?;
     apply_decided_by_kind_v47(conn)?;
     apply_operator_channel_bindings_v48(conn)?;
+    apply_session_inference_bindings_v49(conn)?;
 
     Ok(())
 }
@@ -543,6 +544,37 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
 /// external_id)` is the natural key (one conversation ⇒ one room); rebinding
 /// the same conversation upserts. Channels reach this over RPC — they are API
 /// clients, never direct store readers (Separation of Powers, #390).
+fn apply_session_inference_bindings_v49(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 49 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_inference_bindings (
+            root_session_id TEXT PRIMARY KEY,
+            preset_override TEXT,
+            reason TEXT,
+            set_by TEXT NOT NULL,
+            set_at TEXT NOT NULL
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            49_i64,
+            "session_inference_bindings",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
 fn apply_operator_channel_bindings_v48(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",

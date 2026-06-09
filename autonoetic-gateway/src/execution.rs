@@ -908,6 +908,209 @@ impl GatewayExecutionService {
         self.degraded_sessions.lock().await.contains(session_id)
     }
 
+    fn resolve_inference_agent_id(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        if let Some(id) = agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+            return Ok(id.to_string());
+        }
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required to resolve agent_id"))?;
+        let binding = store
+            .get_session_agent_binding(session_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "agent_id is required when session '{}' has no agent binding",
+                    session_id
+                )
+            })?;
+        Ok(binding.agent_id)
+    }
+
+    fn resolve_spawn_inference_profile(
+        &self,
+        agent_id: &str,
+        manifest: &autonoetic_types::agent::AgentManifest,
+        session_id: &str,
+    ) -> anyhow::Result<crate::runtime::inference_profile::ResolvedInferenceProfile> {
+        let root = crate::runtime::content_store::root_session_id(session_id);
+        let binding = self
+            .gateway_store
+            .as_ref()
+            .and_then(|gs| gs.get_session_inference_binding(root).ok().flatten());
+        let profile = crate::runtime::inference_profile::resolve_inference_profile(
+            agent_id,
+            manifest,
+            &self.config,
+            binding.as_ref(),
+        )?;
+        if profile.preset_source
+            == crate::runtime::inference_profile::PresetSource::LegacyInline
+        {
+            tracing::warn!(
+                target: "autonoetic::inference",
+                agent_id = %agent_id,
+                session_id = %session_id,
+                "Agent uses legacy inline llm_config; prefer llm_preset in SKILL.md"
+            );
+        }
+        Ok(profile)
+    }
+
+    pub fn get_session_inference(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
+        let (manifest, _) = self.load_agent_manifest(&agent_id)?;
+        let profile = self.resolve_spawn_inference_profile(&agent_id, &manifest, session_id)?;
+        let binding = self
+            .gateway_store
+            .as_ref()
+            .and_then(|gs| {
+                gs.get_session_inference_binding(crate::runtime::content_store::root_session_id(
+                    session_id,
+                ))
+                .ok()
+                .flatten()
+            });
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "root_session_id": crate::runtime::content_store::root_session_id(session_id),
+            "agent_id": agent_id,
+            "preset_name": profile.preset_name,
+            "preset_source": profile.snapshot_preset_source(),
+            "session_override_preset": profile.session_override_preset,
+            "provider": profile.llm_config.provider,
+            "model": profile.llm_config.model,
+            "is_routing_preset": profile.is_routing_preset,
+            "binding": binding,
+        }))
+    }
+
+    pub fn set_session_inference_override(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        preset: &str,
+        reason: Option<&str>,
+        set_by: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let preset = preset.trim();
+        anyhow::ensure!(!preset.is_empty(), "preset must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session inference override"))?;
+        let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
+        let (manifest, _) = self.load_agent_manifest(&agent_id)?;
+        crate::runtime::inference_profile::validate_inference_override(
+            &manifest,
+            &self.config,
+            preset,
+        )?;
+        let root = crate::runtime::content_store::root_session_id(session_id);
+        let binding = store.upsert_session_inference_binding(
+            root,
+            Some(preset),
+            reason,
+            set_by,
+        )?;
+        let profile = self.resolve_spawn_inference_profile(&agent_id, &manifest, session_id)?;
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("inference-override-{}", uuid::Uuid::new_v4()),
+            agent_id: agent_id.clone(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "session".to_string(),
+            action: "session.inference_override".to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec![],
+            target: None,
+            payload: Some(
+                serde_json::json!({
+                    "operation": "set",
+                    "preset": preset,
+                    "reason": reason,
+                    "set_by": set_by,
+                    "resolved_provider": profile.llm_config.provider,
+                    "resolved_model": profile.llm_config.model,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: reason.map(str::to_string),
+        };
+        let _ = store.create_causal_event(&event);
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "root_session_id": root,
+            "binding": binding,
+            "resolved": {
+                "preset_name": profile.preset_name,
+                "provider": profile.llm_config.provider,
+                "model": profile.llm_config.model,
+            }
+        }))
+    }
+
+    pub fn clear_session_inference_override(
+        &self,
+        session_id: &str,
+        set_by: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session inference override"))?;
+        let root = crate::runtime::content_store::root_session_id(session_id);
+        let cleared = store.delete_session_inference_binding(root)?;
+        if cleared {
+            let event = autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("inference-clear-{}", uuid::Uuid::new_v4()),
+                agent_id: String::new(),
+                session_id: session_id.to_string(),
+                turn_id: None,
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "session".to_string(),
+                action: "session.inference_override".to_string(),
+                status: "active".to_string(),
+                enforced_rules: vec![],
+                target: None,
+                payload: Some(
+                    serde_json::json!({ "operation": "clear", "set_by": set_by }).to_string(),
+                ),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            };
+            let _ = store.create_causal_event(&event);
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "root_session_id": root,
+            "cleared": cleared,
+        }))
+    }
+
     /// Operator / gateway / privileged-agent root-session circuit breaker (see Phase 2C).
     pub async fn emergency_stop_root_session(
         &self,
@@ -1157,6 +1360,14 @@ impl GatewayExecutionService {
                 root_session_id = %root_session_id,
                 error = %e,
                 "Failed to delete session grants during emergency stop"
+            );
+        }
+        if let Err(e) = store.delete_session_inference_binding(root_session_id) {
+            tracing::warn!(
+                target: "emergency_stop",
+                root_session_id = %root_session_id,
+                error = %e,
+                "Failed to delete session inference binding during emergency stop"
             );
         }
 
@@ -2071,12 +2282,12 @@ impl GatewayExecutionService {
                 });
             }
 
-            let llm_config = loaded
-                .manifest
-                .llm_config
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
-            let driver = build_driver(llm_config, self.http_client.clone())?;
+            let inference = self.resolve_spawn_inference_profile(
+                agent_id,
+                &loaded.manifest,
+                session_id,
+            )?;
+            let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
 
             let openrouter_catalog =
                 Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
@@ -2090,6 +2301,7 @@ impl GatewayExecutionService {
                 crate::runtime::tools::default_registry(),
                 self.gateway_store.clone(),
             )
+            .with_resolved_inference(inference)
             .with_gateway_dir(self.config.agents_dir.join(".gateway"))
             .with_config(self.config.clone())
             .with_session_budget(Some(self.session_budget.clone()))
@@ -3050,12 +3262,12 @@ impl GatewayExecutionService {
             );
         };
 
-        let llm_config = loaded
-            .manifest
-            .llm_config
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
-        let driver = build_driver(llm_config, self.http_client.clone())?;
+        let inference = self.resolve_spawn_inference_profile(
+            agent_id,
+            &loaded.manifest,
+            session_id,
+        )?;
+        let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
 
         let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
         let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
@@ -3068,6 +3280,7 @@ impl GatewayExecutionService {
             crate::runtime::tools::default_registry(),
             self.gateway_store.clone(),
         )
+        .with_resolved_inference(inference)
         .with_gateway_dir(self.config.agents_dir.join(".gateway"))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
@@ -3300,12 +3513,12 @@ impl GatewayExecutionService {
             .get_sync_from_store(&agent_id, &gateway_dir, self.gateway_store.as_deref())
             .map_err(|e| anyhow::anyhow!("Failed to load agent '{}': {}", agent_id, e))?;
 
-        let llm_config = loaded
-            .manifest
-            .llm_config
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
-        let driver = build_driver(llm_config, self.http_client.clone())?;
+        let inference = self.resolve_spawn_inference_profile(
+            &agent_id,
+            &loaded.manifest,
+            &child_session_id,
+        )?;
+        let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
 
         let redacted_question = crate::log_redaction::redact_text_for_logs(question);
         store.add_gate_message(approval_id, "operator", &redacted_question)?;
@@ -3346,6 +3559,7 @@ impl GatewayExecutionService {
             crate::runtime::tools::default_registry(),
             self.gateway_store.clone(),
         )
+        .with_resolved_inference(inference)
         .with_gateway_dir(self.config.agents_dir.join(".gateway"))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
@@ -3451,12 +3665,12 @@ impl GatewayExecutionService {
             .get_sync_from_store(&agent_id, &gateway_dir, self.gateway_store.as_deref())
             .map_err(|e| anyhow::anyhow!("Failed to load agent '{}': {}", agent_id, e))?;
 
-        let llm_config = loaded
-            .manifest
-            .llm_config
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Agent '{}' is missing llm_config", agent_id))?;
-        let driver = build_driver(llm_config, self.http_client.clone())?;
+        let inference = self.resolve_spawn_inference_profile(
+            &agent_id,
+            &loaded.manifest,
+            &child_session_id,
+        )?;
+        let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
 
         let redacted_question = crate::log_redaction::redact_text_for_logs(question);
         store.add_gate_message(escalation_id, "operator", &redacted_question)?;
@@ -3499,6 +3713,7 @@ impl GatewayExecutionService {
             crate::runtime::tools::default_registry(),
             self.gateway_store.clone(),
         )
+        .with_resolved_inference(inference)
         .with_gateway_dir(self.config.agents_dir.join(".gateway"))
         .with_config(self.config.clone())
         .with_session_budget(Some(self.session_budget.clone()))
@@ -3922,6 +4137,7 @@ mod tests {
                 description: "test".to_string(),
             },
             capabilities: vec![],
+            llm_preset: None,
             llm_config: None,
             limits: None,
             background: None,
