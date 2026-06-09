@@ -469,11 +469,13 @@ pub fn approve_request_with_options(
             // Update index.toml
             let index_path = wiki_dir.join("index.toml");
             let mut index: Vec<toml::Value> = if index_path.exists() {
-                let index_content = std::fs::read_to_string(&index_path).unwrap_or_default();
-                match index_content.parse::<toml::Value>() {
-                    Ok(v) => v.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default(),
-                    Err(_) => Vec::new(),
-                }
+                let index_content = std::fs::read_to_string(&index_path).map_err(|e| {
+                    anyhow::anyhow!("Failed to read wiki index '{}': {}", index_path.display(), e)
+                })?;
+                let parsed: toml::Value = index_content.parse().map_err(|e| {
+                    anyhow::anyhow!("Failed to parse wiki index '{}': {}", index_path.display(), e)
+                })?;
+                parsed.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default()
             } else {
                 Vec::new()
             };

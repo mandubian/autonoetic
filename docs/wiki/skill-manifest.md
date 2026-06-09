@@ -41,13 +41,13 @@ Your natural language instructions go here.
 |-------|----------|-------------|
 | `name` | Yes | Fully qualified agent ID |
 | `description` | Yes | One-line description |
-| `metadata.autonogetic.agent.id` | Yes | Must match directory name |
-| `metadata.autonogetic.llm_config` | Reasoning mode | LLM provider/model config |
-| `metadata.autonogetic.capabilities` | No | Permission declarations |
-| `metadata.autonogetic.execution_mode` | No | `"reasoning"` (default) or `"script"` |
-| `metadata.autonogetic.script_entry` | Script mode | Entry script path |
-| `metadata.autonogetic.io` | No | JSON Schema for input/output |
-| `metadata.autonogetic.validation` | No | `"soft"` (LLM) or `"strict"` (script) |
+| `metadata.autonoetic.agent.id` | Yes | Must match directory name |
+| `metadata.autonoetic.llm_config` | Reasoning mode | LLM provider/model config |
+| `metadata.autonoetic.capabilities` | No | Permission declarations |
+| `metadata.autonoetic.execution_mode` | No | `"reasoning"` (default) or `"script"` |
+| `metadata.autonoetic.script_entry` | Script mode | Entry script path |
+| `metadata.autonoetic.io` | No | JSON Schema for input/output |
+| `metadata.autonoetic.validation` | No | `"soft"` (LLM) or `"strict"` (script) |
 
 ## Script vs Reasoning Mode
 

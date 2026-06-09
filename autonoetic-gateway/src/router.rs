@@ -1315,9 +1315,9 @@ impl JsonRpcRouter {
 
             "wiki.list" => {
                 let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
-                let wiki_dir = gateway_dir.join("wiki");
+                let wiki_root = gateway_dir.join("wiki");
                 match crate::runtime::tools::wiki::list_pages(
-                    if wiki_dir.exists() { Some(wiki_dir.as_path()) } else { None },
+                    if wiki_root.exists() { Some(gateway_dir.as_path()) } else { None },
                 ) {
                     Ok(result) => JsonRpcResponse::success(
                         req.id,
@@ -1344,9 +1344,9 @@ impl JsonRpcRouter {
                         }
                     };
                 let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
-                let wiki_dir = gateway_dir.join("wiki");
+                let wiki_root = gateway_dir.join("wiki");
                 match crate::runtime::tools::wiki::get_page(
-                    if wiki_dir.exists() { Some(wiki_dir.as_path()) } else { None },
+                    if wiki_root.exists() { Some(gateway_dir.as_path()) } else { None },
                     &params.id,
                 ) {
                     Ok(result) => JsonRpcResponse::success(

@@ -576,14 +576,14 @@ pub fn bootstrap_sdk_snapshot(gateway_dir: &Path) -> Result<()> {
     let py_src = sdk_root.join("python").join("autonoetic_sdk");
     if py_src.exists() {
         let py_dest = dest.join("python").join("autonoetic_sdk");
-        sync_dir(&py_src, &py_dest)?;
+        seed_missing(&py_src, &py_dest)?;
     }
 
     // TypeScript SDK
     let ts_src = sdk_root.join("typescript");
     if ts_src.exists() {
         let ts_dest = dest.join("typescript");
-        sync_dir(&ts_src, &ts_dest)?;
+        seed_missing(&ts_src, &ts_dest)?;
     }
 
     Ok(())
@@ -591,6 +591,9 @@ pub fn bootstrap_sdk_snapshot(gateway_dir: &Path) -> Result<()> {
 
 /// Materialize the wiki docs corpus into `.gateway/wiki/` so agents can
 /// discover and read platform documentation at runtime.
+///
+/// Only seeds pages that don't already exist — operator-promoted pages are
+/// never overwritten on restart.
 pub fn bootstrap_wiki_snapshot(gateway_dir: &Path) -> Result<()> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let wiki_src = manifest_dir
@@ -603,13 +606,14 @@ pub fn bootstrap_wiki_snapshot(gateway_dir: &Path) -> Result<()> {
     }
 
     let dest = gateway_dir.join("wiki");
-    sync_dir(&wiki_src, &dest)?;
+    seed_missing(&wiki_src, &dest)?;
     Ok(())
 }
 
-/// Recursively copy files from `src` to `dst`. Idempotent — skips when
-/// destination already exists with matching content (by mtime + size).
-fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
+/// Copy files from `src` to `dst` only when the destination file is missing.
+/// Never overwrites existing files — operator-promoted wiki pages and index
+/// entries survive restarts.
+fn seed_missing(src: &Path, dst: &Path) -> Result<()> {
     if !dst.exists() {
         std::fs::create_dir_all(dst)?;
     }
@@ -618,19 +622,9 @@ fn sync_dir(src: &Path, dst: &Path) -> Result<()> {
         let file_type = entry.file_type()?;
         let dest_path = dst.join(entry.file_name());
         if file_type.is_dir() {
-            sync_dir(&entry.path(), &dest_path)?;
-        } else if file_type.is_file() {
-            let src_meta = entry.metadata()?;
-            let should_copy = match dest_path.metadata() {
-                Ok(dst_meta) => {
-                    dst_meta.len() != src_meta.len()
-                        || dst_meta.modified().ok() != src_meta.modified().ok()
-                }
-                Err(_) => true,
-            };
-            if should_copy {
-                std::fs::copy(&entry.path(), &dest_path)?;
-            }
+            seed_missing(&entry.path(), &dest_path)?;
+        } else if file_type.is_file() && !dest_path.exists() {
+            std::fs::copy(&entry.path(), &dest_path)?;
         }
     }
     Ok(())

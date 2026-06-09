@@ -85,6 +85,7 @@ Agents interact with the gateway through tools. This page lists the major tool c
 |------|-------------|
 | `wiki.list` | List all available wiki pages (id + title + tags) |
 | `wiki.get` | Get full content of a wiki page by id |
+| `wiki.propose` | Propose a new wiki page or edit an existing one (requires operator approval) |
 
 ## Web Tools
 
