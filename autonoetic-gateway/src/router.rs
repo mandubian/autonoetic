@@ -1592,7 +1592,8 @@ impl JsonRpcRouter {
                 #[derive(Deserialize)]
                 struct InferenceGetParams {
                     session_id: String,
-                    agent_id: String,
+                    #[serde(default)]
+                    agent_id: Option<String>,
                 }
                 let params: InferenceGetParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
@@ -1604,7 +1605,10 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match self.execution.get_session_inference(&params.session_id, &params.agent_id) {
+                match self.execution.get_session_inference(
+                    &params.session_id,
+                    params.agent_id.as_deref(),
+                ) {
                     Ok(v) => JsonRpcResponse::success(req.id, v),
                     Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
                 }
@@ -1614,7 +1618,8 @@ impl JsonRpcRouter {
                 #[derive(Deserialize)]
                 struct InferenceSetParams {
                     session_id: String,
-                    agent_id: String,
+                    #[serde(default)]
+                    agent_id: Option<String>,
                     preset: String,
                     #[serde(default)]
                     reason: Option<String>,
@@ -1636,7 +1641,7 @@ impl JsonRpcRouter {
                 };
                 match self.execution.set_session_inference_override(
                     &params.session_id,
-                    &params.agent_id,
+                    params.agent_id.as_deref(),
                     &params.preset,
                     params.reason.as_deref(),
                     &params.set_by,

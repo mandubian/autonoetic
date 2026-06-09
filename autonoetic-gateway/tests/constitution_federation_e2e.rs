@@ -165,6 +165,7 @@ fn evaluator_manifest() -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -202,6 +203,7 @@ fn auditor_manifest() -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

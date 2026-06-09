@@ -908,6 +908,29 @@ impl GatewayExecutionService {
         self.degraded_sessions.lock().await.contains(session_id)
     }
 
+    fn resolve_inference_agent_id(
+        &self,
+        session_id: &str,
+        agent_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        if let Some(id) = agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+            return Ok(id.to_string());
+        }
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required to resolve agent_id"))?;
+        let binding = store
+            .get_session_agent_binding(session_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "agent_id is required when session '{}' has no agent binding",
+                    session_id
+                )
+            })?;
+        Ok(binding.agent_id)
+    }
+
     fn resolve_spawn_inference_profile(
         &self,
         agent_id: &str,
@@ -941,12 +964,13 @@ impl GatewayExecutionService {
     pub fn get_session_inference(
         &self,
         session_id: &str,
-        agent_id: &str,
+        agent_id: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
         let session_id = session_id.trim();
         anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
-        let (manifest, _) = self.load_agent_manifest(agent_id)?;
-        let profile = self.resolve_spawn_inference_profile(agent_id, &manifest, session_id)?;
+        let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
+        let (manifest, _) = self.load_agent_manifest(&agent_id)?;
+        let profile = self.resolve_spawn_inference_profile(&agent_id, &manifest, session_id)?;
         let binding = self
             .gateway_store
             .as_ref()
@@ -975,7 +999,7 @@ impl GatewayExecutionService {
     pub fn set_session_inference_override(
         &self,
         session_id: &str,
-        agent_id: &str,
+        agent_id: Option<&str>,
         preset: &str,
         reason: Option<&str>,
         set_by: &str,
@@ -988,7 +1012,8 @@ impl GatewayExecutionService {
             .gateway_store
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session inference override"))?;
-        let (manifest, _) = self.load_agent_manifest(agent_id)?;
+        let agent_id = self.resolve_inference_agent_id(session_id, agent_id)?;
+        let (manifest, _) = self.load_agent_manifest(&agent_id)?;
         crate::runtime::inference_profile::validate_inference_override(
             &manifest,
             &self.config,
@@ -1001,10 +1026,10 @@ impl GatewayExecutionService {
             reason,
             set_by,
         )?;
-        let profile = self.resolve_spawn_inference_profile(agent_id, &manifest, session_id)?;
+        let profile = self.resolve_spawn_inference_profile(&agent_id, &manifest, session_id)?;
         let event = autonoetic_types::causal_chain::CausalEventRecord {
             event_id: format!("inference-override-{}", uuid::Uuid::new_v4()),
-            agent_id: agent_id.to_string(),
+            agent_id: agent_id.clone(),
             session_id: session_id.to_string(),
             turn_id: None,
             event_seq: 0,
@@ -1016,6 +1041,7 @@ impl GatewayExecutionService {
             target: None,
             payload: Some(
                 serde_json::json!({
+                    "operation": "set",
                     "preset": preset,
                     "reason": reason,
                     "set_by": set_by,
@@ -1064,11 +1090,13 @@ impl GatewayExecutionService {
                 event_seq: 0,
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 category: "session".to_string(),
-                action: "session.inference_override_cleared".to_string(),
+                action: "session.inference_override".to_string(),
                 status: "active".to_string(),
                 enforced_rules: vec![],
                 target: None,
-                payload: Some(serde_json::json!({ "set_by": set_by }).to_string()),
+                payload: Some(
+                    serde_json::json!({ "operation": "clear", "set_by": set_by }).to_string(),
+                ),
                 payload_ref: None,
                 evidence_ref: None,
                 reason: None,

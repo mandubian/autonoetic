@@ -38,6 +38,7 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
             description: "test".to_string(),
         },
         capabilities,
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

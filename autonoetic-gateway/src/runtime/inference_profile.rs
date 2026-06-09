@@ -151,8 +151,11 @@ fn merge_manifest_llm_hints(cfg: &mut LlmConfig, manifest: Option<&LlmConfig>) {
     if m.thinking.is_some() {
         cfg.thinking = m.thinking.clone();
     }
-    // Preserve explicit manifest temperature when non-default and preset left default.
-    if m.temperature > 0.0 && (cfg.temperature - 0.2).abs() < f64::EPSILON && m.temperature != 0.2
+    // Preserve manifest temperature when it differs from the preset default (0.2),
+    // including explicit 0.0 (fully deterministic).
+    const PRESET_DEFAULT_TEMPERATURE: f64 = 0.2;
+    if (cfg.temperature - PRESET_DEFAULT_TEMPERATURE).abs() < f64::EPSILON
+        && (m.temperature - cfg.temperature).abs() > f64::EPSILON
     {
         cfg.temperature = m.temperature;
     }
@@ -339,6 +342,30 @@ mod tests {
             resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
         assert_eq!(profile.preset_source, PresetSource::LegacyInline);
         assert_eq!(profile.llm_config.model, "gpt-4o");
+    }
+
+    #[test]
+    fn merge_manifest_temperature_zero_when_preset_default() {
+        let mut config = fixed_config();
+        config.llm_presets.get_mut("sonnet").unwrap().temperature = None;
+        let mut manifest = test_manifest();
+        manifest.llm_config = Some(LlmConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: 0.0,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: false,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            routing_preset: None,
+            thinking: None,
+        });
+        manifest.llm_preset = Some("sonnet".to_string());
+        let profile =
+            resolve_inference_profile("coder.default", &manifest, &config, None).unwrap();
+        assert_eq!(profile.llm_config.temperature, 0.0);
     }
 
     #[test]

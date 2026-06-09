@@ -29,6 +29,7 @@ fn test_manifest() -> AgentManifest {
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

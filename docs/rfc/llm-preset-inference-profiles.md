@@ -283,6 +283,13 @@ Also accept `autonoetic chat --llm-preset <name>` when starting or resuming a se
 { "method": "session.inference.clear", "params": { "session_id": "..." } }
 ```
 
+`agent_id` is optional on get/set when the session has a row in
+`session_agent_bindings` (resolved automatically). `set_by` defaults to
+`operator:rpc` on set/clear.
+
+Set/clear both emit `session.inference_override` with `operation: "set"` or
+`"clear"` in the payload.
+
 Gateway-only; not exposed as an agent tool.
 
 ### 7.3 `agent init` / `agent install`

@@ -26,6 +26,7 @@ fn minimal_manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: caps,
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

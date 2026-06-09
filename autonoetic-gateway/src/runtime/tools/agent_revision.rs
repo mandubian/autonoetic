@@ -1494,7 +1494,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 description: args.description.clone(),
             },
             capabilities: args.capabilities.clone(),
-            llm_preset: None,
+            llm_preset: args.llm_preset.clone(),
             llm_config: args.llm_config.clone(),
             limits: None,
             background: None,
