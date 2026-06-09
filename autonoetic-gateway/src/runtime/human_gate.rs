@@ -50,6 +50,16 @@ pub enum GateKind {
     Escalation {
         reason: String,
     },
+    /// Agent proposes a wiki page addition/update.
+    WikiProposal {
+        page_id: String,
+        title: String,
+        content: String,
+        tags: Vec<String>,
+        is_edit: bool,
+        proposed_by_agent: String,
+        proposed_by_session: String,
+    },
 }
 
 /// How strictly an `approval_ref` must match the current request.
@@ -196,6 +206,7 @@ impl GateService {
             } => self.check_approval(&req, action, targets, *match_strategy),
             GateKind::UserInput { .. } => self.check_user_input(&req),
             GateKind::Escalation { .. } => self.check_escalation(&req),
+            GateKind::WikiProposal { .. } => self.check_wiki_proposal(&req),
         }
     }
 
@@ -424,6 +435,88 @@ impl GateService {
     }
 
     // -----------------------------------------------------------------------
+    // WikiProposal pipeline
+    // -----------------------------------------------------------------------
+
+    fn check_wiki_proposal(&self, req: &GateRequest<'_>) -> Result<GateResult> {
+        let GateKind::WikiProposal {
+            page_id,
+            title,
+            content,
+            tags,
+            is_edit,
+            proposed_by_agent,
+            proposed_by_session,
+        } = &req.kind
+        else {
+            unreachable!()
+        };
+
+        // 1. Capability check.
+        let has_cap = req.manifest.capabilities.iter().any(|c| {
+            matches!(c, autonoetic_types::capability::Capability::WikiContribute)
+        });
+        if !has_cap {
+            anyhow::bail!("Missing capability: WikiContribute");
+        }
+
+        // 2. Pending dedup.
+        if let Some(sid) = req.session_id {
+            if !sid.is_empty() {
+                if let Some(pending_id) = self.find_pending_wiki_proposal(sid, page_id)? {
+                    return Ok(GateResult::AlreadyPending {
+                        gate_id: pending_id,
+                        enforced_rules: vec!["P-2.3"],
+                    });
+                }
+            }
+        }
+
+        // 3. Compute content SHA-256.
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let content_sha256 = Some(format!("{:x}", hasher.finalize()));
+
+        // 4. Create approval row.
+        let action = ScheduledAction::WikiProposal {
+            page_id: page_id.clone(),
+            title: title.clone(),
+            content: content.clone(),
+            tags: tags.clone(),
+            content_sha256,
+            proposed_by_agent: proposed_by_agent.clone(),
+            proposed_by_session: Some(proposed_by_session.clone()),
+        };
+        let gate_id = self.create_approval_row(req, &action)?;
+
+        // 5. Seed enrichment message.
+        let edit_label = if *is_edit { "edit" } else { "new" };
+        let seed = format!(
+            "Wiki proposal ({}) — page_id: {}, title: {}, proposed by: {}",
+            edit_label, page_id, title, proposed_by_agent
+        );
+        let _ = self.add_gate_message(&gate_id, "system", &seed);
+
+        // 6. Build suspension JSON (tool will NOT suspend — it returns ok:true).
+        let response_json = serde_json::json!({
+            "ok": true,
+            "id": page_id,
+            "gate_id": gate_id,
+            "is_edit": is_edit,
+            "status": "pending",
+            "proposed_at": chrono::Utc::now().to_rfc3339(),
+        })
+        .to_string();
+
+        Ok(GateResult::Suspended {
+            gate_id,
+            response_json,
+            enforced_rules: vec!["P-2.1"],
+        })
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers — approval_ref validation
     // -----------------------------------------------------------------------
 
@@ -566,6 +659,30 @@ impl GateService {
                     req_hosts.iter().any(|h| extract_host_from_target(h) == t_host)
                 });
                 if overlap {
+                    return Ok(Some(req.request_id.clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Find an existing pending wiki proposal for the same session + page_id.
+    fn find_pending_wiki_proposal(
+        &self,
+        session_id: &str,
+        page_id: &str,
+    ) -> Result<Option<String>> {
+        let pending = crate::scheduler::approval::pending_approval_requests_for_session(
+            &autonoetic_types::config::GatewayConfig::default(),
+            Some(&self.store),
+            session_id,
+        )?;
+        for req in &pending {
+            if let ScheduledAction::WikiProposal {
+                page_id: ref pid, ..
+            } = &req.action
+            {
+                if pid == page_id {
                     return Ok(Some(req.request_id.clone()));
                 }
             }

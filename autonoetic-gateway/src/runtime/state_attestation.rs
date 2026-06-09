@@ -249,6 +249,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SecurityRedTeam => "SecurityRedTeam",
         Capability::CapsuleExport => "CapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
+        Capability::WikiContribute => "WikiContribute",
     }
     .to_string()
 }

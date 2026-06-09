@@ -171,6 +171,11 @@ pub enum Capability {
     /// `docs/cognitive-capsule.md`.
     CapsuleExport,
 
+    /// Propose new wiki pages (docs) to be curated into the platform wiki.
+    /// Writing durable documentation is a trust boundary — requires judgment.
+    /// Only agents with this capability can call wiki.propose.
+    WikiContribute,
+
     /// Access to PlanFrame operations (propose, amend, approve, list, get).
     /// Controls whether an agent can create and modify collaborative plans.
     /// The `patterns` field restricts which operations are allowed.
@@ -325,6 +330,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
         Capability::CapsuleExport => "CapsuleExport".to_string(),
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
+        Capability::WikiContribute => "WikiContribute".to_string(),
     }
 }
 

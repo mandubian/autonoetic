@@ -272,6 +272,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::SecurityRedTeam => "SecurityRedTeam",
         Capability::CapsuleExport => "CapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
+        Capability::WikiContribute => "WikiContribute",
     }
 }
 

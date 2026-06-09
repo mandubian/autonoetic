@@ -8217,6 +8217,13 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             }
             v
         }
+        ScheduledAction::WikiProposal {
+            page_id, title, ..
+        } => vec![
+            "type: wiki_propose".to_string(),
+            format!("  page_id: {}", clamp_chat_field(page_id)),
+            format!("  title: {}", clamp_chat_field(title)),
+        ],
     }
 }
 
