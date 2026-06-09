@@ -36,6 +36,8 @@ struct AutonoeticMetadata {
     agent: Option<AgentIdentity>,
     #[serde(default)]
     capabilities: Option<Vec<Capability>>,
+    #[serde(default)]
+    llm_preset: Option<String>,
     llm_config: Option<LlmConfig>,
     limits: Option<ResourceLimits>,
     background: Option<BackgroundPolicy>,
@@ -146,6 +148,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         runtime,
         agent,
         capabilities,
+        llm_preset: meta.llm_preset,
         llm_config: meta.llm_config,
         limits: meta.limits,
         background: meta.background,

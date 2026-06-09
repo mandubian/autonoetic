@@ -271,6 +271,10 @@ pub struct AgentExecutor {
     /// pressure level. Cleared when estimated tokens drop below the threshold (85% of
     /// effective_limit), so the TUI sees a fresh warning on each pressure buildup cycle.
     pub pressure_high_warned: bool,
+
+    /// Resolved inference profile for this spawn (preset + concrete llm_config).
+    pub resolved_inference:
+        Option<crate::runtime::inference_profile::ResolvedInferenceProfile>,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -335,7 +339,16 @@ impl AgentExecutor {
             discovered_tools: std::collections::HashSet::new(),
             discovered_tools_writer: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pressure_high_warned: false,
+            resolved_inference: None,
         }
+    }
+
+    pub fn with_resolved_inference(
+        mut self,
+        profile: crate::runtime::inference_profile::ResolvedInferenceProfile,
+    ) -> Self {
+        self.resolved_inference = Some(profile);
+        self
     }
 
     /// Take accumulated LLM usage from the last `execute_with_history` (consumes the buffer).
@@ -706,10 +719,15 @@ impl AgentExecutor {
         pending_tool_state: Option<PendingToolState>,
     ) -> SessionCheckpoint {
         let llm_config_snapshot = self
-            .manifest
-            .llm_config
+            .resolved_inference
             .as_ref()
-            .map(LlmConfigSnapshot::from_config);
+            .map(LlmConfigSnapshot::from_inference_profile)
+            .or_else(|| {
+                self.manifest
+                    .llm_config
+                    .as_ref()
+                    .map(LlmConfigSnapshot::from_config)
+            });
 
         // Gather budget counters from the session budget registry
         let (llm_rounds, tokens, cost) = self
@@ -3197,6 +3215,7 @@ mod tests {
                 description: "test".to_string(),
             },
             capabilities,
+            llm_preset: None,
             llm_config: None,
             limits: None,
             background: None,

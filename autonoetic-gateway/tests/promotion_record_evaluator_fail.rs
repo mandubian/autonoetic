@@ -78,6 +78,7 @@ fn evolution_manifest() -> AgentManifest {
             max_children: 10,
             max_spawn_depth: 0,
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -116,6 +117,7 @@ fn evaluator_manifest() -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -334,6 +336,7 @@ async fn test_promotion_auditor_fail_rejected() {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

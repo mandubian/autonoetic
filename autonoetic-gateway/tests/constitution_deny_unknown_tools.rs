@@ -34,6 +34,7 @@ fn manifest_with_sandbox(allowed: Vec<&str>) -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: allowed.iter().map(|s| s.to_string()).collect(),
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -69,6 +70,7 @@ fn manifest_no_capabilities() -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: vec![],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

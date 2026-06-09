@@ -39,6 +39,7 @@ fn manifest_with_reasoning_audit(targets: Vec<&str>) -> AgentManifest {
         capabilities: vec![Capability::ReasoningAudit {
             targets: targets.iter().map(|t| t.to_string()).collect(),
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -74,6 +75,7 @@ fn manifest_without_audit() -> AgentManifest {
             description: "test".to_string(),
         },
         capabilities: vec![],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,

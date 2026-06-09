@@ -24,6 +24,7 @@ pub mod eval_stats;
 pub mod failure_classification;
 pub mod guard;
 pub mod history_persist;
+pub mod inference_profile;
 pub mod human_gate;
 pub mod install_contract;
 pub mod lifecycle;

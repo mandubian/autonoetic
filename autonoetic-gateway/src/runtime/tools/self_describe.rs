@@ -168,6 +168,7 @@ mod tests {
                 description: "a demo".to_string(),
             },
             capabilities: caps,
+            llm_preset: None,
             llm_config: None,
             limits: None,
             background: None,

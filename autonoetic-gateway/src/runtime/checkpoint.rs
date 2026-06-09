@@ -58,6 +58,12 @@ pub struct LlmConfigSnapshot {
     pub fallback_model: Option<String>,
     pub chat_only: bool,
     pub context_window_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_override_preset: Option<String>,
 }
 
 impl LlmConfigSnapshot {
@@ -70,7 +76,20 @@ impl LlmConfigSnapshot {
             fallback_model: config.fallback_model.clone(),
             chat_only: config.chat_only,
             context_window_tokens: config.context_window_tokens,
+            preset_name: config.routing_preset.clone(),
+            preset_source: None,
+            session_override_preset: None,
         }
+    }
+
+    pub fn from_inference_profile(
+        profile: &crate::runtime::inference_profile::ResolvedInferenceProfile,
+    ) -> Self {
+        let mut snap = Self::from_config(&profile.llm_config);
+        snap.preset_name = profile.preset_name.clone();
+        snap.preset_source = Some(profile.snapshot_preset_source());
+        snap.session_override_preset = profile.session_override_preset.clone();
+        snap
     }
 }
 

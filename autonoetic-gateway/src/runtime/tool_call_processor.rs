@@ -816,6 +816,7 @@ mod tests {
                     scopes: vec!["*".to_string()],
                 },
             ],
+            llm_preset: None,
             llm_config: None,
             limits: None,
             background: None,

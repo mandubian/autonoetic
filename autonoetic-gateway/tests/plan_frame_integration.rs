@@ -39,6 +39,7 @@ fn plan_frame_manifest() -> AgentManifest {
                 patterns: vec!["*".to_string()],
             },
         ],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
@@ -76,6 +77,7 @@ fn no_plan_frame_manifest() -> AgentManifest {
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
         }],
+        llm_preset: None,
         llm_config: None,
         limits: None,
         background: None,
