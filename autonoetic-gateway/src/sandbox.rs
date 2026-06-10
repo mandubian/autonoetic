@@ -1,5 +1,6 @@
 //! Sandbox runner supporting bubblewrap, docker, and firecracker.
 
+use crate::exec_request::ExecutionKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::SandboxConfig;
@@ -225,7 +226,7 @@ impl SandboxRunner {
         Self::spawn_with_driver_and_dependencies_and_env(
             driver,
             agent_dir,
-            entrypoint,
+            &ExecutionKind::shell(entrypoint),
             dependencies,
             overrides,
             &[],
@@ -236,12 +237,14 @@ impl SandboxRunner {
     pub fn spawn_with_driver_and_dependencies_and_env(
         driver: SandboxDriverKind,
         agent_dir: &str,
-        entrypoint: &str,
+        request: &ExecutionKind,
         dependencies: Option<&DependencyPlan>,
         overrides: Option<&BwrapIsolationOverrides>,
         extra_env: &[(String, String)],
         root_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
+        // Process backend: render the intent request to a shell line.
+        let entrypoint = request.render_process_command()?;
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
             "entrypoint must not be empty"
@@ -260,7 +263,7 @@ impl SandboxRunner {
             socket_mounts.push(mount);
         }
 
-        let composed_entrypoint = compose_entrypoint(entrypoint, dependencies)?;
+        let composed_entrypoint = compose_entrypoint(&entrypoint, dependencies)?;
         let (program, args) = match driver {
             SandboxDriverKind::Bubblewrap => {
                 if dependencies.is_some() {
@@ -271,7 +274,7 @@ impl SandboxRunner {
                         overrides,
                     )?
                 } else {
-                    bubblewrap_shell_command(agent_dir, entrypoint, &socket_mounts, overrides)?
+                    bubblewrap_shell_command(agent_dir, &entrypoint, &socket_mounts, overrides)?
                 }
             }
             SandboxDriverKind::Docker => {
@@ -319,7 +322,7 @@ impl SandboxRunner {
         Self::spawn_with_session_content_and_env(
             driver,
             agent_dir,
-            entrypoint,
+            &ExecutionKind::shell(entrypoint),
             dependencies,
             session_content_mounts,
             overrides,
@@ -331,13 +334,15 @@ impl SandboxRunner {
     pub fn spawn_with_session_content_and_env(
         driver: SandboxDriverKind,
         agent_dir: &str,
-        entrypoint: &str,
+        request: &ExecutionKind,
         dependencies: Option<&DependencyPlan>,
         session_content_mounts: Vec<SandboxMount>,
         overrides: Option<&BwrapIsolationOverrides>,
         extra_env: &[(String, String)],
         root_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
+        // Process backend: render the intent request to a shell line.
+        let entrypoint = request.render_process_command()?;
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
             "entrypoint must not be empty"
@@ -355,7 +360,7 @@ impl SandboxRunner {
             all_mounts.push(mount);
         }
 
-        let composed_entrypoint = compose_entrypoint(entrypoint, dependencies)?;
+        let composed_entrypoint = compose_entrypoint(&entrypoint, dependencies)?;
         let (program, args) = match driver {
             SandboxDriverKind::Bubblewrap => {
                 bubblewrap_shell_command(agent_dir, &composed_entrypoint, &all_mounts, overrides)?

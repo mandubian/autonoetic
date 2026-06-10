@@ -207,7 +207,6 @@ pub(crate) async fn execute_script_in_sandbox(
             autonoetic_types::agent::ScriptInputMode::Stdin => vec![],
         },
     };
-    let shell_command = exec_kind.render_process_command()?;
 
     // Primary contract for script agents: file-backed payload + metadata paths.
     // Keep normalized env payloads for compatibility with older scripts.
@@ -237,7 +236,7 @@ pub(crate) async fn execute_script_in_sandbox(
     let mut runner = match crate::sandbox::SandboxRunner::spawn_with_session_content_and_env(
         driver,
         &agent_dir.to_string_lossy(),
-        &shell_command,
+        &exec_kind,
         None,
         runtime_lock_mounts,
         Some(&overrides),

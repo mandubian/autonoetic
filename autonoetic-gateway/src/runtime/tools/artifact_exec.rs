@@ -939,10 +939,11 @@ impl NativeTool for ArtifactExecTool {
                 Some(&manifest.agent.id),
             )?;
 
+        let exec_kind = crate::exec_request::ExecutionKind::shell(command.clone());
         let runner = SandboxRunner::spawn_with_session_content_and_env(
             driver,
             agent_dir_str,
-            &command,
+            &exec_kind,
             None,
             mounts,
             Some(&overrides),
@@ -1217,10 +1218,11 @@ fn execute_with_ticket(
         Some(&manifest.agent.id),
     )?;
 
+    let exec_kind = crate::exec_request::ExecutionKind::shell(command.clone());
     let runner = SandboxRunner::spawn_with_session_content_and_env(
         driver,
         agent_dir_str,
-        &command,
+        &exec_kind,
         None,
         mounts,
         Some(&overrides),
