@@ -1029,6 +1029,7 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "wiki.proposed" => format!("wiki proposed: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
         "wiki.promoted" => format!("wiki promoted: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
         "wiki.rejected" => format!("wiki rejected: {} — {}", field("title").unwrap_or_default(), field("reason").unwrap_or_else(|| "no reason".into())),
+        "wiki.withdrawn" => format!("wiki withdrawn: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
         "divergence.intervention" => format!(
             "divergence: {} (turn {})",
             field("level").unwrap_or_else(|| "?".into()),
@@ -1440,6 +1441,7 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
         "wiki.proposed" => wiki_lifecycle_card(entry, "📝 WIKI PROPOSED"),
         "wiki.promoted" => wiki_lifecycle_card(entry, "✅ WIKI PROMOTED"),
         "wiki.rejected" => wiki_lifecycle_card(entry, "❌ WIKI REJECTED"),
+        "wiki.withdrawn" => wiki_lifecycle_card(entry, "↩️ WIKI WITHDRAWN"),
         _ => (summarize(entry), detail_preview(entry)),
     };
     let actor = actor_kind(&entry.role);
@@ -1523,7 +1525,7 @@ pub fn row_tone(event_type: &str) -> RowTone {
 pub fn tone_for_entry(entry: &SessionTimelineEntry) -> RowTone {
     match entry.event_type.as_str() {
         "plan.pending" | "approval.pending" | "user.ask.pending" | "escalation.pending"
-        | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" => {
+        | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" | "wiki.withdrawn" => {
             RowTone::OperatorGate
         }
         "agent.message" | "operator.message" if extract_plan_proposal_id(entry).is_some() => {
