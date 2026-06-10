@@ -107,6 +107,7 @@ impl PromotionStore {
                 sealed_evaluator_findings: vec![],
                 sealed_evaluator_timestamp: None,
                 promotion_gate_version: "2.1".to_string(),
+                blessed_packages: vec![],
             });
 
         if let Some(artifact_digest) = artifact_digest {
@@ -184,6 +185,25 @@ impl PromotionStore {
         self.save()?;
 
         Ok(record)
+    }
+
+    /// Bless the resolved dependency closure for a promoted artifact: freeze the
+    /// versions the validated, approved run used (determinism inc 3). No-op if no
+    /// record exists for the artifact. The set is typically derived from the
+    /// artifact's layers via `LayerStore::aggregate_resolved_packages`.
+    pub fn set_blessed_packages(
+        &self,
+        artifact_id: &str,
+        packages: Vec<autonoetic_types::layer::ResolvedPackage>,
+    ) -> anyhow::Result<bool> {
+        let mut records = self.records.lock().unwrap();
+        let Some(record) = records.get_mut(artifact_id) else {
+            return Ok(false);
+        };
+        record.blessed_packages = packages;
+        drop(records);
+        self.save()?;
+        Ok(true)
     }
 
     /// If a promotion record exists but has no bound content digest yet, attach one.
@@ -503,6 +523,46 @@ mod tests {
             assert!(record.evaluator_pass);
             assert_eq!(record.evaluator_id, Some("evaluator.default".to_string()));
         }
+    }
+
+    #[test]
+    fn blessed_packages_persist_and_no_op_when_missing() {
+        use autonoetic_types::layer::ResolvedPackage;
+        let temp = tempdir().unwrap();
+        let artifact_id = "art_bless".to_string();
+
+        let store = PromotionStore::new(temp.path()).unwrap();
+        // No record yet → no-op (false), nothing to bless.
+        assert!(!store
+            .set_blessed_packages(&artifact_id, vec![])
+            .unwrap());
+
+        store
+            .record_promotion(
+                artifact_id.clone(),
+                None,
+                None,
+                PromotionRole::Evaluator,
+                "evaluator.default",
+                true,
+                vec![],
+                None,
+            )
+            .unwrap();
+        let blessed = vec![ResolvedPackage {
+            name: "requests".into(),
+            version: "2.31.0".into(),
+        }];
+        assert!(store
+            .set_blessed_packages(&artifact_id, blessed.clone())
+            .unwrap());
+
+        // Survives a reload from disk.
+        let reloaded = PromotionStore::new(temp.path()).unwrap();
+        assert_eq!(
+            reloaded.get_promotion(&artifact_id).unwrap().blessed_packages,
+            blessed
+        );
     }
 
     #[test]
