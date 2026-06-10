@@ -262,10 +262,22 @@ impl LayerStore {
             for entry in entries.flatten() {
                 visited += 1;
                 if visited > 500_000 {
-                    return Self::finalize_resolved(found); // safety bound
+                    // Don't return silently — truncated provenance must be
+                    // detectable so it can't read as "complete" in an audit.
+                    tracing::warn!(
+                        target: "layer_store",
+                        root = %dir.display(),
+                        "resolved-package provenance scan hit the entry bound; results may be truncated"
+                    );
+                    return Self::finalize_resolved(found);
                 }
-                let path = entry.path();
-                if !path.is_dir() {
+                // `file_type()` does NOT follow symlinks (unlike `path.is_dir()`),
+                // so a symlinked dir / cycle can't traverse outside the capture
+                // root or leak host package names into the manifest.
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_dir() {
                     continue;
                 }
                 let fname = entry.file_name();
@@ -282,7 +294,7 @@ impl LayerStore {
                     // Don't descend into the dist-info directory itself.
                     continue;
                 }
-                stack.push(path);
+                stack.push(entry.path());
             }
         }
         Self::finalize_resolved(found)
@@ -525,6 +537,27 @@ mod tests {
         assert!(store
             .aggregate_resolved_packages(&["nope".to_string()])
             .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_does_not_follow_symlinked_dirs() {
+        let temp = tempdir().unwrap();
+        // External dist-info that must NOT be captured via a symlink.
+        let external = temp.path().join("external");
+        fs::create_dir_all(external.join("evil-1.0.dist-info")).unwrap();
+        // Capture root: a real package + a symlink pointing outside.
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("good-2.0.dist-info")).unwrap();
+        std::os::unix::fs::symlink(&external, src.join("link")).unwrap();
+
+        let found = LayerStore::scan_resolved_packages(&src);
+        let names: Vec<String> = found.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["good".to_string()],
+            "symlinked external dist-info must not be traversed"
+        );
     }
 
     #[test]
