@@ -71,10 +71,14 @@ impl ExecutionKind {
                 let suffix = render_args_suffix(args);
                 match (language, source) {
                     // Exec the entry directly (shebang-driven) — script-mode parity.
-                    (None, CodeSource::Entry(path)) => Ok(format!("{path}{suffix}")),
-                    (Some(lang), CodeSource::Entry(path)) => {
-                        Ok(format!("{} {path}{suffix}", lang.process_interpreter()))
-                    }
+                    // The path is shell-quoted so spaces/metacharacters in the
+                    // workspace path can't word-split or expand.
+                    (None, CodeSource::Entry(path)) => Ok(format!("{}{suffix}", shell_quote(path))),
+                    (Some(lang), CodeSource::Entry(path)) => Ok(format!(
+                        "{} {}{suffix}",
+                        lang.process_interpreter(),
+                        shell_quote(path)
+                    )),
                     (Some(CodeLanguage::Python), CodeSource::Inline(src)) => {
                         Ok(format!("python3 -c {}{suffix}", shell_quote(src)))
                     }
@@ -120,13 +124,27 @@ mod tests {
 
     #[test]
     fn entry_no_language_execs_directly() {
-        // Script-mode parity: run the file via its shebang.
+        // Script-mode parity: run the file via its shebang. The entry path is
+        // shell-quoted (robust against spaces/metacharacters in the path).
         let k = ExecutionKind::Code {
             language: None,
             source: CodeSource::Entry("/tmp/main.py".into()),
             args: vec![],
         };
-        assert_eq!(k.render_process_command().unwrap(), "/tmp/main.py");
+        assert_eq!(k.render_process_command().unwrap(), "'/tmp/main.py'");
+    }
+
+    #[test]
+    fn entry_path_with_spaces_is_quoted() {
+        let k = ExecutionKind::Code {
+            language: None,
+            source: CodeSource::Entry("/tmp/my agent/run.py".into()),
+            args: vec![],
+        };
+        assert_eq!(
+            k.render_process_command().unwrap(),
+            "'/tmp/my agent/run.py'"
+        );
     }
 
     #[test]
@@ -138,7 +156,24 @@ mod tests {
         };
         assert_eq!(
             k.render_process_command().unwrap(),
-            r"/tmp/main.py 'a b' 'x'\''y'"
+            r"'/tmp/main.py' 'a b' 'x'\''y'"
+        );
+    }
+
+    #[test]
+    fn backslashes_survive_single_quoting() {
+        // Regression (PR #445 review): inside POSIX single quotes a backslash is
+        // literal, so a JSON-ish arg keeps exactly one backslash. The prior
+        // `shell_words_quote` doubled backslashes (`\n` → `\\n`) — a bug this
+        // path fixes. The shell will hand the script `{"k":"a\nb"}` verbatim.
+        let k = ExecutionKind::Code {
+            language: None,
+            source: CodeSource::Entry("/tmp/main.py".into()),
+            args: vec![r#"{"k":"a\nb"}"#.into()],
+        };
+        assert_eq!(
+            k.render_process_command().unwrap(),
+            r#"'/tmp/main.py' '{"k":"a\nb"}'"#
         );
     }
 
@@ -151,7 +186,7 @@ mod tests {
         };
         assert_eq!(
             k.render_process_command().unwrap(),
-            "python3 /workspace/run.py '--flag'"
+            "python3 '/workspace/run.py' '--flag'"
         );
     }
 
