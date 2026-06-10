@@ -1439,6 +1439,7 @@ fn validate_dependency_package(pkg: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     #[test]
     fn test_parse_driver_kind() {
@@ -1473,6 +1474,7 @@ mod tests {
     }
 
     #[test]
+    #[serial] // mutates AUTONOETIC_DOCKER_IMAGE (process-global)
     fn test_docker_command_requires_env() {
         let old = std::env::var(DOCKER_IMAGE_ENV).ok();
         std::env::remove_var(DOCKER_IMAGE_ENV);
@@ -1488,6 +1490,7 @@ mod tests {
     }
 
     #[test]
+    #[serial] // mutates AUTONOETIC_DOCKER_IMAGE (process-global)
     fn test_docker_command_emits_socket_volume_and_env() {
         // P1: the SDK socket + its env must reach the container via `-v`/`-e`
         // (the container does not inherit the gateway process env).
@@ -1545,13 +1548,14 @@ mod tests {
 
     #[test]
     fn test_sdk_socket_sandbox_path_per_driver() {
+        let expected_bwrap = format!("{}/s.sock", BWRAP_WORKSPACE_DIR);
         assert_eq!(
-            sdk_socket_sandbox_path(SandboxDriverKind::Bubblewrap, "s.sock").as_deref(),
-            Some(format!("{}/s.sock", BWRAP_WORKSPACE_DIR).as_str())
+            sdk_socket_sandbox_path(SandboxDriverKind::Bubblewrap, "s.sock"),
+            Some(expected_bwrap)
         );
         assert_eq!(
-            sdk_socket_sandbox_path(SandboxDriverKind::Docker, "s.sock").as_deref(),
-            Some(DOCKER_SDK_SOCKET_PATH)
+            sdk_socket_sandbox_path(SandboxDriverKind::Docker, "s.sock"),
+            Some(DOCKER_SDK_SOCKET_PATH.to_string())
         );
         // microvm has no bridge yet (P5)
         assert!(sdk_socket_sandbox_path(SandboxDriverKind::MicroVm, "s.sock").is_none());
