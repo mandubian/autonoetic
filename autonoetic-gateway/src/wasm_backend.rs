@@ -49,13 +49,20 @@ struct WasmStoreData {
 const WASI_PIPE_CAP: usize = 1 << 20;
 
 /// Run a WASI Preview 1 command module (`_start`) in-process: the host directory
-/// is preopened at the guest path `/workspace`, `args`/`env` are passed through,
+/// is preopened at the guest path `guest_dir`, `args`/`env` are passed through,
 /// stdout/stderr are captured, and CPU/memory are bounded by `limits` (P-3.7).
 /// Network is not granted. WASI `proc_exit` surfaces as `I32Exit` → exit code;
 /// fuel/limit exhaustion surfaces as a trap (mapped to a clear error).
+///
+/// `guest_dir` is the path the workspace appears at *inside* the module. The
+/// agent execution path passes the same workspace path the process tiers use
+/// (`BWRAP_WORKSPACE_DIR`), so input-file env vars resolve identically across
+/// tiers — a libc-based module (e.g. python.wasm) maps an absolute guest path
+/// onto this preopen by prefix.
 pub fn run_wasi_module(
     wasm: &[u8],
     preopen_host_dir: &std::path::Path,
+    guest_dir: &str,
     args: &[String],
     env: &[(String, String)],
     limits: &WasmLimits,
@@ -81,12 +88,7 @@ pub fn run_wasi_module(
         builder.env(k, v);
     }
     builder
-        .preopened_dir(
-            preopen_host_dir,
-            "/workspace",
-            DirPerms::all(),
-            FilePerms::all(),
-        )
+        .preopened_dir(preopen_host_dir, guest_dir, DirPerms::all(), FilePerms::all())
         .map_err(|e| anyhow::anyhow!("preopening workspace dir: {e}"))?;
 
     let data = WasmStoreData {
@@ -186,7 +188,7 @@ mod tests {
     (i32.store (i32.const 4) (i32.const 3))
     (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 20)))))"#;
         let dir = tempfile::tempdir().unwrap();
-        let out = run_wasi_module(wat.as_bytes(), dir.path(), &[], &[], &WasmLimits::default())
+        let out = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &WasmLimits::default())
             .expect("wasi module should run");
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, "hi\n");
@@ -202,7 +204,7 @@ mod tests {
             fuel: 100_000,
             ..WasmLimits::default()
         };
-        let err = run_wasi_module(wat.as_bytes(), dir.path(), &[], &[], &limits)
+        let err = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &limits)
             .expect_err("infinite loop should hit the fuel bound");
         assert!(
             err.to_string().contains("resource limit") || err.to_string().contains("fuel"),

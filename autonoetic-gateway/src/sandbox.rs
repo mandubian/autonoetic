@@ -680,6 +680,9 @@ fn run_wasm_request(
     let out = crate::wasm_backend::run_wasi_module(
         &wasm,
         Path::new(agent_dir),
+        // Same guest workspace path the process tiers use, so input-file env
+        // vars (built against BWRAP_WORKSPACE_DIR) resolve inside the module too.
+        BWRAP_WORKSPACE_DIR,
         &args,
         extra_env,
         &crate::wasm_backend::WasmLimits::default(),

@@ -196,16 +196,18 @@ pub(crate) async fn execute_script_in_sandbox(
         Err(_) => script_path.to_string_lossy().to_string(),
     };
 
+    let script_args = match input_mode {
+        autonoetic_types::agent::ScriptInputMode::Args => vec![normalized_input.clone()],
+        autonoetic_types::agent::ScriptInputMode::Stdin => vec![],
+    };
+
     // Script-mode is intent-based exec: run the declared entry file. `language:
     // None` execs it directly (shebang-driven), matching prior behavior; the
     // Process backend renders it back to a shell line.
     let exec_kind = crate::exec_request::ExecutionKind::Code {
         language: None,
         source: crate::exec_request::CodeSource::Entry(entrypoint_relative),
-        args: match input_mode {
-            autonoetic_types::agent::ScriptInputMode::Args => vec![normalized_input.clone()],
-            autonoetic_types::agent::ScriptInputMode::Stdin => vec![],
-        },
+        args: script_args.clone(),
     };
 
     // Primary contract for script agents: file-backed payload + metadata paths.
@@ -231,6 +233,46 @@ pub(crate) async fn execute_script_in_sandbox(
         prepare_runtime_lock_layer_mounts(agent_dir, runtime_lock_rel_path, gateway_dir)?;
     if !layer_python_paths.is_empty() {
         autonoetic_env.push(("PYTHONPATH".to_string(), layer_python_paths.join(":")));
+    }
+
+    // WASM tier runs in-process, not via the POSIX spawn path: route it through
+    // the unified `run_to_output` entry. The entry must be the workspace-relative
+    // path (the backend joins it onto `agent_dir`), not the `BWRAP_WORKSPACE_DIR`-
+    // prefixed path the process backend renders into a shell line.
+    if driver == crate::sandbox::SandboxDriverKind::Wasm {
+        let entry_relative = script_path
+            .strip_prefix(agent_dir)
+            .map(|relative| relative.to_string_lossy().to_string())
+            .unwrap_or_else(|_| script_path.to_string_lossy().to_string());
+        let wasm_request = crate::exec_request::ExecutionKind::Code {
+            language: None,
+            source: crate::exec_request::CodeSource::Entry(entry_relative),
+            args: script_args,
+        };
+        let result = crate::sandbox::SandboxRunner::run_to_output(
+            driver,
+            &agent_dir.to_string_lossy(),
+            &wasm_request,
+            None,
+            Some(&overrides),
+            &autonoetic_env,
+            None,
+        );
+        invocation_files.cleanup();
+        let out = result?;
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        if out.exit_code != 0 {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::error!(stderr = %stderr, stdout = %stdout, exit_code = out.exit_code, "WASM script execution failed");
+            anyhow::bail!(
+                "Script execution failed with code {}: stdout={}, stderr={}",
+                out.exit_code,
+                stdout,
+                stderr
+            );
+        }
+        tracing::info!(stdout_len = stdout.len(), "WASM script execution completed");
+        return Ok(stdout);
     }
 
     let mut runner = match crate::sandbox::SandboxRunner::spawn_with_session_content_and_env(
