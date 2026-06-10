@@ -261,6 +261,11 @@ async fn run_scheduler_tick_at(
         tracing::warn!(error = %e, "Failed to check approval timeouts");
     }
 
+    // Wiki proposal auto-expiry: cancel proposals older than configured TTL.
+    if let Err(e) = check_wiki_proposal_expiry(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to check wiki proposal expiry");
+    }
+
     // Detect and resolve tasks stuck in Running state (child session completed but task status not updated).
     if let Err(e) = check_stuck_running_tasks(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to check stuck running tasks");
@@ -302,6 +307,63 @@ async fn run_scheduler_tick_at(
         tracing::warn!(error = %e, "Failed to resume answered standalone interactions");
     }
 
+    Ok(())
+}
+
+async fn check_wiki_proposal_expiry(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let config = execution.config();
+    let ttl_secs = config.wiki_proposal.auto_expire_secs;
+    if ttl_secs == 0 {
+        return Ok(());
+    }
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let pending = store.get_pending_approvals()?;
+    let now = chrono::Utc::now();
+    let mut expired = 0;
+    for req in &pending {
+        if !matches!(req.action, autonoetic_types::background::ScheduledAction::WikiProposal { .. }) {
+            continue;
+        }
+        let created = match chrono::DateTime::parse_from_rfc3339(&req.created_at) {
+            Ok(dt) => dt.with_timezone(&chrono::Utc),
+            Err(_) => continue,
+        };
+        if (now - created).num_seconds() > ttl_secs as i64 {
+            match crate::scheduler::approval::cancel_request(
+                &config,
+                Some(&store),
+                &req.request_id,
+                "system",
+                Some("Wiki proposal auto-expired".to_string()),
+                None,
+            ) {
+                Ok(_) => {
+                    expired += 1;
+                    tracing::info!(
+                        target: "wiki_proposal_expiry",
+                        request_id = %req.request_id,
+                        "Auto-expired wiki proposal"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "wiki_proposal_expiry",
+                        request_id = %req.request_id,
+                        error = %e,
+                        "Failed to cancel expired wiki proposal"
+                    );
+                }
+            }
+        }
+    }
+    if expired > 0 {
+        tracing::info!(target: "wiki_proposal_expiry", expired, "Wiki proposal auto-expiry sweep completed");
+    }
     Ok(())
 }
 

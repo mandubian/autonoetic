@@ -490,6 +490,67 @@ impl GateService {
         };
         let gate_id = self.create_approval_row(req, &action)?;
 
+        // 4b. Advisory quality heuristics + duplicate detection.
+        let mut quality_warnings: Vec<String> = Vec::new();
+        if let Some(cfg) = req.config {
+            if cfg.wiki_proposal.quality_heuristics_enabled {
+                if content.len() < cfg.wiki_proposal.min_content_length {
+                    quality_warnings.push(format!(
+                        "Short content ({} chars, recommended minimum: {})",
+                        content.len(),
+                        cfg.wiki_proposal.min_content_length
+                    ));
+                }
+                let heading_count = content.lines().filter(|l| l.starts_with("# ")).count();
+                if heading_count < cfg.wiki_proposal.min_headings {
+                    quality_warnings.push(format!(
+                        "Few markdown headings ({} found, recommended minimum: {})",
+                        heading_count, cfg.wiki_proposal.min_headings
+                    ));
+                }
+            }
+            if cfg.wiki_proposal.duplicate_detection_enabled {
+                if let Ok(recent) = self.store.get_pending_approvals() {
+                    let new_req = autonoetic_types::background::ApprovalRequest {
+                        request_id: gate_id.clone(),
+                        agent_id: req.manifest.agent.id.clone(),
+                        session_id: req.session_id.unwrap_or("unknown").to_string(),
+                        action: action.clone(),
+                        created_at: String::new(),
+                        reason: None,
+                        evidence_ref: None,
+                        root_session_id: None,
+                        workflow_id: None,
+                        task_id: None,
+                        status: None,
+                        decided_at: None,
+                        decided_by: None,
+                        decision_reason: None,
+                        approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                        similar_to_request_id: None,
+                        similarity_score: None,
+                        code_excerpts: None,
+                        risk_summary: None,
+                        confirm_phrase: None,
+                        min_dwell_ms: None,
+                    };
+                    let similar = crate::scheduler::approval_similarity::find_similar_approvals(
+                        &new_req,
+                        &recent,
+                        3,
+                        cfg.wiki_proposal.duplicate_threshold,
+                    );
+                    for s in &similar {
+                        quality_warnings.push(format!(
+                            "Similar to existing proposal {} (score {:.0}%)",
+                            s.request_id,
+                            s.score * 100.0
+                        ));
+                    }
+                }
+            }
+        }
+
         // 5. Surface on timeline.
         {
             let role = crate::runtime::session_timeline::derive_role(&req.manifest.agent.id);
@@ -529,6 +590,17 @@ impl GateService {
             edit_label, page_id, title, proposed_by_agent
         );
         let _ = self.add_gate_message(&gate_id, "system", &seed);
+
+        // 6b. Advisory quality warnings for operator.
+        if !quality_warnings.is_empty() {
+            let warning_text = format!("⚠ Quality advisory (advisory only, does not block):\n{}",
+                quality_warnings.iter()
+                    .map(|w| format!("  • {w}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let _ = self.add_gate_message(&gate_id, "system", &warning_text);
+        }
 
         // 6. Build suspension JSON (tool will NOT suspend — it returns ok:true).
         let response_json = serde_json::json!({
