@@ -746,6 +746,8 @@ operator_activity:
 
 Controls the canonical session timeline (see [`docs/session-room-architecture.md`](session-room-architecture.md)). The timeline uses an altitude model (`Detail < Normal < Attention < Error`) where each event's effective altitude is `max(base_altitude(event_type), role_floor(seat))`. Role floors only *raise* events, never suppress them.
 
+> **Note:** `role_floors` is parsed and validated at startup. The runtime plumbing to apply these overrides during altitude computation is in progress — until that lands, the hardcoded defaults are used.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_room.role_floors` | map\<string, string\> | `{}` (empty — use hardcoded defaults) | Per-seat minimum altitude override. Keys are role names (`sentinel`, `runtime`, `planner`, `specialist`, `operator`, `curator`, `auditor`, `tool`, `external_surface`). Values are altitude strings (`detail`, `normal`, `attention`, `error`). Unconfigured roles keep their hardcoded defaults. |

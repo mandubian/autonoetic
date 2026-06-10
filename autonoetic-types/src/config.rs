@@ -1217,7 +1217,9 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub wiki_proposal: WikiProposalConfig,
 
-    /// Session Room: timeline altitude tuning (role floors, event overrides).
+    /// Session Room: timeline altitude tuning surface (role floors).
+    /// Config is parsed and validated; runtime plumbing to apply it during
+    /// altitude computation is tracked separately.
     #[serde(default)]
     pub session_room: SessionRoomConfig,
 }

@@ -204,6 +204,9 @@ operator_activity:
 # Valid altitudes: detail, normal, attention, error.
 # Default role floors (shown commented): sentinel→attention, runtime→detail,
 # all others→detail.
+# NOTE: This config surface is parsed and validated. Runtime plumbing to
+# apply it during altitude computation is in progress — until that lands,
+# the hardcoded defaults are used.
 # session_room:
 #   role_floors:
 #     sentinel: attention

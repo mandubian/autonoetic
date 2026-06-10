@@ -210,7 +210,8 @@ pub fn base_altitude(event_type: &str) -> Altitude {
 
 /// Minimum altitude a seat guarantees for its events. Only raises (`max`),
 /// never lowers. Configurable via `session_room.role_floors` in the gateway
-/// config; unconfigured roles keep their hardcoded defaults.
+/// config (see `role_floor_with_config`); unconfigured roles keep their
+/// hardcoded defaults.
 pub fn role_floor(role: &SessionRole) -> Altitude {
     role_floor_with_config(role, None)
 }
