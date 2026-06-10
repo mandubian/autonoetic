@@ -246,7 +246,7 @@ impl NativeTool for ApprovalWithdrawTool {
                         "page_id": page_id,
                         "title": title,
                         "decided_by": format!("agent:{}", manifest.agent.id),
-                        "cancelled_by": manifest.agent.id,
+                        "cancelled_by": format!("agent:{}", manifest.agent.id),
                         "reason": reason,
                     });
                     let event = crate::runtime::session_timeline::build_timeline_event(
