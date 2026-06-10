@@ -185,23 +185,53 @@ SDK method families exposed today (must all work over both transports):
 `memory.*`, plus the content/knowledge/artifact/execution/digest/user families in
 `dispatch_sdk_method` (`sandbox.rs:727+`).
 
-### 5.4 Evolution B′ — Dependencies as ahead-of-time WASI closures
+### 5.4 Evolution B′ — Dependencies as pinned, embeddable layers (all tiers)
 
-WASM cannot `pip install`. Extend dependency resolution to a **prebuilt-layer**
-model that reuses the existing layer/closure machinery:
+**This is not WASM-specific.** Embedded, ahead-of-time dependency closures are a
+*tier-independent* requirement for immutable, portable, exportable agents — the
+whole point of a Cognitive Capsule ("agent bundle plus its runtime closure"). The
+machinery already exists; the gap is that **runtime `pip install` is still the
+default**, which is exactly what breaks capsule immutability/portability (it needs
+network + a resolver at spawn and isn't reproducible). WASM merely *forces* the
+issue (it can't `pip install` at all).
 
-- `LayerStore` (`autonoetic-gateway/src/layer_store.rs`: `create_from_dir`,
-  `resolve_for_artifact`, `get_by_digest`) already provides content-addressed,
-  read-only layers (constitution **P-3.6**).
-- `RuntimeLock.layers: Vec<LockedLayerMount>` (`runtime_lock.rs`) already pins the
-  execution closure.
-- Add a resolution step: for a WASM agent, declared `DependencyPlan.packages` are
-  resolved **at build time** to prebuilt **WASI-compatible** layer digests (pure-
-  Python wheels or WASI-built packages), pinned in `RuntimeLock.layers`, and
-  mounted read-only via WASI preopens. **Fail-closed** with a clear error if a
-  requested package has no WASI build (no silent fallback to native).
-- The native tier keeps runtime pip; this AOT path also improves native-tier
-  reproducibility and is therefore worth doing on its own.
+What already exists (reuse, don't reinvent):
+
+- **Two dependency representations** in `RuntimeLock` (`runtime_lock.rs`):
+  `LockedDependencySet { runtime, packages }` — declarative "install at spawn"
+  (the non-portable, runtime-pip path) — and **`LockedLayerMount { layer_id,
+  digest, mount_path, approval_scope }`** — a pinned, digest-verified,
+  content-addressed, read-only prebuilt layer (the portable path, constitution
+  **P-3.6**).
+- **`LayerStore`** (`layer_store.rs`: `create_from_dir`, `resolve_for_artifact`,
+  `get_by_digest`) — bakes a resolved dependency tree into a content-addressed layer.
+- **Capsule embedding** — `CapsuleMode::Hermetic`/`Replay` already embed layer
+  **content** for offline/air-gapped import ("no network needed on import");
+  `Thin`/`Headless` carry references only. `CapsuleManifest.included_layers:
+  Vec<CapsuleLayerRef>` with `embedded_handle` (`capsule.rs`).
+- **`CapsulePlatform`** already records/checks layer **arch+OS compatibility** on
+  import — the mechanism that makes native-ELF layers safely portable.
+
+The change (tier-independent):
+
+- Introduce a **lock step** ("bake"): resolve a declared `DependencyPlan` →
+  install into a staging dir → `LayerStore::create_from_dir` → pin as a
+  `LockedLayerMount` in `runtime.lock`. Same step for every tier; only the **layer
+  ABI** differs:
+  - **Native tier (bwrap/docker):** native-ELF layers (e.g. `pip install --target`),
+    portable to *compatible* host arch/OS (gated by `CapsulePlatform`).
+  - **WASM tier:** WASI layers (pure-Python wheels / WASI-built packages),
+    **arch-portable** — the only truly "spawn-anywhere" grade. Fail-closed if a
+    requested package has no WASI build (no silent fallback to native).
+- Define **locked vs dev** dependency modes:
+  - **Locked** (default for any agent intended to be exported/stored/spawned
+    elsewhere): all deps resolved to `LockedLayerMount`; **no runtime pip**.
+    *Required* for `CapsuleMode::Hermetic`/`Replay` export.
+  - **Dev/unlocked**: runtime `pip install` via `compose_entrypoint` — convenience
+    for iteration only; cannot be Hermetic-exported.
+- Net effect: bwrap and docker get embedded-layer deps **immediately** (this is
+  worth doing on its own, independent of WASM), and the capsule becomes genuinely
+  immutable/portable. WASM is then "one more layer ABI" on the same scheme.
 
 ### 5.5 The WASM backend
 
@@ -277,16 +307,28 @@ enforcement register to a new driver:
 2. **P2 — `ExecutionRequest` + `SandboxBackend` trait.** Introduce intent-based
    exec; `Process` backend renders it; map `ExecutionMode::Script` to `Code{Entry}`.
    *Multi-backend ready, cleaner contract. ~1–2 weeks.*
-3. **P3 — AOT WASI dependency closures.** Resolve declared deps to prebuilt WASI
-   layers pinned in `RuntimeLock`; fail-closed on missing WASI build. *Weeks.*
+3. **P3 — Pinned, embeddable dependency layers + lock/dev modes (all tiers).**
+   Add the bake step (`DependencyPlan` → staged install → `LayerStore::create_from_dir`
+   → `LockedLayerMount`); make locked mode the default for exportable agents and
+   *required* for `CapsuleMode::Hermetic`/`Replay`; keep runtime pip as dev-only.
+   **Lands for bwrap/docker first** (native-ELF layers) — immutable/portable
+   capsules independent of WASM — then adds the **WASI** layer ABI (fail-closed on
+   missing WASI build). *Weeks.*
 4. **P4 — WASM backend.** Embed wasmtime, bundle `python.wasm`, host-function SDK,
    WASI preopens, fuel/`StoreLimits`, escape signals, `sandbox: "wasm"` manifest.
-   Tractable because the contract it plugs into is already intent-based. *Weeks.*
+   Tractable because the contract it plugs into is already intent-based, and P3
+   already gives it arch-portable WASI dependency layers. *Weeks.*
 
 ## 9. Ceilings & open questions
 
+- **Two grades of portability.** Embedded-layer deps make *every* tier's capsule
+  immutable and self-contained, but native-ELF layers are portable only to a
+  *compatible* host arch/OS (enforced by `CapsulePlatform`). WASI layers are the
+  only **arch-portable** ("spawn-anywhere") grade — that's the WASM tier's
+  distinguishing value, not dep-embedding itself.
 - **Native deps (hard ceiling).** numpy/pandas/most ML have no WASI build →
-  those agents stay native. The portable tier is a *subset*, by design.
+  those agents stay native (still get embedded native-ELF layers, just not
+  arch-portable). The WASM/portable tier is a *subset*, by design.
 - **System tools (hard ceiling).** No `git`/`curl`/compilers in WASM. Agents that
   orchestrate CLIs stay native.
 - **Agent networking.** `wasi-sockets` (Preview 2) is immature; P4 ships with **no
