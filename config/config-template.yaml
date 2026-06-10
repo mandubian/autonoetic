@@ -197,6 +197,24 @@ operator_activity:
   # retention_days: maximum age (days) of operator activity rows before pruning. Default: 90.
   retention_days: 90
 
+# ── Session Room ──────────────────────────────────────────────────────
+# Controls the canonical session timeline (altitude model, role floors).
+# role_floors: map of session-role name to minimum altitude. Only raises
+# events, never lowers. Unconfigured roles use hardcoded defaults.
+# Valid altitudes: detail, normal, attention, error.
+# Default role floors (shown commented): sentinel→attention, runtime→detail,
+# all others→detail.
+# NOTE: This config surface is parsed and validated. Runtime plumbing to
+# apply it during altitude computation is in progress — until that lands,
+# the hardcoded defaults are used.
+# session_room:
+#   role_floors:
+#     sentinel: attention
+#     runtime: detail
+#     planner: detail
+#     specialist: detail
+#     operator: detail
+
 # ── Decider Obligations (symmetric obligations, #359 §O) ──────────────
 # When enabled, the gateway refuses a BLOCKING-tier gate decision with no
 # motivation: a principal's rejection/abort, or approval of an elevated-authority

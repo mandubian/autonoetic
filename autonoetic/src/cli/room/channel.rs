@@ -25,6 +25,7 @@ pub enum GateKind {
     Interaction,
     Plan,
     WikiProposal,
+    Escalation,
 }
 
 /// A resolution action a gate affords — the operator's intent, independent of
@@ -77,6 +78,7 @@ impl Channel for CliChannel {
             GateKind::Interaction => "(pending question — answer in `room --tui`)".into(),
             GateKind::Plan => "(pending plan — approve in `room --tui` with y or /plan approve)".into(),
             GateKind::WikiProposal => "(pending wiki proposal — resolve in `room --tui`)".into(),
+            GateKind::Escalation => "(pending escalation — resolve in `room --tui`)".into(),
         }
     }
 }
@@ -95,6 +97,7 @@ impl Channel for TuiChannel {
             GateKind::Interaction => " · ⚠ QUESTION PENDING — Enter/i/r to answer".into(),
             GateKind::Plan => " · ⚠ PLAN PENDING — Enter/p review · y approve · n revise".into(),
             GateKind::WikiProposal => " · ⚠ WIKI PROPOSAL — y/n".into(),
+            GateKind::Escalation => " · ⚠ ESCALATION — y/n".into(),
         }
     }
 }

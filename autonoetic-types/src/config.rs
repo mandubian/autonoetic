@@ -1216,6 +1216,12 @@ pub struct GatewayConfig {
     /// Wiki proposal governance: auto-expiry, quality heuristics, duplicate detection.
     #[serde(default)]
     pub wiki_proposal: WikiProposalConfig,
+
+    /// Session Room: timeline altitude tuning surface (role floors).
+    /// Config is parsed and validated; runtime plumbing to apply it during
+    /// altitude computation is tracked separately.
+    #[serde(default)]
+    pub session_room: SessionRoomConfig,
 }
 
 fn default_approval_dwell_multiplier() -> f64 {
@@ -2036,6 +2042,20 @@ impl Default for WikiProposalConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRoomConfig {
+    #[serde(default)]
+    pub role_floors: HashMap<String, String>,
+}
+
+impl Default for SessionRoomConfig {
+    fn default() -> Self {
+        Self {
+            role_floors: HashMap::new(),
+        }
+    }
+}
+
 /// Configuration for pluggable code analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeAnalysisConfig {
@@ -2729,6 +2749,7 @@ impl Default for GatewayConfig {
             auto_learning: AutoLearningConfig::default(),
             persona_path: None,
             wiki_proposal: WikiProposalConfig::default(),
+            session_room: SessionRoomConfig::default(),
         }
     }
 }

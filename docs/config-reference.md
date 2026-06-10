@@ -742,6 +742,35 @@ operator_activity:
 
 ---
 
+## Session Room
+
+Controls the canonical session timeline (see [`docs/session-room-architecture.md`](session-room-architecture.md)). The timeline uses an altitude model (`Detail < Normal < Attention < Error`) where each event's effective altitude is `max(base_altitude(event_type), role_floor(seat))`. Role floors only *raise* events, never suppress them.
+
+> **Note:** `role_floors` is parsed and validated at startup. The runtime plumbing to apply these overrides during altitude computation is in progress — until that lands, the hardcoded defaults are used.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `session_room.role_floors` | map\<string, string\> | `{}` (empty — use hardcoded defaults) | Per-seat minimum altitude override. Keys are role names (`sentinel`, `runtime`, `planner`, `specialist`, `operator`, `curator`, `auditor`, `tool`, `external_surface`). Values are altitude strings (`detail`, `normal`, `attention`, `error`). Unconfigured roles keep their hardcoded defaults. |
+
+Hardcoded defaults when no config is provided:
+
+| Role | Default Floor |
+|------|---------------|
+| `sentinel` | `attention` |
+| `runtime` | `detail` |
+| all others | `detail` |
+
+Example — raise planner events to `normal` and keep sentinel at `attention`:
+
+```yaml
+session_room:
+  role_floors:
+    sentinel: attention
+    planner: normal
+```
+
+---
+
 ## Decider Obligations
 
 Symmetric-obligation enforcement (#359 §O). When enabled, the gateway refuses a **BLOCKING-tier** gate decision that carries no motivation — mirroring how an agent owes a reason for every rejection (`Ri-0.3`). The gateway checks only that a reason is *present*, never its quality (Lawful Executor).

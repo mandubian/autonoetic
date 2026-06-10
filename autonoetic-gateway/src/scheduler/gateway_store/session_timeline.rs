@@ -439,4 +439,42 @@ mod tests {
         assert_eq!(only_coder.entries.len(), 1);
         assert_eq!(only_coder.entries[0].principal.id, "coder.default");
     }
+
+    #[test]
+    fn multi_producer_merge_ordering() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let root = "root-merge";
+
+        store
+            .create_live_digest_event(&record(root, "planner.default", "turn.start", "2026-06-01T10:00:00.000+00:00"))
+            .unwrap();
+        store
+            .create_live_digest_event(&record(root, "coder.default", "tool.completed", "2026-06-01T10:00:00.100+00:00"))
+            .unwrap();
+        store
+            .create_live_digest_event(&record(root, "sentinel.divergence", "divergence.intervention", "2026-06-01T10:00:00.200+00:00"))
+            .unwrap();
+        store
+            .create_live_digest_event(&record(root, "coder.default", "llm.request_failed", "2026-06-01T10:00:00.300+00:00"))
+            .unwrap();
+        store
+            .create_live_digest_event(&record(root, "planner.default", "turn.end", "2026-06-01T10:00:00.400+00:00"))
+            .unwrap();
+
+        let result = store
+            .list_session_timeline(root, None, 50, None, None)
+            .unwrap();
+
+        assert_eq!(result.entries.len(), 5);
+        let types: Vec<&str> = result.entries.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(
+            types,
+            ["turn.start", "tool.completed", "divergence.intervention", "llm.request_failed", "turn.end"],
+            "events from multiple producers must merge in (created_at, event_id) order"
+        );
+
+        let agents: Vec<&str> = result.entries.iter().map(|e| e.principal.id.as_str()).collect();
+        assert_eq!(agents, ["planner.default", "coder.default", "sentinel.divergence", "coder.default", "planner.default"]);
+    }
 }
