@@ -194,7 +194,49 @@ pub struct SandboxRunner {
     _sdk_bridge: Option<SdkBridgeGuard>,
 }
 
+/// Captured result of a completed sandbox execution, tier-agnostic.
+#[derive(Debug, Clone)]
+pub struct ExecOutput {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
 impl SandboxRunner {
+    /// Run a request to completion and capture its output, dispatching by tier:
+    /// the **process** drivers (bubblewrap/docker/microvm) spawn a child and
+    /// wait; the **wasm** tier runs in-process via the WASI backend. This is the
+    /// unified entry the agent execution path migrates onto (P4 inc 2c); the
+    /// `spawn_*` methods remain the process-only path used today.
+    pub fn run_to_output(
+        driver: SandboxDriverKind,
+        agent_dir: &str,
+        request: &ExecutionKind,
+        dependencies: Option<&DependencyPlan>,
+        overrides: Option<&BwrapIsolationOverrides>,
+        extra_env: &[(String, String)],
+        root_session_id: Option<&str>,
+    ) -> anyhow::Result<ExecOutput> {
+        if driver == SandboxDriverKind::Wasm {
+            return run_wasm_request(agent_dir, request, extra_env);
+        }
+        let runner = Self::spawn_with_driver_and_dependencies_and_env(
+            driver,
+            agent_dir,
+            request,
+            dependencies,
+            overrides,
+            extra_env,
+            root_session_id,
+        )?;
+        let out = runner.process.wait_with_output()?;
+        Ok(ExecOutput {
+            exit_code: out.status.code().unwrap_or(-1),
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
+
     /// Spawn with the default bubblewrap driver.
     pub fn spawn(agent_dir: &str, entrypoint: &str) -> anyhow::Result<Self> {
         Self::spawn_with_driver(SandboxDriverKind::Bubblewrap, agent_dir, entrypoint)
@@ -299,7 +341,7 @@ impl SandboxRunner {
             // The WASM tier is in-process (not a host `(program, args)`); its
             // wasmtime-backed execution lands in a later P4 increment.
             SandboxDriverKind::Wasm => {
-                anyhow::bail!("wasm sandbox tier is not yet implemented (P4 in progress)")
+                anyhow::bail!("wasm tier runs in-process via SandboxRunner::run_to_output, not the process spawn path")
             }
         };
 
@@ -388,7 +430,7 @@ impl SandboxRunner {
             }
             SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
             SandboxDriverKind::Wasm => {
-                anyhow::bail!("wasm sandbox tier is not yet implemented (P4 in progress)")
+                anyhow::bail!("wasm tier runs in-process via SandboxRunner::run_to_output, not the process spawn path")
             }
         };
 
@@ -605,6 +647,52 @@ fn apply_child_env(
         // spawn match bails first), but the match must stay exhaustive.
         SandboxDriverKind::Wasm => {}
     }
+}
+
+/// Run a request on the WASM tier (`wasm-tier` feature): resolve the `Code`
+/// entry to a `.wasm` file under the agent dir and execute it via the WASI
+/// backend, preopening the agent dir. Free-form shell / inline source are
+/// rejected — the portable tier runs declared code, not arbitrary shell.
+#[cfg(feature = "wasm-tier")]
+fn run_wasm_request(
+    agent_dir: &str,
+    request: &ExecutionKind,
+    extra_env: &[(String, String)],
+) -> anyhow::Result<ExecOutput> {
+    use crate::exec_request::CodeSource;
+    let (entry, args) = match request {
+        ExecutionKind::Code {
+            source: CodeSource::Entry(path),
+            args,
+            ..
+        } => (path.clone(), args.clone()),
+        ExecutionKind::Code {
+            source: CodeSource::Inline(_),
+            ..
+        } => anyhow::bail!("wasm tier: inline source is not supported yet (declare a .wasm entry)"),
+        ExecutionKind::Shell { .. } => {
+            anyhow::bail!("wasm tier does not support free-form shell execution")
+        }
+    };
+    let wasm_path = Path::new(agent_dir).join(&entry);
+    let wasm = std::fs::read(&wasm_path)
+        .map_err(|e| anyhow::anyhow!("reading wasm entry {}: {e}", wasm_path.display()))?;
+    let out =
+        crate::wasm_backend::run_wasi_module(&wasm, Path::new(agent_dir), &args, extra_env)?;
+    Ok(ExecOutput {
+        exit_code: out.exit_code,
+        stdout: out.stdout.into_bytes(),
+        stderr: out.stderr.into_bytes(),
+    })
+}
+
+#[cfg(not(feature = "wasm-tier"))]
+fn run_wasm_request(
+    _agent_dir: &str,
+    _request: &ExecutionKind,
+    _extra_env: &[(String, String)],
+) -> anyhow::Result<ExecOutput> {
+    anyhow::bail!("wasm sandbox tier requires the `wasm-tier` build feature")
 }
 
 fn run_sdk_bridge_loop(
@@ -1493,13 +1581,13 @@ mod tests {
     }
 
     #[test]
-    fn wasm_driver_not_yet_executable() {
-        // P4 increment 1: the driver parses, but execution bails clearly until
-        // the wasmtime backend is wired.
+    fn wasm_uses_run_to_output_not_the_process_spawn_path() {
+        // The process spawn path is for bwrap/docker/microvm; wasm runs in-process
+        // via run_to_output, so spawn_for_driver("wasm") bails with that guidance.
         let result = SandboxRunner::spawn_for_driver("wasm", "/tmp/agent", "python main.py");
-        assert!(result.is_err(), "wasm execution should not be implemented yet");
+        assert!(result.is_err(), "wasm must not use the process spawn path");
         let err = result.err().unwrap().to_string();
-        assert!(err.contains("not yet implemented"), "got: {err}");
+        assert!(err.contains("run_to_output"), "got: {err}");
     }
 
     #[test]
