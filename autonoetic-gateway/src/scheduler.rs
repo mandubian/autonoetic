@@ -331,7 +331,16 @@ async fn check_wiki_proposal_expiry(
         }
         let created = match chrono::DateTime::parse_from_rfc3339(&req.created_at) {
             Ok(dt) => dt.with_timezone(&chrono::Utc),
-            Err(_) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    target: "wiki_proposal_expiry",
+                    request_id = %req.request_id,
+                    created_at = %req.created_at,
+                    error = %e,
+                    "Skipping wiki proposal with unparseable created_at"
+                );
+                continue;
+            }
         };
         if (now - created).num_seconds() > ttl_secs as i64 {
             match crate::scheduler::approval::cancel_request(
@@ -339,7 +348,7 @@ async fn check_wiki_proposal_expiry(
                 Some(&store),
                 &req.request_id,
                 "system",
-                Some("Wiki proposal auto-expired".to_string()),
+                Some("auto-expired".to_string()),
                 None,
             ) {
                 Ok(_) => {

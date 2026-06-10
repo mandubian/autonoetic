@@ -494,14 +494,14 @@ impl GateService {
         let mut quality_warnings: Vec<String> = Vec::new();
         if let Some(cfg) = req.config {
             if cfg.wiki_proposal.quality_heuristics_enabled {
-                if content.len() < cfg.wiki_proposal.min_content_length {
+                if content.chars().count() < cfg.wiki_proposal.min_content_length {
                     quality_warnings.push(format!(
                         "Short content ({} chars, recommended minimum: {})",
-                        content.len(),
+                        content.chars().count(),
                         cfg.wiki_proposal.min_content_length
                     ));
                 }
-                let heading_count = content.lines().filter(|l| l.starts_with("# ")).count();
+                let heading_count = content.lines().filter(|l| l.trim_start().starts_with('#') && l.trim_start().chars().nth(1).map_or(true, |c| c == ' ' || c == '#')).count();
                 if heading_count < cfg.wiki_proposal.min_headings {
                     quality_warnings.push(format!(
                         "Few markdown headings ({} found, recommended minimum: {})",
