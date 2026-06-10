@@ -1296,13 +1296,18 @@ impl GatewayStore {
         };
         self.create_causal_event(&event)?;
 
-        if !root_session_id.is_empty() {
+        let timeline_root = if root_session_id.is_empty() {
+            session_id
+        } else {
+            root_session_id
+        };
+        if !timeline_root.is_empty() {
             let (principal, seat) = crate::runtime::session_timeline::actor_from_kind_id(
                 "system",
                 "gateway",
             );
             let timeline_event = crate::runtime::session_timeline::build_timeline_event(
-                root_session_id.to_string(),
+                timeline_root.to_string(),
                 session_id.to_string(),
                 None,
                 &principal,

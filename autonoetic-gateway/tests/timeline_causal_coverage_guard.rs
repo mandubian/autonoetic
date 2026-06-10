@@ -1,8 +1,10 @@
-//! Coverage guard: every operator-meaningful causal action that is session-scoped
-//! MUST have a timeline counterpart so the room shows it. If a new causal action
-//! is added and this test breaks, add a `create_live_digest_event` call and
-//! register the event type here — or add it to the intentional exclusion list if
-//! it is NOT session-scoped (e.g. keyed to `sentinel_revision_id`).
+//! Coverage guard: maintains a curated list of operator-meaningful timeline
+//! event types and verifies each one has an explicit altitude mapping above
+//! Normal. When a new operator-meaningful event type is added to the system,
+//! it should be registered in `TIMELINE_COVERAGE` so its altitude assignment
+//! is mechanically verified. If the event type is intentionally excluded
+//! (not session-scoped), document why in the module but do NOT add it to
+//! `TIMELINE_COVERAGE`.
 
 mod support;
 
