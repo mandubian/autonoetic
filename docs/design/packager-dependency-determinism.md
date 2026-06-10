@@ -78,12 +78,28 @@ becomes unrecoverable. Build-time capture is the safety net (always
 reconstructable); promotion is the trust/freeze. "Unpinned" must never mean
 "unrecoverable", only "not yet blessed".
 
-### Verification gate
+### Verification gate — already provided by `unit_test_runner` (no new gate)
 
-"Validated" must be concrete: a post-bake check that the layer actually satisfies
-the agent — imports resolve / smoke test passes (reuse `unit_test_runner` /
-evaluator/auditor) — **before** promotion. An autonomous build must not be able
-to ship a broken-but-locked closure.
+"Validated" must be concrete: the layer must actually satisfy the agent (imports
+resolve). On review this is **already covered by the existing promotion gate**,
+not a piece to build:
+
+- The `unit_test_runner` promotion role runs the candidate's test suite via
+  **`artifact_exec`**, which mounts the artifact's dependency layers and sets
+  `PYTHONPATH` (`artifact_exec.rs:~789`), in a **no-network** sandbox. Its
+  SKILL.md explicitly forbids `sandbox_exec` for this precisely because it would
+  *not* mount the layers. So a passing `unit_test_runner` verdict means the baked
+  closure resolves against the real layers — that *is* the post-bake verification.
+- bless-on-promotion only freezes the closure on a **passing** promotion, so the
+  blessed set is, by construction, one that a layer-mounted run validated.
+
+A separate import/smoke gate would duplicate `unit_test_runner` (same redundancy
+lesson as the bake step vs. the packager). The only residual gap is the narrow
+case of an agent with **baked deps but no tests**, where `unit_test_runner`
+returns `unable_to_evaluate` (skips) — its closure isn't exercised by that role.
+That's a candidate for a tiny optional smoke check later, but it's not a missing
+gate, and a naive `import <package>` is unreliable anyway (package name ≠ import
+name), so it's deliberately deferred rather than built now.
 
 ## Implementation plan (increments)
 
@@ -94,10 +110,12 @@ to ship a broken-but-locked closure.
 2. **Surface resolved versions at the approval boundary.** Include the layer's
    resolved-version manifest in the promotion/approval payload so the operator
    blesses a concrete set.
-3. **Bless-on-promotion.** On approval, persist the blessed pinned set on the
-   agent revision (see open question below).
-4. **Verification gate.** Wire a post-bake import/smoke check into the
-   promotion flow; block promotion (not build) on failure.
+3. **Bless-on-promotion.** On a passing promotion, persist the blessed pinned
+   set on the promotion record.
+4. **Verification gate — not built (covered by `unit_test_runner`).** See the
+   section above: the existing test-runner role already exercises the baked
+   closure with layers mounted. Only the narrow no-tests case remains, deferred
+   as an optional future smoke check.
 
 Each increment is independently shippable and verified on bubblewrap + docker
 (availability-gated, RFC §4.1).
