@@ -196,16 +196,18 @@ pub(crate) async fn execute_script_in_sandbox(
         Err(_) => script_path.to_string_lossy().to_string(),
     };
 
-    let shell_command = match input_mode {
-        autonoetic_types::agent::ScriptInputMode::Args => {
-            format!(
-                "{} {}",
-                entrypoint_relative,
-                shell_words_quote(&normalized_input)
-            )
-        }
-        autonoetic_types::agent::ScriptInputMode::Stdin => entrypoint_relative,
+    // Script-mode is intent-based exec: run the declared entry file. `language:
+    // None` execs it directly (shebang-driven), matching prior behavior; the
+    // Process backend renders it back to a shell line.
+    let exec_kind = crate::exec_request::ExecutionKind::Code {
+        language: None,
+        source: crate::exec_request::CodeSource::Entry(entrypoint_relative),
+        args: match input_mode {
+            autonoetic_types::agent::ScriptInputMode::Args => vec![normalized_input.clone()],
+            autonoetic_types::agent::ScriptInputMode::Stdin => vec![],
+        },
     };
+    let shell_command = exec_kind.render_process_command()?;
 
     // Primary contract for script agents: file-backed payload + metadata paths.
     // Keep normalized env payloads for compatibility with older scripts.
@@ -293,13 +295,6 @@ pub(crate) async fn execute_script_in_sandbox(
     tracing::info!(stdout_len = stdout.len(), "Script execution completed");
 
     Ok(stdout)
-}
-
-/// Quote a string for safe inclusion in a shell command (POSIX sh -c).
-/// Uses single-quote wrapping with embedded single-quote escaping.
-pub(crate) fn shell_words_quote(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('\'', "'\\''");
-    format!("'{}'", escaped)
 }
 
 /// Write a single `causal_events` row for script-agent fast-path execution.
