@@ -296,6 +296,24 @@ impl LayerStore {
         v
     }
 
+    /// Aggregate resolved-package provenance across a set of layers (e.g. all the
+    /// dependency layers in an agent's `runtime.lock`) into one deduplicated,
+    /// sorted set — the resolved dependency closure. This is what the approval
+    /// boundary surfaces and what bless-on-promotion freezes (determinism inc
+    /// 2/3). Missing layers or layers without provenance contribute nothing.
+    pub fn aggregate_resolved_packages(
+        &self,
+        layer_ids: &[String],
+    ) -> Vec<autonoetic_types::layer::ResolvedPackage> {
+        let mut all = Vec::new();
+        for id in layer_ids {
+            if let Ok(manifest) = self.inspect(id) {
+                all.extend(manifest.resolved_packages);
+            }
+        }
+        Self::finalize_resolved(all)
+    }
+
     fn count_dir(dir: PathBuf) -> anyhow::Result<(usize, u64)> {
         let mut file_count = 0usize;
         let mut size_bytes = 0u64;
@@ -472,6 +490,41 @@ mod tests {
         // Provenance is persisted in the manifest too.
         let manifest = store.inspect(&captured.layer_id).unwrap();
         assert_eq!(manifest.resolved_packages.len(), 2);
+    }
+
+    #[test]
+    fn aggregate_resolved_packages_merges_and_dedups_across_layers() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+
+        let a = temp.path().join("a");
+        fs::create_dir_all(a.join("requests-2.31.0.dist-info")).unwrap();
+        let layer_a = store.create_from_dir(&a, "a", "/opt/a", None).unwrap();
+
+        let b = temp.path().join("b");
+        fs::create_dir_all(b.join("rich-13.7.0.dist-info")).unwrap();
+        // Overlap with layer a — should dedup, not double-count.
+        fs::create_dir_all(b.join("requests-2.31.0.dist-info")).unwrap();
+        let layer_b = store.create_from_dir(&b, "b", "/opt/b", None).unwrap();
+
+        let merged =
+            store.aggregate_resolved_packages(&[layer_a.layer_id, layer_b.layer_id]);
+        let pairs: Vec<(String, String)> = merged
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("requests".to_string(), "2.31.0".to_string()),
+                ("rich".to_string(), "13.7.0".to_string()),
+            ]
+        );
+
+        // Unknown layer ids are skipped silently.
+        assert!(store
+            .aggregate_resolved_packages(&["nope".to_string()])
+            .is_empty());
     }
 
     #[test]
