@@ -2384,11 +2384,13 @@ impl NativeTool for SandboxExecTool {
             all_mounts.extend(runtime_lock_mounts);
         }
 
+        // sandbox.exec is free-form shell on the native tier.
+        let exec_kind = crate::exec_request::ExecutionKind::shell(effective_command.clone());
         let runner = if all_mounts.is_empty() {
             SandboxRunner::spawn_with_driver_and_dependencies_and_env(
                 driver,
                 agent_dir_str,
-                &effective_command,
+                &exec_kind,
                 dep_plan.as_ref(),
                 Some(&overrides),
                 &extra_env,
@@ -2403,7 +2405,7 @@ impl NativeTool for SandboxExecTool {
             SandboxRunner::spawn_with_session_content_and_env(
                 driver,
                 agent_dir_str,
-                &effective_command,
+                &exec_kind,
                 dep_plan.as_ref(),
                 all_mounts,
                 Some(&overrides),
