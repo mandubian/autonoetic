@@ -613,9 +613,33 @@ async fn test_promotion_blesses_resolved_closure() {
     let artifact_store =
         autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
     let session_id = "bless-session";
-    let skill_md = "---\nversion: \"1.0\"\nruntime:\n  engine: autonoetic\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  runtime_type: stateful\n  sandbox: \"bubblewrap\"\n  runtime_lock: \"runtime.lock\"\nagent:\n  id: \"bless.test.agent\"\n  name: \"Bless Test\"\n  description: \"x\"\ncapabilities: []\nexecution_mode: script\nscript_entry: main.py\n---\n# Bless Test\n";
+    let skill_md = r#"---
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "bless.test.agent"
+  name: "Bless Test"
+  description: "x"
+capabilities: []
+execution_mode: script
+script_entry: main.py
+---
+# Bless Test
+"#;
+    // runtime.lock consistent with the artifact's layer (the fixture references it).
+    let runtime_lock = format!(
+        "gateway:\n  artifact: autonoetic-gateway\n  version: \"0.1.0\"\n  sha256: unmanaged\n  signature: null\nsdk:\n  version: \"0.1.0\"\nsandbox:\n  backend: bubblewrap\ndependencies: []\nartifacts: []\nlayers:\n  - layer_id: {}\n    digest: {}\n    mount_path: /opt/autonoetic-deps\n",
+        layer.layer_id, layer.digest
+    );
     for (path, content) in [
         ("SKILL.md", skill_md.as_bytes()),
+        ("runtime.lock", runtime_lock.as_bytes()),
         ("main.py", b"print(1)\n".as_slice()),
     ] {
         let h = content_store.write(content).unwrap();
@@ -623,7 +647,11 @@ async fn test_promotion_blesses_resolved_closure() {
     }
     let bundle = artifact_store
         .build_with_kind(
-            &["SKILL.md".to_string(), "main.py".to_string()],
+            &[
+                "SKILL.md".to_string(),
+                "runtime.lock".to_string(),
+                "main.py".to_string(),
+            ],
             Some(&["main.py".to_string()]),
             Some(&[ArtifactLayer {
                 layer_id: layer.layer_id.clone(),
