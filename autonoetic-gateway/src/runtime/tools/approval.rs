@@ -234,6 +234,37 @@ impl NativeTool for ApprovalWithdrawTool {
                     }
                 }
 
+                if matches!(r.action, autonoetic_types::background::ScheduledAction::WikiProposal { .. }) {
+                    let role = crate::runtime::session_timeline::derive_role(&r.agent_id);
+                    let principal = autonoetic_types::principal::Principal::agent(r.agent_id.clone());
+                    let refs = autonoetic_types::session_timeline::TimelineRefs::default();
+                    let (page_id, title) = match &r.action {
+                        autonoetic_types::background::ScheduledAction::WikiProposal { page_id, title, .. } => (page_id.clone(), title.clone()),
+                        _ => unreachable!(),
+                    };
+                    let payload = serde_json::json!({
+                        "page_id": page_id,
+                        "title": title,
+                        "decided_by": format!("agent:{}", manifest.agent.id),
+                        "cancelled_by": manifest.agent.id,
+                        "reason": reason,
+                    });
+                    let event = crate::runtime::session_timeline::build_timeline_event(
+                        r.root_session_id.clone().unwrap_or_else(|| r.session_id.clone()),
+                        r.session_id.clone(),
+                        None,
+                        &principal,
+                        &role,
+                        "wiki.withdrawn",
+                        None,
+                        Some(payload),
+                        refs,
+                    );
+                    if let Err(e) = store.create_live_digest_event(&event) {
+                        tracing::debug!(target: "session_timeline", error = %e, "wiki.withdrawn timeline emit failed");
+                    }
+                }
+
                 tracing::info!(
                     target: "approval_withdraw",
                     request_id = %args.request_id,
