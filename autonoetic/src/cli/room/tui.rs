@@ -1316,7 +1316,7 @@ pub fn run(
                                     );
                                 }
                             } else if let Some(g) =
-                                view_gate.as_ref().filter(|g| matches!(g.kind, GateKind::Approval | GateKind::WikiProposal))
+                                view_gate.as_ref().filter(|g| matches!(g.kind, GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation))
                             {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
                                 input = Some(GateInput {
@@ -2075,6 +2075,13 @@ fn gate_for_entry(
                 id,
             })
         }),
+        "escalation.pending" => {
+            let id = e.refs.approval_request_id.clone()?;
+            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
+                kind: GateKind::Escalation,
+                id,
+            })
+        }
         _ => None,
     }
 }
@@ -3867,6 +3874,40 @@ mod tests {
         let g2 = selectable_gate(&entries2, Some(&single), &empty, &empty).unwrap();
         assert_eq!(g2.kind, GateKind::Approval);
         assert_eq!(g2.id, "apr-1");
+    }
+
+    #[test]
+    fn escalation_pending_gate_uses_approval_ref() {
+        use autonoetic_types::session_timeline::TimelineRefs;
+        let single = (
+            RenderedRow::Line(render::RowSpec {
+                altitude: Altitude::Attention,
+                actor: render::ActorKind::Planner,
+                tone: RowTone::Default,
+                actor_label: "planner".into(),
+                headline: "x".into(),
+                detail: None,
+                turn_id: None,
+                turn_index: None,
+                in_flight: false,
+                show_reasoning: true,
+            }),
+            RowSource::Single(0),
+        );
+        let empty = HashSet::new();
+        let mut esc = gate_entry("escalation.pending");
+        esc.refs = TimelineRefs {
+            approval_request_id: Some("apr-esc-test123".into()),
+            ..Default::default()
+        };
+        let entries = vec![esc];
+        let g = selectable_gate(&entries, Some(&single), &empty, &empty).unwrap();
+        assert_eq!(g.kind, GateKind::Escalation);
+        assert_eq!(g.id, "apr-esc-test123");
+
+        let mut resolved = HashSet::new();
+        resolved.insert("apr-esc-test123".to_string());
+        assert!(selectable_gate(&entries, Some(&single), &resolved, &empty).is_none());
     }
 
     #[test]
