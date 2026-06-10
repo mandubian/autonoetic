@@ -555,46 +555,38 @@ llm_presets:
     temperature: 1.0
 
 
+# Role → preset for agent init and agents without manifest llm_preset.
+# In-repo bundles declare llm_preset directly; mapping is fallback + cross-cutting roles.
 llm_preset_mapping:
-  planner: gemma4_31b             # routed
-  planner.collaborative: gemma4_31b  # PlanFrame lead; same preset as planner (merged at bootstrap)
-  coder: gemma4_31b               # routed
-  executor: gemma4_31b            # routed
-  researcher: gemma4_31b         # fixed
-  debugger: gemma4_31b            # fixed
-  evaluator: gemma4_31b          # routed
-  architect: gemma4_31b            # fixed
-  specialized_builder: gemma4_31b
-  packager: gemma4_31b
-  registration: gemma4_31b        # credential onboarding flow
-  agent-factory: gemma4_31b       # agent creation pipeline orchestration
-  discovery: gemma4_31b          # semantic reasoning over agent descriptions
-  context_compression: haiku      # capsule summarization LLM (cross-cutting role)
-  default: gemma4_31b
+  planner: smart
+  planner.collaborative: smart
+  coder: coding
+  executor: coding
+  researcher: research
+  debugger: coding
+  evaluator: coding
+  architect: coding
+  auditor: coding
+  specialized_builder: agentic
+  packager: agentic
+  registration: agentic
+  agent-factory: agentic
+  discovery: research
+  memory-curator: agentic
+  evolution-steward: agentic
+  evolution-orchestrator: agentic
+  agent-adapter: agentic
+  context_compression: haiku
+  default: fallback
 
 # ── Default Orchestrator ────────────────────────────────────────────
 # The lead agent used for new sessions. Override to use the
 # collaborative planner for PlanFrame-aware workflows.
 # default_orchestrator: "planner.collaborative"
 
-
-# ── Template → Preset Mapping ────────────────────────────────────────
-# Used during 'agent bootstrap' and 'agent init --template <name>'.
-# Values can be fixed preset names or routing preset names.
-# llm_preset_mapping:
-#   planner: agentic             # routed
-#   coder: coding               # routed
-#   executor: coding            # routed
-#   researcher: research         # fixed
-#   debugger: coding            # fixed
-#   evaluator: coding          # routed
-#   architect: coding            # fixed
-#   specialized_builder: agentic
-#   packager: agentic
-#   registration: agentic        # credential onboarding flow
-#   agent-factory: agentic       # agent creation pipeline orchestration
-#   discovery: research          # semantic reasoning over agent descriptions
-#   default: fallback
+# ── Local / deployment-specific presets (optional) ─────────────────
+# Point semantic presets at your hardware, e.g. replace coding/agentic provider/model
+# with gemma4_31b, or map roles to gemma4_31b via llm_preset_mapping above.
 
 # ── Context Compression (Safe Defaults) ──────────────────────────────
 # Summarizes old conversation turns when approaching context limits.
