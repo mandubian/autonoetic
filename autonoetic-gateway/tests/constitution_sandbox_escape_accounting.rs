@@ -244,3 +244,30 @@ fn r_plus_plus_8_emit_escape_threshold_event_creates_causal_event() -> anyhow::R
 
     Ok(())
 }
+
+#[test]
+fn r_plus_plus_8_escape_threshold_surfaces_on_timeline() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    store.emit_escape_threshold_event("sess-esc", "root-esc", 7, 5, "degradation")?;
+
+    let timeline = store.list_session_timeline("root-esc", None, 50, None, None)?;
+    let ev = timeline
+        .entries
+        .iter()
+        .find(|e| e.event_type == "security.escape_threshold")
+        .expect("escape threshold must surface on timeline");
+    assert_eq!(
+        ev.altitude,
+        autonoetic_types::session_timeline::Altitude::Attention
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(ev.payload.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["level"], "degradation");
+    assert_eq!(payload["count"], 7);
+    assert_eq!(payload["threshold"], 5);
+
+    Ok(())
+}

@@ -200,7 +200,9 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // (Error when rejected, Attention when overridden); this is just the
         // safe floor for any NULL-altitude fallback.
         "user.ask.pending" | "approval.pending" | "plan.pending" | "divergence.intervention"
-        | "runtime.lock_drift" | "escalation.pending" => Altitude::Attention,
+        | "runtime.lock_drift" | "escalation.pending" | "security.escape_threshold" => {
+            Altitude::Attention
+        }
         // Everything else is normal progress.
         _ => Altitude::Normal,
     }
@@ -434,6 +436,18 @@ mod tests {
         assert!(matches!(seat, SessionRole::Auditor));
         let (sys, seat) = actor_from_kind_id("security_policy", "gateway");
         assert!(matches!(sys.kind, PrincipalKind::Script) && matches!(seat, SessionRole::Runtime));
+    }
+
+    #[test]
+    fn escape_threshold_is_attention() {
+        assert_eq!(
+            base_altitude("security.escape_threshold"),
+            Altitude::Attention
+        );
+        assert_eq!(
+            altitude_for("security.escape_threshold", &SessionRole::Runtime),
+            Altitude::Attention
+        );
     }
 
     #[test]

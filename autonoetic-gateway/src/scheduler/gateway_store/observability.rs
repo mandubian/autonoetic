@@ -1295,6 +1295,38 @@ impl GatewayStore {
             )),
         };
         self.create_causal_event(&event)?;
+
+        if !root_session_id.is_empty() {
+            let (principal, seat) = crate::runtime::session_timeline::actor_from_kind_id(
+                "system",
+                "gateway",
+            );
+            let timeline_event = crate::runtime::session_timeline::build_timeline_event(
+                root_session_id.to_string(),
+                session_id.to_string(),
+                None,
+                &principal,
+                &seat,
+                "security.escape_threshold",
+                None,
+                Some(serde_json::json!({
+                    "level": level,
+                    "count": count,
+                    "threshold": threshold,
+                    "session_id": session_id,
+                    "root_session_id": root_session_id,
+                })),
+                autonoetic_types::session_timeline::TimelineRefs::default(),
+            );
+            if let Err(e) = self.create_live_digest_event(&timeline_event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    "escape_threshold timeline emit failed"
+                );
+            }
+        }
+
         Ok(())
     }
 
