@@ -209,12 +209,33 @@ pub fn base_altitude(event_type: &str) -> Altitude {
 }
 
 /// Minimum altitude a seat guarantees for its events. Only raises (`max`),
-/// never lowers. Tunable later via `session_room.role_floors` config.
+/// never lowers. Configurable via `session_room.role_floors` in the gateway
+/// config; unconfigured roles keep their hardcoded defaults.
 pub fn role_floor(role: &SessionRole) -> Altitude {
+    role_floor_with_config(role, None)
+}
+
+pub fn role_floor_with_config(role: &SessionRole, config_floors: Option<&std::collections::HashMap<String, String>>) -> Altitude {
+    if let Some(floors) = config_floors {
+        let key = match role {
+            SessionRole::Operator => "operator",
+            SessionRole::Planner => "planner",
+            SessionRole::Specialist { .. } => "specialist",
+            SessionRole::Sentinel => "sentinel",
+            SessionRole::Curator => "curator",
+            SessionRole::Auditor => "auditor",
+            SessionRole::Tool { .. } => "tool",
+            SessionRole::ExternalSurface { .. } => "external_surface",
+            SessionRole::Runtime => "runtime",
+        };
+        if let Some(alt_str) = floors.get(key) {
+            if let Some(alt) = Altitude::parse_str(alt_str) {
+                return alt;
+            }
+        }
+    }
     match role {
-        // A divergence/security intervention must never sit below the floor.
         SessionRole::Sentinel => Altitude::Attention,
-        // The executor's mechanical voice is hidable by default.
         SessionRole::Runtime => Altitude::Detail,
         _ => Altitude::Detail,
     }
@@ -223,6 +244,10 @@ pub fn role_floor(role: &SessionRole) -> Altitude {
 /// `max(base, role_floor)` — the effective altitude written to the row.
 pub fn altitude_for(event_type: &str, role: &SessionRole) -> Altitude {
     base_altitude(event_type).max(role_floor(role))
+}
+
+pub fn altitude_for_with_config(event_type: &str, role: &SessionRole, config_floors: Option<&std::collections::HashMap<String, String>>) -> Altitude {
+    base_altitude(event_type).max(role_floor_with_config(role, config_floors))
 }
 
 /// Derive the session seat from an agent id (e.g. `planner.default`,
@@ -489,6 +514,54 @@ mod tests {
         assert_eq!(
             derive_role("coder.default"),
             SessionRole::Specialist { kind: "coder".to_string() }
+        );
+    }
+
+    #[test]
+    fn role_floor_config_override() {
+        let mut floors = std::collections::HashMap::new();
+        floors.insert("planner".to_string(), "attention".to_string());
+        floors.insert("runtime".to_string(), "normal".to_string());
+
+        assert_eq!(
+            role_floor_with_config(&SessionRole::Planner, Some(&floors)),
+            Altitude::Attention
+        );
+        assert_eq!(
+            role_floor_with_config(&SessionRole::Runtime, Some(&floors)),
+            Altitude::Normal
+        );
+        assert_eq!(
+            role_floor_with_config(&SessionRole::Sentinel, Some(&floors)),
+            Altitude::Attention,
+            "sentinel uses hardcoded default when not in config map"
+        );
+    }
+
+    #[test]
+    fn role_floor_config_ignores_invalid_altitude() {
+        let mut floors = std::collections::HashMap::new();
+        floors.insert("sentinel".to_string(), "invalid_value".to_string());
+        assert_eq!(
+            role_floor_with_config(&SessionRole::Sentinel, Some(&floors)),
+            Altitude::Attention,
+            "invalid altitude string falls back to hardcoded default"
+        );
+    }
+
+    #[test]
+    fn role_floor_no_config_uses_defaults() {
+        assert_eq!(
+            role_floor_with_config(&SessionRole::Sentinel, None),
+            Altitude::Attention
+        );
+        assert_eq!(
+            role_floor_with_config(&SessionRole::Runtime, None),
+            Altitude::Detail
+        );
+        assert_eq!(
+            role_floor_with_config(&SessionRole::Planner, None),
+            Altitude::Detail
         );
     }
 }
