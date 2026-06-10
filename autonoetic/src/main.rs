@@ -156,6 +156,9 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Constitution { command } => {
                 cli::gateway::handle_gateway_constitution(&config_path, command).await?;
             }
+            cli::common::GatewayCommands::Wiki { command } => {
+                cli::gateway::handle_gateway_wiki(&config_path, command).await?;
+            }
         },
 
         Commands::Agent(args) => match &args.command {
