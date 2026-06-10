@@ -8,7 +8,7 @@
 
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p1::{add_to_linker_sync, WasiP1Ctx};
-use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 /// Result of a WASI module run: captured streams + the process exit code.
@@ -52,9 +52,10 @@ const WASI_PIPE_CAP: usize = 1 << 20;
 
 /// Run a WASI Preview 1 command module (`_start`) in-process: the host directory
 /// is preopened at the guest path `guest_dir`, `args`/`env` are passed through,
-/// stdout/stderr are captured, and CPU/memory are bounded by `limits` (P-3.7).
-/// Network is not granted. WASI `proc_exit` surfaces as `I32Exit` → exit code;
-/// fuel/limit exhaustion surfaces as a trap (mapped to a clear error).
+/// stdout/stderr are captured, `stdin` is fed to the module, and CPU/memory are
+/// bounded by `limits` (P-3.7). Network is not granted. WASI `proc_exit` surfaces
+/// as `I32Exit` → exit code; fuel/limit exhaustion surfaces as a trap (mapped to
+/// a clear error).
 ///
 /// `guest_dir` is the path the workspace appears at *inside* the module. The
 /// agent execution path passes the same workspace path the process tiers use
@@ -67,6 +68,7 @@ pub fn run_wasi_module(
     guest_dir: &str,
     args: &[String],
     env: &[(String, String)],
+    stdin: &[u8],
     limits: &WasmLimits,
 ) -> anyhow::Result<WasiRunOutput> {
     let mut config = Config::new();
@@ -82,6 +84,7 @@ pub fn run_wasi_module(
     let mut builder = WasiCtxBuilder::new();
     builder.stdout(stdout.clone());
     builder.stderr(stderr.clone());
+    builder.stdin(MemoryInputPipe::new(stdin.to_vec()));
     builder.arg("program"); // argv[0]
     for a in args {
         builder.arg(a);
@@ -190,11 +193,45 @@ mod tests {
     (i32.store (i32.const 4) (i32.const 3))
     (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 20)))))"#;
         let dir = tempfile::tempdir().unwrap();
-        let out = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &WasmLimits::default())
+        let out = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &[], &WasmLimits::default())
             .expect("wasi module should run");
         assert_eq!(out.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
         assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn wasi_module_stdin_is_delivered() {
+        // Echo module: read up to 16 bytes from fd 0 (stdin) into a buffer, then
+        // write `nread` bytes from that buffer to fd 1 (stdout). Proves the stdin
+        // pipe reaches the guest. Layout: iovec for read at addr 0 → {ptr:16,len:16};
+        // nread written at addr 8; iovec for write at addr 0 reused → {ptr:16,len:nread}.
+        let wat = r#"(module
+  (import "wasi_snapshot_preview1" "fd_read"
+    (func $fd_read (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "_start")
+    (i32.store (i32.const 0) (i32.const 16))
+    (i32.store (i32.const 4) (i32.const 16))
+    (drop (call $fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8)))
+    (i32.store (i32.const 0) (i32.const 16))
+    (i32.store (i32.const 4) (i32.load (i32.const 8)))
+    (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 12)))))"#;
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_wasi_module(
+            wat.as_bytes(),
+            dir.path(),
+            "/tmp",
+            &[],
+            &[],
+            b"ping\n",
+            &WasmLimits::default(),
+        )
+        .expect("wasi module should run");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ping\n");
     }
 
     #[test]
@@ -206,7 +243,7 @@ mod tests {
             fuel: 100_000,
             ..WasmLimits::default()
         };
-        let err = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &limits)
+        let err = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &[], &limits)
             .expect_err("infinite loop should hit the fuel bound");
         assert!(
             err.to_string().contains("resource limit") || err.to_string().contains("fuel"),
