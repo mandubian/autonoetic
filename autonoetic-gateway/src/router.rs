@@ -1314,6 +1314,23 @@ impl JsonRpcRouter {
             }
 
             "wiki.proposals_pending" => {
+                #[derive(serde::Deserialize)]
+                struct WikiProposalsPendingParams {
+                    #[serde(default)]
+                    root_session_id: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                let params: WikiProposalsPendingParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for wiki.proposals_pending: {}", e),
+                        );
+                    }
+                };
                 let store = match self.execution.gateway_store() {
                     Some(s) => s,
                     None => {
@@ -1324,9 +1341,17 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                let proposals = store
-                    .get_pending_approvals()
-                    .unwrap_or_default()
+                let all = match store.get_pending_approvals() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("wiki.proposals_pending failed: {}", e),
+                        );
+                    }
+                };
+                let proposals: Vec<_> = all
                     .into_iter()
                     .filter(|a| {
                         matches!(
@@ -1334,7 +1359,14 @@ impl JsonRpcRouter {
                             autonoetic_types::background::ScheduledAction::WikiProposal { .. }
                         )
                     })
-                    .collect::<Vec<_>>();
+                    .filter(|a| {
+                        params.root_session_id.as_deref().map_or(true, |sid| {
+                            a.root_session_id.as_deref() == Some(sid)
+                                || a.session_id == sid
+                        })
+                    })
+                    .take(params.limit.unwrap_or(50))
+                    .collect();
                 JsonRpcResponse::success(
                     req.id,
                     serde_json::json!({ "proposals": proposals }),

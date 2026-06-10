@@ -3136,7 +3136,8 @@ fn list_wiki_proposals_detail(client: &RoomClient, root_session_id: &str) -> (Ve
             }
             let mut lines = vec![format!("pending wiki proposals for {root_session_id}:")];
             let mut ids = Vec::new();
-            for (i, p) in proposals.iter().enumerate() {
+            let max_shown = proposals.len().min(9);
+            for (i, p) in proposals.iter().enumerate().take(max_shown) {
                 let request_id = p
                     .get("request_id")
                     .and_then(|v| v.as_str())
@@ -3157,6 +3158,9 @@ fn list_wiki_proposals_detail(client: &RoomClient, root_session_id: &str) -> (Ve
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 lines.push(format!("  [{}] {} [{}] {} -> {}", i + 1, request_id, agent_id, title, page_id));
+            }
+            if proposals.len() > 9 {
+                lines.push(format!("  ... and {} more (use gateway CLI to list all)", proposals.len() - 9));
             }
             lines.push("→ press a number to view proposal details".to_string());
             (lines, ids)
@@ -3211,9 +3215,14 @@ fn wiki_proposal_detail(client: &RoomClient, request_id: &str) -> Vec<String> {
                                 lines.push(format!("tags:        {}", tag_str.join(", ")));
                             }
                         }
-                        if let Some(v) = action.get("reason").and_then(|v| v.as_str()) {
+                        if let Some(v) = p.get("reason").and_then(|v| v.as_str()) {
                             if !v.is_empty() {
                                 lines.push(format!("reason:      {v}"));
+                            }
+                        }
+                        if let Some(v) = p.get("decision_reason").and_then(|v| v.as_str()) {
+                            if !v.is_empty() {
+                                lines.push(format!("decision:    {v}"));
                             }
                         }
                     }
