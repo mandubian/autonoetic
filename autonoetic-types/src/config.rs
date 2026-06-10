@@ -1212,6 +1212,10 @@ pub struct GatewayConfig {
     /// Default: `persona.md` next to the config file (used only if the file exists).
     #[serde(default)]
     pub persona_path: Option<PathBuf>,
+
+    /// Wiki proposal governance: auto-expiry, quality heuristics, duplicate detection.
+    #[serde(default)]
+    pub wiki_proposal: WikiProposalConfig,
 }
 
 fn default_approval_dwell_multiplier() -> f64 {
@@ -1975,6 +1979,63 @@ fn default_roster_repeat_floor() -> u32 {
     3
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiProposalConfig {
+    /// Auto-expiry TTL in seconds for pending wiki proposals. 0 = disabled.
+    /// Expired proposals are automatically cancelled.
+    #[serde(default = "default_wiki_proposal_auto_expire_secs")]
+    pub auto_expire_secs: u64,
+
+    /// Enable advisory quality heuristics (warn but don't block).
+    #[serde(default = "default_true")]
+    pub quality_heuristics_enabled: bool,
+
+    /// Minimum content length in characters for advisory warning.
+    #[serde(default = "default_wiki_proposal_min_content_length")]
+    pub min_content_length: usize,
+
+    /// Minimum number of markdown headings (# ) for advisory warning.
+    #[serde(default = "default_wiki_proposal_min_headings")]
+    pub min_headings: usize,
+
+    /// Enable duplicate detection against existing wiki pages.
+    #[serde(default = "default_true")]
+    pub duplicate_detection_enabled: bool,
+
+    /// Jaccard similarity threshold for flagging duplicates (0.0–1.0).
+    #[serde(default = "default_wiki_proposal_duplicate_threshold")]
+    pub duplicate_threshold: f64,
+}
+
+fn default_wiki_proposal_auto_expire_secs() -> u64 {
+    604800
+}
+
+fn default_wiki_proposal_min_content_length() -> usize {
+    100
+}
+
+fn default_wiki_proposal_min_headings() -> usize {
+    1
+}
+
+fn default_wiki_proposal_duplicate_threshold() -> f64 {
+    0.7
+}
+
+impl Default for WikiProposalConfig {
+    fn default() -> Self {
+        Self {
+            auto_expire_secs: default_wiki_proposal_auto_expire_secs(),
+            quality_heuristics_enabled: true,
+            min_content_length: default_wiki_proposal_min_content_length(),
+            min_headings: default_wiki_proposal_min_headings(),
+            duplicate_detection_enabled: true,
+            duplicate_threshold: default_wiki_proposal_duplicate_threshold(),
+        }
+    }
+}
+
 /// Configuration for pluggable code analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeAnalysisConfig {
@@ -2667,6 +2728,7 @@ impl Default for GatewayConfig {
             profile: Profile::default(),
             auto_learning: AutoLearningConfig::default(),
             persona_path: None,
+            wiki_proposal: WikiProposalConfig::default(),
         }
     }
 }

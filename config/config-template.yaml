@@ -627,3 +627,18 @@ context_compression:
 #     - agent-factory.default
 #     - specialized_builder.default
 #     - evolution-orchestrator.default
+
+# ── Wiki Proposal Governance ─────────────────────────────────────────
+# Quality heuristics are advisory (warn, don't block) — operator always has final say.
+# Duplicate detection flags similar proposals for reviewer attention, doesn't auto-reject.
+#
+# wiki_proposal:
+#   # Auto-expiry TTL for pending proposals (0 = disabled). Default: 7 days.
+#   auto_expire_secs: 604800
+#   # Advisory content quality checks.
+#   quality_heuristics_enabled: true
+#   min_content_length: 100
+#   min_headings: 1
+#   # Duplicate detection via Jaccard similarity over content tokens.
+#   duplicate_detection_enabled: true
+#   duplicate_threshold: 0.7

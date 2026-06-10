@@ -44,6 +44,38 @@ pub fn compute_action_similarity(a: &ScheduledAction, b: &ScheduledAction) -> f6
 
             0.7 * cmd_sim + 0.3 * host_sim
         }
+        (
+            ScheduledAction::WikiProposal {
+                content: content_a,
+                title: title_a,
+                tags: tags_a,
+                ..
+            },
+            ScheduledAction::WikiProposal {
+                content: content_b,
+                title: title_b,
+                tags: tags_b,
+                ..
+            },
+        ) => {
+            let tokens_a: HashSet<&str> = content_a.split_whitespace().collect();
+            let tokens_b: HashSet<&str> = content_b.split_whitespace().collect();
+            let content_sim = jaccard(&tokens_a, &tokens_b);
+
+            let title_a_set: HashSet<&str> = title_a.split_whitespace().collect();
+            let title_b_set: HashSet<&str> = title_b.split_whitespace().collect();
+            let title_sim = jaccard(&title_a_set, &title_b_set);
+
+            let tags_a_set: HashSet<&str> = tags_a.iter().map(|s| s.as_str()).collect();
+            let tags_b_set: HashSet<&str> = tags_b.iter().map(|s| s.as_str()).collect();
+            let tags_sim = if tags_a_set.is_empty() && tags_b_set.is_empty() {
+                1.0
+            } else {
+                jaccard(&tags_a_set, &tags_b_set)
+            };
+
+            0.5 * content_sim + 0.3 * title_sim + 0.2 * tags_sim
+        }
         _ => {
             if a.kind() == b.kind() {
                 0.5
@@ -160,5 +192,51 @@ mod tests {
             detected_hosts: None,
         };
         assert!(compute_action_similarity(&a, &b) > 0.99);
+    }
+
+    #[test]
+    fn test_identical_wiki_proposals_high_similarity() {
+        let a = ScheduledAction::WikiProposal {
+            page_id: "page-1".into(),
+            title: "Getting Started".into(),
+            content: "# Getting Started\n\nInstall the SDK with pip.".into(),
+            tags: vec!["sdk".into(), "install".into()],
+            content_sha256: None,
+            proposed_by_agent: "agent-1".into(),
+            proposed_by_session: Some("session-1".into()),
+        };
+        let b = ScheduledAction::WikiProposal {
+            page_id: "page-2".into(),
+            title: "Getting Started".into(),
+            content: "# Getting Started\n\nInstall the SDK with pip.".into(),
+            tags: vec!["sdk".into(), "install".into()],
+            content_sha256: None,
+            proposed_by_agent: "agent-2".into(),
+            proposed_by_session: Some("session-2".into()),
+        };
+        assert!(compute_action_similarity(&a, &b) > 0.95);
+    }
+
+    #[test]
+    fn test_different_wiki_proposals_low_similarity() {
+        let a = ScheduledAction::WikiProposal {
+            page_id: "page-1".into(),
+            title: "Getting Started".into(),
+            content: "Install the SDK with pip install autonoetic-sdk".into(),
+            tags: vec!["sdk".into()],
+            content_sha256: None,
+            proposed_by_agent: "agent-1".into(),
+            proposed_by_session: Some("session-1".into()),
+        };
+        let b = ScheduledAction::WikiProposal {
+            page_id: "page-2".into(),
+            title: "Architecture Overview".into(),
+            content: "The system uses a gateway agent pattern with SQLite storage".into(),
+            tags: vec!["architecture".into()],
+            content_sha256: None,
+            proposed_by_agent: "agent-2".into(),
+            proposed_by_session: Some("session-2".into()),
+        };
+        assert!(compute_action_similarity(&a, &b) < 0.5);
     }
 }
