@@ -155,6 +155,11 @@ pub enum SandboxDriverKind {
     Bubblewrap,
     Docker,
     MicroVm,
+    /// In-process WebAssembly (WASI) tier — the portable execution backend
+    /// (RFC `docs/rfc/portable-wasm-execution-tier.md`, P4). The driver surface
+    /// and manifest value (`sandbox: "wasm"`) land first; the wasmtime-backed
+    /// execution is wired in subsequent increments.
+    Wasm,
 }
 
 impl SandboxDriverKind {
@@ -163,6 +168,7 @@ impl SandboxDriverKind {
             "bubblewrap" | "bwrap" => Ok(Self::Bubblewrap),
             "docker" => Ok(Self::Docker),
             "microvm" | "firecracker" => Ok(Self::MicroVm),
+            "wasm" | "wasi" => Ok(Self::Wasm),
             other => anyhow::bail!("Unsupported sandbox driver '{}'", other),
         }
     }
@@ -290,6 +296,11 @@ impl SandboxRunner {
                 )?
             }
             SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
+            // The WASM tier is in-process (not a host `(program, args)`); its
+            // wasmtime-backed execution lands in a later P4 increment.
+            SandboxDriverKind::Wasm => {
+                anyhow::bail!("wasm sandbox tier is not yet implemented (P4 in progress)")
+            }
         };
 
         let mut command = Command::new(program);
@@ -376,6 +387,9 @@ impl SandboxRunner {
                 )?
             }
             SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
+            SandboxDriverKind::Wasm => {
+                anyhow::bail!("wasm sandbox tier is not yet implemented (P4 in progress)")
+            }
         };
 
         let mut command = Command::new(program);
@@ -460,7 +474,8 @@ fn sdk_socket_sandbox_path(driver: SandboxDriverKind, socket_name: &str) -> Opti
     match driver {
         SandboxDriverKind::Bubblewrap => Some(format!("{}/{}", BWRAP_WORKSPACE_DIR, socket_name)),
         SandboxDriverKind::Docker => Some(DOCKER_SDK_SOCKET_PATH.to_string()),
-        SandboxDriverKind::MicroVm => None,
+        // microvm deferred (P5); wasm uses host-function imports, not a socket bridge (P4).
+        SandboxDriverKind::MicroVm | SandboxDriverKind::Wasm => None,
     }
 }
 
@@ -530,7 +545,9 @@ fn wire_sdk_bridge(
                     .push((PYTHONPATH_ENV.to_string(), DOCKER_SDK_PYTHONPATH.to_string()));
             }
         }
-        SandboxDriverKind::MicroVm => {}
+        // Not reached (the early guard returns for drivers without a socket
+        // bridge), but the match must stay exhaustive.
+        SandboxDriverKind::MicroVm | SandboxDriverKind::Wasm => {}
     }
     wiring.guard = Some(bridge.guard);
     Ok(wiring)
@@ -583,6 +600,10 @@ fn apply_child_env(
                 command.env(key, value);
             }
         }
+        // Wasm runs in-process (no child `Command`); env is applied to the
+        // wasmtime store in the WASM backend, not here. Not reached today (the
+        // spawn match bails first), but the match must stay exhaustive.
+        SandboxDriverKind::Wasm => {}
     }
 }
 
@@ -1460,6 +1481,25 @@ mod tests {
             SandboxDriverKind::parse("microvm").expect("microvm should parse"),
             SandboxDriverKind::MicroVm
         );
+        assert_eq!(
+            SandboxDriverKind::parse("wasm").expect("wasm should parse"),
+            SandboxDriverKind::Wasm
+        );
+        assert_eq!(
+            SandboxDriverKind::parse("wasi").expect("wasi alias should parse"),
+            SandboxDriverKind::Wasm
+        );
+        assert!(SandboxDriverKind::parse("nope").is_err());
+    }
+
+    #[test]
+    fn wasm_driver_not_yet_executable() {
+        // P4 increment 1: the driver parses, but execution bails clearly until
+        // the wasmtime backend is wired.
+        let result = SandboxRunner::spawn_for_driver("wasm", "/tmp/agent", "python main.py");
+        assert!(result.is_err(), "wasm execution should not be implemented yet");
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("not yet implemented"), "got: {err}");
     }
 
     #[test]
@@ -1564,6 +1604,8 @@ mod tests {
         );
         // microvm has no bridge yet (P5)
         assert!(sdk_socket_sandbox_path(SandboxDriverKind::MicroVm, "s.sock").is_none());
+        // wasm uses host-function imports, not a socket bridge.
+        assert!(sdk_socket_sandbox_path(SandboxDriverKind::Wasm, "s.sock").is_none());
     }
 
     #[test]
