@@ -114,3 +114,66 @@ pub struct RuntimeLock {
     #[serde(default)]
     pub credentials: Vec<LockedCredentialMount>,
 }
+
+impl RuntimeLock {
+    /// True when the closure declares runtime-installed (e.g. `pip install`)
+    /// dependencies. These are resolved *at spawn time* and need network — the
+    /// opposite of an embedded, content-addressed [`LockedLayerMount`].
+    pub fn has_runtime_pip_dependencies(&self) -> bool {
+        !self.dependencies.is_empty()
+    }
+
+    /// True when the closure is **dependency-locked**: every dependency is baked
+    /// into a pinned, content-addressed `layers` mount (or there are none), with
+    /// no runtime-install step. Locked closures are reproducible and importable
+    /// offline — a precondition for `CapsuleMode::Hermetic`/`Replay` export.
+    pub fn is_dependency_locked(&self) -> bool {
+        !self.has_runtime_pip_dependencies()
+    }
+}
+
+#[cfg(test)]
+mod lock_state_tests {
+    use super::*;
+
+    fn empty_lock() -> RuntimeLock {
+        RuntimeLock {
+            gateway: LockedGateway {
+                artifact: String::new(),
+                version: String::new(),
+                sha256: String::new(),
+                binary_sha256: None,
+                build_tag: None,
+                signature: None,
+            },
+            sdk: LockedSdk {
+                version: String::new(),
+            },
+            sandbox: LockedSandbox {
+                backend: String::new(),
+            },
+            dependencies: vec![],
+            artifacts: vec![],
+            layers: vec![],
+            credentials: vec![],
+        }
+    }
+
+    #[test]
+    fn no_deps_is_locked() {
+        let lock = empty_lock();
+        assert!(lock.is_dependency_locked());
+        assert!(!lock.has_runtime_pip_dependencies());
+    }
+
+    #[test]
+    fn runtime_pip_deps_are_not_locked() {
+        let mut lock = empty_lock();
+        lock.dependencies.push(LockedDependencySet {
+            runtime: "python".to_string(),
+            packages: vec!["requests".to_string()],
+        });
+        assert!(!lock.is_dependency_locked());
+        assert!(lock.has_runtime_pip_dependencies());
+    }
+}

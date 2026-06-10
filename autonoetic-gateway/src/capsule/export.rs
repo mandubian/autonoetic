@@ -91,6 +91,11 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
     let revision = resolve_revision(&req, ctx.gateway_store.as_ref())?;
     let revision_dir = revision_dir(ctx.gateway_dir, &revision.agent_id, &revision.revision_id);
 
+    // Hermetic/Replay capsules are imported offline, so every dependency must be
+    // embedded as a pinned layer — a runtime-pip (dev-mode) closure can't be
+    // reproduced without network on the receiver. Fail fast with guidance.
+    require_locked_dependencies_for_hermetic(&revision_dir, req.mode)?;
+
     let staging = tempfile::tempdir().context("creating capsule staging dir")?;
     let staging_path = staging.path();
 
@@ -440,6 +445,38 @@ fn mode_str(mode: CapsuleMode) -> &'static str {
     }
 }
 
+/// Hermetic/Replay capsules embed their closure for offline import, so the
+/// agent must be **dependency-locked** (deps baked into pinned layers, no
+/// runtime-pip step). Reject the export otherwise, with guidance. Thin/Headless
+/// modes carry references and are unaffected. A missing/unparseable lock is not
+/// blocked here (there's nothing we can positively flag as runtime-pip).
+fn require_locked_dependencies_for_hermetic(
+    revision_dir: &Path,
+    mode: CapsuleMode,
+) -> Result<()> {
+    if !mode.is_hermetic() {
+        return Ok(());
+    }
+    let lock_path = revision_dir.join("runtime.lock");
+    let Ok(content) = std::fs::read_to_string(&lock_path) else {
+        return Ok(());
+    };
+    let Ok(lock) = serde_yaml::from_str::<autonoetic_types::runtime_lock::RuntimeLock>(&content)
+    else {
+        return Ok(());
+    };
+    if lock.has_runtime_pip_dependencies() {
+        anyhow::bail!(
+            "{}-mode export requires a dependency-locked agent, but its runtime.lock declares \
+             runtime-installed (pip) dependencies. Hermetic/Replay capsules import offline, so \
+             dependencies must be baked into pinned layers first (locked mode). \
+             See docs/rfc/portable-wasm-execution-tier.md §5.4.1.",
+            mode_str(mode)
+        );
+    }
+    Ok(())
+}
+
 fn emit_export_event(
     store: &GatewayStore,
     capsule_id: &str,
@@ -480,6 +517,39 @@ fn emit_export_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LOCK_WITH_PIP: &str = "gateway:\n  artifact: \"\"\n  version: \"\"\n  sha256: \"\"\n  signature: null\nsdk:\n  version: \"\"\nsandbox:\n  backend: bubblewrap\ndependencies:\n  - runtime: python\n    packages: [requests]\n";
+    const LOCK_NO_DEPS: &str = "gateway:\n  artifact: \"\"\n  version: \"\"\n  sha256: \"\"\n  signature: null\nsdk:\n  version: \"\"\nsandbox:\n  backend: bubblewrap\n";
+
+    #[test]
+    fn hermetic_export_rejects_runtime_pip_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("runtime.lock"), LOCK_WITH_PIP).unwrap();
+        // Hermetic + Replay reject; Thin + Headless are unaffected.
+        let err = require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Hermetic)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("dependency-locked"), "got: {err}");
+        assert!(require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Replay).is_err());
+        assert!(require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Thin).is_ok());
+        assert!(
+            require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Headless).is_ok()
+        );
+    }
+
+    #[test]
+    fn hermetic_export_allows_locked_closure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("runtime.lock"), LOCK_NO_DEPS).unwrap();
+        assert!(require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Hermetic).is_ok());
+    }
+
+    #[test]
+    fn hermetic_export_lenient_when_no_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // No runtime.lock present → nothing to positively flag as runtime-pip.
+        assert!(require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Hermetic).is_ok());
+    }
 
     #[test]
     fn redact_file_if_text_masks_text_secrets() {
