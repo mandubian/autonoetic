@@ -156,9 +156,10 @@ pub enum SandboxDriverKind {
     Docker,
     MicroVm,
     /// In-process WebAssembly (WASI) tier — the portable execution backend
-    /// (RFC `docs/rfc/portable-wasm-execution-tier.md`, P4). The driver surface
-    /// and manifest value (`sandbox: "wasm"`) land first; the wasmtime-backed
-    /// execution is wired in subsequent increments.
+    /// (RFC `docs/rfc/portable-wasm-execution-tier.md`, P4). Selected via
+    /// `sandbox: "wasm"`; runs declared modules in-process through
+    /// [`SandboxRunner::run_to_output`] when built with the `wasm-tier` feature
+    /// (without it, selecting this driver returns a clear build-feature error).
     Wasm,
 }
 
@@ -674,6 +675,16 @@ fn run_wasm_request(
             anyhow::bail!("wasm tier does not support free-form shell execution")
         }
     };
+    // Keep the module strictly under the agent dir: reject absolute paths and any
+    // `..` traversal so a manifest entry can't read/execute outside the bundle.
+    let entry_path = Path::new(&entry);
+    anyhow::ensure!(
+        entry_path.is_relative()
+            && !entry_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+        "wasm entry must be a relative path within the agent dir (no `..`): {entry}"
+    );
     let wasm_path = Path::new(agent_dir).join(&entry);
     let wasm = std::fs::read(&wasm_path)
         .map_err(|e| anyhow::anyhow!("reading wasm entry {}: {e}", wasm_path.display()))?;
@@ -689,8 +700,8 @@ fn run_wasm_request(
     )?;
     Ok(ExecOutput {
         exit_code: out.exit_code,
-        stdout: out.stdout.into_bytes(),
-        stderr: out.stderr.into_bytes(),
+        stdout: out.stdout,
+        stderr: out.stderr,
     })
 }
 

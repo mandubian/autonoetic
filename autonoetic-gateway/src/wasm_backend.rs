@@ -1,10 +1,10 @@
 //! WASM execution backend (RFC `docs/rfc/portable-wasm-execution-tier.md`, P4).
 //!
 //! Gated behind the `wasm-tier` Cargo feature so the native build never pays
-//! wasmtime's compile-time/binary-size cost. This first increment embeds the
-//! runtime and proves a module instantiates and runs in-process; WASI preopens,
-//! stdout/stderr capture, the host-function SDK bridge, and resource limits land
-//! in subsequent increments.
+//! wasmtime's compile-time/binary-size cost. Runs a WASI Preview 1 command
+//! module in-process with a preopened workspace, captured stdout/stderr, and
+//! CPU/memory bounds (P-3.7). The host-function SDK bridge and a WASI layer ABI
+//! for embedded dependencies land in subsequent increments.
 
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p1::{add_to_linker_sync, WasiP1Ctx};
@@ -12,11 +12,13 @@ use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 /// Result of a WASI module run: captured streams + the process exit code.
+/// Streams are raw bytes (like the process tiers' `ExecOutput`) — UTF-8 decoding
+/// is left to higher layers so non-UTF-8 output isn't silently corrupted.
 #[derive(Debug, Clone)]
 pub struct WasiRunOutput {
     pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 /// Resource bounds for a WASM run (constitution P-3.7). `fuel` caps CPU work
@@ -127,8 +129,8 @@ pub fn run_wasi_module(
 
     Ok(WasiRunOutput {
         exit_code,
-        stdout: String::from_utf8_lossy(&stdout.contents()).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr.contents()).into_owned(),
+        stdout: stdout.contents().to_vec(),
+        stderr: stderr.contents().to_vec(),
     })
 }
 
@@ -191,8 +193,8 @@ mod tests {
         let out = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &WasmLimits::default())
             .expect("wasi module should run");
         assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, "hi\n");
-        assert_eq!(out.stderr, "");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+        assert!(out.stderr.is_empty());
     }
 
     #[test]

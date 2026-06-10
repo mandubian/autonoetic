@@ -49,7 +49,7 @@ tempfile = "3.26.0"
 aes-gcm = "0.10.3"
 rand = "0.8"
 wasmtime = { version = "45.0.1", optional = true }
-wasmtime-wasi = { version = "45", optional = true }
+wasmtime-wasi = { version = "45.0.1", optional = true }
 
 [[bin]]
 name = "mock-moltbook"

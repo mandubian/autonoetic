@@ -65,3 +65,28 @@ fn wasm_tier_rejects_free_form_shell() {
         "error should explain shell is unsupported: {err}"
     );
 }
+
+#[test]
+fn wasm_tier_rejects_path_traversal_entry() {
+    let dir = tempdir().unwrap();
+    // A `..` entry must not escape the agent dir to read/execute a foreign module.
+    let request = ExecutionKind::Code {
+        language: None,
+        source: CodeSource::Entry("../escape.wasm".to_string()),
+        args: vec![],
+    };
+    let err = SandboxRunner::run_to_output(
+        SandboxDriverKind::Wasm,
+        dir.path().to_str().unwrap(),
+        &request,
+        None,
+        None,
+        &[],
+        None,
+    )
+    .expect_err("wasm tier must reject path-traversal entries");
+    assert!(
+        err.to_string().contains(".."),
+        "error should explain the entry must stay within the agent dir: {err}"
+    );
+}
