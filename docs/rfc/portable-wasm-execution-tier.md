@@ -44,15 +44,19 @@ and are sequenced so each ships and de-risks the next.
 ## 3. Current contract (what we must soften)
 
 The execution layer today (`autonoetic-gateway/src/sandbox.rs`) is uniformly POSIX.
-Every driver returns a host `(program, argv)` that runs `sh -c "<entrypoint>"`:
+Every driver returns a host `(program, argv)`; **bubblewrap and docker** run the
+composed entrypoint via `sh -c "<entrypoint>"`. (MicroVm is the exception: today
+`microvm_command` **ignores** the entrypoint and returns
+`("firecracker", ["--config-file", <cfg>])` — `sandbox.rs:1223`, param `_entrypoint`
+— so the firecracker path is effectively a stub w.r.t. the composed entrypoint.)
 
 ```
 spawn_with_driver_and_dependencies_and_env(driver, agent_dir, entrypoint,
     dependencies: Option<&DependencyPlan>, overrides, extra_env, root_session_id)
   → match driver {
-        Bubblewrap => bubblewrap_shell_command(...),   // sandbox.rs:265
-        Docker     => docker_command(...),             // sandbox.rs:277
-        MicroVm    => microvm_command(...),            // sandbox.rs:278
+        Bubblewrap => bubblewrap_shell_command(...),   // sandbox.rs:265  (sh -c)
+        Docker     => docker_command(...),             // sandbox.rs:277  (sh -c)
+        MicroVm    => microvm_command(...),            // sandbox.rs:278  (ignores entrypoint)
     } → (String /*program*/, Vec<String> /*argv*/)
   → Command::new(program).args(argv).spawn() → SandboxRunner { process: Child, .. }
 ```
@@ -161,7 +165,9 @@ on a worker thread.
 
 ```rust
 pub enum SdkTransport {
-    /// Bubblewrap/docker: bind-mounted Unix socket (today's path).
+    /// Bind-mounted Unix socket. Today this is wired for **bubblewrap only**
+    /// (`sandbox.rs:252`, `if driver == Bubblewrap`); P1 extends it to
+    /// docker/microvm.
     Socket(SocketBridge),
     /// WASM: host-function imports the guest calls in-process.
     HostFunctions(HostFnBridge),
@@ -222,11 +228,18 @@ model that reuses the existing layer/closure machinery:
   - **P-3.8** (destructive-command denylist in `policy.rs:analyze_command`) runs
     pre-execution and still applies; for `Code` it analyzes source, not a shell line.
 
-### 5.6 Manifest & capability surface (`autonoetic-types`)
+### 5.6 Manifest & capability surface (`autonoetic-types` + `autonoetic-gateway`)
 
-- `SandboxDriverKind::parse` gains `"wasm"` → `SandboxDriverKind::Wasm`
-  (`sandbox.rs:152`). (The `agent.rs:29` comment already lists `"wasm"` — wire it.)
-- `AgentManifest.runtime.sandbox = "wasm"` selects the portable tier.
+Note the crate split: `autonoetic-types` carries only the manifest **string**
+(`AgentManifest.runtime.sandbox: String`, `agent.rs:29`); the **enum + parsing**
+(`SandboxDriverKind` / `parse`) live in `autonoetic-gateway/src/sandbox.rs`. The
+two changes are therefore in different crates:
+
+- **`autonoetic-gateway`** — `SandboxDriverKind::parse` gains `"wasm"` →
+  `SandboxDriverKind::Wasm` (`sandbox.rs:152`). (The `agent.rs:29` comment already
+  lists `"wasm"` as an intended value — wire it.)
+- **`autonoetic-types`** — `AgentManifest.runtime.sandbox = "wasm"` selects the
+  portable tier (no struct change; it's already a free-form string).
 - Validation (install-time, `runtime/install_contract.rs`): reject a `wasm` agent
   that declares native-only deps or relies on `ExecutionKind::Shell`, with an
   actionable message pointing to the native tier.
@@ -252,8 +265,8 @@ enforcement register to a new driver:
 | SDK transport | `sandbox.rs` (`start_sdk_bridge`, `dispatch_sdk_method`) → transport trait |
 | Callers | `runtime/tools/sandbox.rs`, `runtime/tools/artifact_exec.rs`, `runtime/script_execute.rs`, `runtime/middleware.rs` (construct `ExecutionRequest`) |
 | Deps/closures | `layer_store.rs`, `runtime_lock.rs`, dependency resolution |
-| Manifest | `autonoetic-types/src/agent.rs` (`SandboxDriverKind`, validation), `runtime/install_contract.rs` |
-| Escape accounting | `gateway_store/observability.rs`, `scheduler.rs`, `sandbox.rs::detect_sandbox_escape_indicators` |
+| Manifest | `autonoetic-types/src/agent.rs` (`runtime.sandbox` string), `autonoetic-gateway/src/sandbox.rs` (`SandboxDriverKind::parse`), `runtime/install_contract.rs` (validation) |
+| Escape accounting | `runtime/tools/sandbox.rs::detect_sandbox_escape_indicators` (note: in `runtime/tools/`, not top-level `sandbox.rs`), `gateway_store/observability.rs::record_sandbox_escape_attempt`, `scheduler.rs` |
 | Constitution | `enforcement_register` + §3 table + `docs/constitution/...` |
 
 ## 8. Phasing (each phase independently shippable)
