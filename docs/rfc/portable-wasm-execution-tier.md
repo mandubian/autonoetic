@@ -97,6 +97,35 @@ exists.
 - **Portable tier:** language-tagged code, prebuilt WASI deps, host-function SDK,
   no system binaries, no native deps. All platforms, in-process.
 
+### 4.1 Driver support priority & verification matrix
+
+The principles in this RFC (intent-based exec, transport-abstracted SDK, locked
+dependency layers, Hermetic capsules, the constitution mappings) must be **proven
+on the default sandboxes first**. Priority order:
+
+1. **bubblewrap** — primary, easiest to test locally; the existing baseline.
+2. **docker** — co-equal first-class target, verified alongside bubblewrap in
+   every early phase. Today docker lags: it has **no SDK bridge**
+   (`sandbox.rs:252` gates the bridge to bubblewrap) and is otherwise `--network
+   none` + `sh -c` only. Bringing docker to parity is **in-scope for P1–P3**.
+3. **wasm** — next (P4+), once the contract is intent-based and layers exist.
+4. **firecracker / microvm** — **deferred until after WASM.** It is currently a
+   stub (`microvm_command` ignores the entrypoint, `sandbox.rs:1223`); reaching
+   parity is real work with low near-term payoff, so it explicitly trails WASM.
+
+**Verification matrix** — every early-phase acceptance criterion is checked on
+**both bubblewrap and docker**. Tests are availability-gated (extend the existing
+`is_bwrap_available()` pattern with `is_docker_available()`); a driver that isn't
+installed skips with a message rather than failing, so a contributor with only
+bwrap (or only docker) still gets a green local run, and CI covers both.
+
+| Capability proven per phase | bwrap | docker | wasm | firecracker |
+|---|---|---|---|---|
+| P1 SDK transport | ✅ verify | ✅ **bring to parity + verify** | — | deferred |
+| P2 intent exec | ✅ verify | ✅ verify | — | deferred |
+| P3 locked layers + Hermetic round-trip | ✅ verify | ✅ verify | (WASI ABI in P4) | deferred |
+| P4 WASM tier | n/a | n/a | ✅ verify | deferred |
+
 ## 5. Design
 
 ### 5.1 Evolution A — Execution as intent (`ExecutionRequest`)
@@ -332,23 +361,31 @@ enforcement register to a new driver:
 
 ## 8. Phasing (each phase independently shippable)
 
+Driver scope per §4.1: **P1–P3 prove the principles on bubblewrap *and* docker
+together**; firecracker/microvm is **deferred until after WASM**.
+
 1. **P1 — SDK transport abstraction.** Extract `SdkTransport`; reimplement today's
-   socket path behind it; wire it for docker/microvm too (closes existing gap).
-   *No WASM. Pure refactor + bug-fix. Days–1 week.*
+   socket path behind it and **wire it for docker** (bring docker to bridge parity
+   — the current gap at `sandbox.rs:252`). Firecracker bridge deferred.
+   *No WASM. Pure refactor + docker parity. Days–1 week.*
 2. **P2 — `ExecutionRequest` + `SandboxBackend` trait.** Introduce intent-based
-   exec; `Process` backend renders it; map `ExecutionMode::Script` to `Code{Entry}`.
-   *Multi-backend ready, cleaner contract. ~1–2 weeks.*
-3. **P3 — Pinned, embeddable dependency layers + lock/dev modes (all tiers).**
+   exec; the `Process` backend renders it for **bwrap and docker**; map
+   `ExecutionMode::Script` to `Code{Entry}`. *Multi-backend, cleaner contract. ~1–2 weeks.*
+3. **P3 — Pinned, embeddable dependency layers + lock/dev modes (native tier).**
    Add the bake step (`DependencyPlan` → staged install → `LayerStore::create_from_dir`
    → `LockedLayerMount`); make locked mode the default for exportable agents and
    *required* for `CapsuleMode::Hermetic`/`Replay`; keep runtime pip as dev-only.
-   **Lands for bwrap/docker first** (native-ELF layers) — immutable/portable
-   capsules independent of WASM — then adds the **WASI** layer ABI (fail-closed on
-   missing WASI build). *Weeks.*
+   **Verified on bwrap and docker** (native-ELF layers) — immutable/portable
+   capsules independent of WASM. (The WASI layer ABI is added in P4.) *Weeks.*
 4. **P4 — WASM backend.** Embed wasmtime, bundle `python.wasm`, host-function SDK,
-   WASI preopens, fuel/`StoreLimits`, escape signals, `sandbox: "wasm"` manifest.
-   Tractable because the contract it plugs into is already intent-based, and P3
-   already gives it arch-portable WASI dependency layers. *Weeks.*
+   WASI preopens, fuel/`StoreLimits`, escape signals, `sandbox: "wasm"` manifest,
+   plus the **WASI** layer ABI for P3's bake step (fail-closed on missing WASI
+   build). Tractable because the contract it plugs into is already intent-based.
+   *Weeks.*
+5. **P5 (deferred, after WASM) — firecracker/microvm parity.** Replace the stub
+   (`microvm_command` ignores the entrypoint today, `sandbox.rs:1223`): real
+   entrypoint execution, SDK transport, dependency layers, and escape-signal
+   mapping. Low near-term priority; sequenced last by design.
 
 ## 9. Ceilings & open questions
 
@@ -383,17 +420,24 @@ enforcement register to a new driver:
 
 ## 11. Acceptance criteria
 
-- P1: docker/microvm agents can call SDK methods; existing bubblewrap behavior
-  byte-for-byte unchanged; transport covered by tests.
-- P2: `sandbox.exec` and script-mode run through `ExecutionRequest`; bubblewrap
-  integration suite green; no behavior change for native agents.
-- P3 (native first): a **bubblewrap/docker** agent's declared deps bake into a
+Early-phase criteria are checked on **both bubblewrap and docker** (availability-
+gated; see §4.1). Firecracker is out of scope until P5.
+
+- P1: a **docker** agent can call SDK methods (closing the bubblewrap-only gap),
+  and **bubblewrap** behavior is byte-for-byte unchanged; transport covered by
+  tests gated on `is_bwrap_available()` / `is_docker_available()`.
+- P2: `sandbox.exec` and script-mode run through `ExecutionRequest` on **both**
+  bwrap and docker; existing integration suites green; no behavior change for
+  native agents on either driver.
+- P3 (native): on **both bwrap and docker**, a declared-dep agent bakes into a
   pinned `LockedLayerMount`; a `Hermetic` capsule of it imports and runs on a
-  compatible host **with no network**; attempting a `Hermetic` export of a
-  runtime-pip (dev-mode) agent **fails with an actionable error** (per §5.4.1).
-- P3 (WASM ABI): a WASM-targeted agent resolves pure-Python deps to pinned **WASI**
-  layers; a native-only dep fails closed with an actionable error.
-- P4: a `sandbox: "wasm"` example agent runs a pure-Python task **with no `bwrap`
-  and no Docker present**, calls a gateway SDK method via host functions, is
-  network-isolated, respects CPU/memory limits, and increments escape accounting
-  on a forced trap — verified on Linux and at least one non-Linux host.
+  compatible host **with no network**; a `Hermetic` export of a runtime-pip
+  (dev-mode) agent **fails with an actionable error** (per §5.4.1).
+- P4: the WASI layer ABI lands for the bake step (pure-Python deps → pinned WASI
+  layers; native-only dep fails closed); a `sandbox: "wasm"` example agent runs a
+  pure-Python task **with no `bwrap` and no Docker present**, calls a gateway SDK
+  method via host functions, is network-isolated, respects CPU/memory limits, and
+  increments escape accounting on a forced trap — verified on Linux and at least
+  one non-Linux host.
+- P5 (deferred): firecracker/microvm reaches the same P1–P3 bar (SDK transport,
+  intent exec, locked layers, Hermetic round-trip).
