@@ -176,7 +176,12 @@ impl LayerStore {
         fs::write(&archive_path, &archive_buffer)?;
 
         // Count files and size for manifest
-        let (file_count, size_bytes) = Self::count_dir(source_dir)?;
+        let (file_count, size_bytes) = Self::count_dir(source_dir.clone())?;
+
+        // Build-time dependency provenance (read-only, best-effort): record the
+        // resolved versions present in the captured tree. The digest already
+        // pins the bytes; this makes the closure auditable and blessable.
+        let resolved_packages = Self::scan_resolved_packages(&source_dir);
 
         // Create and persist manifest
         let manifest = LayerManifest {
@@ -187,6 +192,7 @@ impl LayerStore {
             size_bytes,
             created_at: chrono::Utc::now().to_rfc3339(),
             approval_scope: approval_scope.clone(),
+            resolved_packages: resolved_packages.clone(),
         };
         let manifest_path = layer_dir.join(MANIFEST_FILENAME);
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -216,6 +222,7 @@ impl LayerStore {
             file_count,
             size_bytes,
             approval_scope,
+            resolved_packages,
         })
     }
 
@@ -234,7 +241,89 @@ impl LayerStore {
             file_count: manifest.file_count,
             size_bytes: manifest.size_bytes,
             approval_scope: manifest.approval_scope,
+            resolved_packages: manifest.resolved_packages,
         })
+    }
+
+    /// Scan a captured tree for resolved dependency versions (build-time
+    /// provenance). Recursively finds Python `*.dist-info` directories (both
+    /// `pip --target` and venv layouts produce these) and parses `name==version`
+    /// from the directory stem. Read-only and bounded. (Node `node_modules`
+    /// provenance is a follow-up.)
+    fn scan_resolved_packages(dir: &Path) -> Vec<autonoetic_types::layer::ResolvedPackage> {
+        use autonoetic_types::layer::ResolvedPackage;
+        let mut found: Vec<ResolvedPackage> = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        let mut visited = 0usize;
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                visited += 1;
+                if visited > 500_000 {
+                    // Don't return silently — truncated provenance must be
+                    // detectable so it can't read as "complete" in an audit.
+                    tracing::warn!(
+                        target: "layer_store",
+                        root = %dir.display(),
+                        "resolved-package provenance scan hit the entry bound; results may be truncated"
+                    );
+                    return Self::finalize_resolved(found);
+                }
+                // `file_type()` does NOT follow symlinks (unlike `path.is_dir()`),
+                // so a symlinked dir / cycle can't traverse outside the capture
+                // root or leak host package names into the manifest.
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let fname = entry.file_name();
+                let name = fname.to_string_lossy();
+                if let Some(stem) = name.strip_suffix(".dist-info") {
+                    if let Some((pkg, ver)) = stem.rsplit_once('-') {
+                        if !pkg.is_empty() && !ver.is_empty() {
+                            found.push(ResolvedPackage {
+                                name: pkg.to_string(),
+                                version: ver.to_string(),
+                            });
+                        }
+                    }
+                    // Don't descend into the dist-info directory itself.
+                    continue;
+                }
+                stack.push(entry.path());
+            }
+        }
+        Self::finalize_resolved(found)
+    }
+
+    fn finalize_resolved(
+        mut v: Vec<autonoetic_types::layer::ResolvedPackage>,
+    ) -> Vec<autonoetic_types::layer::ResolvedPackage> {
+        v.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+        v.dedup();
+        v
+    }
+
+    /// Aggregate resolved-package provenance across a set of layers (e.g. all the
+    /// dependency layers in an agent's `runtime.lock`) into one deduplicated,
+    /// sorted set — the resolved dependency closure. This is what the approval
+    /// boundary surfaces and what bless-on-promotion freezes (determinism inc
+    /// 2/3). Missing layers or layers without provenance contribute nothing.
+    pub fn aggregate_resolved_packages(
+        &self,
+        layer_ids: &[String],
+    ) -> Vec<autonoetic_types::layer::ResolvedPackage> {
+        let mut all = Vec::new();
+        for id in layer_ids {
+            if let Ok(manifest) = self.inspect(id) {
+                all.extend(manifest.resolved_packages);
+            }
+        }
+        Self::finalize_resolved(all)
     }
 
     fn count_dir(dir: PathBuf) -> anyhow::Result<(usize, u64)> {
@@ -374,6 +463,101 @@ mod tests {
         let gw = temp.join(".gateway");
         fs::create_dir_all(&gw).unwrap();
         LayerStore::new(&gw, LayerLimits::default()).unwrap()
+    }
+
+    #[test]
+    fn create_from_dir_records_resolved_package_provenance() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+
+        // A captured tree mixing a flat `pip --target` layout and a venv layout.
+        let src = temp.path().join("deps");
+        fs::create_dir_all(src.join("requests-2.31.0.dist-info")).unwrap();
+        fs::create_dir_all(
+            src.join("lib/python3.12/site-packages/rich-13.7.0.dist-info"),
+        )
+        .unwrap();
+        // A non-dist-info dir should be ignored (and descended into).
+        fs::create_dir_all(src.join("requests")).unwrap();
+        fs::write(src.join("requests/__init__.py"), b"").unwrap();
+
+        let captured = store
+            .create_from_dir(&src, "python-deps", "/opt/autonoetic-deps", None)
+            .unwrap();
+
+        let names: Vec<(String, String)> = captured
+            .resolved_packages
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("requests".to_string(), "2.31.0".to_string()),
+                ("rich".to_string(), "13.7.0".to_string()),
+            ],
+            "resolved packages parsed from dist-info, sorted by name"
+        );
+
+        // Provenance is persisted in the manifest too.
+        let manifest = store.inspect(&captured.layer_id).unwrap();
+        assert_eq!(manifest.resolved_packages.len(), 2);
+    }
+
+    #[test]
+    fn aggregate_resolved_packages_merges_and_dedups_across_layers() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+
+        let a = temp.path().join("a");
+        fs::create_dir_all(a.join("requests-2.31.0.dist-info")).unwrap();
+        let layer_a = store.create_from_dir(&a, "a", "/opt/a", None).unwrap();
+
+        let b = temp.path().join("b");
+        fs::create_dir_all(b.join("rich-13.7.0.dist-info")).unwrap();
+        // Overlap with layer a — should dedup, not double-count.
+        fs::create_dir_all(b.join("requests-2.31.0.dist-info")).unwrap();
+        let layer_b = store.create_from_dir(&b, "b", "/opt/b", None).unwrap();
+
+        let merged =
+            store.aggregate_resolved_packages(&[layer_a.layer_id, layer_b.layer_id]);
+        let pairs: Vec<(String, String)> = merged
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("requests".to_string(), "2.31.0".to_string()),
+                ("rich".to_string(), "13.7.0".to_string()),
+            ]
+        );
+
+        // Unknown layer ids are skipped silently.
+        assert!(store
+            .aggregate_resolved_packages(&["nope".to_string()])
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_does_not_follow_symlinked_dirs() {
+        let temp = tempdir().unwrap();
+        // External dist-info that must NOT be captured via a symlink.
+        let external = temp.path().join("external");
+        fs::create_dir_all(external.join("evil-1.0.dist-info")).unwrap();
+        // Capture root: a real package + a symlink pointing outside.
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("good-2.0.dist-info")).unwrap();
+        std::os::unix::fs::symlink(&external, src.join("link")).unwrap();
+
+        let found = LayerStore::scan_resolved_packages(&src);
+        let names: Vec<String> = found.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["good".to_string()],
+            "symlinked external dist-info must not be traversed"
+        );
     }
 
     #[test]

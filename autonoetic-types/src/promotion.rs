@@ -104,6 +104,13 @@ pub struct PromotionRecord {
     #[serde(default)]
     pub sealed_evaluator_timestamp: Option<String>,
     pub promotion_gate_version: String,
+    /// The resolved dependency closure (name==version) **blessed** at promotion:
+    /// the versions the validated, approved run actually used, frozen here so the
+    /// pin is earned by validation rather than demanded up front. Empty until
+    /// blessed, or for agents with no dependency layers.
+    /// See `docs/design/packager-dependency-determinism.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blessed_packages: Vec<crate::layer::ResolvedPackage>,
 }
 
 impl PromotionRecord {
