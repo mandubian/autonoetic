@@ -3048,6 +3048,7 @@ fn capture_layers_from_paths(
                     "file_count": layer.file_count,
                     "size_bytes": layer.size_bytes,
                     "approval_scope": layer.approval_scope,
+                    "resolved_packages": layer.resolved_packages,
                 }));
             }
             Err(e) => {

@@ -26,6 +26,15 @@ pub struct LayerApprovalScope {
     pub captured_at: String,
 }
 
+/// A resolved dependency captured at build time (provenance). The layer digest
+/// already pins the content; this records the *human-readable* version that was
+/// resolved, so the closure is auditable and can be blessed/pinned at promotion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedPackage {
+    pub name: String,
+    pub version: String,
+}
+
 /// A layer manifest stored alongside the compressed archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerManifest {
@@ -47,6 +56,11 @@ pub struct LayerManifest {
     /// None for layers built before this feature was added (treated as no network scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_scope: Option<LayerApprovalScope>,
+    /// Dependencies resolved into this layer at build time (name==version),
+    /// captured for audit and pin-on-promotion. Empty for non-dependency layers
+    /// or layers built before this feature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_packages: Vec<ResolvedPackage>,
 }
 
 /// A reference to a layer within an artifact manifest.
@@ -82,4 +96,7 @@ pub struct CapturedLayer {
     /// Approval scope recorded at capture time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_scope: Option<LayerApprovalScope>,
+    /// Dependencies resolved into this layer at build time (name==version).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_packages: Vec<ResolvedPackage>,
 }
