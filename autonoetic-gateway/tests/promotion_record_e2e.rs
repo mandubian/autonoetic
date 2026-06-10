@@ -583,3 +583,108 @@ async fn test_promotion_record_with_artifact_ref() {
         "promotion_query should return the artifact_ref"
     );
 }
+
+/// Bless-on-promotion (determinism inc 3): a passing verdict on an artifact with
+/// a dependency layer freezes that layer's resolved closure onto the promotion
+/// record and surfaces it in the response.
+#[tokio::test]
+async fn test_promotion_blesses_resolved_closure() {
+    use autonoetic_gateway::layer_store::LayerStore;
+    use autonoetic_types::layer::ArtifactLayer;
+
+    let temp = tempdir().unwrap();
+    let agents_dir = temp.path().join("agents");
+    let builder_dir = agents_dir.join("specialized_builder.default");
+    std::fs::create_dir_all(&builder_dir).unwrap();
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+
+    // A dependency layer carrying build-time resolved-version provenance.
+    let deps_src = temp.path().join("deps");
+    std::fs::create_dir_all(deps_src.join("requests-2.31.0.dist-info")).unwrap();
+    let layer = LayerStore::new(&gateway_dir, Default::default())
+        .unwrap()
+        .create_from_dir(&deps_src, "python-deps", "/opt/autonoetic-deps", None)
+        .unwrap();
+    assert!(!layer.resolved_packages.is_empty(), "layer should have provenance");
+
+    // Build an AgentBundle artifact referencing that layer.
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store =
+        autonoetic_gateway::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+    let session_id = "bless-session";
+    let skill_md = "---\nversion: \"1.0\"\nruntime:\n  engine: autonoetic\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  runtime_type: stateful\n  sandbox: \"bubblewrap\"\n  runtime_lock: \"runtime.lock\"\nagent:\n  id: \"bless.test.agent\"\n  name: \"Bless Test\"\n  description: \"x\"\ncapabilities: []\nexecution_mode: script\nscript_entry: main.py\n---\n# Bless Test\n";
+    for (path, content) in [
+        ("SKILL.md", skill_md.as_bytes()),
+        ("main.py", b"print(1)\n".as_slice()),
+    ] {
+        let h = content_store.write(content).unwrap();
+        content_store.register_name(session_id, path, &h).unwrap();
+    }
+    let bundle = artifact_store
+        .build_with_kind(
+            &["SKILL.md".to_string(), "main.py".to_string()],
+            Some(&["main.py".to_string()]),
+            Some(&[ArtifactLayer {
+                layer_id: layer.layer_id.clone(),
+                name: "python-deps".to_string(),
+                mount_path: "/opt/autonoetic-deps".to_string(),
+                digest: layer.digest.clone(),
+            }]),
+            ArtifactKind::AgentBundle,
+            session_id,
+        )
+        .unwrap();
+
+    // Record a passing promotion via the tool.
+    let config = GatewayConfig {
+        agents_dir,
+        ..Default::default()
+    };
+    let manifest = evaluator_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let args = serde_json::json!({
+        "artifact_id": bundle.artifact_id,
+        "role": "sealed_evaluator",
+        "pass": true,
+        "findings": [],
+        "summary": "ok"
+    });
+    let result = registry
+        .execute(
+            "promotion_record",
+            &manifest,
+            &policy,
+            &builder_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).unwrap(),
+            Some(session_id),
+            None,
+            Some(&config),
+            None,
+            None,
+        )
+        .expect("promotion.record should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let blessed = parsed
+        .pointer("/promotion_record/blessed_packages")
+        .and_then(|v| v.as_array())
+        .expect("blessed_packages should be present in the response");
+    assert!(
+        blessed.iter().any(|p| {
+            p.get("name").and_then(|n| n.as_str()) == Some("requests")
+                && p.get("version").and_then(|v| v.as_str()) == Some("2.31.0")
+        }),
+        "blessed closure should include requests==2.31.0, got: {blessed:?}"
+    );
+
+    // And it's persisted on the promotion record.
+    let store = PromotionStore::new(&gateway_dir).unwrap();
+    assert!(!store
+        .get_promotion(&bundle.artifact_id)
+        .unwrap()
+        .blessed_packages
+        .is_empty());
+}

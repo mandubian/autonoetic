@@ -278,7 +278,7 @@ impl NativeTool for PromotionRecordTool {
 
         let store = PromotionStore::new(gw_dir)?;
 
-        let record = store.record_promotion(
+        let mut record = store.record_promotion(
             artifact_id.clone(),
             args.artifact_digest.clone(),
             None,
@@ -288,6 +288,29 @@ impl NativeTool for PromotionRecordTool {
             args.findings.clone(),
             args.summary.clone(),
         )?;
+
+        // Bless-on-promotion (determinism inc 3): on a passing verdict, freeze
+        // the resolved dependency closure the validated run used. Best-effort
+        // provenance recorded *after* the gate decision — it never alters the
+        // gate and never fails the promotion. Idempotent across role verdicts
+        // (the artifact's layers don't change between them).
+        if args.pass {
+            match bless_resolved_closure(gw_dir, &artifact_id, &store) {
+                Ok(true) => {
+                    // Re-read so the response reflects the freshly-blessed set.
+                    if let Some(updated) = store.get_promotion(&artifact_id) {
+                        record = updated;
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    target: "promotion",
+                    artifact_id = %artifact_id,
+                    error = %e,
+                    "failed to bless resolved dependency closure (non-blocking)"
+                ),
+            }
+        }
 
         let response = serde_json::json!({
             "ok": true,
@@ -317,11 +340,35 @@ impl NativeTool for PromotionRecordTool {
                 "sealed_evaluator_findings": record.sealed_evaluator_findings,
                 "sealed_evaluator_timestamp": record.sealed_evaluator_timestamp,
                 "promotion_gate_version": record.promotion_gate_version,
+                "blessed_packages": record.blessed_packages,
             }
         });
 
         serde_json::to_string(&response).map_err(Into::into)
     }
+}
+
+/// Freeze the resolved dependency closure for a promoted artifact: aggregate the
+/// resolved-version provenance across the artifact's layers and bless it onto the
+/// promotion record. Returns `Ok(true)` if a non-empty closure was blessed,
+/// `Ok(false)` when the artifact has no dependency layers / provenance. Pure
+/// provenance — callers treat errors as non-blocking.
+fn bless_resolved_closure(
+    gw_dir: &Path,
+    artifact_id: &str,
+    store: &PromotionStore,
+) -> anyhow::Result<bool> {
+    let bundle = crate::artifact_store::ArtifactStore::new(gw_dir)?.inspect(artifact_id)?;
+    let layer_ids: Vec<String> = bundle.layers.iter().map(|l| l.layer_id.clone()).collect();
+    if layer_ids.is_empty() {
+        return Ok(false);
+    }
+    let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
+    let blessed = layer_store.aggregate_resolved_packages(&layer_ids);
+    if blessed.is_empty() {
+        return Ok(false);
+    }
+    store.set_blessed_packages(artifact_id, blessed)
 }
 
 pub struct PromotionQueryTool;
