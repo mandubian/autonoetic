@@ -31,6 +31,9 @@ pub mod sentinel;
 pub mod server;
 pub mod tracing;
 pub mod vault;
+/// WASM execution backend — only compiled with the `wasm-tier` feature (P4).
+#[cfg(feature = "wasm-tier")]
+pub mod wasm_backend;
 
 pub use agent::{cached, scan_agents, AgentRepository, LoadedAgent};
 pub use artifact_store::ArtifactStore;
