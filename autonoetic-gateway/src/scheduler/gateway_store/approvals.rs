@@ -70,6 +70,10 @@ impl GatewayStore {
                 risk_summary_json,
             ],
         )?;
+        // Release the conn lock before timeline emit — create_live_digest_event
+        // re-locks the same Mutex and would deadlock otherwise.
+        drop(conn);
+        crate::runtime::session_timeline::emit_approval_pending_timeline_event(self, request, None);
         Ok(())
     }
 

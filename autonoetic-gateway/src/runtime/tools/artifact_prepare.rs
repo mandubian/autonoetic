@@ -107,7 +107,7 @@ impl NativeTool for ArtifactPrepareTool {
         gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
-        _turn_id: Option<&str>,
+        turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<Arc<GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,

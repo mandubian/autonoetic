@@ -44,6 +44,9 @@ impl GatewayStore {
                 interaction.checkpoint_turn_id,
             ],
         )?;
+        // Release the conn lock before timeline emit (same deadlock pattern as approvals).
+        drop(conn);
+        crate::runtime::session_timeline::emit_user_ask_pending_timeline_event(self, interaction);
         Ok(())
     }
 

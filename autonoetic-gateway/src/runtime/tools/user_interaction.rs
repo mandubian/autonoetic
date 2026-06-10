@@ -176,16 +176,19 @@ impl NativeTool for UserAskTool {
                 }
             }
 
+            let pending_approvals = store
+                .get_pending_approvals_for_root(&root_session_id)
+                .unwrap_or_default();
             let pending_interactions = store
                 .get_pending_interactions_for_root_session(&root_session_id)
                 .unwrap_or_default();
-            if !pending_interactions.is_empty() {
+            if !pending_approvals.is_empty() || !pending_interactions.is_empty() {
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "conflict",
-                    "message": "user.ask is not available while interactions are pending. Resolve pending interactions before retrying.",
-                    "repair_hint": "Resolve or wait for pending interactions, then retry user.ask.",
-                    "error": "user.ask is not available while interactions are pending. Resolve pending interactions before retrying."
+                    "message": "user.ask is not available while gates are pending (approvals, interactions, or escalations). Resolve pending gates before retrying.",
+                    "repair_hint": "Resolve or wait for pending gates, then retry user.ask.",
+                    "error": "user.ask is not available while gates are pending. Resolve pending gates before retrying."
                 }).to_string());
             }
         }
@@ -221,18 +224,6 @@ impl NativeTool for UserAskTool {
                     .join("; "),
             )
         };
-        let options_count = options.len();
-        // Embed the pre-digested choices (id + label) in the timeline event so
-        // every channel can render one-tap options inline without an extra
-        // round-trip — the room is store-free and reads only the timeline (#393).
-        // Labels only (not `value`, which may be sensitive); freeform-allowed
-        // travels too so a channel knows whether to offer a text fallback.
-        let options_for_event: Vec<serde_json::Value> = options
-            .iter()
-            .map(|o| serde_json::json!({ "id": o.id, "label": o.label }))
-            .collect();
-        let allow_freeform_for_event = args.allow_freeform;
-
         let store = match gateway_store {
             Some(ref s) => s.clone(),
             None => {
@@ -306,47 +297,6 @@ impl NativeTool for UserAskTool {
                             );
                         }
                     }
-                    let ask_role =
-                        crate::runtime::session_timeline::derive_role(&_manifest.agent.id);
-                    let ask_altitude = crate::runtime::session_timeline::altitude_for(
-                        "user.ask.pending",
-                        &ask_role,
-                    );
-                    let ask_principal = autonoetic_types::principal::Principal::agent(
-                        _manifest.agent.id.clone(),
-                    );
-                    let ask_refs = autonoetic_types::session_timeline::TimelineRefs {
-                        interaction_id: Some(gate_id.clone()),
-                        ..Default::default()
-                    };
-                    let _ = store.create_live_digest_event(
-                        &crate::scheduler::gateway_store::LiveDigestEventRecord {
-                            event_id: uuid::Uuid::new_v4().to_string(),
-                            root_session_id: ctx.root_session_id.clone(),
-                            source_session_id: ctx.session_id.clone(),
-                            turn_id: turn_id.map(|s| s.to_string()),
-                            source_agent_id: Some(_manifest.agent.id.clone()),
-                            source_node_id: std::env::var("AUTONOETIC_NODE_ID")
-                                .unwrap_or_else(|_| "gateway".to_string()),
-                            event_type: "user.ask.pending".to_string(),
-                            payload: Some(
-                                serde_json::json!({
-                                    "interaction_id": gate_id,
-                                    "question": crate::log_redaction::redact_text_for_logs(&question_for_side_effects),
-                                    "options_count": options_count,
-                                    "options": options_for_event,
-                                    "allow_freeform": allow_freeform_for_event,
-                                })
-                                .to_string(),
-                            ),
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                            principal_kind: Some(ask_principal.kind_to_storage()),
-                            principal_id: Some(ask_principal.id.clone()),
-                            role: Some(ask_role.to_storage()),
-                            altitude: Some(ask_altitude.as_str().to_string()),
-                            refs_json: serde_json::to_string(&ask_refs).ok(),
-                        },
-                    );
                 }
                 Ok(response_json)
             }

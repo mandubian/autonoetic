@@ -17,6 +17,8 @@ const TIMELINE_COVERAGE: &[(&str, Altitude)] = &[
     ("security.escape_threshold", Altitude::Attention),
     ("escalation.pending", Altitude::Attention),
     ("approval.pending", Altitude::Attention),
+    ("user.ask.pending", Altitude::Attention),
+    ("plan.pending", Altitude::Attention),
     ("divergence.intervention", Altitude::Attention),
     ("runtime.lock_drift", Altitude::Attention),
     ("guard.tripped", Altitude::Error),
