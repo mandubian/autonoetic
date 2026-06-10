@@ -677,8 +677,13 @@ fn run_wasm_request(
     let wasm_path = Path::new(agent_dir).join(&entry);
     let wasm = std::fs::read(&wasm_path)
         .map_err(|e| anyhow::anyhow!("reading wasm entry {}: {e}", wasm_path.display()))?;
-    let out =
-        crate::wasm_backend::run_wasi_module(&wasm, Path::new(agent_dir), &args, extra_env)?;
+    let out = crate::wasm_backend::run_wasi_module(
+        &wasm,
+        Path::new(agent_dir),
+        &args,
+        extra_env,
+        &crate::wasm_backend::WasmLimits::default(),
+    )?;
     Ok(ExecOutput {
         exit_code: out.exit_code,
         stdout: out.stdout.into_bytes(),
