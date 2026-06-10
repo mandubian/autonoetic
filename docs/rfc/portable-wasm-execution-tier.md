@@ -233,6 +233,36 @@ The change (tier-independent):
   worth doing on its own, independent of WASM), and the capsule becomes genuinely
   immutable/portable. WASM is then "one more layer ABI" on the same scheme.
 
+#### 5.4.1 Capsule portability matrix
+
+The outcome is a function of **dependency mode × tier × capsule mode**. Portability
+grades: **None** = needs network + resolver at spawn; **Host-compatible** =
+self-contained but ELF-bound to a matching arch/OS (`CapsulePlatform`-gated);
+**Universal** = arch-independent, spawn-anywhere.
+
+| Dep mode | Tier | `CapsuleMode` | Embeds deps? | Network on import/spawn? | Reproducible? | Portability |
+|---|---|---|---|---|---|---|
+| **dev** (runtime pip) | native (bwrap/docker) | `Thin`/`Headless` | no (refs only) | **yes** (pip at spawn) | no | **None** |
+| **dev** (runtime pip) | native | `Hermetic`/`Replay` | — | — | — | **Rejected** (runtime pip cannot be embedded → export error) |
+| **dev** | WASM | any | — | — | — | **N/A** (WASM cannot runtime-pip) |
+| **locked** (layers) | native | `Thin`/`Headless` | refs only | yes (fetch layers) | yes (pinned digests) | None–partial (depends on layer source) |
+| **locked** (ELF layers) | native | `Hermetic`/`Replay` | **yes** | **no** | **yes** | **Host-compatible** (arch/OS-gated) |
+| **locked** (WASI layers) | WASM | `Hermetic`/`Replay` | **yes** | **no** | **yes** | **Universal** (spawn-anywhere) |
+
+Reading the matrix:
+
+- **The only fully immutable, offline, portable rows are the two `locked` +
+  `Hermetic`/`Replay` rows** — exactly the "export, store, spawn elsewhere"
+  capsule the operator wants.
+- **Runtime pip + Hermetic is an explicit error**, not a silent degrade: locked
+  mode is a *precondition* the exporter validates before producing a Hermetic
+  capsule (enforce in the capsule-export path; see §7).
+- **Native locked + Hermetic is already achievable today** with the existing
+  `LockedLayerMount` + `CapsuleMode::Hermetic` + `CapsulePlatform` machinery —
+  P3 makes it the *default/required* path rather than an opt-in.
+- **WASM is the only Universal row** — its sole differentiator over native is
+  arch-independence; everything else (embedding, pinning, offline import) is shared.
+
 ### 5.5 The WASM backend
 
 - **Runtime:** embed `wasmtime` (Component Model + WASI Preview 2) as a Rust
@@ -294,7 +324,8 @@ enforcement register to a new driver:
 | Exec request + backends | `autonoetic-gateway/src/sandbox.rs` (split into `sandbox/{mod,process,wasm,exec_request,sdk_transport}.rs`) |
 | SDK transport | `sandbox.rs` (`start_sdk_bridge`, `dispatch_sdk_method`) → transport trait |
 | Callers | `runtime/tools/sandbox.rs`, `runtime/tools/artifact_exec.rs`, `runtime/script_execute.rs`, `runtime/middleware.rs` (construct `ExecutionRequest`) |
-| Deps/closures | `layer_store.rs`, `runtime_lock.rs`, dependency resolution |
+| Deps/closures | `layer_store.rs`, `runtime_lock.rs`, dependency resolution + bake step (`DependencyPlan` → `LockedLayerMount`) |
+| Capsule export | `autonoetic-types/src/capsule.rs` (`CapsuleMode`, `CapsulePlatform`); capsule-export path validates **locked mode** before producing `Hermetic`/`Replay` (reject runtime-pip deps) — see §5.4.1 matrix |
 | Manifest | `autonoetic-types/src/agent.rs` (`runtime.sandbox` string), `autonoetic-gateway/src/sandbox.rs` (`SandboxDriverKind::parse`), `runtime/install_contract.rs` (validation) |
 | Escape accounting | `runtime/tools/sandbox.rs::detect_sandbox_escape_indicators` (note: in `runtime/tools/`, not top-level `sandbox.rs`), `gateway_store/observability.rs::record_sandbox_escape_attempt`, `scheduler.rs` |
 | Constitution | `enforcement_register` + §3 table + `docs/constitution/...` |
@@ -356,8 +387,12 @@ enforcement register to a new driver:
   byte-for-byte unchanged; transport covered by tests.
 - P2: `sandbox.exec` and script-mode run through `ExecutionRequest`; bubblewrap
   integration suite green; no behavior change for native agents.
-- P3: a WASM-targeted agent resolves pure-Python deps to pinned WASI layers; a
-  native-only dep fails closed with an actionable error.
+- P3 (native first): a **bubblewrap/docker** agent's declared deps bake into a
+  pinned `LockedLayerMount`; a `Hermetic` capsule of it imports and runs on a
+  compatible host **with no network**; attempting a `Hermetic` export of a
+  runtime-pip (dev-mode) agent **fails with an actionable error** (per §5.4.1).
+- P3 (WASM ABI): a WASM-targeted agent resolves pure-Python deps to pinned **WASI**
+  layers; a native-only dep fails closed with an actionable error.
 - P4: a `sandbox: "wasm"` example agent runs a pure-Python task **with no `bwrap`
   and no Docker present**, calls a gateway SDK method via host functions, is
   network-isolated, respects CPU/memory limits, and increments escape accounting
