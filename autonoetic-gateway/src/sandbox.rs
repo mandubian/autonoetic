@@ -22,6 +22,14 @@ pub const SDK_BRIDGE_MAX_PAYLOAD_BYTES: usize = 1_048_576;
 const DOCKER_IMAGE_ENV: &str = "AUTONOETIC_DOCKER_IMAGE";
 const FIRECRACKER_CONFIG_ENV: &str = "AUTONOETIC_FIRECRACKER_CONFIG";
 pub(crate) const BWRAP_WORKSPACE_DIR: &str = "/tmp";
+/// In-container path the SDK socket is mounted at for the docker driver (P1).
+/// Bubblewrap exposes it under `BWRAP_WORKSPACE_DIR`; docker bind-mounts to a
+/// fixed path outside `/workspace` so the agent_dir mount can't shadow it.
+const DOCKER_SDK_SOCKET_PATH: &str = "/run/autonoetic-sdk.sock";
+/// In-container path the Python SDK source is mounted at for the docker driver.
+/// (For bubblewrap the host `/` is ro-bind-mounted, so the host SDK path is
+/// already visible; docker images are separate, so the SDK is mounted in.)
+const DOCKER_SDK_PYTHONPATH: &str = "/opt/autonoetic-sdk";
 const PYTHONPATH_ENV: &str = "PYTHONPATH";
 const PYTHON_SDK_PATH_ENV: &str = "AUTONOETIC_PYTHON_SDK_PATH";
 const CCOS_SOCKET_ENV: &str = "CCOS_SOCKET_PATH";
@@ -242,22 +250,14 @@ impl SandboxRunner {
             anyhow::bail!("MicroVM dependency bootstrap is not implemented yet");
         }
 
-        let mut sdk_bridge = None;
+        // Wire the SDK socket transport once; the helper produces driver-specific
+        // plumbing (bubblewrap bind mount vs docker `-v`/`-e`). Now wired for
+        // bubblewrap AND docker (P1) — previously bubblewrap-only.
+        let wiring = wire_sdk_bridge(driver, agent_dir, root_session_id)?;
+        let socket_path_sandbox = wiring.socket_path_sandbox.clone();
         let mut socket_mounts: Vec<SandboxMount> = Vec::new();
-
-        // Start SDK bridge for bubblewrap and prepare socket mount so it's
-        // visible inside the sandbox (the agent_dir bind-mount at /tmp would
-        // otherwise shadow the socket file).
-        let mut socket_path_sandbox: Option<String> = None;
-        if driver == SandboxDriverKind::Bubblewrap {
-            let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
-            socket_path_sandbox = Some(bridge.socket_path_sandbox.clone());
-            socket_mounts.push(SandboxMount {
-                source: bridge.guard.socket_path_host.clone(),
-                dest: bridge.socket_path_sandbox.clone(),
-                readonly: false,
-            });
-            sdk_bridge = Some(bridge.guard);
+        if let Some(mount) = wiring.bwrap_mount {
+            socket_mounts.push(mount);
         }
 
         let composed_entrypoint = compose_entrypoint(entrypoint, dependencies)?;
@@ -274,7 +274,18 @@ impl SandboxRunner {
                     bubblewrap_shell_command(agent_dir, entrypoint, &socket_mounts, overrides)?
                 }
             }
-            SandboxDriverKind::Docker => docker_command(agent_dir, &composed_entrypoint)?,
+            SandboxDriverKind::Docker => {
+                // Container env does NOT inherit the gateway process env, so the
+                // socket path / PYTHONPATH / extra_env must be passed as `-e`.
+                let mut docker_env = wiring.docker_env.clone();
+                merge_docker_env(&mut docker_env, extra_env);
+                docker_command(
+                    agent_dir,
+                    &composed_entrypoint,
+                    &wiring.docker_volumes,
+                    &docker_env,
+                )?
+            }
             SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
         };
 
@@ -285,28 +296,13 @@ impl SandboxRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        if driver == SandboxDriverKind::Bubblewrap {
-            if let Some(sdk_path) = resolve_python_sdk_path() {
-                inject_pythonpath(&mut command, &sdk_path);
-            }
-            if let Some(ref path) = socket_path_sandbox {
-                command.env(CCOS_SOCKET_ENV, path);
-            }
-        }
-
-        for (key, value) in extra_env {
-            if key == PYTHONPATH_ENV {
-                inject_pythonpath_value(&mut command, value);
-            } else {
-                command.env(key, value);
-            }
-        }
+        apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
 
         let child = command.spawn()?;
         Ok(Self {
             process: child,
             driver,
-            _sdk_bridge: sdk_bridge,
+            _sdk_bridge: wiring.guard,
         })
     }
 
@@ -350,19 +346,13 @@ impl SandboxRunner {
             anyhow::bail!("MicroVM dependency bootstrap is not implemented yet");
         }
 
-        let mut sdk_bridge = None;
         let mut all_mounts = session_content_mounts;
-        let mut socket_path_sandbox: Option<String> = None;
 
-        if driver == SandboxDriverKind::Bubblewrap {
-            let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
-            socket_path_sandbox = Some(bridge.socket_path_sandbox.clone());
-            all_mounts.push(SandboxMount {
-                source: bridge.guard.socket_path_host.clone(),
-                dest: bridge.socket_path_sandbox.clone(),
-                readonly: false,
-            });
-            sdk_bridge = Some(bridge.guard);
+        // SDK socket transport, wired for bubblewrap AND docker (P1).
+        let wiring = wire_sdk_bridge(driver, agent_dir, root_session_id)?;
+        let socket_path_sandbox = wiring.socket_path_sandbox.clone();
+        if let Some(mount) = wiring.bwrap_mount {
+            all_mounts.push(mount);
         }
 
         let composed_entrypoint = compose_entrypoint(entrypoint, dependencies)?;
@@ -370,7 +360,16 @@ impl SandboxRunner {
             SandboxDriverKind::Bubblewrap => {
                 bubblewrap_shell_command(agent_dir, &composed_entrypoint, &all_mounts, overrides)?
             }
-            SandboxDriverKind::Docker => docker_command(agent_dir, &composed_entrypoint)?,
+            SandboxDriverKind::Docker => {
+                let mut docker_env = wiring.docker_env.clone();
+                merge_docker_env(&mut docker_env, extra_env);
+                docker_command(
+                    agent_dir,
+                    &composed_entrypoint,
+                    &wiring.docker_volumes,
+                    &docker_env,
+                )?
+            }
             SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
         };
 
@@ -381,34 +380,22 @@ impl SandboxRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        if driver == SandboxDriverKind::Bubblewrap {
-            if let Some(sdk_path) = resolve_python_sdk_path() {
-                inject_pythonpath(&mut command, &sdk_path);
-            }
-            if let Some(ref path) = socket_path_sandbox {
-                command.env(CCOS_SOCKET_ENV, path);
-            }
-        }
-
-        for (key, value) in extra_env {
-            if key == PYTHONPATH_ENV {
-                inject_pythonpath_value(&mut command, value);
-            } else {
-                command.env(key, value);
-            }
-        }
+        apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
 
         let child = command.spawn()?;
         Ok(Self {
             process: child,
             driver,
-            _sdk_bridge: sdk_bridge,
+            _sdk_bridge: wiring.guard,
         })
     }
 }
 
 struct StartedSdkBridge {
-    socket_path_sandbox: String,
+    /// Socket file name (e.g. `autonoetic-<hash>.sock`). The in-sandbox mount
+    /// path is driver-specific and computed by the caller via
+    /// [`sdk_socket_sandbox_path`], so the bridge itself stays driver-agnostic.
+    socket_name: String,
     guard: SdkBridgeGuard,
 }
 
@@ -451,13 +438,147 @@ fn start_sdk_bridge(
     });
 
     Ok(StartedSdkBridge {
-        socket_path_sandbox: format!("{}/{}", BWRAP_WORKSPACE_DIR, socket_name),
+        socket_name,
         guard: SdkBridgeGuard {
             stop,
             handle: Some(handle),
             socket_path_host: host_socket_path,
         },
     })
+}
+
+/// In-sandbox path where the SDK socket is exposed for a given driver.
+/// Bubblewrap binds it under the workspace dir; docker bind-mounts it to a
+/// fixed path. Returns `None` for drivers that don't run the bridge yet
+/// (microvm — deferred to P5).
+fn sdk_socket_sandbox_path(driver: SandboxDriverKind, socket_name: &str) -> Option<String> {
+    match driver {
+        SandboxDriverKind::Bubblewrap => Some(format!("{}/{}", BWRAP_WORKSPACE_DIR, socket_name)),
+        SandboxDriverKind::Docker => Some(DOCKER_SDK_SOCKET_PATH.to_string()),
+        SandboxDriverKind::MicroVm => None,
+    }
+}
+
+/// Centralized SDK-bridge wiring shared by every spawn path. Starts the bridge
+/// (the socket transport) once and produces the driver-specific plumbing:
+/// bubblewrap takes a bind `SandboxMount` + host-inherited env; docker takes
+/// `docker run` `-v`/`-e` flags (its container env does **not** inherit the
+/// gateway process env, so socket path + PYTHONPATH must be passed explicitly).
+/// The bridge is not started for drivers without socket support yet (microvm).
+#[derive(Default)]
+struct SdkBridgeWiring {
+    guard: Option<SdkBridgeGuard>,
+    /// In-sandbox socket path; `Some` whenever the bridge was started.
+    socket_path_sandbox: Option<String>,
+    /// Bubblewrap: bind mount to add to the mount list.
+    bwrap_mount: Option<SandboxMount>,
+    /// Docker: extra `(host, container, readonly)` volumes for `docker run -v`.
+    docker_volumes: Vec<(String, String, bool)>,
+    /// Docker: env vars for `docker run -e` (the container won't inherit them).
+    docker_env: Vec<(String, String)>,
+}
+
+fn wire_sdk_bridge(
+    driver: SandboxDriverKind,
+    agent_dir: &str,
+    root_session_id: Option<&str>,
+) -> anyhow::Result<SdkBridgeWiring> {
+    let mut wiring = SdkBridgeWiring::default();
+    // Drivers without socket support yet (microvm) run no bridge.
+    if sdk_socket_sandbox_path(driver, "").is_none() {
+        return Ok(wiring);
+    }
+
+    let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
+    let host_socket = bridge.guard.socket_path_host.clone();
+    let sandbox_socket = sdk_socket_sandbox_path(driver, &bridge.socket_name)
+        .expect("driver supports the bridge (checked above)");
+    wiring.socket_path_sandbox = Some(sandbox_socket.clone());
+
+    match driver {
+        SandboxDriverKind::Bubblewrap => {
+            wiring.bwrap_mount = Some(SandboxMount {
+                source: host_socket,
+                dest: sandbox_socket,
+                readonly: false,
+            });
+        }
+        SandboxDriverKind::Docker => {
+            wiring.docker_volumes.push((
+                host_socket.to_string_lossy().to_string(),
+                sandbox_socket.clone(),
+                false,
+            ));
+            wiring
+                .docker_env
+                .push((CCOS_SOCKET_ENV.to_string(), sandbox_socket));
+            // The Python SDK isn't in the docker image; mount it read-only and
+            // point PYTHONPATH at the mount so the in-container client resolves.
+            if let Some(sdk_path) = resolve_python_sdk_path() {
+                wiring.docker_volumes.push((
+                    sdk_path,
+                    DOCKER_SDK_PYTHONPATH.to_string(),
+                    true,
+                ));
+                wiring
+                    .docker_env
+                    .push((PYTHONPATH_ENV.to_string(), DOCKER_SDK_PYTHONPATH.to_string()));
+            }
+        }
+        SandboxDriverKind::MicroVm => {}
+    }
+    wiring.guard = Some(bridge.guard);
+    Ok(wiring)
+}
+
+/// Merge `extra_env` into a docker env list, concatenating `PYTHONPATH` (the SDK
+/// path must stay on the path) rather than overwriting it.
+fn merge_docker_env(base: &mut Vec<(String, String)>, extra_env: &[(String, String)]) {
+    for (key, value) in extra_env {
+        if key == PYTHONPATH_ENV {
+            if let Some(existing) = base.iter_mut().find(|(k, _)| k == PYTHONPATH_ENV) {
+                existing.1 = format!("{}:{}", value, existing.1);
+                continue;
+            }
+        }
+        base.push((key.clone(), value.clone()));
+    }
+}
+
+/// Apply child-process env per driver. Bubblewrap inherits the gateway env, so
+/// the SDK PYTHONPATH, socket path, and `extra_env` go on the `Command`. Docker
+/// bakes its env into the `docker run` argv (`-e`, in `docker_command`) since the
+/// container doesn't inherit this process's env, so nothing is set here. MicroVm
+/// keeps prior behavior (`extra_env` on the `Command`).
+fn apply_child_env(
+    command: &mut Command,
+    driver: SandboxDriverKind,
+    socket_path_sandbox: Option<&str>,
+    extra_env: &[(String, String)],
+) {
+    match driver {
+        SandboxDriverKind::Bubblewrap => {
+            if let Some(sdk_path) = resolve_python_sdk_path() {
+                inject_pythonpath(command, &sdk_path);
+            }
+            if let Some(path) = socket_path_sandbox {
+                command.env(CCOS_SOCKET_ENV, path);
+            }
+            for (key, value) in extra_env {
+                if key == PYTHONPATH_ENV {
+                    inject_pythonpath_value(command, value);
+                } else {
+                    command.env(key, value);
+                }
+            }
+        }
+        SandboxDriverKind::Docker => {}
+        SandboxDriverKind::MicroVm => {
+            for (key, value) in extra_env {
+                command.env(key, value);
+            }
+        }
+    }
 }
 
 fn run_sdk_bridge_loop(
@@ -1199,11 +1320,20 @@ fn parse_bwrap_dev_mode(value: Option<&str>) -> BwrapDevMode {
     }
 }
 
-fn docker_command(agent_dir: &str, entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
+/// Build the `docker run` invocation. `volumes` are extra `(host, container,
+/// readonly)` bind mounts (e.g. the SDK socket + SDK source); `env` are vars
+/// passed via `-e` (the container does not inherit the gateway process env, so
+/// the SDK socket path / PYTHONPATH must be passed explicitly here).
+fn docker_command(
+    agent_dir: &str,
+    entrypoint: &str,
+    volumes: &[(String, String, bool)],
+    env: &[(String, String)],
+) -> anyhow::Result<(String, Vec<String>)> {
     let image = std::env::var(DOCKER_IMAGE_ENV).map_err(|_| {
         anyhow::anyhow!("Missing required environment variable {}", DOCKER_IMAGE_ENV)
     })?;
-    let argv = vec![
+    let mut argv = vec![
         "run".to_string(),
         "--rm".to_string(),
         "--network".to_string(),
@@ -1212,11 +1342,23 @@ fn docker_command(agent_dir: &str, entrypoint: &str) -> anyhow::Result<(String, 
         format!("{}:/workspace", agent_dir),
         "--workdir".to_string(),
         "/workspace".to_string(),
-        image,
-        "sh".to_string(),
-        "-c".to_string(), // Non-login shell - don't source /etc/profile.d/*
-        entrypoint.to_string(),
     ];
+    for (host, container, readonly) in volumes {
+        argv.push("--volume".to_string());
+        argv.push(if *readonly {
+            format!("{}:{}:ro", host, container)
+        } else {
+            format!("{}:{}", host, container)
+        });
+    }
+    for (key, value) in env {
+        argv.push("--env".to_string());
+        argv.push(format!("{}={}", key, value));
+    }
+    argv.push(image);
+    argv.push("sh".to_string());
+    argv.push("-c".to_string()); // Non-login shell - don't source /etc/profile.d/*
+    argv.push(entrypoint.to_string());
     Ok(("docker".to_string(), argv))
 }
 
@@ -1297,6 +1439,7 @@ fn validate_dependency_package(pkg: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     #[test]
     fn test_parse_driver_kind() {
@@ -1331,10 +1474,11 @@ mod tests {
     }
 
     #[test]
+    #[serial] // mutates AUTONOETIC_DOCKER_IMAGE (process-global)
     fn test_docker_command_requires_env() {
         let old = std::env::var(DOCKER_IMAGE_ENV).ok();
         std::env::remove_var(DOCKER_IMAGE_ENV);
-        let err = docker_command("/tmp/agent", "python main.py")
+        let err = docker_command("/tmp/agent", "python main.py", &[], &[])
             .expect_err("docker command should fail without env");
         assert!(
             err.to_string().contains(DOCKER_IMAGE_ENV),
@@ -1343,6 +1487,78 @@ mod tests {
         if let Some(v) = old {
             std::env::set_var(DOCKER_IMAGE_ENV, v);
         }
+    }
+
+    #[test]
+    #[serial] // mutates AUTONOETIC_DOCKER_IMAGE (process-global)
+    fn test_docker_command_emits_socket_volume_and_env() {
+        // P1: the SDK socket + its env must reach the container via `-v`/`-e`
+        // (the container does not inherit the gateway process env).
+        let old = std::env::var(DOCKER_IMAGE_ENV).ok();
+        std::env::set_var(DOCKER_IMAGE_ENV, "test-image:latest");
+        let volumes = vec![
+            (
+                "/tmp/autonoetic-abc.sock".to_string(),
+                DOCKER_SDK_SOCKET_PATH.to_string(),
+                false,
+            ),
+            (
+                "/host/sdk".to_string(),
+                DOCKER_SDK_PYTHONPATH.to_string(),
+                true,
+            ),
+        ];
+        let env = vec![
+            (CCOS_SOCKET_ENV.to_string(), DOCKER_SDK_SOCKET_PATH.to_string()),
+            (PYTHONPATH_ENV.to_string(), DOCKER_SDK_PYTHONPATH.to_string()),
+        ];
+        let (program, argv) =
+            docker_command("/tmp/agent", "python main.py", &volumes, &env).expect("docker command");
+        assert_eq!(program, "docker");
+        let joined = argv.join(" ");
+        // socket mounted read-write, SDK source read-only
+        assert!(joined.contains(&format!("/tmp/autonoetic-abc.sock:{}", DOCKER_SDK_SOCKET_PATH)));
+        assert!(joined.contains(&format!("/host/sdk:{}:ro", DOCKER_SDK_PYTHONPATH)));
+        // env passed via -e, not inherited
+        assert!(joined.contains(&format!("{}={}", CCOS_SOCKET_ENV, DOCKER_SDK_SOCKET_PATH)));
+        assert!(joined.contains(&format!("{}={}", PYTHONPATH_ENV, DOCKER_SDK_PYTHONPATH)));
+        // image + shell entrypoint preserved, after the flags
+        assert!(argv.contains(&"test-image:latest".to_string()));
+        assert_eq!(argv.last().unwrap(), "python main.py");
+        match old {
+            Some(v) => std::env::set_var(DOCKER_IMAGE_ENV, v),
+            None => std::env::remove_var(DOCKER_IMAGE_ENV),
+        }
+    }
+
+    #[test]
+    fn test_merge_docker_env_concatenates_pythonpath() {
+        let mut base = vec![(PYTHONPATH_ENV.to_string(), "/opt/autonoetic-sdk".to_string())];
+        merge_docker_env(
+            &mut base,
+            &[
+                (PYTHONPATH_ENV.to_string(), "/extra".to_string()),
+                ("FOO".to_string(), "bar".to_string()),
+            ],
+        );
+        let pp = base.iter().find(|(k, _)| k == PYTHONPATH_ENV).unwrap();
+        assert_eq!(pp.1, "/extra:/opt/autonoetic-sdk");
+        assert!(base.iter().any(|(k, v)| k == "FOO" && v == "bar"));
+    }
+
+    #[test]
+    fn test_sdk_socket_sandbox_path_per_driver() {
+        let expected_bwrap = format!("{}/s.sock", BWRAP_WORKSPACE_DIR);
+        assert_eq!(
+            sdk_socket_sandbox_path(SandboxDriverKind::Bubblewrap, "s.sock"),
+            Some(expected_bwrap)
+        );
+        assert_eq!(
+            sdk_socket_sandbox_path(SandboxDriverKind::Docker, "s.sock"),
+            Some(DOCKER_SDK_SOCKET_PATH.to_string())
+        );
+        // microvm has no bridge yet (P5)
+        assert!(sdk_socket_sandbox_path(SandboxDriverKind::MicroVm, "s.sock").is_none());
     }
 
     #[test]
