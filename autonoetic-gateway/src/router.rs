@@ -2057,7 +2057,7 @@ impl JsonRpcRouter {
             "artifact.list_files" => {
                 #[derive(Deserialize)]
                 struct ArtifactListParams {
-                    artifact_id: String,
+                    artifact_ref: String,
                 }
                 let params: ArtifactListParams = match serde_json::from_value(req.params) {
                     Ok(v) => v,
@@ -2080,7 +2080,38 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match store.inspect(&params.artifact_id) {
+                let artifact_id = if params.artifact_ref.starts_with("art_") {
+                    params.artifact_ref.clone()
+                } else {
+                    let gw_store = match self.execution.gateway_store() {
+                        Some(s) => s,
+                        None => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                "Gateway store not available for ref resolution".to_string(),
+                            );
+                        }
+                    };
+                    match gw_store.resolve_artifact_ref_any_scope(&params.artifact_ref, "") {
+                        Ok(Some(rec)) => rec.artifact_id,
+                        Ok(None) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("artifact ref '{}' not found or expired", params.artifact_ref),
+                            );
+                        }
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("artifact ref resolution failed: {}", e),
+                            );
+                        }
+                    }
+                };
+                match store.inspect(&artifact_id) {
                     Ok(bundle) => {
                         let files: Vec<serde_json::Value> = bundle
                             .files
@@ -2097,6 +2128,7 @@ impl JsonRpcRouter {
                             req.id,
                             serde_json::json!({
                                 "artifact_id": bundle.artifact_id,
+                                "artifact_ref": params.artifact_ref,
                                 "kind": format!("{:?}", bundle.kind),
                                 "files": files,
                                 "created_at": bundle.created_at,
@@ -2114,7 +2146,7 @@ impl JsonRpcRouter {
             "artifact.read_file" => {
                 #[derive(Deserialize)]
                 struct ArtifactReadParams {
-                    artifact_id: String,
+                    artifact_ref: String,
                     file_name: String,
                 }
                 let params: ArtifactReadParams = match serde_json::from_value(req.params) {
@@ -2138,7 +2170,38 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match store.inspect(&params.artifact_id) {
+                let artifact_id = if params.artifact_ref.starts_with("art_") {
+                    params.artifact_ref.clone()
+                } else {
+                    let gw_store = match self.execution.gateway_store() {
+                        Some(s) => s,
+                        None => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                "Gateway store not available for ref resolution".to_string(),
+                            );
+                        }
+                    };
+                    match gw_store.resolve_artifact_ref_any_scope(&params.artifact_ref, "") {
+                        Ok(Some(rec)) => rec.artifact_id,
+                        Ok(None) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("artifact ref '{}' not found or expired", params.artifact_ref),
+                            );
+                        }
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("artifact ref resolution failed: {}", e),
+                            );
+                        }
+                    }
+                };
+                match store.inspect(&artifact_id) {
                     Ok(bundle) => {
                         let file_entry = match bundle.files.iter().find(|f| f.name == params.file_name) {
                             Some(f) => f,
@@ -2148,7 +2211,7 @@ impl JsonRpcRouter {
                                     -32000,
                                     format!(
                                         "file '{}' not found in artifact '{}'",
-                                        params.file_name, params.artifact_id
+                                        params.file_name, artifact_id
                                     ),
                                 );
                             }
@@ -2157,7 +2220,7 @@ impl JsonRpcRouter {
                             Ok(content) => JsonRpcResponse::success(
                                 req.id,
                                 serde_json::json!({
-                                    "artifact_id": params.artifact_id,
+                                    "artifact_id": artifact_id,
                                     "file_name": params.file_name,
                                     "content": content,
                                 }),

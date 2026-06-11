@@ -625,6 +625,7 @@ struct ArtifactFileEntry {
 
 struct ArtifactViewer {
     artifact_id: String,
+    artifact_ref: String,
     kind: String,
     files: Vec<ArtifactFileEntry>,
     selected: usize,
@@ -638,28 +639,30 @@ struct ArtifactFileView {
     scroll: u16,
 }
 
-/// Extract artifact_id from a timeline entry, if it has one.
-fn artifact_id_for_entry(entry: &SessionTimelineEntry) -> Option<String> {
+/// Extract artifact_ref from a timeline entry, if it has one.
+/// Returns an `ar.*` or `art_*` ref that the gateway can resolve.
+fn artifact_ref_for_entry(entry: &SessionTimelineEntry) -> Option<String> {
     if let Some(ref aid) = entry.refs.artifact_id {
         return Some(aid.clone());
     }
     if entry.event_type == "tool.completed" {
         if let Some(ref payload) = entry.payload {
             if let Ok(p) = serde_json::from_str::<serde_json::Value>(payload) {
-                if p.get("tool_name").and_then(|v| v.as_str())
-                    .map(|n| n.starts_with("artifact"))
-                    .unwrap_or(false)
-                {
+                let tool_name = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                if tool_name.starts_with("artifact") {
                     if let Some(result_str) = p.get("result").and_then(|v| v.as_str()) {
                         if let Ok(result) = serde_json::from_str::<serde_json::Value>(result_str) {
-                            if let Some(ref aid) = result.get("artifact_id").and_then(|v| v.as_str()) {
+                            if let Some(aref) = result.get("artifact_ref").and_then(|v| v.as_str()) {
+                                return Some(aref.to_string());
+                            }
+                            if let Some(aid) = result.get("artifact_id").and_then(|v| v.as_str()) {
                                 return Some(aid.to_string());
                             }
                         }
                     }
-                    if let Some(ref aid) = p.get("args_preview").and_then(|v| v.as_str()) {
-                        if aid.starts_with("ar.") || aid.starts_with("art_") {
-                            return Some(aid.to_string());
+                    if let Some(preview) = p.get("args_preview").and_then(|v| v.as_str()) {
+                        if preview.starts_with("ar.") || preview.starts_with("art_") {
+                            return Some(preview.to_string());
                         }
                     }
                 }
@@ -2047,7 +2050,7 @@ pub fn run(
                                         client,
                                         "artifact.read_file",
                                         serde_json::json!({
-                                            "artifact_id": viewer.artifact_id,
+                                            "artifact_ref": viewer.artifact_ref,
                                             "file_name": file.name,
                                         }),
                                     );
@@ -2073,16 +2076,17 @@ pub fn run(
                                     RowSource::Run { start, .. } => *start,
                                 };
                                 if let Some(entry) = view_visible.get(idx) {
-                                    if let Some(artifact_id) = artifact_id_for_entry(entry) {
+                                    if let Some(artifact_ref) = artifact_ref_for_entry(entry) {
                                         let result = rpc(
                                             client,
                                             "artifact.list_files",
                                             serde_json::json!({
-                                                "artifact_id": artifact_id,
+                                                "artifact_ref": artifact_ref,
                                             }),
                                         );
                                         match result {
                                             Ok(v) => {
+                                                let resolved_id = v.get("artifact_id").and_then(|i| i.as_str()).unwrap_or(&artifact_ref).to_string();
                                                 let files: Vec<ArtifactFileEntry> = v.get("files")
                                                     .and_then(|f| f.as_array())
                                                     .map(|arr| {
@@ -2099,7 +2103,8 @@ pub fn run(
                                                 } else {
                                                     let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("unknown").to_string();
                                                     artifact_viewer = Some(ArtifactViewer {
-                                                        artifact_id,
+                                                        artifact_id: resolved_id,
+                                                        artifact_ref,
                                                         kind,
                                                         files,
                                                         selected: 0,
@@ -2842,33 +2847,37 @@ fn answer_params(gi: &GateInput, chosen: Option<&GateOption>) -> Result<serde_js
 /// Returns `Ok(msg)` only when the gateway accepted the decision (the caller
 /// uses this to mark the gate acted); `Err(msg)` on validation or transport
 /// failure, leaving the gate offerable so the operator can retry.
+fn approval_approve_params(gi: &GateInput) -> serde_json::Value {
+    let text = gi.buffer.trim();
+    let mut params = serde_json::json!({
+        "request_id": gi.id,
+        "decided_by": "operator",
+    });
+    // §O: destructive / elevated approvals need a non-empty motivation on the
+    // `reason` field. For R++4 confirm-phrase gates the typed phrase satisfies
+    // both obligations — do not send confirm_phrase without reason.
+    if gi.required_confirm_phrase.is_some() {
+        if !text.is_empty() {
+            params["confirm_phrase"] = serde_json::json!(text);
+            params["reason"] = serde_json::json!(text);
+        }
+    } else if !text.is_empty() {
+        params["reason"] = serde_json::json!(text);
+    }
+    if !gi.acknowledged_capabilities.is_empty() {
+        params["acknowledged_capabilities"] = serde_json::json!(gi.acknowledged_capabilities);
+    }
+    params
+}
+
 fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>) -> Result<String, String> {
     let text = gi.buffer.trim();
-    let reason = if gi.required_confirm_phrase.is_some() {
-        None
-    } else {
-        (!text.is_empty()).then(|| text.to_string())
-    };
+    let reason = (!text.is_empty()).then(|| text.to_string());
     let (result, verb) = match gi.action {
-        GateAction::Approve => {
-            let mut params = serde_json::json!({
-                "request_id": gi.id,
-                "decided_by": "operator",
-            });
-            if let Some(r) = reason {
-                params["reason"] = serde_json::json!(r);
-            }
-            if gi.required_confirm_phrase.is_some() && !text.is_empty() {
-                params["confirm_phrase"] = serde_json::json!(text);
-            }
-            if !gi.acknowledged_capabilities.is_empty() {
-                params["acknowledged_capabilities"] = serde_json::json!(gi.acknowledged_capabilities);
-            }
-            (
-                rpc(client, "approvals.approve", params),
-                "approved",
-            )
-        }
+        GateAction::Approve => (
+            rpc(client, "approvals.approve", approval_approve_params(gi)),
+            "approved",
+        ),
         GateAction::Reject => (
             rpc(
                 client,
@@ -4272,11 +4281,11 @@ fn draw(
             _ => None,
         });
         let footer_w = chunks[footer_idx].width as usize;
-        let nav = "q quit · j↓ k↑ · Enter detail · ? info";
+        let nav = "q quit · j↓ k↑ · Enter detail · o artifact · ? info";
         let nav_display = if footer_w < 50 {
-            "j↓ k↑ · ?"
+            "j↓ k↑ · o · ?"
         } else if footer_w < 70 {
-            "q quit · j↓ k↑ · Enter · ?"
+            "q quit · j↓ k↑ · o · ?"
         } else {
             nav
         };
@@ -4443,7 +4452,7 @@ fn gate_modal_input_panel_lines(
 
     if let Some(ref phrase) = gi.required_confirm_phrase {
         lines.push(Line::from(Span::styled(
-            "Type this phrase exactly to approve:",
+            "Type this phrase exactly (also records your §O motivation):",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -5042,6 +5051,35 @@ mod tests {
             kind: GateKind::Plan,
             id: "plan-1".into(),
         }));
+    }
+
+    #[test]
+    fn approval_approve_params_sends_phrase_as_reason_for_section_o() {
+        let gi = GateInput {
+            action: GateAction::Approve,
+            id: "apr-1".into(),
+            buffer: "promote weather-lookup rev_sha256:abc".into(),
+            options: Vec::new(),
+            allow_freeform: true,
+            motivation_required: false,
+            required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
+            acknowledged_capabilities: vec!["NetworkAccess".into()],
+        };
+        let params = approval_approve_params(&gi);
+        assert_eq!(
+            params.get("confirm_phrase").and_then(|v| v.as_str()),
+            Some("promote weather-lookup rev_sha256:abc")
+        );
+        assert_eq!(
+            params.get("reason").and_then(|v| v.as_str()),
+            Some("promote weather-lookup rev_sha256:abc")
+        );
+        assert_eq!(
+            params.get("acknowledged_capabilities")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
     }
 
     #[test]

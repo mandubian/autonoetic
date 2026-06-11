@@ -900,7 +900,17 @@ impl SessionTracer {
             "result_sha256": sha256_hex(result),
             "result_preview": redact_text_for_logs(&truncate_for_log(result, TOOL_RESULT_PREVIEW_MAX_CHARS))
         });
-        let args_preview = arguments.and_then(|a| extract_tool_args_preview(tool_name, a));
+        let args_preview = arguments.and_then(|a| extract_tool_args_preview(tool_name, a))
+            .or_else(|| {
+                if tool_name == "artifact_build" {
+                    parsed_result.as_ref()
+                        .and_then(|r| r.get("artifact_ref"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            });
         if let Some(ref preview) = args_preview {
             completed_payload["args_preview"] = serde_json::json!(preview);
         }

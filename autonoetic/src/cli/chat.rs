@@ -7367,9 +7367,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             autonoetic_types::background::ApprovalLevel::Operator;
                                         let mut options =
                                             autonoetic_gateway::scheduler::ApproveOptions::default();
+                                        let mut reason: Option<String> = None;
                                         if let Ok(Some(ref approval)) = store.get_approval(&apr_id) {
                                             if let Some(ref phrase) = approval.confirm_phrase {
                                                 options.confirm_phrase = Some(phrase.clone());
+                                                reason = Some(phrase.clone());
                                             }
                                             if let autonoetic_types::background::ScheduledAction::RevisionPromote {
                                                 added_capabilities,
@@ -7389,7 +7391,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                             Some(store),
                                             &apr_id,
                                             "chat-tui",
-                                            None,
+                                            reason,
                                             None,
                                             Some(&approver_level),
                                             None,
@@ -7533,9 +7535,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 autonoetic_types::background::ApprovalLevel::Operator;
                                             let mut options =
                                                 autonoetic_gateway::scheduler::ApproveOptions::default();
+                                            let mut reason: Option<String> = None;
                                             if let Ok(Some(ref approval)) = store.get_approval(&apr_id) {
                                                 if let Some(ref phrase) = approval.confirm_phrase {
                                                     options.confirm_phrase = Some(phrase.clone());
+                                                    reason = Some(phrase.clone());
                                                 }
                                                 if let autonoetic_types::background::ScheduledAction::RevisionPromote {
                                                     added_capabilities,
@@ -7555,7 +7559,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 Some(store),
                                                 &apr_id,
                                                 "chat-tui",
-                                                None,
+                                                reason,
                                                 None,
                                                 Some(&approver_level),
                                                 None,
