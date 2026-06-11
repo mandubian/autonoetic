@@ -883,13 +883,14 @@ impl SessionTracer {
     }
 
     pub fn log_tool_completed(&mut self, tool_name: &str, result: &str) -> anyhow::Result<String> {
-        self.log_tool_completed_with_approval(tool_name, result, None)
+        self.log_tool_completed_with_approval(tool_name, result, None, None)
     }
 
     pub fn log_tool_completed_with_approval(
         &mut self,
         tool_name: &str,
         result: &str,
+        arguments: Option<&str>,
         approval_ref: Option<&str>,
     ) -> anyhow::Result<String> {
         let parsed_result = serde_json::from_str::<serde_json::Value>(result).ok();
@@ -899,6 +900,9 @@ impl SessionTracer {
             "result_sha256": sha256_hex(result),
             "result_preview": redact_text_for_logs(&truncate_for_log(result, TOOL_RESULT_PREVIEW_MAX_CHARS))
         });
+        if let Some(args_preview) = arguments.and_then(|a| extract_tool_args_preview(tool_name, a)) {
+            completed_payload["args_preview"] = serde_json::json!(args_preview);
+        }
         if let Some(enforced_rules) = parsed_result
             .as_ref()
             .and_then(|v| v.get("enforced_rules"))
@@ -1145,6 +1149,26 @@ fn cap_chars(value: &str, max: usize) -> String {
     }
     let truncated: String = value.chars().take(max - 1).collect();
     format!("{truncated}…")
+}
+
+/// Extract a short preview of the key argument for known tools.
+/// Returned string is the argument value, which is small (artifact ref, file name,
+/// agent id) and does not need truncation.
+fn extract_tool_args_preview(tool_name: &str, arguments: &str) -> Option<String> {
+    let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let preview = match tool_name {
+        "artifact_inspect" => args.get("artifact_ref").and_then(|v| v.as_str()),
+        "content_write" => args.get("name").and_then(|v| v.as_str()),
+        "agent_spawn" => args.get("agent_id").and_then(|v| v.as_str()),
+        _ => return None,
+    };
+    preview.map(|s| {
+        if s.len() > 80 {
+            format!("{}…", &s[..79])
+        } else {
+            s.to_string()
+        }
+    })
 }
 
 fn sanitize_token(value: &str) -> String {

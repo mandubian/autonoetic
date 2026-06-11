@@ -176,6 +176,7 @@ impl<'a> ToolCallProcessor<'a> {
                     let event_id = tracer.log_tool_completed_with_approval(
                         &tc.name,
                         &res,
+                        Some(&tc.arguments),
                         approval_ref.as_deref(),
                     )?;
                     self.record_execution_trace(
@@ -211,6 +212,7 @@ impl<'a> ToolCallProcessor<'a> {
                     let event_id = tracer.log_tool_completed_with_approval(
                         &tc.name,
                         &error_json,
+                        Some(&tc.arguments),
                         approval_ref.as_deref(),
                     )?;
                     self.record_execution_trace(

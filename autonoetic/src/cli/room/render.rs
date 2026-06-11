@@ -994,6 +994,33 @@ fn extract_tool_summary(p: Option<&serde_json::Value>) -> Option<String> {
     None
 }
 
+/// Extract the key argument from a `tool.requested` or `tool.completed` payload.
+/// For `tool.requested` the `arguments` field is a JSON string; for `tool.completed`
+/// there is an `args_preview` field written by the tracer.
+fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Option<String> {
+    let v = p.as_ref()?;
+    // tool.completed may have a pre-extracted args_preview
+    if let Some(preview) = v.get("args_preview").and_then(|x| x.as_str()) {
+        return Some(preview.to_string());
+    }
+    // tool.requested has arguments as a JSON string
+    let args_str = v.get("arguments")?.as_str()?;
+    let args: serde_json::Value = serde_json::from_str(args_str).ok()?;
+    let key = match tool_name {
+        "artifact_inspect" => args.get("artifact_ref").and_then(|x| x.as_str()),
+        "content_write" => args.get("name").and_then(|x| x.as_str()),
+        "agent_spawn" => args.get("agent_id").and_then(|x| x.as_str()),
+        _ => return None,
+    };
+    key.map(|s| {
+        if s.len() > 80 {
+            format!("{}…", &s[..79])
+        } else {
+            s.to_string()
+        }
+    })
+}
+
 /// Human summary of an event, from its type + payload. Keeps the most useful
 /// field per known event type; falls back to the bare event type.
 pub fn summarize(entry: &SessionTimelineEntry) -> String {
@@ -1072,9 +1099,24 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             one_line(&field("question").unwrap_or_default(), 200),
         ),
         // Payload key is `tool_name`; keep `tool` as a fallback for older rows.
-        // Show just the result summary — status is conveyed by altitude color.
+        // Show the result summary — status is conveyed by altitude color.
+        // For tool.completed, also include the key argument (args_preview) when
+        // available so the row tells you what artifact/file/agent was involved.
+        "tool.requested" => {
+            let tool_name = field("tool_name").unwrap_or_default();
+            match extract_tool_key_param(&p, &tool_name) {
+                Some(kp) => format!("{tool_name} → {kp}"),
+                None => format!("{tool_name} requested"),
+            }
+        }
         "tool.completed" => {
             let summary = extract_tool_summary(p.as_ref());
+            let tool_name = field("tool_name")
+                .or_else(|| field("tool"))
+                .unwrap_or_else(|| "completed".into());
+            let key_suffix = extract_tool_key_param(&p, &tool_name)
+                .map(|kp| format!(" ({kp})"))
+                .unwrap_or_default();
             match summary {
                 Some(s) => {
                     let plain = if super::markdown::looks_like_markdown(&s) {
@@ -1082,11 +1124,10 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                     } else {
                         s
                     };
-                    one_line(&plain, 160)
+                    let base = one_line(&plain, 160);
+                    format!("{base}{key_suffix}")
                 }
-                None => format!("tool {}", field("tool_name")
-                    .or_else(|| field("tool"))
-                    .unwrap_or_else(|| "completed".into())),
+                None => format!("tool {tool_name}{key_suffix}"),
             }
         }
         // A promotion/governance escalation awaiting the operator's decision (#413).
@@ -1244,13 +1285,29 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
     };
 
     match entry.event_type.as_str() {
+        // Tool requested: show the key argument (artifact_ref, name, agent_id)
+        // from the arguments JSON.
+        "tool.requested" => {
+            let tool = s("tool_name").or_else(|| s("tool"));
+            match tool.as_deref() {
+                Some(name) => extract_tool_key_param(&p, name).map(|kp| cap_preview(&kp, 80)),
+                None => None,
+            }
+        }
         // Tool calls: a one-line hint at the args or the result preview.
         "tool.completed" => {
             let tool = s("tool_name").or_else(|| s("tool"));
             // For sandbox_exec-like tools, surface the result.stdout (or first
-            // 80 chars of any string result). For content_write, surface path.
+            // 80 chars of any string result). For content_write, surface path
+            // or args_preview. For artifact_inspect/agent_spawn, show the key
+            // argument from args_preview (extracted by the tracer).
             match tool.as_deref() {
-                Some("content_write") => s("path").map(|p| cap_preview(&p, 80)),
+                Some("content_write") => s("args_preview")
+                    .or_else(|| s("name")).or_else(|| s("path"))
+                    .map(|p| cap_preview(&p, 80)),
+                Some("artifact_inspect") => s("args_preview")
+                    .or_else(|| s("artifact_ref"))
+                    .map(|p| cap_preview(&p, 80)),
                 Some("sandbox_exec") | Some("artifact_exec") => p
                     .as_ref()
                     .and_then(|v| v.get("result"))
@@ -1261,7 +1318,9 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                         // The result may be a JSON string (not an object).
                         s("result").map(|r| cap_preview(&r, 80))
                     }),
-                Some("agent_spawn") => s("message").map(|m| cap_preview(&m, 80)),
+                Some("agent_spawn") => s("args_preview")
+                    .or_else(|| s("message"))
+                    .map(|m| cap_preview(&m, 80)),
                 Some("workflow_wait") | Some("workflow_state") => p
                     .as_ref()
                     .and_then(|v| v.get("task_ids"))
