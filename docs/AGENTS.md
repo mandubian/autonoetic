@@ -600,6 +600,8 @@ and `console.log` output is captured as the script result.
 - When `io.accepts` is absent, the `message` is passed through unchanged. The author is responsible for parsing it inside the script.
 - There is no auto-generated default schema; the shape of the input is entirely the author's choice.
 
+**Test dependencies — use the standard library.** Write promotion-gate tests with Python's built-in `unittest` (run as `python3 -m unittest`), not `pytest`/`nose`/`hypothesis`. The `unit_test_runner` runs in a **no-network sandbox** that mounts only the agent's runtime dependency layers — and those layers *are* the shipped capsule. A test-only framework would have to be baked into the runtime layers to import at all, bloating every capsule with a dependency the agent never uses at runtime. The dependency model is currently single-grade (no separate dev/test scope); a future dev/test-dependency grade is tracked in `docs/design/`. Until then: don't add a dependency just for tests.
+
 ### Reasoning Agent Requirements
 
 ```yaml
