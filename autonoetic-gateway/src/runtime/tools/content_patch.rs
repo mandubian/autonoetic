@@ -2,6 +2,7 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::content_store::{ContentHandle, ContentStore, ContentVisibility};
+use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use crate::runtime::{fuzzy_match, v4a};
 use autonoetic_types::agent::AgentManifest;
@@ -169,6 +170,30 @@ impl NativeTool for ContentPatchTool {
             }
         }
         meta
+    }
+
+    fn guidance(&self) -> Vec<GuidanceBlock> {
+        vec![GuidanceBlock {
+            id: "editing.content_patch",
+            // Gating is belt-and-suspenders: collect_guidance only reaches here
+            // when content_patch is available (WriteAccess), but the explicit
+            // condition keeps the block self-describing.
+            when: GuidanceCondition::All(vec![
+                GuidanceCondition::Capability("write_access"),
+                GuidanceCondition::ToolPresent("content_patch"),
+            ]),
+            priority: 10,
+            prose: "**Editing existing content.** Two tools put content in the store: `content_write` \
+authors a NEW entry; `content_patch` edits an EXISTING one. To change an entry you already wrote, \
+prefer `content_patch` — send only the changed region, never the whole file. \
+`content_patch(mode=\"replace\", name, old_string, new_string)` matches a unique snippet (tolerant of \
+whitespace/indentation drift) and swaps it; include surrounding lines if a short snippet would match in \
+several places. Use `mode=\"v4a\"` only when one logical edit spans several entries. Reach for \
+`content_write` to edit only when authoring a brand-new entry, or when the region genuinely can't be \
+uniquely anchored. If a patch fails to match, `resolve` the entry to re-read its current content before \
+retrying — don't guess variations of the same snippet."
+                .to_string(),
+        }]
     }
 }
 

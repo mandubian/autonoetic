@@ -865,11 +865,44 @@ impl AgentExecutor {
         }
     }
 
+    /// The tool tier filter for the current turn — shared by the guidance
+    /// gather and the advertised tool list so the two agree.
+    fn compute_tier_filter(&self) -> crate::runtime::tools::ToolTierFilter {
+        let pending_approvals = self.has_pending_approvals();
+        let progressive = self
+            .config
+            .as_ref()
+            .map(|c| c.prompt_budget.progressive_tool_disclosure)
+            .unwrap_or(false);
+        determine_tool_tier_filter(
+            &self.manifest,
+            self.session_id.as_deref(),
+            pending_approvals,
+            self.session_state,
+            if progressive { self.tool_tier_escalated } else { true },
+        )
+    }
+
+    /// Render tool-contributed prompt guidance (#463/#464) for the native tools
+    /// that pass `tier_filter`, plus the builtin blocks. Empty when none apply.
+    fn render_tool_guidance(&self, tier_filter: &crate::runtime::tools::ToolTierFilter) -> String {
+        let (tool_names, mut blocks) = self.registry.collect_guidance(&self.manifest, tier_filter);
+        blocks.extend(crate::runtime::guidance::builtin_blocks());
+        let ctx = crate::runtime::guidance::GuidanceContext {
+            capabilities: &self.manifest.capabilities,
+            active_tool_names: &tool_names,
+            model_family: None, // populated by #465
+            role: crate::runtime::context::role_from_manifest(&self.manifest),
+        };
+        crate::runtime::guidance::compose_guidance(&blocks, &ctx)
+    }
+
     /// Run the agent loop until completion or guard trip.
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
         let memory_context = self.build_memory_context_snippet();
         let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
+        let guidance_rendered = self.render_tool_guidance(&self.compute_tier_filter());
         let mut system_instructions = compose_system_instructions_full(
             &inlined_instructions,
             &self.manifest,
@@ -879,6 +912,7 @@ impl AgentExecutor {
                 .and_then(|io| io.output_policy.as_ref()),
             user_context.as_deref(),
             self.persona.as_deref(),
+            Some(guidance_rendered.as_str()),
         );
         if let Some(ref snippet) = memory_context {
             system_instructions.push_str("\n\n");
@@ -1425,6 +1459,11 @@ impl AgentExecutor {
                 digest_turn_active = true;
             }
 
+            // Tool-contributed prompt guidance (#463/#464). The tier filter is
+            // shared with the tool list below so guidance and advertised tools agree.
+            let tier_filter = self.compute_tier_filter();
+            let guidance_rendered = self.render_tool_guidance(&tier_filter);
+
             // Update system message — ensure exactly one system message at position 0
             let user_context = self.build_user_context_snippet();
             let memory_context = self.build_memory_context_snippet();
@@ -1438,6 +1477,7 @@ impl AgentExecutor {
                     .and_then(|io| io.output_policy.as_ref()),
                 user_context.as_deref(),
                 self.persona.as_deref(),
+                Some(guidance_rendered.as_str()),
             );
             if let Some(ref snippet) = memory_context {
                 system_instructions.push_str("\n\n");
@@ -1462,19 +1502,7 @@ impl AgentExecutor {
             history.insert(0, Message::system(&system_instructions));
 
             let mut tools: Vec<ToolDefinition> = {
-                let pending_approvals = self.has_pending_approvals();
-                let progressive = self
-                    .config
-                    .as_ref()
-                    .map(|c| c.prompt_budget.progressive_tool_disclosure)
-                    .unwrap_or(false);
-                let tier_filter = determine_tool_tier_filter(
-                    &self.manifest,
-                    self.session_id.as_deref(),
-                    pending_approvals,
-                    self.session_state,
-                    if progressive { self.tool_tier_escalated } else { true },
-                );
+                // `tier_filter` is computed once above (shared with guidance).
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
                     .into_iter()
@@ -3553,6 +3581,53 @@ mod tests {
         assert!(system.contains("Foundation Core"));
         assert!(system.contains("content_write(name, content)"));
         assert!(system.contains("Agent local rules"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_loop_includes_content_patch_guidance_for_write_access() {
+        // WriteAccess ⇒ content_patch is available and contributes its block.
+        let manifest =
+            manifest_with_capabilities(vec![Capability::WriteAccess { scopes: vec!["*".to_string()] }]);
+        let temp = tempdir().expect("tempdir should create");
+        let captured = Arc::new(Mutex::new(None));
+        let driver = CaptureSystemDriver { system_message: Arc::clone(&captured) };
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "rules".to_string(),
+            Arc::new(driver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.execute_loop().await.expect("execution should succeed");
+        let system = captured.lock().unwrap().clone().expect("system message captured");
+        assert!(system.contains("Guidance"), "guidance section missing");
+        assert!(
+            system.contains("Editing existing content"),
+            "content_patch guidance block missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_loop_omits_content_patch_guidance_without_write_access() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let captured = Arc::new(Mutex::new(None));
+        let driver = CaptureSystemDriver { system_message: Arc::clone(&captured) };
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "rules".to_string(),
+            Arc::new(driver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.execute_loop().await.expect("execution should succeed");
+        let system = captured.lock().unwrap().clone().expect("system message captured");
+        assert!(
+            !system.contains("Editing existing content"),
+            "content_patch guidance must be absent without WriteAccess"
+        );
     }
 
     struct ApprovalRequiredLifecycleTool;
