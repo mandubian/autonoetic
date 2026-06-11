@@ -146,3 +146,4 @@ Notable suite for approval continuation:
 - `docs/planner-principles.md` — Principle-first planner design: why principles beat rules, security boundary, what moved to specialists
 - `docs/agent-discovery.md` — Agent discovery: agent.list gateway tool + discovery.default semantic matching agent
 - `docs/session-forking.md` — Forking a session from a past turn: runnable Hibernation checkpoint, yield-point granularity, timeline mirroring (copy vs reuse-by-reference choice), CLI/RPC/room surfaces
+- `docs/wasm-execution-tier.md` — Portable in-process WASM tier (`sandbox: "wasm"`) and first-class JavaScript agents (compiled to wasm via Javy at bootstrap): concepts, the `wasm-tier` build feature, `gateway preflight`, resource bounds, and a JS-agent tutorial. python.wasm is deferred (see the RFC status note).
