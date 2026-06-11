@@ -116,8 +116,9 @@ fn bootstrap_agent_inner(
 
     let skill_content = std::fs::read(&skill_path)?;
     let skill_text = String::from_utf8_lossy(&skill_content);
-    let (parsed_manifest, _instructions) = crate::runtime::parser::SkillParser::parse(&skill_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse SKILL.md for '{}': {}", agent_id, e))?;
+    let (mut parsed_manifest, _instructions) =
+        crate::runtime::parser::SkillParser::parse(&skill_text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse SKILL.md for '{}': {}", agent_id, e))?;
 
     let lock_rel_path = &parsed_manifest.runtime.runtime_lock;
     let lock_path = agent_dir.join(lock_rel_path);
@@ -221,6 +222,75 @@ fn bootstrap_agent_inner(
                 let modified_bytes = modified.into_bytes();
                 file_map.insert("SKILL.md".to_string(), modified_bytes.clone());
                 std::fs::write(&skill_path, &modified_bytes)?;
+            }
+        }
+    }
+
+    // JavaScript agents run on the wasm tier: compile the `.js` entry to a
+    // self-contained `.wasm` module at bundle time (Javy), bundle it, and
+    // repoint the manifest's `script_entry` at it. The compiled module is
+    // content-addressed in the revision like any other bundled file, so the
+    // runtime executes it unchanged. Runs after the preset merge so the
+    // `script_entry` rewrite lands on the final bundled SKILL.md.
+    if matches!(parsed_manifest.execution_mode, ExecutionMode::Script) {
+        if let Some(entry) = parsed_manifest.script_entry.clone() {
+            if is_javascript_entry(&entry) {
+                // Keep the entry strictly under the agent dir: it's used both to
+                // read the source (`agent_dir.join(entry)`) and to name the
+                // bundled output, which is later materialized under revision_dir.
+                let entry_path = std::path::Path::new(&entry);
+                anyhow::ensure!(
+                    entry_path.is_relative()
+                        && !entry_path
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir)),
+                    "Agent '{}' script_entry '{}' must be a relative path within the agent dir (no `..`).",
+                    agent_id,
+                    entry
+                );
+                anyhow::ensure!(
+                    parsed_manifest.runtime.sandbox == "wasm",
+                    "Agent '{}' declares a JavaScript entry '{}' but sandbox '{}': \
+                     JavaScript agents run on the wasm tier — set `sandbox: wasm`.",
+                    agent_id,
+                    entry,
+                    parsed_manifest.runtime.sandbox
+                );
+                anyhow::ensure!(
+                    crate::host_capabilities::is_javy_available(),
+                    "Agent '{}' needs the Javy compiler (`javy`) on PATH to build JavaScript \
+                     entry '{}' into wasm. Install Javy, then re-run; `autonoetic gateway \
+                     preflight` shows toolchain availability.",
+                    agent_id,
+                    entry
+                );
+                let wasm_bytes = compile_js_to_wasm(&agent_dir.join(&entry)).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Compiling JavaScript entry '{}' for agent '{}': {}",
+                        entry,
+                        agent_id,
+                        e
+                    )
+                })?;
+                let wasm_entry = wasm_entry_for(&entry);
+                file_map.insert(wasm_entry.clone(), wasm_bytes);
+
+                let skill_now = file_map
+                    .get("SKILL.md")
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_else(|| skill_text.to_string());
+                let rewritten =
+                    set_script_entry_in_skill(&skill_now, &wasm_entry).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Could not repoint script_entry to '{}' in SKILL.md for agent '{}'",
+                            wasm_entry,
+                            agent_id
+                        )
+                    })?;
+                file_map.insert("SKILL.md".to_string(), rewritten.into_bytes());
+                // Keep the in-memory manifest in sync for the execute-bit step
+                // and the stored revision metadata below.
+                parsed_manifest.script_entry = Some(wasm_entry);
             }
         }
     }
@@ -434,6 +504,92 @@ fn normalize_path_label(path: &Path) -> String {
 /// already present in the agent's config.
 /// Returns `None` if no modification was needed or if the frontmatter couldn't
 /// be parsed.
+/// Whether a script entry is JavaScript (compiled to wasm via Javy at bootstrap).
+fn is_javascript_entry(entry: &str) -> bool {
+    let lower = entry.to_ascii_lowercase();
+    lower.ends_with(".js") || lower.ends_with(".mjs")
+}
+
+/// The bundled wasm entry name for a JavaScript source entry (`main.js` →
+/// `main.wasm`, preserving any subdirectory).
+fn wasm_entry_for(js_entry: &str) -> String {
+    std::path::Path::new(js_entry)
+        .with_extension("wasm")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Compile a JavaScript file to a self-contained WASI module with Javy.
+///
+/// Uses `-C deterministic=y` (fixed clocks, zero-filled RNG during
+/// pre-initialization) so identical source yields an identical module — the
+/// compiled `.wasm` is content-addressed in the revision, so determinism keeps
+/// rebuilds from churning the revision digest. The default (non-`dynamic`) build
+/// embeds the QuickJS runtime, producing a standalone `_start` module the wasm
+/// tier runs without a separate plugin.
+fn compile_js_to_wasm(js_path: &Path) -> Result<Vec<u8>> {
+    let out = tempfile::Builder::new().suffix(".wasm").tempfile()?;
+    let result = std::process::Command::new("javy")
+        .arg("build")
+        .arg(js_path)
+        .arg("-o")
+        .arg(out.path())
+        .arg("-C")
+        .arg("deterministic=y")
+        .output()
+        .map_err(|e| anyhow::anyhow!("spawning javy: {e}"))?;
+    anyhow::ensure!(
+        result.status.success(),
+        "javy build failed ({}): {}",
+        result.status,
+        String::from_utf8_lossy(&result.stderr).trim()
+    );
+    Ok(std::fs::read(out.path())?)
+}
+
+/// Repoint `script_entry` in a SKILL.md's YAML frontmatter to `new_entry`,
+/// returning the rewritten file. Handles both SKILL.md shapes the parser accepts:
+/// the Autonoetic-native format (top-level `script_entry`) and the AgentSkills
+/// format (`metadata.autonoetic.script_entry`) — preferring top-level, matching
+/// the parser's native-first precedence. Returns `None` if there's no
+/// frontmatter or no place to write `script_entry`.
+fn set_script_entry_in_skill(skill_text: &str, new_entry: &str) -> Option<String> {
+    let (fm_start, fm_end) = {
+        let t = skill_text.trim_start();
+        if !t.starts_with("---") {
+            return None;
+        }
+        let rest = &t[3..];
+        let first_nl = rest.find(|c: char| c == '\n' || c == '\r')?;
+        let after_first = &rest[first_nl..];
+        let end = after_first.find("\n---")?;
+        (3 + first_nl, 3 + first_nl + end)
+    };
+    let frontmatter = &skill_text[fm_start..fm_end];
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    let key = serde_yaml::Value::String("script_entry".to_string());
+    let value = serde_yaml::Value::String(new_entry.to_string());
+
+    let top = yaml.as_mapping_mut()?;
+    if top.contains_key(&key) {
+        // Autonoetic-native: top-level script_entry.
+        top.insert(key, value);
+    } else if let Some(autonoetic) = top
+        .get_mut(serde_yaml::Value::String("metadata".to_string()))
+        .and_then(|m| m.get_mut(serde_yaml::Value::String("autonoetic".to_string())))
+        .and_then(|a| a.as_mapping_mut())
+    {
+        // AgentSkills format: metadata.autonoetic.script_entry.
+        autonoetic.insert(key, value);
+    } else {
+        return None;
+    }
+
+    let new_frontmatter = serde_yaml::to_string(&yaml).ok()?;
+    let body = &skill_text[fm_end + 4..];
+    Some(format!("---\n{}---{}\n", new_frontmatter, body))
+}
+
 fn merge_preset_into_skill(skill_text: &str, preset: &LlmPreset) -> Option<String> {
     let (fm_start, fm_end) = {
         let t = skill_text.trim_start();
@@ -728,6 +884,65 @@ fn seed_missing(src: &Path, dst: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn javascript_entry_detection_and_wasm_naming() {
+        assert!(is_javascript_entry("main.js"));
+        assert!(is_javascript_entry("scripts/agent.MJS"));
+        assert!(!is_javascript_entry("main.py"));
+        assert!(!is_javascript_entry("main.wasm"));
+        assert_eq!(wasm_entry_for("main.js"), "main.wasm");
+        assert_eq!(wasm_entry_for("scripts/agent.mjs"), "scripts/agent.wasm");
+    }
+
+    fn reparse_frontmatter(out: &str) -> serde_yaml::Value {
+        let fm = out.trim_start().strip_prefix("---").unwrap();
+        let end = fm.find("\n---").unwrap();
+        serde_yaml::from_str(&fm[..end]).unwrap()
+    }
+
+    #[test]
+    fn set_script_entry_rewrites_agentskills_frontmatter() {
+        // AgentSkills format: metadata.autonoetic.script_entry.
+        let skill = "---\nmetadata:\n  autonoetic:\n    execution_mode: script\n    script_entry: main.js\n    runtime:\n      sandbox: wasm\n---\nbody text\n";
+        let out = set_script_entry_in_skill(skill, "main.wasm").expect("should rewrite");
+        let yaml = reparse_frontmatter(&out);
+        assert_eq!(
+            yaml["metadata"]["autonoetic"]["script_entry"].as_str(),
+            Some("main.wasm")
+        );
+        assert!(out.contains("body text"));
+    }
+
+    #[test]
+    fn set_script_entry_rewrites_native_top_level_frontmatter() {
+        // Autonoetic-native format: top-level script_entry.
+        let skill = "---\nexecution_mode: script\nscript_entry: main.js\nruntime:\n  sandbox: wasm\n---\nnative body\n";
+        let out = set_script_entry_in_skill(skill, "main.wasm").expect("should rewrite");
+        let yaml = reparse_frontmatter(&out);
+        assert_eq!(yaml["script_entry"].as_str(), Some("main.wasm"));
+        assert!(out.contains("native body"));
+    }
+
+    #[test]
+    fn set_script_entry_returns_none_when_no_target() {
+        // No top-level script_entry and no metadata.autonoetic mapping.
+        assert!(set_script_entry_in_skill("---\nfoo: bar\n---\nx\n", "main.wasm").is_none());
+        assert!(set_script_entry_in_skill("no frontmatter", "main.wasm").is_none());
+    }
+
+    #[test]
+    fn compile_js_to_wasm_produces_a_wasm_module() {
+        if !crate::host_capabilities::is_javy_available() {
+            eprintln!("skipping: javy not on PATH");
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let js = dir.path().join("main.js");
+        std::fs::write(&js, "console.log('hi');").unwrap();
+        let bytes = compile_js_to_wasm(&js).expect("javy build should succeed");
+        assert_eq!(&bytes[0..4], b"\0asm", "output must be a wasm module");
+    }
 
     fn minimal_skill(agent_id: &str) -> String {
         format!(
