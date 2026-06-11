@@ -24,16 +24,21 @@ fn javy_compiled_javascript_runs_through_run_to_output() {
     )
     .unwrap();
     let wasm = dir.path().join("main.wasm");
-    let status = std::process::Command::new("javy")
+    let output = std::process::Command::new("javy")
         .arg("build")
         .arg(dir.path().join("main.js"))
         .arg("-o")
         .arg(&wasm)
         .arg("-C")
         .arg("deterministic=y")
-        .status()
+        .output()
         .expect("spawn javy");
-    assert!(status.success(), "javy build should succeed");
+    assert!(
+        output.status.success(),
+        "javy build should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let request = ExecutionKind::Code {
         language: None,
@@ -55,6 +60,74 @@ fn javy_compiled_javascript_runs_through_run_to_output() {
     assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("js-agent-ran"),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The stdin-reading JavaScript pattern documented in
+/// `docs/wasm-execution-tier.md` works on Javy + the wasm tier: the agent reads
+/// its task payload from stdin and echoes a result on stdout. Skips without javy.
+#[test]
+fn javy_javascript_agent_reads_stdin_pattern() {
+    if !autonoetic_gateway::host_capabilities::is_javy_available() {
+        eprintln!("skipping javy stdin e2e: `javy` not on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let js = r#"
+function readStdin() {
+  const buf = new Uint8Array(1024);
+  const chunks = [];
+  let n;
+  while ((n = Javy.IO.readSync(0, buf)) > 0) { chunks.push(buf.slice(0, n)); }
+  const total = chunks.reduce((a, c) => a + c.length, 0);
+  const all = new Uint8Array(total);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  return new TextDecoder().decode(all);
+}
+const task = readStdin().trim();
+console.log(JSON.stringify({ greeting: "hello, " + (task || "world") }));
+"#;
+    std::fs::write(dir.path().join("main.js"), js).unwrap();
+    let wasm = dir.path().join("main.wasm");
+    let output = std::process::Command::new("javy")
+        .arg("build")
+        .arg(dir.path().join("main.js"))
+        .arg("-o")
+        .arg(&wasm)
+        .arg("-C")
+        .arg("deterministic=y")
+        .output()
+        .expect("spawn javy");
+    assert!(
+        output.status.success(),
+        "javy build should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let request = ExecutionKind::Code {
+        language: None,
+        source: CodeSource::Entry("main.wasm".to_string()),
+        args: vec![],
+    };
+    let out = SandboxRunner::run_to_output(
+        SandboxDriverKind::Wasm,
+        dir.path().to_str().unwrap(),
+        &request,
+        None,
+        None,
+        &[],
+        None,
+        Some(b"Ada".to_vec()),
+    )
+    .expect("js stdin agent should run");
+
+    assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello, Ada"),
         "stdout: {}",
         String::from_utf8_lossy(&out.stdout)
     );

@@ -361,6 +361,23 @@ enforcement register to a new driver:
 
 ## 8. Phasing (each phase independently shippable)
 
+> **Implementation status (2026-06-11).** P4's WASM backend shipped in slices
+> (PRs #453/#455/#456/#457): the `sandbox: "wasm"` driver, embedded wasmtime
+> (feature-gated), the unified `run_to_output` entry, WASI preopens, stdin, fuel
+> + `StoreLimits` resource bounds, a host-capability preflight, and **first-class
+> JavaScript agents via Javy** (each JS agent AOT-compiles to a self-contained
+> `.wasm`). **`python.wasm` is deferred** (owner decision, 2026-06-11): Python is
+> not blocked (it runs on bwrap/docker), the wasm tier would only serve
+> pure-stdlib Python (the native-deps ceiling below), and the shared-interpreter
+> cost (~20 MB artifact, licensing, provisioning, layering) isn't justified yet.
+> The host-function SDK bridge and the WASI layer ABI are likewise deferred —
+> they're only needed once a shared interpreter (python.wasm) or sandboxed
+> SDK-using wasm agents exist. **Revisit triggers:** a beginner/portability
+> scenario requiring agents to run with no bwrap/docker; demand for in-process
+> isolation of untrusted pure-Python; a mature WASI-CPython build covering native
+> deps. Deferring costs no rework — the tier already runs `_start` modules with
+> stdin + a preopened workspace, and the preflight already probes `python3`.
+
 Driver scope per §4.1: **P1–P3 prove the principles on bubblewrap *and* docker
 together**; firecracker/microvm is **deferred until after WASM**.
 
@@ -377,10 +394,13 @@ together**; firecracker/microvm is **deferred until after WASM**.
    *required* for `CapsuleMode::Hermetic`/`Replay`; keep runtime pip as dev-only.
    **Verified on bwrap and docker** (native-ELF layers) — immutable/portable
    capsules independent of WASM. (The WASI layer ABI is added in P4.) *Weeks.*
-4. **P4 — WASM backend.** Embed wasmtime, bundle `python.wasm`, host-function SDK,
-   WASI preopens, fuel/`StoreLimits`, escape signals, `sandbox: "wasm"` manifest,
-   plus the **WASI** layer ABI for P3's bake step (fail-closed on missing WASI
-   build). Tractable because the contract it plugs into is already intent-based.
+4. **P4 — WASM backend.** Embed wasmtime, WASI preopens, stdin, fuel/`StoreLimits`,
+   `sandbox: "wasm"` manifest, host-capability preflight, and **JavaScript agents
+   via Javy** (per-agent self-contained `.wasm`, no shared interpreter). Tractable
+   because the contract it plugs into is already intent-based. **Shipped**
+   (#453/#455/#456/#457). *Deferred within P4:* `python.wasm` bundling, the
+   host-function SDK bridge, and the WASI layer ABI for P3's bake step — see the
+   status note above.
    *Weeks.*
 5. **P5 (deferred, after WASM) — firecracker/microvm parity.** Replace the stub
    (`microvm_command` ignores the entrypoint today, `sandbox.rs:1223`): real

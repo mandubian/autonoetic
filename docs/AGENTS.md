@@ -592,7 +592,8 @@ compiles the entry to a self-contained `.wasm` module with [Javy](https://github
 tier. The host needs `javy` on `PATH` (check with `autonoetic gateway preflight`);
 bootstrap fails with a clear hint otherwise. The JS runtime is QuickJS (ES2020-ish,
 no Node APIs); input arrives on stdin (or argv with `script_input_mode: args`)
-and `console.log` output is captured as the script result.
+and `console.log` output is captured as the script result. Full concepts +
+step-by-step tutorial: [`docs/wasm-execution-tier.md`](wasm-execution-tier.md).
 
 **Input schema contract:**
 - The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest to describe the input the script expects. The gateway exposes this schema through `agent.describe` so callers (including the planner) can translate natural-language intent into matching fields before calling `agent_spawn`.
