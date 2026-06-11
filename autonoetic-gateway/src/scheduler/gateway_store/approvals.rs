@@ -417,6 +417,17 @@ impl GatewayStore {
         .map_err(Into::into)
     }
 
+    pub fn get_pending_approval_request_id_for_task(&self, task_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT request_id FROM approvals WHERE task_id = ?1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn insert_session_grant(
         &self,
         root_session_id: &str,

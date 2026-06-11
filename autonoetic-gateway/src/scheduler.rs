@@ -782,6 +782,8 @@ pub async fn reap_orphaned_sessions(
                 if is_terminal {
                     continue;
                 }
+                let was_awaiting_approval =
+                    task.status == autonoetic_types::workflow::TaskRunStatus::AwaitingApproval;
                 task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
                 task.updated_at = now_rfc.clone();
                 task.result_summary = Some(
@@ -793,6 +795,19 @@ pub async fn reap_orphaned_sessions(
                     Some(store.as_ref()),
                     &task,
                 );
+                if was_awaiting_approval {
+                    let _ = crate::scheduler::approval::cancel_pending_approval_for_workflow_task(
+                        Some(store.as_ref()),
+                        &task.task_id,
+                        "gateway",
+                        "orphan_child_reaper",
+                    );
+                    let _ = crate::scheduler::workflow_store::sync_workflow_blocked_approval_status(
+                        &config,
+                        Some(store.as_ref()),
+                        &task.workflow_id,
+                    );
+                }
                 crate::scheduler::workflow_store::dequeue_task(
                     &config,
                     Some(store.as_ref()),

@@ -368,6 +368,25 @@ impl NativeTool for AgentSpawnTool {
             Some(source_agent_id.as_str()),
         )?;
         let workflow_id = workflow.workflow_id.clone();
+
+        if let Some(gate) = crate::scheduler::workflow_approval_gate_active(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+        )? {
+            let approval_ids = if gate.pending_approval_request_ids.is_empty() {
+                "see awaiting task(s)".to_string()
+            } else {
+                gate.pending_approval_request_ids.join(", ")
+            };
+            return Err(anyhow::anyhow!(
+                "Cannot delegate (agent.spawn): workflow {} has task(s) awaiting operator approval. Awaiting task id(s): {}. Pending approval request id(s): {}. Resolve with `autonoetic gateway approvals approve|reject <id> --config <path>` before spawning new tasks.",
+                gate.workflow_id,
+                gate.awaiting_task_ids.join(", "),
+                approval_ids,
+            ));
+        }
+
         let task_id = crate::scheduler::new_task_id();
         let target_agent_id = args.agent_id.clone();
 

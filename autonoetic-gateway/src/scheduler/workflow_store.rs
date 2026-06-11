@@ -822,6 +822,89 @@ pub fn list_task_runs_for_workflow(
     Ok(out)
 }
 
+/// Active workflow approval gate: any task in `AwaitingApproval` or workflow `BlockedApproval`.
+#[derive(Debug, Clone)]
+pub struct WorkflowApprovalGate {
+    pub workflow_id: String,
+    pub awaiting_task_ids: Vec<String>,
+    pub pending_approval_request_ids: Vec<String>,
+}
+
+pub fn workflow_approval_gate_active(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+) -> anyhow::Result<Option<WorkflowApprovalGate>> {
+    let Some(wf) = load_workflow_run(config, store, workflow_id)? else {
+        return Ok(None);
+    };
+    let tasks = list_task_runs_for_workflow(config, store, workflow_id)?;
+    let awaiting_task_ids: Vec<String> = tasks
+        .iter()
+        .filter(|task| task.status == TaskRunStatus::AwaitingApproval)
+        .map(|task| task.task_id.clone())
+        .collect();
+    let gate_active =
+        wf.status == WorkflowRunStatus::BlockedApproval || !awaiting_task_ids.is_empty();
+    if !gate_active {
+        return Ok(None);
+    }
+
+    let mut pending_approval_request_ids = Vec::new();
+    if let Some(store) = store {
+        for task_id in &awaiting_task_ids {
+            if let Ok(Some(request_id)) = store.get_pending_approval_request_id_for_task(task_id)
+            {
+                pending_approval_request_ids.push(request_id);
+            }
+        }
+    }
+
+    Ok(Some(WorkflowApprovalGate {
+        workflow_id: workflow_id.to_string(),
+        awaiting_task_ids,
+        pending_approval_request_ids,
+    }))
+}
+
+/// Keep `WorkflowRunStatus::BlockedApproval` aligned with task-level `AwaitingApproval` rows.
+pub fn sync_workflow_blocked_approval_status(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mut wf) = load_workflow_run(config, store, workflow_id)? else {
+        return Ok(());
+    };
+    if matches!(
+        wf.status,
+        WorkflowRunStatus::EmergencyStopping
+            | WorkflowRunStatus::EmergencyStopped
+            | WorkflowRunStatus::Completed
+            | WorkflowRunStatus::Failed
+            | WorkflowRunStatus::Cancelled
+    ) {
+        return Ok(());
+    }
+
+    let tasks = list_task_runs_for_workflow(config, store, workflow_id)?;
+    let any_awaiting = tasks
+        .iter()
+        .any(|task| task.status == TaskRunStatus::AwaitingApproval);
+    if any_awaiting {
+        if wf.status != WorkflowRunStatus::BlockedApproval {
+            wf.status = WorkflowRunStatus::BlockedApproval;
+            wf.updated_at = now_rfc3339();
+            save_workflow_run(config, store, &wf)?;
+        }
+    } else if wf.status == WorkflowRunStatus::BlockedApproval {
+        wf.status = WorkflowRunStatus::WaitingChildren;
+        wf.updated_at = now_rfc3339();
+        save_workflow_run(config, store, &wf)?;
+    }
+    Ok(())
+}
+
 /// Update task status (and optional result summary) and append a completion-style event.
 pub fn update_task_run_status(
     config: &GatewayConfig,
@@ -835,6 +918,8 @@ pub fn update_task_run_status(
 ) -> anyhow::Result<()> {
     let mut task = load_task_run(config, store, workflow_id, task_id)?
         .ok_or_else(|| anyhow::anyhow!("task '{}' not in workflow '{}'", task_id, workflow_id))?;
+
+    let previous_status = task.status;
 
     // Store previous status for implicit artifact creation
     let was_succeeded = task.status == TaskRunStatus::Succeeded;
@@ -857,6 +942,23 @@ pub fn update_task_run_status(
         task.side_effect_state = failure.side_effect_state;
     }
     save_task_run(config, store, &task)?;
+
+    if status == TaskRunStatus::Cancelled && previous_status == TaskRunStatus::AwaitingApproval {
+        let cancel_reason = result_summary
+            .as_deref()
+            .unwrap_or("workflow_task_cancelled");
+        let _ = crate::scheduler::approval::cancel_pending_approval_for_workflow_task(
+            store,
+            task_id,
+            "gateway",
+            cancel_reason,
+        );
+    }
+    if previous_status == TaskRunStatus::AwaitingApproval
+        || status == TaskRunStatus::AwaitingApproval
+    {
+        let _ = sync_workflow_blocked_approval_status(config, store, workflow_id);
+    }
 
     // Create implicit artifact when task succeeds (transition to Succeeded)
     if is_now_succeeded && !was_succeeded {

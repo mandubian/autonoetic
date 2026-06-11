@@ -655,6 +655,44 @@ pub fn cancel_request(
     Ok(decision)
 }
 
+/// Withdraw a still-pending approval bound to a workflow task (e.g. task cancelled).
+pub fn cancel_pending_approval_for_workflow_task(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    task_id: &str,
+    cancelled_by: &str,
+    reason: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(store) = gateway_store else {
+        return Ok(None);
+    };
+    let Some(request_id) = store.get_pending_approval_request_id_for_task(task_id)? else {
+        return Ok(None);
+    };
+    let cancelled_at = chrono::Utc::now().to_rfc3339();
+    match store.cancel_approval(&request_id, cancelled_by, &cancelled_at) {
+        Ok(()) => {
+            tracing::info!(
+                target: "approval",
+                request_id = %request_id,
+                task_id = %task_id,
+                reason = %reason,
+                "Cancelled pending approval for workflow task"
+            );
+            Ok(Some(request_id))
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "approval",
+                request_id = %request_id,
+                task_id = %task_id,
+                error = %error,
+                "Failed to cancel pending approval for workflow task"
+            );
+            Ok(None)
+        }
+    }
+}
+
 fn cancel_approval_request(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,

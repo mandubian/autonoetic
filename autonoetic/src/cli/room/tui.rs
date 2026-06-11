@@ -463,6 +463,161 @@ fn clear_detail(
     *h_scroll = 0;
 }
 
+struct InfoPanel {
+    lines: Vec<String>,
+}
+
+impl InfoPanel {
+    fn new(lines: Vec<String>) -> Self {
+        Self { lines }
+    }
+}
+
+fn build_info_panel(
+    root: &str,
+    channel_kind: &str,
+    stats: &SessionStats,
+    floor: Altitude,
+    squash: bool,
+    follow: bool,
+    show_reasoning: bool,
+    row_count: usize,
+    gate: Option<&GateRef>,
+    pending_plan_count: usize,
+    status: Option<&str>,
+    selected_spawn_agent: Option<&str>,
+) -> InfoPanel {
+    let mut lines = Vec::new();
+    let short_id = if root.len() > 32 {
+        format!("{}…{}", &root[..12], &root[root.len()-8..])
+    } else {
+        root.to_string()
+    };
+    lines.push(format!("  Session    {short_id}"));
+    lines.push(format!("  Channel    {channel_kind}"));
+    lines.push(String::new());
+    if stats.llm_calls > 0 {
+        let model_tag = if stats.models.len() == 1 {
+            stats.models[0].clone()
+        } else {
+            format!("{} models", stats.models.len())
+        };
+        lines.push(format!("  Model      {model_tag}  ({} calls)", stats.llm_calls));
+        lines.push(format!("  Tokens     in {}   out {}", format_tokens(stats.total_input), format_tokens(stats.total_output)));
+    }
+    lines.push(String::new());
+    lines.push(format!("  Toggles    floor:{}  squash:{}  reasoning:{}  follow:{}",
+        floor.as_str(),
+        if squash { "on" } else { "off" },
+        if show_reasoning { "on" } else { "off" },
+        if follow { "●" } else { "○" },
+    ));
+    lines.push(format!("  Rows       {row_count}"));
+    lines.push(String::new());
+    let mut active = Vec::new();
+    if let Some(g) = gate {
+        active.push(format!("  ⏸  gate: {} ({:?})", g.id, g.kind));
+    }
+    if pending_plan_count > 0 {
+        active.push(format!("  ⚠  {pending_plan_count} plan(s) pending"));
+    }
+    if let Some(agent) = selected_spawn_agent {
+        active.push(format!("  ↳  agent_spawn → {agent}"));
+    }
+    if active.is_empty() {
+        lines.push("  Active     —".to_string());
+    } else {
+        lines.push("  Active".to_string());
+        for a in active {
+            lines.push(a);
+        }
+    }
+    if let Some(s) = status {
+        lines.push(String::new());
+        lines.push(format!("  Status     {s}"));
+    }
+    InfoPanel::new(lines)
+}
+
+fn truncate_id(id: &str, max: usize) -> String {
+    if id.len() <= max {
+        id.to_string()
+    } else {
+        format!("{}…{}", &id[..max / 2], &id[id.len() - (max - max / 2 - 1)..])
+    }
+}
+
+fn build_header(
+    root: &str,
+    channel_kind: &str,
+    stats: &SessionStats,
+    gate_count: usize,
+    follow: bool,
+    width: u16,
+) -> String {
+    let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
+    let mut right_parts = Vec::new();
+    if stats.llm_calls > 0 {
+        right_parts.push(format!("{}→{} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
+    }
+    if gate_count > 0 {
+        right_parts.push(format!("⚠{gate_count}"));
+    }
+    if follow {
+        right_parts.push("[following]".to_string());
+    }
+    let right = right_parts.join("  ");
+    let left_w = left.width();
+    let right_w = right.width();
+    let avail = width as usize;
+    if left_w + right_w + 2 >= avail {
+        format!("{left} {right}")
+    } else {
+        let pad = avail - left_w - right_w;
+        format!("{}{}{}", left, " ".repeat(pad), right)
+    }
+}
+
+/// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
+fn count_active_gates(entries: &[SessionTimelineEntry], resolved: &HashSet<String>) -> usize {
+    entries.iter().filter(|e| {
+        matches!(e.event_type.as_str(),
+            "approval.pending" | "plan.pending" | "user.ask.pending" | "escalation.pending"
+        ) && !resolved.contains(approval_or_interaction_id(e).as_deref().unwrap_or(&e.event_id))
+    }).count()
+}
+
+fn approval_or_interaction_id(e: &SessionTimelineEntry) -> Option<String> {
+    if e.event_type == "user.ask.pending" {
+        e.payload.as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("interaction_id").and_then(|x| x.as_str()).map(String::from))
+    } else {
+        e.payload.as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("request_id").and_then(|x| x.as_str()).map(String::from))
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
 /// and `GateAction` are the channel-neutral primitives, shared from
@@ -843,6 +998,8 @@ pub fn run(
     // Display toggles + spinner state for the in-flight row indicator.
     let mut show_reasoning = true;
     let mut spinner_frame: usize = 0;
+    let mut info_panel_open = false;
+    let mut info_scroll: u16 = 0;
     let mut quit_armed_until: Option<Instant> = None;
     let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
     let mut last_announced_plan_event: Option<String> = None;
@@ -1221,7 +1378,10 @@ pub fn run(
                     }
                     match key.code {
                         KeyCode::Esc => {
-                            if detail.is_some() {
+                            if info_panel_open {
+                                info_panel_open = false;
+                                info_scroll = 0;
+                            } else if detail.is_some() {
                                 detail = None;
                                 detail_scroll = 0;
                                 detail_h_scroll = 0;
@@ -1496,13 +1656,26 @@ pub fn run(
                         }
                         // /: slash-command mode (vim/Discord convention). `:`
                         // and `?` are accepted aliases for muscle memory.
-                        KeyCode::Char('/') | KeyCode::Char(':') | KeyCode::Char('?') => {
+                        KeyCode::Char('/') | KeyCode::Char(':') => {
                             detail = None;
+                            info_panel_open = false;
                             slash = Some(String::new());
                             status = None;
                         }
+                        KeyCode::Char('?') => {
+                            if info_panel_open {
+                                info_panel_open = false;
+                                info_scroll = 0;
+                            } else {
+                                info_panel_open = true;
+                                info_scroll = 0;
+                                status = Some("info: j/k scroll · Esc close".to_string());
+                            }
+                        }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if detail.is_some() {
+                            if info_panel_open {
+                                info_scroll = info_scroll.saturating_add(1);
+                            } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
                                 follow = false;
@@ -1511,7 +1684,9 @@ pub fn run(
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if detail.is_some() {
+                            if info_panel_open {
+                                info_scroll = info_scroll.saturating_sub(1);
+                            } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
                                 follow = false;
@@ -1850,6 +2025,25 @@ pub fn run(
         } else {
             compute_viewport_offset(safe_selected, list_height, &row_heights)
         };
+        let gate_count = count_active_gates(&entries, &resolved);
+        let info_panel = if info_panel_open {
+            Some(build_info_panel(
+                root_session_id,
+                TuiChannel.kind(),
+                &session_stats,
+                floor,
+                squash,
+                follow,
+                show_reasoning,
+                row_count,
+                gate.as_ref(),
+                pending_plan_count,
+                status.as_deref(),
+                selected_spawn_agent.as_deref(),
+            ))
+        } else {
+            None
+        };
 
         terminal.draw(|f| {
             draw(
@@ -1874,6 +2068,9 @@ pub fn run(
                 &session_stats,
                 pending_plan_count,
                 selected_spawn_agent.as_deref(),
+                info_panel.as_ref(),
+                info_scroll,
+                gate_count,
             )
         })?;
 
@@ -3332,6 +3529,9 @@ fn draw(
     stats: &SessionStats,
     pending_plan_count: usize,
     selected_spawn_agent: Option<&str>,
+    info_panel: Option<&InfoPanel>,
+    info_scroll: u16,
+    gate_count: usize,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -3353,40 +3553,7 @@ fn draw(
     let footer_idx = if compose_open { 3 } else { 2 };
     let list_idx = 1usize;
 
-    let stats_tag = if stats.llm_calls > 0 {
-        let models_tag = if stats.models.len() == 1 {
-            stats.models[0].clone()
-        } else {
-            format!("{} models", stats.models.len())
-        };
-        format!(
-            "   in:{} out:{} calls:{} [{}]",
-            format_tokens(stats.total_input),
-            format_tokens(stats.total_output),
-            stats.llm_calls,
-            models_tag,
-        )
-    } else {
-        String::new()
-    };
-    let plan_chip = if pending_plan_count > 0 {
-        format!("   ⚠ {pending_plan_count} plan(s) pending")
-    } else {
-        String::new()
-    };
-    let spawn_chip = selected_spawn_agent
-        .map(|id| format!("   ↳ agent_spawn → {id}"))
-        .unwrap_or_default();
-    let header = format!(
-        " Session Room [{}] — {root}   floor: {}   squash: {}   reasoning: {}   {} rows{spawn_chip}{plan_chip}{stats_tag}{}{}",
-        TuiChannel.kind(),
-        floor.as_str(),
-        if squash { "on" } else { "off" },
-        if show_reasoning { "on" } else { "off" },
-        rows.len(),
-        if follow { "   (following)" } else { "" },
-        status.map(|s| format!("   {s}")).unwrap_or_default(),
-    );
+    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, chunks[0].width);
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
@@ -3428,6 +3595,25 @@ fn draw(
             );
             return;
         }
+    }
+
+    // Info panel overlay (? key) — shows session stats, toggles, active gates.
+    if let Some(panel) = info_panel {
+        let area = centered_rect(60, 70, f.area());
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let total_lines = panel.lines.len();
+        let max_scroll = total_lines.saturating_sub(inner_height) as u16;
+        let scroll = info_scroll.min(max_scroll);
+        let text: Vec<Line> = panel.lines.iter().map(|l| Line::from(l.clone())).collect();
+        f.render_widget(
+            Paragraph::new(text)
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Session Info [?/Esc close] ")
+                    .border_style(Style::default().fg(Color::Cyan)))
+                .scroll((scroll, 0)),
+            area,
+        );
     }
 
     // The terminal width caps each line. Reserve 2 cells for the actor rail
@@ -3578,18 +3764,46 @@ fn draw(
         Paragraph::new(format!(" {label}: {}▏{err}   {hint}", gi.buffer))
             .style(Style::default().fg(Color::Cyan))
     } else {
-        // The gate affordance hint is the channel's concern (#393) — route it
-        // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
-        let follow_indicator = if follow { " ● following" } else { " ○ paused" };
         let turn_hint = rows.get(safe_selected).and_then(|r| match r {
-            RenderedRow::Line(s) => s.turn_index.map(|n| format!(" · turn {n}")),
+            RenderedRow::Line(s) => s.turn_index.map(|n| format!("turn {n}")),
             _ => None,
-        }).unwrap_or_default();
-        Paragraph::new(format!(
-            " q quit (2×) · j/k scroll · PgUp/PgDn page · f/Space follow{follow_indicator}{turn_hint} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · Enter/p plan review{gate_hint}"
-        ))
-        .style(Style::default().fg(Color::DarkGray))
+        });
+        let footer_w = chunks[footer_idx].width as usize;
+        let nav = "q quit · j↓ k↑ · Enter detail · ? info";
+        let nav_display = if footer_w < 50 {
+            "j↓ k↑ · ?"
+        } else if footer_w < 70 {
+            "q quit · j↓ k↑ · Enter · ?"
+        } else {
+            nav
+        };
+        let center = turn_hint.unwrap_or_else(|| "—".to_string());
+        let right = if info_panel.is_some() {
+            "info: j/k scroll · Esc close".to_string()
+        } else if !gate_hint.is_empty() {
+            gate_hint
+        } else {
+            String::new()
+        };
+        let nav_w = nav_display.width();
+        let center_w = center.width();
+        let right_w = right.width();
+        let total = nav_w + center_w + right_w + 4;
+        if total <= footer_w && !right.is_empty() {
+            let pad1 = (footer_w - total) / 3;
+            let pad2 = footer_w - nav_w - center_w - right_w - pad1;
+            Paragraph::new(format!(" {nav}{}{center}{}{right}", " ".repeat(pad1), " ".repeat(pad2)))
+                .style(Style::default().fg(Color::DarkGray))
+        } else if total <= footer_w {
+            let pad = footer_w - nav_w - center_w;
+            Paragraph::new(format!(" {nav}{}{center}", " ".repeat(pad)))
+                .style(Style::default().fg(Color::DarkGray))
+        } else {
+            let right_part = if right.is_empty() { String::new() } else { format!("  {right}") };
+            Paragraph::new(format!(" {nav}{right_part}"))
+                .style(Style::default().fg(Color::DarkGray))
+        }
     };
     f.render_widget(footer, chunks[footer_idx]);
 }
