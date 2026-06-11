@@ -235,6 +235,19 @@ fn bootstrap_agent_inner(
     if matches!(parsed_manifest.execution_mode, ExecutionMode::Script) {
         if let Some(entry) = parsed_manifest.script_entry.clone() {
             if is_javascript_entry(&entry) {
+                // Keep the entry strictly under the agent dir: it's used both to
+                // read the source (`agent_dir.join(entry)`) and to name the
+                // bundled output, which is later materialized under revision_dir.
+                let entry_path = std::path::Path::new(&entry);
+                anyhow::ensure!(
+                    entry_path.is_relative()
+                        && !entry_path
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir)),
+                    "Agent '{}' script_entry '{}' must be a relative path within the agent dir (no `..`).",
+                    agent_id,
+                    entry
+                );
                 anyhow::ensure!(
                     parsed_manifest.runtime.sandbox == "wasm",
                     "Agent '{}' declares a JavaScript entry '{}' but sandbox '{}': \
@@ -534,10 +547,12 @@ fn compile_js_to_wasm(js_path: &Path) -> Result<Vec<u8>> {
     Ok(std::fs::read(out.path())?)
 }
 
-/// Repoint `metadata.autonoetic.script_entry` in a SKILL.md's YAML frontmatter to
-/// `new_entry`, returning the rewritten file. Mirrors `merge_preset_into_skill`'s
-/// frontmatter handling. Returns `None` if there's no frontmatter or no
-/// `metadata.autonoetic` mapping to update.
+/// Repoint `script_entry` in a SKILL.md's YAML frontmatter to `new_entry`,
+/// returning the rewritten file. Handles both SKILL.md shapes the parser accepts:
+/// the Autonoetic-native format (top-level `script_entry`) and the AgentSkills
+/// format (`metadata.autonoetic.script_entry`) — preferring top-level, matching
+/// the parser's native-first precedence. Returns `None` if there's no
+/// frontmatter or no place to write `script_entry`.
 fn set_script_entry_in_skill(skill_text: &str, new_entry: &str) -> Option<String> {
     let (fm_start, fm_end) = {
         let t = skill_text.trim_start();
@@ -552,14 +567,24 @@ fn set_script_entry_in_skill(skill_text: &str, new_entry: &str) -> Option<String
     };
     let frontmatter = &skill_text[fm_start..fm_end];
     let mut yaml: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
-    let autonoetic = yaml
-        .get_mut("metadata")
-        .and_then(|m| m.get_mut("autonoetic"))
-        .and_then(|a| a.as_mapping_mut())?;
-    autonoetic.insert(
-        serde_yaml::Value::String("script_entry".to_string()),
-        serde_yaml::Value::String(new_entry.to_string()),
-    );
+    let key = serde_yaml::Value::String("script_entry".to_string());
+    let value = serde_yaml::Value::String(new_entry.to_string());
+
+    let top = yaml.as_mapping_mut()?;
+    if top.contains_key(&key) {
+        // Autonoetic-native: top-level script_entry.
+        top.insert(key, value);
+    } else if let Some(autonoetic) = top
+        .get_mut(serde_yaml::Value::String("metadata".to_string()))
+        .and_then(|m| m.get_mut(serde_yaml::Value::String("autonoetic".to_string())))
+        .and_then(|a| a.as_mapping_mut())
+    {
+        // AgentSkills format: metadata.autonoetic.script_entry.
+        autonoetic.insert(key, value);
+    } else {
+        return None;
+    }
+
     let new_frontmatter = serde_yaml::to_string(&yaml).ok()?;
     let body = &skill_text[fm_end + 4..];
     Some(format!("---\n{}---{}\n", new_frontmatter, body))
@@ -870,22 +895,38 @@ mod tests {
         assert_eq!(wasm_entry_for("scripts/agent.mjs"), "scripts/agent.wasm");
     }
 
+    fn reparse_frontmatter(out: &str) -> serde_yaml::Value {
+        let fm = out.trim_start().strip_prefix("---").unwrap();
+        let end = fm.find("\n---").unwrap();
+        serde_yaml::from_str(&fm[..end]).unwrap()
+    }
+
     #[test]
-    fn set_script_entry_rewrites_autonoetic_frontmatter() {
+    fn set_script_entry_rewrites_agentskills_frontmatter() {
+        // AgentSkills format: metadata.autonoetic.script_entry.
         let skill = "---\nmetadata:\n  autonoetic:\n    execution_mode: script\n    script_entry: main.js\n    runtime:\n      sandbox: wasm\n---\nbody text\n";
         let out = set_script_entry_in_skill(skill, "main.wasm").expect("should rewrite");
-        // Re-parse and confirm the entry flipped, body preserved.
-        let yaml: serde_yaml::Value = {
-            let fm = out.trim_start().strip_prefix("---").unwrap();
-            let end = fm.find("\n---").unwrap();
-            serde_yaml::from_str(&fm[..end]).unwrap()
-        };
+        let yaml = reparse_frontmatter(&out);
         assert_eq!(
             yaml["metadata"]["autonoetic"]["script_entry"].as_str(),
             Some("main.wasm")
         );
         assert!(out.contains("body text"));
-        // No metadata.autonoetic mapping → nothing to rewrite.
+    }
+
+    #[test]
+    fn set_script_entry_rewrites_native_top_level_frontmatter() {
+        // Autonoetic-native format: top-level script_entry.
+        let skill = "---\nexecution_mode: script\nscript_entry: main.js\nruntime:\n  sandbox: wasm\n---\nnative body\n";
+        let out = set_script_entry_in_skill(skill, "main.wasm").expect("should rewrite");
+        let yaml = reparse_frontmatter(&out);
+        assert_eq!(yaml["script_entry"].as_str(), Some("main.wasm"));
+        assert!(out.contains("native body"));
+    }
+
+    #[test]
+    fn set_script_entry_returns_none_when_no_target() {
+        // No top-level script_entry and no metadata.autonoetic mapping.
         assert!(set_script_entry_in_skill("---\nfoo: bar\n---\nx\n", "main.wasm").is_none());
         assert!(set_script_entry_in_skill("no frontmatter", "main.wasm").is_none());
     }
