@@ -24,6 +24,7 @@ pub mod eval_stats;
 pub mod failure_classification;
 pub mod fuzzy_match;
 pub mod guard;
+pub mod guidance;
 pub mod history_persist;
 pub mod inference_profile;
 pub mod human_gate;

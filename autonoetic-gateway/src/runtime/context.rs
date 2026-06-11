@@ -76,6 +76,19 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
     parts.join("\n\n---\n\n")
 }
 
+/// Best-effort role for guidance gating: the agent id segment before the first
+/// `.` (e.g. `coder.default` → `coder`), or the whole id if there is none.
+/// Returns `None` for an empty id or one with an empty leading segment
+/// (e.g. `.coder`), so role-gated guidance never matches on `""`.
+fn role_from_manifest(manifest: &AgentManifest) -> Option<&str> {
+    manifest
+        .agent
+        .id
+        .split('.')
+        .next()
+        .filter(|seg| !seg.is_empty())
+}
+
 const TOOL_BRIDGING_APPENDIX: &str = r#"---
 
 Tool Compatibility Notes (auto-generated from AgentSkills import)
@@ -192,7 +205,7 @@ pub(crate) fn inline_extended(core: &str, extended: Option<&str>) -> String {
 /// Layer order (each layer is structurally positioned so it cannot override
 /// the previous one — foundation constitutional rules always win):
 ///
-///   Foundation → Tool bridging → Persona → User profile → Agent instructions → Output contract
+///   Foundation → Guidance blocks → Tool bridging → Persona → User profile → Agent instructions → Output contract
 pub(crate) fn compose_system_instructions_full(
     agent_instructions: &str,
     manifest: &AgentManifest,
@@ -201,6 +214,25 @@ pub(crate) fn compose_system_instructions_full(
     persona: Option<&str>,
 ) -> String {
     let foundation = compose_foundation(manifest);
+
+    // Composable, targeted guidance blocks (issue #463). Empty until #464/#466
+    // migrate doctrine into blocks; active-tool/model-family inputs land in
+    // #464/#465. Renders to "" today, so this is a no-op on the prompt.
+    let guidance = {
+        let ctx = crate::runtime::guidance::GuidanceContext {
+            capabilities: &manifest.capabilities,
+            active_tool_names: &[],
+            model_family: None,
+            role: role_from_manifest(manifest),
+        };
+        let rendered =
+            crate::runtime::guidance::compose_guidance(&crate::runtime::guidance::builtin_blocks(), &ctx);
+        if rendered.is_empty() {
+            None
+        } else {
+            Some(format!("---\n\nGuidance\n\n{rendered}"))
+        }
+    };
 
     let tool_bridging = manifest
         .agentskills_import
@@ -217,6 +249,9 @@ pub(crate) fn compose_system_instructions_full(
     let base = {
         let trimmed = agent_instructions.trim();
         let mut parts = vec![foundation.as_str()];
+        if let Some(ref g) = guidance {
+            parts.push(g);
+        }
         if let Some(ref bridging) = tool_bridging {
             parts.push(bridging);
         }

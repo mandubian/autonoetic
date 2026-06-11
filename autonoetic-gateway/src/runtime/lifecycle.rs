@@ -3551,7 +3551,7 @@ mod tests {
             .clone()
             .expect("system message should be captured");
         assert!(system.contains("Foundation Core"));
-        assert!(system.contains("content.write(name, content)"));
+        assert!(system.contains("content_write(name, content)"));
         assert!(system.contains("Agent local rules"));
     }
 
