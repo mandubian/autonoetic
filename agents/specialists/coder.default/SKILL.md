@@ -108,7 +108,7 @@ A library the agent **already** depends on at runtime is fine to use in tests �
 - Write clean, documented code
 - **Scripts that need API keys or secrets must read them from environment variables** (`os.environ.get("API_KEY")`), never from command-line arguments or hardcoded values. The gateway injects credentials at runtime via the `credential_env` parameter — the secret never reaches LLM context. The env var name is derived mechanically from the service name: e.g. service `"my-service"` → `"MY_SERVICE_SECRET"`. If the planner delegates with `service: "my-service"`, your script must use `os.environ["MY_SERVICE_SECRET"]`.
 - Test code with `sandbox_exec` before returning — but see "Persistent Test Failure" below
-- Use `content_write` to persist artifacts — **every call must include both `name` (path-like filename, e.g. `weather_fetcher.py`) and `content`**; omitting `name` fails validation
+- Use `content_write` to persist artifacts
 - Follow the principle of minimal changes
 - Focus on durable outputs that should be handed off, reviewed, or installed
 - **DO NOT use `dependencies` field in `sandbox_exec`** — you don't have `NetworkAccess`. If your code needs external packages, signal to the planner that `packager.default` is needed to resolve dependencies into layers.
@@ -191,12 +191,11 @@ When you receive a task from `architect.default`, it will include structured sub
 
 When using `content_write` and `resolve`:
 
-1. **`content_write` requires `name` and `content`** — the gateway rejects a write that only passes `content`. Always set `name` to the file path you want (e.g. `src/main.py`, `weather_fetcher.py`).
-2. **`content_write` returns a handle, short alias, and visibility**
-3. **Within the same root session, prefer names for collaboration**: `resolve({ "ref": "weather.py", "include": "content" })`
-4. **Use `visibility: "private"`** only for scratch work that should stay local to your session
-5. **For anything that will be reviewed or installed, build an artifact before handoff**
-6. `artifact_ref` is not a content handle. Never call `resolve` with fabricated targets like `art_*:main.py`.
+1. **`content_write` returns a handle, short alias, and visibility**
+2. **Within the same root session, prefer names for collaboration**: `resolve({ "ref": "weather.py", "include": "content" })`
+3. **Use `visibility: "private"`** only for scratch work that should stay local to your session
+4. **For anything that will be reviewed or installed, build an artifact before handoff**
+5. `artifact_ref` is not a content handle. Never call `resolve` with fabricated targets like `art_*:main.py`.
 
 ## Running Code
 
@@ -337,12 +336,8 @@ Your `CodeExecution` capability allows these patterns:
 - `node ` - Node.js scripts
 - `bash -c `, `sh -c ` - Shell commands
 
-Use shell commands for deterministic glue only.
-
-**Forbidden shell commands** (blocked by gateway security policy):
-- destructive file operations: `rm`, `rmdir`, `unlink`, `shred`, `wipefs`, `mkfs`, `dd`
-- privilege escalation: `sudo`, `su`, `doas`
-- environment/process disclosure: `env`, `printenv`, `declare -x`, reads of `/proc/*/environ`
+Use shell commands for deterministic glue only. (The forbidden-command list is
+in the shared `sandbox_exec` guidance.)
 
 ## Sandbox Execution Failure Handling
 

@@ -3643,6 +3643,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_execute_loop_includes_migrated_tool_doctrine() {
+        // WriteAccess ⇒ content_write protocol block; CodeExecution ⇒ sandbox_exec
+        // forbidden-commands block (#466 migration from per-SKILL.md prose).
+        let manifest = manifest_with_capabilities(vec![
+            Capability::WriteAccess { scopes: vec!["*".to_string()] },
+            Capability::CodeExecution { patterns: vec![], commands: vec![] },
+        ]);
+        let temp = tempdir().expect("tempdir should create");
+        let captured = Arc::new(Mutex::new(None));
+        let driver = CaptureSystemDriver { system_message: Arc::clone(&captured) };
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "rules".to_string(),
+            Arc::new(driver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.execute_loop().await.expect("execution should succeed");
+        let system = captured.lock().unwrap().clone().expect("system message captured");
+        assert!(
+            system.contains("`content_write` requires both `name` and `content`"),
+            "content_write protocol block missing"
+        );
+        assert!(
+            system.contains("Forbidden shell commands"),
+            "sandbox_exec forbidden-commands block missing"
+        );
+    }
+
     struct ApprovalRequiredLifecycleTool;
 
     impl NativeTool for ApprovalRequiredLifecycleTool {

@@ -129,7 +129,7 @@ Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in m
 
 ## Content System
 
-When you save design notes or specifications with `content_write`, **always pass both `name` (e.g. `weather_agent_design.md`) and `content`** — omitting `name` fails gateway validation.
+Save design notes and specifications with `content_write` (e.g. `name: weather_agent_design.md`).
 
 Within the same root session, prefer names for collaboration. For agent-creation tasks, include artifact handoff in the design: coder writes files, then builds an artifact for evaluator/auditor.
 
