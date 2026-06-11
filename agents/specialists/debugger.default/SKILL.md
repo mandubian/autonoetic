@@ -62,7 +62,7 @@ Your `CodeExecution` capability allows: `python3 `, `python `, `node `, `bash -c
 
 Use absolute paths: `python3 scripts/main.py` not `cd scripts && python main.py`.
 
-Forbidden commands (blocked by policy): `rm`, `rmdir`, `unlink`, `sudo`, `su`, `env`, `printenv`, and reads of `/proc/*/environ`.
+(The forbidden-command list is in the shared `sandbox_exec` guidance.)
 
 ## Sandbox Failures
 

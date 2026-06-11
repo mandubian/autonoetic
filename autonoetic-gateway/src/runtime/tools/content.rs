@@ -144,6 +144,22 @@ impl NativeTool for ContentWriteTool {
         }
         meta
     }
+
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        // Centralized from coder/debugger/architect/executor/packager/researcher
+        // SKILL.md (#466): the name+content requirement is a uniform gateway rule.
+        vec![GuidanceBlock {
+            id: "content.write_protocol",
+            when: GuidanceCondition::ToolPresent("content_write"),
+            priority: 9,
+            prose: "**`content_write` requires both `name` and `content`** — omitting either is \
+rejected. Set `name` to the path-like filename you want (e.g. `src/main.py`, `weather_fetcher.py`); \
+the response returns a `ref`/alias and a `sandbox_path` (`/tmp/<name>`) where the content is mounted \
+in the sandbox."
+                .to_string(),
+        }]
+    }
 }
 
 pub(crate) fn find_available_artifacts(

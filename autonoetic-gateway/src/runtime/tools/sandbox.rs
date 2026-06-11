@@ -795,6 +795,24 @@ impl NativeTool for SandboxExecTool {
             .any(|cap| matches!(cap, Capability::CodeExecution { .. }))
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        // Centralized from coder/debugger/executor SKILL.md (#466). The gateway
+        // enforces this for every `sandbox_exec` call, so it belongs with the
+        // tool rather than copy-pasted per role.
+        vec![GuidanceBlock {
+            id: "sandbox.forbidden_commands",
+            when: GuidanceCondition::ToolPresent("sandbox_exec"),
+            priority: 10,
+            prose: "**Forbidden shell commands** (blocked by gateway security policy): destructive \
+file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shred`, `wipefs`, \
+`dd if=`/`dd of=/dev/…`, redirects to `/dev/…`); privilege escalation (`sudo`, `su`, `doas`, \
+`setuid`/`setgid`, `chmod +s`, `chown root`); and environment/process-secret disclosure (`env`, \
+`printenv`, `declare -x`, and reads of `/proc/self/environ`, `/proc/1/environ`, `/etc/environment`)."
+                .to_string(),
+        }]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),

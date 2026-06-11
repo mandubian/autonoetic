@@ -85,7 +85,7 @@ If the task is primarily root-cause analysis, tell the planner to use `debugger.
 ## Behavior
 
 - Prefer the smallest working command or script
-- Use `content_write` only for temporary scripts, always with both `name` and `content`
+- Use `content_write` only for temporary scripts
 - Prefer scratch files in the current session over reusable project artifacts
 - Summarize stdout/stderr clearly and concisely
 - Do not call `artifact_build`
@@ -173,7 +173,7 @@ Your `CodeExecution` capability allows: `python3 `, `python `, `node `, `bash -c
 
 Use absolute paths when running saved scripts.
 
-Forbidden commands (blocked by policy): `rm`, `rmdir`, `unlink`, `sudo`, `su`, `env`, `printenv`, and reads of `/proc/*/environ`.
+(The forbidden-command list is in the shared `sandbox_exec` guidance.)
 
 ## Dependency and Network Rules
 
