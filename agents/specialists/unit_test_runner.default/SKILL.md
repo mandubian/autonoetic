@@ -14,7 +14,7 @@ metadata:
     agent:
       id: "unit_test_runner.default"
       name: "Unit Test Runner Default"
-      description: "Discovers and runs artifact test suites in a no-network sandbox. If no tests exist, skips without recording a verdict."
+      description: "Discovers and runs deterministic, hermetic unit tests in a no-network promotion sandbox (P-3.10). Network/integration tests → unable_to_evaluate. If no tests exist, skips without recording a verdict."
     llm_preset: coding
     sandbox_network: normal
     capabilities:
