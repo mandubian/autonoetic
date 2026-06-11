@@ -68,7 +68,7 @@ pub fn run_wasi_module(
     guest_dir: &str,
     args: &[String],
     env: &[(String, String)],
-    stdin: &[u8],
+    stdin: Vec<u8>,
     limits: &WasmLimits,
 ) -> anyhow::Result<WasiRunOutput> {
     let mut config = Config::new();
@@ -84,7 +84,7 @@ pub fn run_wasi_module(
     let mut builder = WasiCtxBuilder::new();
     builder.stdout(stdout.clone());
     builder.stderr(stderr.clone());
-    builder.stdin(MemoryInputPipe::new(stdin.to_vec()));
+    builder.stdin(MemoryInputPipe::new(stdin)); // Vec<u8> → Bytes is a move, no copy
     builder.arg("program"); // argv[0]
     for a in args {
         builder.arg(a);
@@ -193,7 +193,7 @@ mod tests {
     (i32.store (i32.const 4) (i32.const 3))
     (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 20)))))"#;
         let dir = tempfile::tempdir().unwrap();
-        let out = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &[], &WasmLimits::default())
+        let out = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], vec![], &WasmLimits::default())
             .expect("wasi module should run");
         assert_eq!(out.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
@@ -226,7 +226,7 @@ mod tests {
             "/tmp",
             &[],
             &[],
-            b"ping\n",
+            b"ping\n".to_vec(),
             &WasmLimits::default(),
         )
         .expect("wasi module should run");
@@ -243,7 +243,7 @@ mod tests {
             fuel: 100_000,
             ..WasmLimits::default()
         };
-        let err = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], &[], &limits)
+        let err = run_wasi_module(wat.as_bytes(), dir.path(), "/tmp", &[], &[], vec![], &limits)
             .expect_err("infinite loop should hit the fuel bound");
         assert!(
             err.to_string().contains("resource limit") || err.to_string().contains("fuel"),

@@ -217,7 +217,7 @@ impl SandboxRunner {
         overrides: Option<&BwrapIsolationOverrides>,
         extra_env: &[(String, String)],
         root_session_id: Option<&str>,
-        stdin: Option<&[u8]>,
+        stdin: Option<Vec<u8>>,
     ) -> anyhow::Result<ExecOutput> {
         if driver == SandboxDriverKind::Wasm {
             return run_wasm_request(agent_dir, request, extra_env, stdin);
@@ -235,7 +235,7 @@ impl SandboxRunner {
         if let Some(input) = stdin {
             if let Some(mut child_stdin) = runner.process.stdin.take() {
                 use std::io::Write;
-                child_stdin.write_all(input)?;
+                child_stdin.write_all(&input)?;
             }
         }
         let out = runner.process.wait_with_output()?;
@@ -667,7 +667,7 @@ fn run_wasm_request(
     agent_dir: &str,
     request: &ExecutionKind,
     extra_env: &[(String, String)],
-    stdin: Option<&[u8]>,
+    stdin: Option<Vec<u8>>,
 ) -> anyhow::Result<ExecOutput> {
     use crate::exec_request::CodeSource;
     let (entry, args) = match request {
@@ -705,7 +705,7 @@ fn run_wasm_request(
         BWRAP_WORKSPACE_DIR,
         &args,
         extra_env,
-        stdin.unwrap_or(&[]),
+        stdin.unwrap_or_default(),
         &crate::wasm_backend::WasmLimits::default(),
     )?;
     Ok(ExecOutput {
@@ -720,7 +720,7 @@ fn run_wasm_request(
     _agent_dir: &str,
     _request: &ExecutionKind,
     _extra_env: &[(String, String)],
-    _stdin: Option<&[u8]>,
+    _stdin: Option<Vec<u8>>,
 ) -> anyhow::Result<ExecOutput> {
     anyhow::bail!("wasm sandbox tier requires the `wasm-tier` build feature")
 }

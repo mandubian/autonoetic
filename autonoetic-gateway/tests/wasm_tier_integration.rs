@@ -80,7 +80,7 @@ fn wasm_agent_receives_stdin_through_run_to_output() {
         None,
         &[],
         None,
-        Some(b"pong\n"),
+        Some(b"pong\n".to_vec()),
     )
     .expect("wasm agent should receive stdin via run_to_output");
 

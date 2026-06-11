@@ -252,7 +252,9 @@ pub(crate) async fn execute_script_in_sandbox(
         // Stdin mode delivers the payload on the module's stdin (Args mode already
         // carries it in argv); mirrors the process tier's stdin handling.
         let stdin_bytes = match input_mode {
-            autonoetic_types::agent::ScriptInputMode::Stdin => Some(normalized_input.as_bytes()),
+            autonoetic_types::agent::ScriptInputMode::Stdin => {
+                Some(normalized_input.clone().into_bytes())
+            }
             autonoetic_types::agent::ScriptInputMode::Args => None,
         };
         let result = crate::sandbox::SandboxRunner::run_to_output(
