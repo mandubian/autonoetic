@@ -239,6 +239,13 @@ pub trait NativeTool: Send + Sync {
     fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
         ToolMetadata::default()
     }
+
+    /// Prompt-guidance blocks this tool contributes (#464). Collected only when
+    /// the tool is available + passes the tier filter, so guidance and
+    /// capability stay in lockstep. Default: none.
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        Vec::new()
+    }
 }
 
 pub struct NativeToolRegistry {
@@ -283,6 +290,25 @@ impl NativeToolRegistry {
             })
             .map(|t| with_intent_schema(t.definition()))
             .collect()
+    }
+
+    /// Guidance blocks contributed by the native tools available to `manifest`
+    /// that pass `filter` (#464). `ToolPresent` gating is evaluated separately
+    /// against the *final advertised* tool set (which includes MCP/discovered
+    /// tools and reflects dedupe/cap), so a collected block whose tool was
+    /// later dropped still won't render.
+    pub fn collect_guidance_blocks(
+        &self,
+        manifest: &AgentManifest,
+        filter: &ToolTierFilter,
+    ) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        let mut blocks = Vec::new();
+        for tool in &self.tools {
+            if tool.is_available(manifest) && filter.allows_tool(tool.name(), tool.tier()) {
+                blocks.extend(tool.guidance());
+            }
+        }
+        blocks
     }
 
     pub fn execute(

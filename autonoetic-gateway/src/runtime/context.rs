@@ -10,7 +10,6 @@ use autonoetic_types::agent::AgentManifest;
 const FOUNDATION_CORE: &str = include_str!("foundation_core.md");
 const FOUNDATION_WORKFLOW: &str = include_str!("foundation_workflow.md");
 const FOUNDATION_ARTIFACT: &str = include_str!("foundation_artifact.md");
-const FOUNDATION_EDITING: &str = include_str!("foundation_editing.md");
 const FOUNDATION_SCRIPT: &str = include_str!("foundation_script.md");
 const FOUNDATION_DIGEST: &str = include_str!("foundation_digest.md");
 const FOUNDATION_SDK: &str = include_str!("foundation_sdk.md");
@@ -56,9 +55,8 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
 
     if has_artifact_caps {
         parts.push(FOUNDATION_ARTIFACT.trim());
-        // Write access ⇒ the agent can also `content_patch`; teach the
-        // write-vs-patch choice (issue #462).
-        parts.push(FOUNDATION_EDITING.trim());
+        // The write-vs-patch doctrine that used to live here (foundation_editing.md,
+        // #462) is now a content_patch-contributed guidance block (#464).
     }
 
     if is_script_mode {
@@ -80,7 +78,7 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
 /// `.` (e.g. `coder.default` → `coder`), or the whole id if there is none.
 /// Returns `None` for an empty id or one with an empty leading segment
 /// (e.g. `.coder`), so role-gated guidance never matches on `""`.
-fn role_from_manifest(manifest: &AgentManifest) -> Option<&str> {
+pub(crate) fn role_from_manifest(manifest: &AgentManifest) -> Option<&str> {
     manifest
         .agent
         .id
@@ -122,7 +120,7 @@ pub(crate) fn compose_system_instructions_with_metadata(
     manifest: &AgentManifest,
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
 ) -> String {
-    compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None)
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None, None)
 }
 
 /// Build a "Prior knowledge" block from Tier-2 global memories relevant to this agent.
@@ -176,7 +174,7 @@ pub(crate) fn compose_system_instructions_with_user_context(
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
     user_context_snippet: Option<&str>,
 ) -> String {
-    compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None)
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None, None)
 }
 
 /// Concatenate core + extended SKILL.md sections for the system prompt.
@@ -212,27 +210,17 @@ pub(crate) fn compose_system_instructions_full(
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
     user_context_snippet: Option<&str>,
     persona: Option<&str>,
+    guidance: Option<&str>,
 ) -> String {
     let foundation = compose_foundation(manifest);
 
-    // Composable, targeted guidance blocks (issue #463). Empty until #464/#466
-    // migrate doctrine into blocks; active-tool/model-family inputs land in
-    // #464/#465. Renders to "" today, so this is a no-op on the prompt.
-    let guidance = {
-        let ctx = crate::runtime::guidance::GuidanceContext {
-            capabilities: &manifest.capabilities,
-            active_tool_names: &[],
-            model_family: None,
-            role: role_from_manifest(manifest),
-        };
-        let rendered =
-            crate::runtime::guidance::compose_guidance(&crate::runtime::guidance::builtin_blocks(), &ctx);
-        if rendered.is_empty() {
-            None
-        } else {
-            Some(format!("---\n\nGuidance\n\n{rendered}"))
-        }
-    };
+    // Composable, targeted guidance blocks (#463/#464). The caller renders them
+    // (it has the live tool set and model); we just position the layer after
+    // foundation. `None`/empty → no Guidance section.
+    let guidance_section = guidance
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .map(|g| format!("---\n\nGuidance\n\n{g}"));
 
     let tool_bridging = manifest
         .agentskills_import
@@ -249,7 +237,7 @@ pub(crate) fn compose_system_instructions_full(
     let base = {
         let trimmed = agent_instructions.trim();
         let mut parts = vec![foundation.as_str()];
-        if let Some(ref g) = guidance {
+        if let Some(ref g) = guidance_section {
             parts.push(g);
         }
         if let Some(ref bridging) = tool_bridging {
