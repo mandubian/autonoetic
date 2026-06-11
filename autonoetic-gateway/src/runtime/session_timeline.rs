@@ -78,12 +78,22 @@ pub fn approval_timeline_extra_from_action(
             "host_patterns": detected_hosts,
         })),
         ScheduledAction::SessionEscalate {
+            session_id,
+            root_session_id,
+            requested_by_agent_id,
             reason,
+            context,
             urgency,
+            suggested_actions,
             ..
         } => Some(serde_json::json!({
             "reason": reason,
             "urgency": urgency,
+            "session_id": session_id,
+            "root_session_id": root_session_id,
+            "requested_by_agent_id": requested_by_agent_id,
+            "context": context,
+            "suggested_actions": suggested_actions,
         })),
         ScheduledAction::RevisionPromote {
             agent_id,

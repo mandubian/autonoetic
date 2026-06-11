@@ -2460,28 +2460,66 @@ impl JsonRpcRouter {
                 };
                 match store.get_approval(params.request_id.trim()) {
                     Ok(Some(approval)) => {
+                        use autonoetic_types::background::ScheduledAction;
                         let mut added_capabilities = Vec::new();
                         let mut broadened_capabilities = Vec::new();
-                        if let autonoetic_types::background::ScheduledAction::RevisionPromote {
-                            added_capabilities: added,
-                            broadened_capabilities: broadened,
-                            ..
-                        } = &approval.action
-                        {
-                            added_capabilities = added.clone();
-                            broadened_capabilities = broadened.clone();
+                        let mut extra = serde_json::Map::new();
+                        match &approval.action {
+                            ScheduledAction::RevisionPromote {
+                                added_capabilities: added,
+                                broadened_capabilities: broadened,
+                                agent_id,
+                                revision_id,
+                                ..
+                            } => {
+                                added_capabilities = added.clone();
+                                broadened_capabilities = broadened.clone();
+                                extra.insert("agent_id".into(), serde_json::json!(agent_id));
+                                extra.insert("revision_id".into(), serde_json::json!(revision_id));
+                            }
+                            ScheduledAction::SessionEscalate {
+                                session_id,
+                                root_session_id,
+                                requested_by_agent_id,
+                                reason,
+                                context,
+                                urgency,
+                                suggested_actions,
+                                ..
+                            } => {
+                                extra.insert("reason".into(), serde_json::json!(reason));
+                                extra.insert("urgency".into(), serde_json::json!(urgency));
+                                extra.insert("session_id".into(), serde_json::json!(session_id));
+                                extra.insert("root_session_id".into(), serde_json::json!(root_session_id));
+                                extra.insert(
+                                    "requested_by_agent_id".into(),
+                                    serde_json::json!(requested_by_agent_id),
+                                );
+                                extra.insert("context".into(), serde_json::json!(context));
+                                extra.insert(
+                                    "suggested_actions".into(),
+                                    serde_json::json!(suggested_actions),
+                                );
+                            }
+                            _ => {}
                         }
-                        JsonRpcResponse::success(
-                            req.id,
-                            serde_json::json!({
-                                "request_id": approval.request_id,
-                                "status": approval.status.as_ref().map(|s| s.as_str()),
-                                "action": approval.action.kind(),
-                                "confirm_phrase": approval.confirm_phrase,
-                                "added_capabilities": added_capabilities,
-                                "broadened_capabilities": broadened_capabilities,
-                            }),
-                        )
+                        let mut body = serde_json::json!({
+                            "request_id": approval.request_id,
+                            "status": approval.status.as_ref().map(|s| s.as_str()),
+                            "action": approval.action.kind(),
+                            "approval_level": approval.approval_level.to_config(),
+                            "confirm_phrase": approval.confirm_phrase,
+                            "summary": approval.reason,
+                            "risk_summary": approval.risk_summary,
+                            "added_capabilities": added_capabilities,
+                            "broadened_capabilities": broadened_capabilities,
+                        });
+                        if let Some(obj) = body.as_object_mut() {
+                            for (k, v) in extra {
+                                obj.insert(k, v);
+                            }
+                        }
+                        JsonRpcResponse::success(req.id, body)
                     }
                     Ok(None) => JsonRpcResponse::error(
                         req.id,
