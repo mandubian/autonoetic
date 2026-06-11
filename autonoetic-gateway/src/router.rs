@@ -2054,6 +2054,129 @@ impl JsonRpcRouter {
                 )
             }
 
+            "artifact.list_files" => {
+                #[derive(Deserialize)]
+                struct ArtifactListParams {
+                    artifact_id: String,
+                }
+                let params: ArtifactListParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for artifact.list_files: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::artifact_store::ArtifactStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("artifact store open failed: {}", e),
+                        );
+                    }
+                };
+                match store.inspect(&params.artifact_id) {
+                    Ok(bundle) => {
+                        let files: Vec<serde_json::Value> = bundle
+                            .files
+                            .iter()
+                            .map(|f| {
+                                serde_json::json!({
+                                    "name": f.name,
+                                    "handle": f.handle,
+                                    "alias": f.alias,
+                                })
+                            })
+                            .collect();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "artifact_id": bundle.artifact_id,
+                                "kind": format!("{:?}", bundle.kind),
+                                "files": files,
+                                "created_at": bundle.created_at,
+                            }),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("artifact.list_files failed: {}", e),
+                    ),
+                }
+            }
+
+            "artifact.read_file" => {
+                #[derive(Deserialize)]
+                struct ArtifactReadParams {
+                    artifact_id: String,
+                    file_name: String,
+                }
+                let params: ArtifactReadParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for artifact.read_file: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::artifact_store::ArtifactStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("artifact store open failed: {}", e),
+                        );
+                    }
+                };
+                match store.inspect(&params.artifact_id) {
+                    Ok(bundle) => {
+                        let file_entry = match bundle.files.iter().find(|f| f.name == params.file_name) {
+                            Some(f) => f,
+                            None => {
+                                return JsonRpcResponse::error(
+                                    req.id,
+                                    -32000,
+                                    format!(
+                                        "file '{}' not found in artifact '{}'",
+                                        params.file_name, params.artifact_id
+                                    ),
+                                );
+                            }
+                        };
+                        match store.content_store().read_string(&file_entry.handle) {
+                            Ok(content) => JsonRpcResponse::success(
+                                req.id,
+                                serde_json::json!({
+                                    "artifact_id": params.artifact_id,
+                                    "file_name": params.file_name,
+                                    "content": content,
+                                }),
+                            ),
+                            Err(e) => JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("artifact.read_file failed: {}", e),
+                            ),
+                        }
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("artifact.read_file failed: {}", e),
+                    ),
+                }
+            }
+
             "gate.get_messages" => {
                 #[derive(Deserialize)]
                 struct GetMessagesParams {
@@ -2173,6 +2296,10 @@ impl JsonRpcRouter {
                     #[serde(default)]
                     secrets: Option<Vec<(String, String)>>,
                     approver_level: Option<String>,
+                    #[serde(default)]
+                    confirm_phrase: Option<String>,
+                    #[serde(default)]
+                    acknowledged_capabilities: Vec<String>,
                 }
 
                 let params: ApproveParams = match serde_json::from_value(req.params) {
@@ -2207,7 +2334,7 @@ impl JsonRpcRouter {
                     _ => autonoetic_types::background::ApprovalLevel::Operator,
                 });
 
-                match crate::scheduler::approve_request(
+                match crate::scheduler::approve_request_with_options(
                     config.as_ref(),
                     store.as_deref(),
                     params.request_id.trim(),
@@ -2216,6 +2343,11 @@ impl JsonRpcRouter {
                     params.secrets,
                     level.as_ref(),
                     Some(hooks.as_ref()),
+                    crate::scheduler::ApproveOptions {
+                        acknowledged_capabilities: params.acknowledged_capabilities,
+                        confirm_phrase: params.confirm_phrase,
+                        ..Default::default()
+                    },
                 ) {
                     Ok(decision) => {
                         self.transition_async_to_processing(
@@ -2234,6 +2366,69 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         format!("Approval failed: {}", e),
+                    ),
+                }
+            }
+
+            "approvals.inspect" => {
+                #[derive(Deserialize)]
+                struct InspectParams {
+                    request_id: String,
+                }
+                let params: InspectParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for approvals.inspect: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "GatewayStore not available",
+                        );
+                    }
+                };
+                match store.get_approval(params.request_id.trim()) {
+                    Ok(Some(approval)) => {
+                        let mut added_capabilities = Vec::new();
+                        let mut broadened_capabilities = Vec::new();
+                        if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+                            added_capabilities: added,
+                            broadened_capabilities: broadened,
+                            ..
+                        } = &approval.action
+                        {
+                            added_capabilities = added.clone();
+                            broadened_capabilities = broadened.clone();
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "request_id": approval.request_id,
+                                "status": approval.status.as_ref().map(|s| s.as_str()),
+                                "action": approval.action.kind(),
+                                "confirm_phrase": approval.confirm_phrase,
+                                "added_capabilities": added_capabilities,
+                                "broadened_capabilities": broadened_capabilities,
+                            }),
+                        )
+                    }
+                    Ok(None) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Approval not found: {}", params.request_id.trim()),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("approvals.inspect failed: {}", e),
                     ),
                 }
             }

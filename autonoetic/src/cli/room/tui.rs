@@ -618,6 +618,57 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+struct ArtifactFileEntry {
+    name: String,
+    alias: String,
+}
+
+struct ArtifactViewer {
+    artifact_id: String,
+    kind: String,
+    files: Vec<ArtifactFileEntry>,
+    selected: usize,
+    scroll: u16,
+}
+
+struct ArtifactFileView {
+    artifact_id: String,
+    file_name: String,
+    content: String,
+    scroll: u16,
+}
+
+/// Extract artifact_id from a timeline entry, if it has one.
+fn artifact_id_for_entry(entry: &SessionTimelineEntry) -> Option<String> {
+    if let Some(ref aid) = entry.refs.artifact_id {
+        return Some(aid.clone());
+    }
+    if entry.event_type == "tool.completed" {
+        if let Some(ref payload) = entry.payload {
+            if let Ok(p) = serde_json::from_str::<serde_json::Value>(payload) {
+                if p.get("tool_name").and_then(|v| v.as_str())
+                    .map(|n| n.starts_with("artifact"))
+                    .unwrap_or(false)
+                {
+                    if let Some(result_str) = p.get("result").and_then(|v| v.as_str()) {
+                        if let Ok(result) = serde_json::from_str::<serde_json::Value>(result_str) {
+                            if let Some(ref aid) = result.get("artifact_id").and_then(|v| v.as_str()) {
+                                return Some(aid.to_string());
+                            }
+                        }
+                    }
+                    if let Some(ref aid) = p.get("args_preview").and_then(|v| v.as_str()) {
+                        if aid.starts_with("ar.") || aid.starts_with("art_") {
+                            return Some(aid.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
 /// and `GateAction` are the channel-neutral primitives, shared from
@@ -634,30 +685,140 @@ struct GateInput {
     /// Rejections always require motivation (§O). Approvals may require it for
     /// elevated/external actions — the gateway enforces that on submit.
     motivation_required: bool,
+    /// R++4: destructive approval classes require typing this phrase exactly
+    /// (case-insensitive) instead of optional motivation.
+    required_confirm_phrase: Option<String>,
+    /// R++2: `revision_promote` approvals — auto-filled from the timeline payload.
+    acknowledged_capabilities: Vec<String>,
 }
 
-fn gate_commit_validation_error(gi: &GateInput) -> Option<&'static str> {
+fn approval_entry_for_id<'a>(
+    entries: &'a [SessionTimelineEntry],
+    request_id: &str,
+) -> Option<&'a SessionTimelineEntry> {
+    entries.iter().find(|entry| approval_id_for(entry).as_deref() == Some(request_id))
+}
+
+fn approval_gate_requirements_from_entry(
+    entry: &SessionTimelineEntry,
+) -> (Option<String>, Vec<String>) {
+    let confirm_phrase = payload_field_str(entry, "confirm_phrase");
+    let mut acknowledged_capabilities = Vec::new();
+    if let Some(payload) = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    {
+        for key in ["added_capabilities", "broadened_capabilities"] {
+            if let Some(values) = payload.get(key).and_then(|v| v.as_array()) {
+                for value in values {
+                    if let Some(cap) = value.as_str() {
+                        acknowledged_capabilities.push(cap.to_string());
+                    }
+                }
+            }
+        }
+    }
+    acknowledged_capabilities.sort();
+    acknowledged_capabilities.dedup();
+    (confirm_phrase, acknowledged_capabilities)
+}
+
+fn approval_gate_requirements(
+    client: &RoomClient,
+    entries: &[SessionTimelineEntry],
+    request_id: &str,
+) -> (Option<String>, Vec<String>) {
+    if let Some(entry) = approval_entry_for_id(entries, request_id) {
+        let (mut confirm_phrase, mut acknowledged_capabilities) =
+            approval_gate_requirements_from_entry(entry);
+        if confirm_phrase.is_none() || acknowledged_capabilities.is_empty() {
+            if let Ok(value) = rpc(
+                client,
+                "approvals.inspect",
+                serde_json::json!({ "request_id": request_id }),
+            ) {
+                if confirm_phrase.is_none() {
+                    confirm_phrase = value
+                        .get("confirm_phrase")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                }
+                if acknowledged_capabilities.is_empty() {
+                    for key in ["added_capabilities", "broadened_capabilities"] {
+                        if let Some(values) = value.get(key).and_then(|v| v.as_array()) {
+                            for cap in values {
+                                if let Some(name) = cap.as_str() {
+                                    acknowledged_capabilities.push(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                    acknowledged_capabilities.sort();
+                    acknowledged_capabilities.dedup();
+                }
+            }
+        }
+        return (confirm_phrase, acknowledged_capabilities);
+    }
+    (None, Vec::new())
+}
+
+fn approval_gate_input(
+    client: &RoomClient,
+    action: GateAction,
+    id: String,
+    entries: &[SessionTimelineEntry],
+    motivation_required: bool,
+) -> GateInput {
+    let (required_confirm_phrase, acknowledged_capabilities) =
+        approval_gate_requirements(client, entries, &id);
+    GateInput {
+        action,
+        id,
+        buffer: String::new(),
+        options: Vec::new(),
+        allow_freeform: true,
+        motivation_required,
+        required_confirm_phrase,
+        acknowledged_capabilities,
+    }
+}
+
+fn gate_commit_validation_error(gi: &GateInput) -> Option<String> {
+    if matches!(gi.action, GateAction::Approve) {
+        if let Some(ref required) = gi.required_confirm_phrase {
+            if !gi.buffer.trim().eq_ignore_ascii_case(required) {
+                return Some(format!(
+                    "✗ type confirm phrase exactly: '{required}'"
+                ));
+            }
+            return None;
+        }
+    }
     if matches!(gi.action, GateAction::Approve | GateAction::Reject)
         && gi.motivation_required
         && gi.buffer.trim().is_empty()
     {
-        Some("✗ motivation required — type a reason and press Enter")
+        Some("✗ motivation required — type a reason and press Enter".to_string())
     } else {
         None
     }
 }
 
-fn gate_input_label(gi: &GateInput) -> &'static str {
+fn gate_input_label(gi: &GateInput) -> String {
     match gi.action {
-        GateAction::Answer => "ANSWER",
+        GateAction::Answer => "ANSWER".to_string(),
         GateAction::Approve => {
-            if gi.motivation_required {
-                "APPROVE — motivation (required)"
+            if gi.required_confirm_phrase.is_some() {
+                "APPROVE — confirm phrase (required)".to_string()
+            } else if gi.motivation_required {
+                "APPROVE — motivation (required)".to_string()
             } else {
-                "APPROVE — motivation (optional)"
+                "APPROVE — motivation (optional)".to_string()
             }
         }
-        GateAction::Reject => "REJECT — motivation (required)",
+        GateAction::Reject => "REJECT — motivation (required)".to_string(),
     }
 }
 
@@ -1000,6 +1161,8 @@ pub fn run(
     let mut spinner_frame: usize = 0;
     let mut info_panel_open = false;
     let mut info_scroll: u16 = 0;
+    let mut artifact_viewer: Option<ArtifactViewer> = None;
+    let mut artifact_file_view: Option<ArtifactFileView> = None;
     let mut quit_armed_until: Option<Instant> = None;
     let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
     let mut last_announced_plan_event: Option<String> = None;
@@ -1378,7 +1541,11 @@ pub fn run(
                     }
                     match key.code {
                         KeyCode::Esc => {
-                            if info_panel_open {
+                            if artifact_file_view.is_some() {
+                                artifact_file_view = None;
+                            } else if artifact_viewer.is_some() {
+                                artifact_viewer = None;
+                            } else if info_panel_open {
                                 info_panel_open = false;
                                 info_scroll = 0;
                             } else if detail.is_some() {
@@ -1479,18 +1646,17 @@ pub fn run(
                                 view_gate.as_ref().filter(|g| matches!(g.kind, GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation))
                             {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
-                                input = Some(GateInput {
-                                    action: if key.code == KeyCode::Char('y') {
+                                input = Some(approval_gate_input(
+                                    client,
+                                    if key.code == KeyCode::Char('y') {
                                         GateAction::Approve
                                     } else {
                                         GateAction::Reject
                                     },
-                                    id: g.id.clone(),
-                                    buffer: String::new(),
-                                    options: Vec::new(),
-                                    allow_freeform: true,
-                                    motivation_required: key.code == KeyCode::Char('n'),
-                                });
+                                    g.id.clone(),
+                                    &entries,
+                                    key.code == KeyCode::Char('n'),
+                                ));
                                 status = None;
                                 continue;
                             }
@@ -1510,6 +1676,8 @@ pub fn run(
                                     options,
                                     allow_freeform,
                                     motivation_required: false,
+                                    required_confirm_phrase: None,
+                                    acknowledged_capabilities: Vec::new(),
                                 });
                                 status = None;
                             }
@@ -1561,6 +1729,8 @@ pub fn run(
                                     options,
                                     allow_freeform,
                                     motivation_required: false,
+                                    required_confirm_phrase: None,
+                                    acknowledged_capabilities: Vec::new(),
                                 });
                                 status = None;
                             } else {
@@ -1646,6 +1816,8 @@ pub fn run(
                                     options,
                                     allow_freeform,
                                     motivation_required: false,
+                                    required_confirm_phrase: None,
+                                    acknowledged_capabilities: Vec::new(),
                                 });
                                 status = None;
                             } else {
@@ -1659,6 +1831,8 @@ pub fn run(
                         KeyCode::Char('/') | KeyCode::Char(':') => {
                             detail = None;
                             info_panel_open = false;
+                            artifact_viewer = None;
+                            artifact_file_view = None;
                             slash = Some(String::new());
                             status = None;
                         }
@@ -1672,8 +1846,90 @@ pub fn run(
                                 status = Some("info: j/k scroll · Esc close".to_string());
                             }
                         }
+                        KeyCode::Char('o') => {
+                            if artifact_file_view.is_some() {
+                            } else if let Some(ref viewer) = artifact_viewer {
+                                if let Some(file) = viewer.files.get(viewer.selected) {
+                                    let result = rpc(
+                                        client,
+                                        "artifact.read_file",
+                                        serde_json::json!({
+                                            "artifact_id": viewer.artifact_id,
+                                            "file_name": file.name,
+                                        }),
+                                    );
+                                    match result {
+                                        Ok(v) => {
+                                            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                                artifact_file_view = Some(ArtifactFileView {
+                                                    artifact_id: viewer.artifact_id.clone(),
+                                                    file_name: file.name.clone(),
+                                                    content: content.to_string(),
+                                                    scroll: 0,
+                                                });
+                                            } else {
+                                                status = Some("artifact.read_file: no content field".to_string());
+                                            }
+                                        }
+                                        Err(e) => status = Some(format!("artifact read failed: {e}")),
+                                    }
+                                }
+                            } else if let Some((_, src)) = view_indexed.get(selected) {
+                                let idx = match src {
+                                    RowSource::Single(i) => *i,
+                                    RowSource::Run { start, .. } => *start,
+                                };
+                                if let Some(entry) = view_visible.get(idx) {
+                                    if let Some(artifact_id) = artifact_id_for_entry(entry) {
+                                        let result = rpc(
+                                            client,
+                                            "artifact.list_files",
+                                            serde_json::json!({
+                                                "artifact_id": artifact_id,
+                                            }),
+                                        );
+                                        match result {
+                                            Ok(v) => {
+                                                let files: Vec<ArtifactFileEntry> = v.get("files")
+                                                    .and_then(|f| f.as_array())
+                                                    .map(|arr| {
+                                                        arr.iter().filter_map(|item| {
+                                                            Some(ArtifactFileEntry {
+                                                                name: item.get("name")?.as_str()?.to_string(),
+                                                                alias: item.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                                                            })
+                                                        }).collect()
+                                                    })
+                                                    .unwrap_or_default();
+                                                if files.is_empty() {
+                                                    status = Some("artifact has no files".to_string());
+                                                } else {
+                                                    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("unknown").to_string();
+                                                    artifact_viewer = Some(ArtifactViewer {
+                                                        artifact_id,
+                                                        kind,
+                                                        files,
+                                                        selected: 0,
+                                                        scroll: 0,
+                                                    });
+                                                    status = Some("artifact: Enter to view · Esc close".to_string());
+                                                }
+                                            }
+                                            Err(e) => status = Some(format!("artifact list failed: {e}")),
+                                        }
+                                    } else {
+                                        status = Some("no artifact on this row".to_string());
+                                    }
+                                }
+                            }
+                        }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if info_panel_open {
+                            if artifact_file_view.is_some() {
+                                artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_add(1);
+                            } else if artifact_viewer.is_some() {
+                                let viewer = artifact_viewer.as_mut().unwrap();
+                                viewer.selected = (viewer.selected + 1).min(viewer.files.len().saturating_sub(1));
+                            } else if info_panel_open {
                                 info_scroll = info_scroll.saturating_add(1);
                             } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
@@ -1684,7 +1940,12 @@ pub fn run(
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if info_panel_open {
+                            if artifact_file_view.is_some() {
+                                artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_sub(1);
+                            } else if artifact_viewer.is_some() {
+                                let viewer = artifact_viewer.as_mut().unwrap();
+                                viewer.selected = viewer.selected.saturating_sub(1);
+                            } else if info_panel_open {
                                 info_scroll = info_scroll.saturating_sub(1);
                             } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_sub(1);
@@ -2071,6 +2332,8 @@ pub fn run(
                 info_panel.as_ref(),
                 info_scroll,
                 gate_count,
+                artifact_viewer.as_ref(),
+                artifact_file_view.as_ref(),
             )
         })?;
 
@@ -2342,16 +2605,31 @@ fn answer_params(gi: &GateInput, chosen: Option<&GateOption>) -> Result<serde_js
 /// failure, leaving the gate offerable so the operator can retry.
 fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>) -> Result<String, String> {
     let text = gi.buffer.trim();
-    let reason = (!text.is_empty()).then(|| text.to_string());
+    let reason = if gi.required_confirm_phrase.is_some() {
+        None
+    } else {
+        (!text.is_empty()).then(|| text.to_string())
+    };
     let (result, verb) = match gi.action {
-        GateAction::Approve => (
-            rpc(
-                client,
-                "approvals.approve",
-                serde_json::json!({ "request_id": gi.id, "decided_by": "operator", "reason": reason }),
-            ),
-            "approved",
-        ),
+        GateAction::Approve => {
+            let mut params = serde_json::json!({
+                "request_id": gi.id,
+                "decided_by": "operator",
+            });
+            if let Some(r) = reason {
+                params["reason"] = serde_json::json!(r);
+            }
+            if gi.required_confirm_phrase.is_some() && !text.is_empty() {
+                params["confirm_phrase"] = serde_json::json!(text);
+            }
+            if !gi.acknowledged_capabilities.is_empty() {
+                params["acknowledged_capabilities"] = serde_json::json!(gi.acknowledged_capabilities);
+            }
+            (
+                rpc(client, "approvals.approve", params),
+                "approved",
+            )
+        }
         GateAction::Reject => (
             rpc(
                 client,
@@ -3532,6 +3810,8 @@ fn draw(
     info_panel: Option<&InfoPanel>,
     info_scroll: u16,
     gate_count: usize,
+    artifact_viewer: Option<&ArtifactViewer>,
+    artifact_file_view: Option<&ArtifactFileView>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -3616,6 +3896,74 @@ fn draw(
                         .borders(Borders::ALL)
                         .title(" Session Info [?/Esc close] ")
                         .border_style(Style::default().fg(Color::Cyan))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    }
+
+    // Artifact file content overlay (level 2 of artifact viewer).
+    if let Some(ref view) = artifact_file_view {
+        let area = centered_rect(80, 85, f.area());
+        let lines: Vec<Line> = view
+            .content
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().bg(Color::Black))))
+            .collect();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+        let scroll = view.scroll.min(max_scroll);
+        let title = format!(
+            " {} {} → {} [Esc back] ",
+            view.artifact_id, view.file_name, lines.len()
+        );
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Green))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    } else if let Some(ref viewer) = artifact_viewer {
+        // Artifact file list overlay (level 1).
+        let area = centered_rect(60, 60, f.area());
+        let lines: Vec<Line> = viewer
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let marker = if i == viewer.selected { " > " } else { "   " };
+                let style = if i == viewer.selected {
+                    Style::default().fg(Color::Yellow).bg(Color::Black)
+                } else {
+                    Style::default().bg(Color::Black)
+                };
+                Line::from(Span::styled(
+                    format!("{}{}", marker, f.name),
+                    style,
+                ))
+            })
+            .collect();
+        let title = format!(
+            " {} [{}] {} files [Enter/Esc] ",
+            viewer.artifact_id, viewer.kind, viewer.files.len()
+        );
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+        let scroll = viewer.scroll.min(max_scroll);
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Green))
                         .style(Style::default().bg(Color::Black)),
                 )
                 .scroll((scroll, 0)),
@@ -4169,6 +4517,24 @@ mod tests {
     }
 
     #[test]
+    fn gate_commit_validation_requires_confirm_phrase_for_promotion() {
+        let gi = GateInput {
+            action: GateAction::Approve,
+            id: "apr-promote".into(),
+            buffer: "agreed".into(),
+            options: Vec::new(),
+            allow_freeform: true,
+            motivation_required: false,
+            required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
+            acknowledged_capabilities: vec!["NetworkAccess".into()],
+        };
+        assert!(gate_commit_validation_error(&gi).is_some());
+        let mut ok = gi;
+        ok.buffer = "promote weather-lookup rev_sha256:abc".into();
+        assert!(gate_commit_validation_error(&ok).is_none());
+    }
+
+    #[test]
     fn gate_commit_validation_requires_motivation_for_reject() {
         let gi = GateInput {
             action: GateAction::Reject,
@@ -4177,6 +4543,8 @@ mod tests {
             options: Vec::new(),
             allow_freeform: true,
             motivation_required: true,
+            required_confirm_phrase: None,
+            acknowledged_capabilities: Vec::new(),
         };
         assert!(gate_commit_validation_error(&gi).is_some());
         let mut ok = gi;
@@ -4196,6 +4564,8 @@ mod tests {
             options: Vec::new(),
             allow_freeform: true,
             motivation_required: false,
+            required_confirm_phrase: None,
+            acknowledged_capabilities: Vec::new(),
         };
         let err = resolve_gate(&client, &gi, None).unwrap_err();
         assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
@@ -4214,6 +4584,8 @@ mod tests {
             options,
             allow_freeform,
             motivation_required: false,
+            required_confirm_phrase: None,
+            acknowledged_capabilities: Vec::new(),
         };
 
         // A typed number selects the matching option — even when free-text is

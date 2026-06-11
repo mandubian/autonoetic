@@ -695,7 +695,12 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
     if let Some(risk) = field("risk_summary") {
         lines.push(format!("  risk: {}", one_line(&risk, 120)));
     }
-    lines.push("  ↳ y approve · n reject".to_string());
+    if let Some(phrase) = field("confirm_phrase") {
+        lines.push(format!("  confirm phrase: {}", one_line(&phrase, 120)));
+        lines.push("  ↳ y then type confirm phrase · n reject".to_string());
+    } else {
+        lines.push("  ↳ y approve · n reject".to_string());
+    }
     (headline, Some(lines.join("\n")))
 }
 

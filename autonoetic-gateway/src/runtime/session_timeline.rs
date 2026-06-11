@@ -158,6 +158,11 @@ pub fn emit_approval_pending_timeline_event(
             );
         }
     }
+    if let Some(phrase) = approval.confirm_phrase.as_ref().filter(|p| !p.is_empty()) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("confirm_phrase".into(), serde_json::Value::String(phrase.clone()));
+        }
+    }
     let event = build_timeline_event(
         root,
         approval.session_id.clone(),
