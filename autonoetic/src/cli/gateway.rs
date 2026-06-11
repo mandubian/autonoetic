@@ -59,7 +59,7 @@ pub fn handle_gateway_stop() {
 }
 
 /// Probe and report host capabilities (sandbox tiers + language toolchains).
-/// Exit code is non-zero when no execution tier is runnable at all.
+/// Exit code is non-zero when no sandbox tier is runnable at all.
 pub fn handle_gateway_preflight(json: bool) -> anyhow::Result<()> {
     let caps = autonoetic_gateway::host_capabilities::HostCapabilities::gather();
     if json {
@@ -71,7 +71,7 @@ pub fn handle_gateway_preflight(json: bool) -> anyhow::Result<()> {
     }
     if !caps.has_any_sandbox_tier() {
         anyhow::bail!(
-            "No sandbox tier is runnable on this host — install bwrap or docker, or build with the wasm-tier feature."
+            "No sandbox tier is runnable on this host — install bwrap, docker, or firecracker, or build with the wasm-tier feature."
         );
     }
     Ok(())
