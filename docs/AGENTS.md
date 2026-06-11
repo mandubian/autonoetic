@@ -584,6 +584,16 @@ script_entry: "scripts/main.py"  # Must exist and be executable
 
 The injected Python / TypeScript SDK includes input helpers. Prefer `load_invocation()` / `load_input()` over open-coding `os.environ["AUTONOETIC_INPUT"]`.
 
+**JavaScript agents (wasm tier):** a `script_entry` ending in `.js`/`.mjs` is a
+JavaScript agent and **must declare `sandbox: "wasm"`**. At bootstrap the gateway
+compiles the entry to a self-contained `.wasm` module with [Javy](https://github.com/bytecodealliance/javy)
+(`javy build … -C deterministic=y`) and bundles that module — the compiled
+`.wasm` is content-addressed in the revision and runs on the in-process wasm
+tier. The host needs `javy` on `PATH` (check with `autonoetic gateway preflight`);
+bootstrap fails with a clear hint otherwise. The JS runtime is QuickJS (ES2020-ish,
+no Node APIs); input arrives on stdin (or argv with `script_input_mode: args`)
+and `console.log` output is captured as the script result.
+
 **Input schema contract:**
 - The agent author declares `io.accepts` (and optionally `io.returns`) in the manifest to describe the input the script expects. The gateway exposes this schema through `agent.describe` so callers (including the planner) can translate natural-language intent into matching fields before calling `agent_spawn`.
 - When `io.accepts` is present, the gateway validates the caller's `message` at spawn time. On mismatch the call is rejected with a structured tool error that includes `expected_schema`, per-field errors, and a repair hint — the calling LLM reads this and retries with a corrected payload.

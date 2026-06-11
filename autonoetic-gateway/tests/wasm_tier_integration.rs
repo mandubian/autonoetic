@@ -8,6 +8,58 @@ use autonoetic_gateway::exec_request::{CodeSource, ExecutionKind};
 use autonoetic_gateway::sandbox::{SandboxDriverKind, SandboxRunner};
 use tempfile::tempdir;
 
+/// End-to-end JS support: a Javy-compiled JavaScript module runs on the wasm
+/// tier through the unified entry, capturing `console.log` on stdout. Skips when
+/// the Javy compiler isn't installed (mirrors the docker availability gating).
+#[test]
+fn javy_compiled_javascript_runs_through_run_to_output() {
+    if !autonoetic_gateway::host_capabilities::is_javy_available() {
+        eprintln!("skipping javy e2e: `javy` not on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.js"),
+        "console.log('js-agent-ran');",
+    )
+    .unwrap();
+    let wasm = dir.path().join("main.wasm");
+    let status = std::process::Command::new("javy")
+        .arg("build")
+        .arg(dir.path().join("main.js"))
+        .arg("-o")
+        .arg(&wasm)
+        .arg("-C")
+        .arg("deterministic=y")
+        .status()
+        .expect("spawn javy");
+    assert!(status.success(), "javy build should succeed");
+
+    let request = ExecutionKind::Code {
+        language: None,
+        source: CodeSource::Entry("main.wasm".to_string()),
+        args: vec![],
+    };
+    let out = SandboxRunner::run_to_output(
+        SandboxDriverKind::Wasm,
+        dir.path().to_str().unwrap(),
+        &request,
+        None,
+        None,
+        &[],
+        None,
+        None,
+    )
+    .expect("javy-compiled module should run on the wasm tier");
+
+    assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("js-agent-ran"),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 #[test]
 fn wasm_agent_entry_runs_through_run_to_output() {
     let dir = tempdir().unwrap();
