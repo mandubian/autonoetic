@@ -153,9 +153,10 @@ impl NativeTool for ContentWriteTool {
             id: "content.write_protocol",
             when: GuidanceCondition::ToolPresent("content_write"),
             priority: 9,
-            prose: "**`content_write` requires both `name` and `content`** — the gateway rejects a \
-write that omits `name`. Set `name` to the path-like filename you want (e.g. `src/main.py`, \
-`weather_fetcher.py`); session content is mounted at `/tmp/<name>` in the sandbox."
+            prose: "**`content_write` requires both `name` and `content`** — omitting either is \
+rejected. Set `name` to the path-like filename you want (e.g. `src/main.py`, `weather_fetcher.py`); \
+the response returns a `ref`/alias and a `sandbox_path` (`/tmp/<name>`) where the content is mounted \
+in the sandbox."
                 .to_string(),
         }]
     }

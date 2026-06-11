@@ -805,9 +805,10 @@ impl NativeTool for SandboxExecTool {
             when: GuidanceCondition::ToolPresent("sandbox_exec"),
             priority: 10,
             prose: "**Forbidden shell commands** (blocked by gateway security policy): destructive \
-file operations (`rm`, `rmdir`, `unlink`, `shred`, `wipefs`, `mkfs`, `dd`); privilege escalation \
-(`sudo`, `su`, `doas`); environment/process disclosure (`env`, `printenv`, `declare -x`, reads of \
-`/proc/*/environ`)."
+file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shred`, `wipefs`, \
+`dd if=`/`dd of=/dev/…`, redirects to `/dev/…`); privilege escalation (`sudo`, `su`, `doas`, \
+`setuid`/`setgid`, `chmod +s`, `chown root`); and environment/process-secret disclosure (`env`, \
+`printenv`, `declare -x`, and reads of `/proc/self/environ`, `/proc/1/environ`, `/etc/environment`)."
                 .to_string(),
         }]
     }
