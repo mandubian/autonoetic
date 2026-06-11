@@ -851,18 +851,95 @@ fn plan_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     (headline, Some(lines.join("\n")))
 }
 
-/// High-visibility escalation gate card (`escalation.pending`).
+/// High-visibility session-escalate gate card (`approval.pending` + session_escalate).
+fn session_escalate_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let request_id = field("request_id")
+        .or_else(|| entry.refs.approval_request_id.clone())
+        .unwrap_or_default();
+    let reason_field = field("reason");
+    let summary_field = field("summary");
+    let reason = reason_field
+        .clone()
+        .or_else(|| summary_field.clone())
+        .unwrap_or_else(|| "agent needs human guidance".into());
+    let headline = format!("⏸ SESSION ESCALATION — {}", one_line(&reason, 88));
+    let mut lines = vec![format!("  request: {request_id}")];
+    lines.push("  reason:".to_string());
+    for line in wrap_display_lines(&reason, 76) {
+        lines.push(format!("    {line}"));
+    }
+    if let Some(agent) = field("requested_by_agent_id") {
+        lines.push(format!("  requested by: {agent}"));
+    }
+    if let Some(u) = field("urgency") {
+        lines.push(format!("  urgency: {u}"));
+    }
+    if let Some(sid) = field("session_id") {
+        lines.push(format!("  session: {sid}"));
+    }
+    if let Some(ctx) = field("context").filter(|c| !c.is_empty()) {
+        lines.push("  context:".to_string());
+        for line in wrap_display_lines(&ctx, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    if let Some(summary) = summary_field.filter(|s| {
+        !s.is_empty() && reason_field.as_ref().map(String::as_str) != Some(s.as_str())
+    }) {
+        lines.push("  summary:".to_string());
+        for line in wrap_display_lines(&summary, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    if let Some(actions) = p
+        .as_ref()
+        .and_then(|v| v.get("suggested_actions"))
+        .and_then(|v| v.as_array())
+    {
+        let joined: Vec<_> = actions
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        if !joined.is_empty() {
+            lines.push(format!("  suggested: {}", joined.join(" · ")));
+        }
+    }
+    lines.push("  ↳ y approve (resume with your guidance) · n reject · Esc peek timeline".to_string());
+    (headline, Some(lines.join("\n")))
+}
+
+/// High-visibility federation/promotion escalation gate card (`escalation.pending`).
 fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     let p = parse_entry_payload(entry);
     let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
     let synthesis = field("synthesis").unwrap_or_else(|| "operator decision requested".into());
-    let rev = field("revision_id");
-    let headline = format!("⏸ ESCALATION — {}", one_line(&synthesis, 88));
+    let headline = format!("⏸ PROMOTION ESCALATION — {}", one_line(&synthesis, 88));
     let mut lines = Vec::new();
-    if let Some(r) = rev.filter(|r| !r.is_empty()) {
-        lines.push(format!("  revision: {r}"));
+    if let Some(id) = field("escalation_id") {
+        lines.push(format!("  escalation: {id}"));
     }
-    lines.push("  ↳ review in detail pane · resolve via gateway approvals".to_string());
+    if let Some(req) = entry.refs.approval_request_id.clone().or(field("request_id")) {
+        lines.push(format!("  approval: {req}"));
+    }
+    if let Some(agent) = field("agent_id") {
+        lines.push(format!("  agent: {agent}"));
+    }
+    if let Some(rev) = field("revision_id").filter(|r| !r.is_empty()) {
+        lines.push(format!("  revision: {}", one_line(&rev, 120)));
+    }
+    if let Some(kind) = field("escalation_type") {
+        lines.push(format!("  type: {kind}"));
+    }
+    if let Some(artifact) = entry.refs.artifact_id.clone() {
+        lines.push(format!("  artifact: {artifact}"));
+    }
+    lines.push("  synthesis:".to_string());
+    for line in wrap_display_lines(&synthesis, 76) {
+        lines.push(format!("    {line}"));
+    }
+    lines.push("  ↳ y approve · n reject · Esc peek timeline".to_string());
     (headline, Some(lines.join("\n")))
 }
 
@@ -1556,15 +1633,15 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
             }
         }
         "approval.pending" => {
-            let is_wiki = entry
+            let action = entry
                 .payload
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                .is_some_and(|v| v.get("action").and_then(|a| a.as_str()) == Some("wiki_propose"));
-            if is_wiki {
-                wiki_proposal_gate_card(entry)
-            } else {
-                approval_gate_card(entry)
+                .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string));
+            match action.as_deref() {
+                Some("wiki_propose") => wiki_proposal_gate_card(entry),
+                Some("session_escalate") => session_escalate_gate_card(entry),
+                _ => approval_gate_card(entry),
             }
         }
         "user.ask.pending" => interaction_gate_card(entry),
@@ -3057,6 +3134,33 @@ mod tests {
         let ask_detail = ask_spec.detail.expect("ask card body");
         assert!(ask_detail.contains("[1] Postgres"));
         assert!(ask_detail.contains("Enter/i/r"));
+    }
+
+    #[test]
+    fn render_spec_session_escalate_approval_shows_guidance_context() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "esc-abc123",
+                "action": "session_escalate",
+                "approval_level": "operator",
+                "requested_by_agent_id": "planner.default",
+                "urgency": "normal",
+                "reason": "Unit tests require live network and cannot be evaluated",
+                "context": "Federation blocked on environment.",
+                "suggested_actions": ["accept without dynamic evidence", "retry with mocks"],
+            }),
+        );
+        let spec = render_spec(&appr);
+        assert!(spec.headline.contains("SESSION ESCALATION"));
+        let detail = spec.detail.expect("session escalate detail");
+        assert!(detail.contains("planner.default"));
+        assert!(detail.contains("live network"));
+        assert!(detail.contains("Federation blocked"));
+        assert!(detail.contains("retry with mocks"));
     }
 
     #[test]

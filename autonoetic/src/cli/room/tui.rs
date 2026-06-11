@@ -704,6 +704,8 @@ struct GateModal {
     /// When true, the timeline stays interactive; a compact banner reminds the
     /// operator that a gate is still open (`g` reopens the full modal).
     peek_timeline: bool,
+    /// Fallback detail from `approvals.inspect` when the timeline row is sparse.
+    inspect_lines: Vec<String>,
 }
 
 fn gate_modal_kind(gate: &GateRef) -> bool {
@@ -730,6 +732,87 @@ fn newest_blocking_gate_event(
     None
 }
 
+fn gate_inspect_detail_lines(value: &serde_json::Value) -> Vec<String> {
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let mut lines = Vec::new();
+    if let Some(action) = field("action") {
+        lines.push(format!("  action: {action}"));
+    }
+    if let Some(level) = field("approval_level") {
+        lines.push(format!("  level: {level}"));
+    }
+    match field("action").as_deref() {
+        Some("session_escalate") => {
+            if let Some(agent) = field("requested_by_agent_id") {
+                lines.push(format!("  requested by: {agent}"));
+            }
+            if let Some(u) = field("urgency") {
+                lines.push(format!("  urgency: {u}"));
+            }
+            if let Some(reason) = field("reason").or_else(|| field("summary")) {
+                lines.push("  reason:".to_string());
+                for line in render::wrap_display_lines(&reason, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            if let Some(ctx) = field("context") {
+                lines.push("  context:".to_string());
+                for line in render::wrap_display_lines(&ctx, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            if let Some(actions) = value.get("suggested_actions").and_then(|v| v.as_array()) {
+                let joined: Vec<_> = actions.iter().filter_map(|v| v.as_str()).collect();
+                if !joined.is_empty() {
+                    lines.push(format!("  suggested: {}", joined.join(" · ")));
+                }
+            }
+        }
+        Some("revision_promote") => {
+            if let Some(agent) = field("agent_id") {
+                lines.push(format!("  agent: {agent}"));
+            }
+            if let Some(rev) = field("revision_id") {
+                lines.push(format!("  revision: {}", render::one_line(&rev, 120)));
+            }
+            if let Some(summary) = field("summary") {
+                lines.push("  about:".to_string());
+                for line in render::wrap_display_lines(&summary, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+        }
+        _ => {
+            if let Some(summary) = field("summary") {
+                lines.push("  about:".to_string());
+                for line in render::wrap_display_lines(&summary, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            if let Some(risk) = field("risk_summary") {
+                lines.push(format!("  risk: {}", render::one_line(&risk, 120)));
+            }
+        }
+    }
+    lines
+}
+
+fn fetch_gate_inspect_detail(client: &RoomClient, request_id: &str) -> Vec<String> {
+    rpc(
+        client,
+        "approvals.inspect",
+        serde_json::json!({ "request_id": request_id }),
+    )
+    .map(|v| gate_inspect_detail_lines(&v))
+    .unwrap_or_default()
+}
+
 fn gate_entry_for_ref<'a>(
     entries: &'a [SessionTimelineEntry],
     gate: &GateRef,
@@ -740,8 +823,10 @@ fn gate_entry_for_ref<'a>(
                 && approval_id_for(e).as_deref() == Some(gate.id.as_str())
         }
         GateKind::Escalation => {
-            e.event_type == "escalation.pending"
-                && e.refs.approval_request_id.as_deref() == Some(gate.id.as_str())
+            (e.event_type == "escalation.pending"
+                && e.refs.approval_request_id.as_deref() == Some(gate.id.as_str()))
+                || (e.event_type == "approval.pending"
+                    && approval_id_for(e).as_deref() == Some(gate.id.as_str()))
         }
         GateKind::Interaction => {
             e.event_type == "user.ask.pending"
@@ -2474,10 +2559,12 @@ pub fn run(
                     info_panel_open = false;
                     artifact_viewer = None;
                     artifact_file_view = None;
+                    let inspect_lines = fetch_gate_inspect_detail(client, &gate_ref.id);
                     gate_modal = Some(GateModal {
                         gate: gate_ref,
                         scroll: 0,
                         peek_timeline: false,
+                        inspect_lines,
                     });
                 }
             }
@@ -2751,11 +2838,13 @@ fn gate_for_entry(
     match e.event_type.as_str() {
         "approval.pending" => {
             let id = approval_id_for(e)?;
-            let is_wiki = payload_field_str(e, "action").as_deref() == Some("wiki_propose");
-            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
-                kind: if is_wiki { GateKind::WikiProposal } else { GateKind::Approval },
-                id,
-            })
+            let action = payload_field_str(e, "action");
+            let kind = match action.as_deref() {
+                Some("wiki_propose") => GateKind::WikiProposal,
+                Some("session_escalate") => GateKind::Escalation,
+                _ => GateKind::Approval,
+            };
+            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef { kind, id })
         }
         "plan.pending" => {
             let id = plan_id_for(e)?;
@@ -4425,9 +4514,29 @@ fn draw(
 
 fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
     if let Some(entry) = entry {
-        if payload_field_str(entry, "action").as_deref() == Some("revision_promote") {
-            let agent = payload_field_str(entry, "agent_id").unwrap_or_else(|| "agent".into());
-            return format!(" ⚠ PROMOTE AGENT — {agent} ");
+        match payload_field_str(entry, "action").as_deref() {
+            Some("revision_promote") => {
+                let agent = payload_field_str(entry, "agent_id").unwrap_or_else(|| "agent".into());
+                return format!(" ⚠ PROMOTE AGENT — {agent} ");
+            }
+            Some("session_escalate") => {
+                let reason = payload_field_str(entry, "reason")
+                    .or_else(|| payload_field_str(entry, "summary"))
+                    .unwrap_or_else(|| "needs guidance".into());
+                return format!(
+                    " ⚠ SESSION ESCALATION — {} ",
+                    render::one_line(&reason, 48)
+                );
+            }
+            _ => {}
+        }
+        if entry.event_type == "escalation.pending" {
+            let synthesis = payload_field_str(entry, "synthesis")
+                .unwrap_or_else(|| "operator decision".into());
+            return format!(
+                " ⚠ PROMOTION ESCALATION — {} ",
+                render::one_line(&synthesis, 48)
+            );
         }
     }
     match modal.gate.kind {
@@ -4570,6 +4679,7 @@ fn draw_gate_modal(
     input: Option<&GateInput>,
     status: Option<&str>,
 ) {
+    let inspect_lines = &modal.inspect_lines;
     if modal.peek_timeline {
         draw_gate_modal_peek_banner(f, modal, entry);
         return;
@@ -4607,6 +4717,25 @@ fn draw_gate_modal(
         }
     } else {
         content_lines.push(Line::from(format!("Gate id: {}", modal.gate.id)));
+    }
+    if content_lines.len() <= 2 && !inspect_lines.is_empty() {
+        content_lines.push(Line::from(Span::styled(
+            "From approval record:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for line in inspect_lines {
+            content_lines.push(Line::from(line.clone()));
+        }
+    } else if !inspect_lines.is_empty()
+        && entry.is_some_and(|e| {
+            payload_field_str(e, "reason").is_none()
+                && payload_field_str(e, "synthesis").is_none()
+                && payload_field_str(e, "summary").is_none()
+        })
+    {
+        for line in inspect_lines {
+            content_lines.push(Line::from(line.clone()));
+        }
     }
 
     let block = Block::default()
