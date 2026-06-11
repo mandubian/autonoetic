@@ -67,7 +67,7 @@ Each wasm run is bounded so a runaway module can't spin or balloon:
   hang.
 - **Memory** is capped via `StoreLimits`.
 
-Defaults (`WasmLimits`: 20 B fuel, 512 MiB) are generous enough for real
+Defaults (`WasmLimits`: 20,000,000,000 fuel units (20B), 512 MiB) are generous enough for real
 interpreter runs and live in code, not the signed constitution.
 
 ### Determinism & content-addressing

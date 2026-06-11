@@ -24,16 +24,21 @@ fn javy_compiled_javascript_runs_through_run_to_output() {
     )
     .unwrap();
     let wasm = dir.path().join("main.wasm");
-    let status = std::process::Command::new("javy")
+    let output = std::process::Command::new("javy")
         .arg("build")
         .arg(dir.path().join("main.js"))
         .arg("-o")
         .arg(&wasm)
         .arg("-C")
         .arg("deterministic=y")
-        .status()
+        .output()
         .expect("spawn javy");
-    assert!(status.success(), "javy build should succeed");
+    assert!(
+        output.status.success(),
+        "javy build should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let request = ExecutionKind::Code {
         language: None,
@@ -87,16 +92,21 @@ console.log(JSON.stringify({ greeting: "hello, " + (task || "world") }));
 "#;
     std::fs::write(dir.path().join("main.js"), js).unwrap();
     let wasm = dir.path().join("main.wasm");
-    let status = std::process::Command::new("javy")
+    let output = std::process::Command::new("javy")
         .arg("build")
         .arg(dir.path().join("main.js"))
         .arg("-o")
         .arg(&wasm)
         .arg("-C")
         .arg("deterministic=y")
-        .status()
+        .output()
         .expect("spawn javy");
-    assert!(status.success(), "javy build should succeed");
+    assert!(
+        output.status.success(),
+        "javy build should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let request = ExecutionKind::Code {
         language: None,
