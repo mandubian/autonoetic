@@ -10,6 +10,7 @@ use autonoetic_types::agent::AgentManifest;
 const FOUNDATION_CORE: &str = include_str!("foundation_core.md");
 const FOUNDATION_WORKFLOW: &str = include_str!("foundation_workflow.md");
 const FOUNDATION_ARTIFACT: &str = include_str!("foundation_artifact.md");
+const FOUNDATION_EDITING: &str = include_str!("foundation_editing.md");
 const FOUNDATION_SCRIPT: &str = include_str!("foundation_script.md");
 const FOUNDATION_DIGEST: &str = include_str!("foundation_digest.md");
 const FOUNDATION_SDK: &str = include_str!("foundation_sdk.md");
@@ -55,6 +56,9 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
 
     if has_artifact_caps {
         parts.push(FOUNDATION_ARTIFACT.trim());
+        // Write access ⇒ the agent can also `content_patch`; teach the
+        // write-vs-patch choice (issue #462).
+        parts.push(FOUNDATION_EDITING.trim());
     }
 
     if is_script_mode {

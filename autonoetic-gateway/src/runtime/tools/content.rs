@@ -29,7 +29,7 @@ impl NativeTool for ContentWriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Write content to the session's content store. Returns the registered name, a short ref (`cnt_<8 hex>`), and `sandbox_path` (`/tmp/<name>`) for sandbox.exec. Use `content.read` with the name, 8-char alias, or ref — not the digest as a shell path. Optional `include_canonical_digest` adds the sha256 digest for debugging.".to_string(),
+            description: "Write a NEW entry to the session's content store (or fully replace one). Returns the registered name, a short ref (`cnt_<8 hex>`), and `sandbox_path` (`/tmp/<name>`) for sandbox.exec. To EDIT an entry you already wrote, prefer `content_patch` — it sends only the changed region instead of the whole file. Use `content.read` with the name, 8-char alias, or ref — not the digest as a shell path. Optional `include_canonical_digest` adds the sha256 digest for debugging.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
