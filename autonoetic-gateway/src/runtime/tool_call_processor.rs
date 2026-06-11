@@ -167,14 +167,15 @@ impl<'a> ToolCallProcessor<'a> {
                     continue;
                 }
             };
-            tracer.log_tool_requested(&tc.name, &tc.arguments, intent.as_deref())?;
+            let canonical_tool = Self::canonical_tool_name(&tc.name);
+            tracer.log_tool_requested(canonical_tool, &tc.arguments, intent.as_deref())?;
 
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
                 Ok(res) => {
                     let res = normalize_tool_result_json(&res);
                     let event_id = tracer.log_tool_completed_with_approval(
-                        &tc.name,
+                        canonical_tool,
                         &res,
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
@@ -210,7 +211,7 @@ impl<'a> ToolCallProcessor<'a> {
                         ));
                     }
                     let event_id = tracer.log_tool_completed_with_approval(
-                        &tc.name,
+                        canonical_tool,
                         &error_json,
                         Some(&tc.arguments),
                         approval_ref.as_deref(),

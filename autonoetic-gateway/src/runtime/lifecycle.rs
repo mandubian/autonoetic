@@ -1265,8 +1265,28 @@ impl AgentExecutor {
             .manifest
             .llm_config
             .as_ref()
-            .map(|c| c.model.clone())
-            .unwrap_or_else(|| "gpt-4o".to_string());
+            .and_then(|c| {
+                // If the model is explicitly set, use it.
+                // Otherwise try to derive one from the routing preset's first model.
+                if !c.model.is_empty() && c.model != "unknown" {
+                    Some(c.model.clone())
+                } else {
+                    c.routing_preset.as_ref().and_then(|preset_name| {
+                        self.config
+                            .as_ref()
+                            .and_then(|cfg| cfg.llm_presets.get(preset_name))
+                            .and_then(|preset| preset.routing.as_ref())
+                            .and_then(|routing| routing.models.first())
+                            .and_then(|first_model_name| {
+                                self.config
+                                    .as_ref()
+                                    .and_then(|cfg| cfg.llm_presets.get(first_model_name))
+                                    .and_then(|fixed| fixed.model.clone())
+                            })
+                    })
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let temperature = self
             .manifest
             .llm_config

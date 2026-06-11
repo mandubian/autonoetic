@@ -3205,6 +3205,46 @@ mod tests {
     }
 
     #[test]
+    fn render_spec_tool_completed_shows_args_preview_from_timeline_payload() {
+        let spawn = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "result": r#"{"accepted":true}"#,
+                "args_preview": "coder.default"
+            }),
+        );
+        let spawn_spec = render_spec(&spawn);
+        assert!(
+            spawn_spec.headline.contains("coder.default"),
+            "headline: {}",
+            spawn_spec.headline
+        );
+        assert_eq!(spawn_spec.detail.as_deref(), Some("coder.default"));
+
+        let write = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "content_write",
+                "result": r#"{"ok":true}"#,
+                "args_preview": "skills/weather/SKILL.md"
+            }),
+        );
+        let write_spec = render_spec(&write);
+        assert!(write_spec.headline.contains("skills/weather/SKILL.md"));
+        assert_eq!(
+            write_spec.detail.as_deref(),
+            Some("skills/weather/SKILL.md")
+        );
+    }
+
+    #[test]
     fn agent_spawn_agent_id_from_completed_result_json() {
         let e = entry(
             SessionRole::Planner,
