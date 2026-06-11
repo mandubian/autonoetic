@@ -53,11 +53,20 @@ impl fmt::Display for FuzzyError {
         match self {
             FuzzyError::EmptyPattern => write!(f, "old_string is empty"),
             FuzzyError::NotFound => write!(f, "old_string not found in content"),
-            FuzzyError::Ambiguous { strategy, count } => write!(
-                f,
-                "old_string matched {count} times ({} strategy); pass a longer, more unique snippet or set replace_all",
-                strategy.as_str()
-            ),
+            FuzzyError::Ambiguous { strategy, count } => {
+                // replace_all only applies to the exact strategy; don't suggest
+                // it for line-based matches, where it can't help.
+                let tail = if matches!(strategy, MatchStrategy::Exact) {
+                    "; pass a longer, more unique snippet or set replace_all"
+                } else {
+                    "; pass a longer, more unique snippet with surrounding context lines"
+                };
+                write!(
+                    f,
+                    "old_string matched {count} times ({} strategy){tail}",
+                    strategy.as_str()
+                )
+            }
         }
     }
 }

@@ -1,13 +1,14 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
-use crate::runtime::content_store::{ContentStore, ContentVisibility};
+use crate::runtime::content_store::{ContentHandle, ContentStore, ContentVisibility};
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use crate::runtime::{fuzzy_match, v4a};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
@@ -18,6 +19,15 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// escalation from studied agents: stop retrying variations, re-read, anchor
 /// harder, or fall back to a full rewrite.
 const ESCALATION_HINT: &str = "Stop retrying variations of the same snippet. Either (1) `resolve` the entry fresh to re-read current content, (2) use a longer, more unique `old_string` with surrounding context lines, or (3) `content_write` the whole entry if the region can't be uniquely anchored.";
+
+/// The same name rule `content_write` enforces — keeps sandbox paths safe and
+/// portable (no spaces, backslashes, etc.).
+fn valid_content_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+}
 
 pub struct ContentPatchTool;
 
@@ -246,9 +256,24 @@ impl ContentPatchTool {
             Err(e) => return Ok(ToolError::validation(format!("invalid v4a patch: {e}"), None::<String>).to_error_response()),
         };
 
-        // Reject unsupported ops up front.
+        // Reject unsupported ops, validate Add names, and reject duplicate
+        // operations on the same name — Phase 1 validates each op against the
+        // original store state, so two ops on one name would apply against
+        // stale content. Callers must combine them into one section.
+        let mut seen: HashSet<&str> = HashSet::new();
         for op in &ops {
-            match op {
+            let name = match op {
+                v4a::V4aOp::Update { name, .. } => name.as_str(),
+                v4a::V4aOp::Add { name, .. } => {
+                    if !valid_content_name(name) {
+                        return Ok(ToolError::validation(
+                            format!("invalid Add File name '{name}': use only alphanumerics, '_', '-', '.', or '/'"),
+                            None::<String>,
+                        )
+                        .to_error_response());
+                    }
+                    name.as_str()
+                }
                 v4a::V4aOp::Delete { .. } | v4a::V4aOp::Move { .. } => {
                     return Ok(ToolError::validation(
                         "v4a Delete/Move operations are not yet supported (the content store has no name unregister/rename). Use Update/Add only.",
@@ -256,7 +281,13 @@ impl ContentPatchTool {
                     )
                     .to_error_response());
                 }
-                _ => {}
+            };
+            if !seen.insert(name) {
+                return Ok(ToolError::validation(
+                    format!("v4a patch has multiple operations for '{name}'; combine them into a single Update/Add section"),
+                    None::<String>,
+                )
+                .to_error_response());
             }
         }
 
@@ -330,10 +361,23 @@ impl ContentPatchTool {
     }
 }
 
-/// Look up the stored visibility for a handle in the session manifest.
+/// Look up the stored visibility for a handle, checking the current session
+/// then its root session. Session/global-visible content is recorded in the
+/// root manifest, so checking there avoids misclassifying (and re-registering)
+/// an entry that resolved from the root. Note: private content is not
+/// cross-session resolvable, so this cannot widen another session's private
+/// entry. Returns `None` only when visibility is genuinely unrecorded.
 fn current_visibility(store: &ContentStore, sid: &str, handle: &str) -> Option<ContentVisibility> {
+    let manifest = store.load_manifest(sid).ok()?;
+    if let Some(v) = manifest.visibility.get(handle).copied() {
+        return Some(v);
+    }
+    let root = manifest.root_session_id.as_deref()?;
+    if root == sid {
+        return None;
+    }
     store
-        .load_manifest(sid)
+        .load_manifest(root)
         .ok()
         .and_then(|m| m.visibility.get(handle).copied())
 }
@@ -341,12 +385,12 @@ fn current_visibility(store: &ContentStore, sid: &str, handle: &str) -> Option<C
 /// The shared `content_write`-shaped result for a written entry.
 fn write_result_json(
     name: &str,
-    handle: &str,
+    handle: &ContentHandle,
     bytes: usize,
     visibility: ContentVisibility,
     include_canonical_digest: bool,
 ) -> serde_json::Value {
-    let short_alias = ContentStore::get_short_alias(&handle.to_string());
+    let short_alias = ContentStore::get_short_alias(handle);
     let mut out = serde_json::json!({
         "ok": true,
         "name": name,
@@ -484,6 +528,30 @@ mod tests {
         let patch = "*** Begin Patch\n*** Delete File: x\n*** End Patch";
         let res = ContentPatchTool.run_v4a(&store, "s1", &Some(patch.into()), None, false).unwrap();
         assert!(res.to_lowercase().contains("not yet supported"));
+    }
+
+    #[test]
+    fn v4a_rejects_duplicate_name_ops() {
+        let (_d, store) = store();
+        let sid = "s1";
+        seed(&store, sid, "a.txt", "one\ntwo\n", ContentVisibility::Private);
+        // Two Update sections for the same name would apply against stale state.
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n-one\n+ONE\n*** Update File: a.txt\n-two\n+TWO\n*** End Patch";
+        let res = ContentPatchTool.run_v4a(&store, sid, &Some(patch.into()), None, false).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&res).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(res.contains("multiple operations"));
+        assert_eq!(read(&store, sid, "a.txt"), "one\ntwo\n"); // untouched
+    }
+
+    #[test]
+    fn v4a_rejects_unsafe_add_name() {
+        let (_d, store) = store();
+        let patch = "*** Begin Patch\n*** Add File: bad name\n+x\n*** End Patch";
+        let res = ContentPatchTool.run_v4a(&store, "s1", &Some(patch.into()), None, false).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&res).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(res.contains("invalid Add File name"));
     }
 }
 

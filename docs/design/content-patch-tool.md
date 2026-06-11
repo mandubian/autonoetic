@@ -77,7 +77,8 @@ exactly the in-place-edit semantics we want.
   "mode": "replace" | "v4a",          // default "replace"
 
   // --- mode = "replace" ---
-  "name": "src/main.rs",              // content name | cnt_<8hex> | sha256:...
+  "name": "src/main.rs",              // registered content name (re-pointing
+                                      // needs a name, so refs/handles aren't accepted)
   "old_string": "...",                // snippet to find (fuzzy)
   "new_string": "...",                // replacement
   "replace_all": false,               // default false → require unique match
@@ -103,7 +104,7 @@ display diff:
   "sandbox_path": "/tmp/src/main.rs",
   "bytes_written": 1234,
   "visibility": "session",
-  "strategy": "indentation-flexible",   // which fuzzy strategy matched
+  "strategy": "line-trimmed",            // which fuzzy strategy matched: exact | line-trimmed | whitespace-normalized
   "diff": "@@ -10,3 +10,3 @@\n-old\n+new",
   "canonical_digest": "sha256:..."       // only if requested
 }
@@ -115,25 +116,29 @@ Multi-file `v4a` returns `{ "ok": true, "files": [ <per-file result>, ... ] }`.
 
 New module `autonoetic-gateway/src/runtime/fuzzy_match.rs`. Port a **subset** of
 Hermes's 9 strategies — the ones that matter for Claude-authored edits, tried in
-order, first match wins:
+order, first match wins. **As built, 3 strategies ship** (indentation handling
+is folded into the replacement step rather than being a separate strategy):
 
 1. **exact** — literal substring.
-2. **line-trimmed** — match ignoring leading/trailing whitespace per line.
-3. **whitespace-normalized** — collapse internal runs of whitespace.
-4. **indentation-flexible** — match the block at any common indent offset,
-   re-applying the target's indentation to `new_string`.
+2. **line-trimmed** — lines equal after trimming each end.
+3. **whitespace-normalized** — lines equal after collapsing internal runs.
+
+The two line-based strategies **re-indent** the replacement to the matched
+region's base indentation, so an edit authored at the wrong indent still lands
+correctly. Exact never re-indents (it matched verbatim). Each strategy reports
+its name so the result can surface which one fired.
 
 Deferred (add only if real edits miss): escape-normalized, unicode-normalized,
-block-anchor, context-aware. Each strategy reports its name so the result can
-surface which one fired (transparency + debugging).
+block-anchor, context-aware.
 
-**Uniqueness rule:** with `replace_all=false`, more than one match for any
-strategy is an error (don't guess which). `replace_all=true` replaces every
-exact-strategy match only (fuzzy + all is too dangerous).
+**Uniqueness rule:** with `replace_all=false`, more than one match is an error
+(don't guess which). `replace_all=true` replaces every **exact**-strategy match
+only (fuzzy + all is too dangerous); for line-based matches `replace_all` does
+not apply and a non-unique match is still an error.
 
-The display diff is computed with a unified-diff helper (`similar` crate if
-already vendored; otherwise a small line-diff). Diff is **display only** — the
-new content is the substituted string, never reconstructed from the diff.
+The display diff is a compact `-old / +new` snippet (no diff crate is vendored,
+so it is not a minimal LCS diff). Diff is **display only** — the new content is
+the substituted string, never reconstructed from the diff.
 
 ## V4A parser
 
@@ -178,16 +183,18 @@ first impl step because it gates the whole feature's value.)
 
 ## Failure / anti-loop behavior
 
-Mirror Hermes's escalation. Track consecutive `content_patch` failures per
-`(session, name)`; after 3, append to the error:
+**As built**, every match failure carries the escalation hint immediately (no
+per-`(session, name)` counter):
 
-> Patch failure #N on `<name>`. Stop retrying variations of the same
-> `old_string`. Either (1) `resolve` the entry fresh to re-read current content,
-> (2) use a longer, more unique `old_string` with surrounding context, or
-> (3) `content_write` the whole entry if the region can't be anchored.
+> Stop retrying variations of the same snippet. Either (1) `resolve` the entry
+> fresh to re-read current content, (2) use a longer, more unique `old_string`
+> with surrounding context lines, or (3) `content_write` the whole entry if the
+> region can't be uniquely anchored.
 
-Counter lives in the per-session run context; reset on success. (Confirm where
-transient per-session tool state is kept — likely `NativeToolRunContext`.)
+The original design tracked consecutive failures and only escalated after 3.
+That counter was dropped for v1 — surfacing the hint on the first failure is
+simpler and strictly more helpful. A counter could be re-added later in
+`NativeToolRunContext` if telemetry shows agents ignoring the first hint.
 
 ## Files touched
 

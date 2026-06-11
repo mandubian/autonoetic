@@ -105,9 +105,10 @@ file, later refactored into a tool-contributed block by #4/#6.
 
 Add a core-tier `content_patch` tool (full spec: `docs/design/content-patch-tool.md`).
 
-- [ ] `runtime/fuzzy_match.rs`: 4 strategies (exact, line-trimmed,
-      whitespace-normalized, indentation-flexible); uniqueness + `replace_all`
-      rules; per-match strategy reporting.
+- [ ] `runtime/fuzzy_match.rs`: 3 strategies (exact, line-trimmed,
+      whitespace-normalized) with indentation handling folded into replacement
+      (re-indent to the matched region); uniqueness + `replace_all` rules
+      (`replace_all` honored for exact only); per-match strategy reporting.
 - [ ] `runtime/v4a.rs`: parse + two-phase (validate-all-then-apply) for
       `Update File` / `Add File`. `Delete`/`Move` parsed → explicit
       "not yet supported" error (needs store unregister/rename — separate issue).
@@ -115,10 +116,12 @@ Add a core-tier `content_patch` tool (full spec: `docs/design/content-patch-tool
       read bytes → apply → `store.write` → `register_name_with_visibility`
       (preserve visibility); result mirrors `content_write` + `strategy` + `diff`.
 - [ ] Register in `runtime/tools/mod.rs`. (`content_` prefix → core tier auto.)
-- [ ] Anti-loop: 3 consecutive failures per (session,name) → escalation hint.
+- [ ] Anti-loop: escalation hint on every match failure (per-`(session,name)`
+      counter dropped for v1 — see content-patch-tool.md).
 - [ ] Tests: per-strategy units; v4a atomic-abort; integration (patch →
       `resolve` returns patched bytes, name re-points, **old handle still
-      readable**, visibility preserved); multi-entry v4a atomicity; anti-loop.
+      readable**, visibility preserved); multi-entry v4a atomicity;
+      duplicate-name + unsafe-Add-name rejection.
 
 ### Issue 2 — Interim editing doctrine: `foundation_editing.md`
 **Track A · depends on: #1**
