@@ -344,6 +344,8 @@ When an artifact-backed agent needs promotion (after `coder.default` produces an
 | Artifact-backed, no external HTTP | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` |
 | Artifact-backed, has HTTP calls | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` (sealed_evaluator deferred to operator decision) |
 
+`unit_test_runner.default` runs tests in a **no-network** promotion sandbox (P-3.10). Artifact unit tests must mock external HTTP/DNS — live API or localhost-server tests are integration tests and will yield `unable_to_evaluate`, not a pass/fail verdict. Ensure `coder.default` wrote hermetic tests before federation; do not re-spawn the unit test runner hoping network approval will appear.
+
 Spawn the independent roles in parallel with `async=true`, then join them with a single `workflow_wait(task_ids=[<all roles>], timeout_secs=300)` (Case 2 — parallel fan-out). It returns once every role is terminal; then collect verdicts. Do not loop the wait or end your turn per-role.
 
 **Step 2: Collect verdicts**

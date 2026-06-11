@@ -21,7 +21,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 use std::collections::{HashMap, HashSet};
@@ -692,6 +692,58 @@ struct GateInput {
     acknowledged_capabilities: Vec<String>,
 }
 
+/// Blocking popup for operator gates — auto-opens when a new approval, question,
+/// or escalation appears so the operator does not have to hunt the timeline.
+struct GateModal {
+    gate: GateRef,
+    scroll: u16,
+}
+
+fn gate_modal_kind(gate: &GateRef) -> bool {
+    matches!(
+        gate.kind,
+        GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation | GateKind::Interaction
+    )
+}
+
+/// Newest unresolved operator gate that should block the session (plans use the
+/// plan-review pane instead).
+fn newest_blocking_gate_event(
+    entries: &[SessionTimelineEntry],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Option<(GateRef, String)> {
+    for e in entries.iter().rev() {
+        if let Some(gate) = gate_for_entry(e, resolved, acted) {
+            if gate_modal_kind(&gate) {
+                return Some((gate, e.event_id.clone()));
+            }
+        }
+    }
+    None
+}
+
+fn gate_entry_for_ref<'a>(
+    entries: &'a [SessionTimelineEntry],
+    gate: &GateRef,
+) -> Option<&'a SessionTimelineEntry> {
+    entries.iter().rev().find(|e| match gate.kind {
+        GateKind::Approval | GateKind::WikiProposal => {
+            e.event_type == "approval.pending"
+                && approval_id_for(e).as_deref() == Some(gate.id.as_str())
+        }
+        GateKind::Escalation => {
+            e.event_type == "escalation.pending"
+                && e.refs.approval_request_id.as_deref() == Some(gate.id.as_str())
+        }
+        GateKind::Interaction => {
+            e.event_type == "user.ask.pending"
+                && interaction_id_for(e).as_deref() == Some(gate.id.as_str())
+        }
+        GateKind::Plan => false,
+    })
+}
+
 fn approval_entry_for_id<'a>(
     entries: &'a [SessionTimelineEntry],
     request_id: &str,
@@ -1166,6 +1218,8 @@ pub fn run(
     let mut quit_armed_until: Option<Instant> = None;
     let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
     let mut last_announced_plan_event: Option<String> = None;
+    let mut last_announced_gate_event: Option<String> = None;
+    let mut gate_modal: Option<GateModal> = None;
     let mut last_session_status_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
@@ -1507,6 +1561,12 @@ pub fn run(
                                 match resolve_gate(client, &gi, chosen.as_ref()) {
                                     Ok(msg) => {
                                         acted.insert(gi.id.clone());
+                                        if gate_modal
+                                            .as_ref()
+                                            .is_some_and(|m| m.gate.id == gi.id)
+                                        {
+                                            gate_modal = None;
+                                        }
                                         status = Some(msg);
                                         follow = true;
                                         force_timeline_refresh = true;
@@ -1528,6 +1588,84 @@ pub fn run(
                             _ => {}
                         }
                         continue;
+                    }
+
+                    // Blocking gate modal — capture y/n/Enter before timeline nav.
+                    if let Some(modal) = gate_modal.as_ref() {
+                        if input.is_none() {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('n')
+                                    if matches!(
+                                        modal.gate.kind,
+                                        GateKind::Approval
+                                            | GateKind::WikiProposal
+                                            | GateKind::Escalation
+                                    ) =>
+                                {
+                                    input = Some(approval_gate_input(
+                                        client,
+                                        if key.code == KeyCode::Char('y') {
+                                            GateAction::Approve
+                                        } else {
+                                            GateAction::Reject
+                                        },
+                                        modal.gate.id.clone(),
+                                        &entries,
+                                        key.code == KeyCode::Char('n'),
+                                    ));
+                                    status = None;
+                                    continue;
+                                }
+                                KeyCode::Char('r') | KeyCode::Enter
+                                    if modal.gate.kind == GateKind::Interaction =>
+                                {
+                                    let (options, allow_freeform) =
+                                        interaction_choices(&entries, &modal.gate.id);
+                                    input = Some(GateInput {
+                                        action: GateAction::Answer,
+                                        id: modal.gate.id.clone(),
+                                        buffer: String::new(),
+                                        options,
+                                        allow_freeform,
+                                        motivation_required: false,
+                                        required_confirm_phrase: None,
+                                        acknowledged_capabilities: Vec::new(),
+                                    });
+                                    status = None;
+                                    continue;
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.scroll = m.scroll.saturating_add(1);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.scroll = m.scroll.saturating_sub(1);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('q') => {
+                                    if quit_armed(&quit_armed_until) {
+                                        break 'room;
+                                    }
+                                    arm_quit(&mut quit_armed_until, &mut status);
+                                    continue;
+                                }
+                                _ => {
+                                    let ctrl_c = key.code == KeyCode::Char('c')
+                                        && key.modifiers.contains(KeyModifiers::CONTROL);
+                                    if ctrl_c {
+                                        if quit_armed(&quit_armed_until) {
+                                            break 'room;
+                                        }
+                                        arm_quit(&mut quit_armed_until, &mut status);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                     }
 
                     let ctrl_c = key.code == KeyCode::Char('c')
@@ -2245,6 +2383,47 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
+        if input.is_none() && compose.is_none() && slash.is_none() {
+            if let Some((gate_ref, event_id)) =
+                newest_blocking_gate_event(&entries, &resolved, &acted)
+            {
+                let needs_open = gate_modal
+                    .as_ref()
+                    .map(|m| m.gate.id != gate_ref.id)
+                    .unwrap_or(true);
+                if needs_open && last_announced_gate_event.as_deref() != Some(event_id.as_str())
+                {
+                    last_announced_gate_event = Some(event_id);
+                    if let Some(row_idx) = newest_gate_row_index(
+                        &visible,
+                        &indexed,
+                        &entries,
+                        &resolved,
+                        &acted,
+                        &gate_ref,
+                    ) {
+                        selected = row_idx;
+                        follow = false;
+                    }
+                    detail = None;
+                    info_panel_open = false;
+                    artifact_viewer = None;
+                    artifact_file_view = None;
+                    gate_modal = Some(GateModal {
+                        gate: gate_ref,
+                        scroll: 0,
+                    });
+                }
+            }
+        }
+        if let Some(modal) = &gate_modal {
+            let still_active = find_active_gate(&entries, &resolved, &acted)
+                .is_some_and(|g| g.id == modal.gate.id);
+            if !still_active {
+                gate_modal = None;
+            }
+        }
+
         let gate = active_gate(&entries, &visible, indexed.get(selected), &resolved, &acted);
 
         spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
@@ -2334,6 +2513,10 @@ pub fn run(
                 gate_count,
                 artifact_viewer.as_ref(),
                 artifact_file_view.as_ref(),
+                gate_modal.as_ref(),
+                gate_modal
+                    .as_ref()
+                    .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
             )
         })?;
 
@@ -3812,6 +3995,8 @@ fn draw(
     gate_count: usize,
     artifact_viewer: Option<&ArtifactViewer>,
     artifact_file_view: Option<&ArtifactFileView>,
+    gate_modal: Option<&GateModal>,
+    gate_modal_entry: Option<&SessionTimelineEntry>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -3880,6 +4065,7 @@ fn draw(
     // Info panel overlay (? key) — shows session stats, toggles, active gates.
     if let Some(panel) = info_panel {
         let area = centered_rect(60, 70, f.area());
+        f.render_widget(Clear, area);
         let inner_height = area.height.saturating_sub(2) as usize;
         let total_lines = panel.lines.len();
         let max_scroll = total_lines.saturating_sub(inner_height) as u16;
@@ -3906,6 +4092,7 @@ fn draw(
     // Artifact file content overlay (level 2 of artifact viewer).
     if let Some(ref view) = artifact_file_view {
         let area = centered_rect(80, 85, f.area());
+        f.render_widget(Clear, area);
         let lines: Vec<Line> = view
             .content
             .lines()
@@ -3933,6 +4120,7 @@ fn draw(
     } else if let Some(ref viewer) = artifact_viewer {
         // Artifact file list overlay (level 1).
         let area = centered_rect(60, 60, f.area());
+        f.render_widget(Clear, area);
         let lines: Vec<Line> = viewer
             .files
             .iter()
@@ -4161,6 +4349,128 @@ fn draw(
         }
     };
     f.render_widget(footer, chunks[footer_idx]);
+
+    if let Some(modal) = gate_modal {
+        draw_gate_modal(f, modal, gate_modal_entry, input, status);
+    }
+}
+
+fn draw_gate_modal(
+    f: &mut Frame,
+    modal: &GateModal,
+    entry: Option<&SessionTimelineEntry>,
+    input: Option<&GateInput>,
+    status: Option<&str>,
+) {
+    let full = f.area();
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(Color::Rgb(20, 20, 20))),
+        full,
+    );
+
+    let area = centered_rect(78, 72, full);
+    f.render_widget(Clear, area);
+
+    let title = match modal.gate.kind {
+        GateKind::Approval => " ⚠ APPROVAL REQUIRED ",
+        GateKind::WikiProposal => " ⚠ WIKI PROPOSAL ",
+        GateKind::Escalation => " ⚠ ESCALATION ",
+        GateKind::Interaction => " ❓ QUESTION PENDING ",
+        GateKind::Plan => " ⚠ ACTION REQUIRED ",
+    };
+    let border_color = match modal.gate.kind {
+        GateKind::Interaction => Color::Cyan,
+        _ => Color::Yellow,
+    };
+
+    let mut content_lines: Vec<Line<'static>> = Vec::new();
+    if let Some(entry) = entry {
+        let spec = render::render_spec(entry);
+        content_lines.push(Line::from(Span::styled(
+            spec.headline,
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(detail) = spec.detail {
+            for line in detail.lines() {
+                content_lines.push(Line::from(line.to_string()));
+            }
+        }
+    } else {
+        content_lines.push(Line::from(format!("Gate id: {}", modal.gate.id)));
+    }
+
+    let action_hint = if input.is_some() {
+        String::new()
+    } else {
+        match modal.gate.kind {
+            GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation => {
+                "y approve · n reject · j/k scroll".to_string()
+            }
+            GateKind::Interaction => "Enter/r answer · j/k scroll".to_string(),
+            GateKind::Plan => String::new(),
+        }
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(border_color).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(area);
+    let footer_h = if input.is_some() || !action_hint.is_empty() {
+        2u16
+    } else {
+        0
+    };
+    let chunks = Layout::vertical([
+        Constraint::Min(4),
+        Constraint::Length(footer_h),
+    ])
+    .split(inner);
+
+    let inner_height = chunks[0].height as usize;
+    let max_scroll = content_lines.len().saturating_sub(inner_height) as u16;
+    let scroll = modal.scroll.min(max_scroll);
+
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(content_lines).scroll((scroll, 0)),
+        chunks[0],
+    );
+
+    if let Some(gi) = input {
+        let label = gate_input_label(gi);
+        let err = status
+            .filter(|s| s.starts_with('✗'))
+            .map(|s| format!("  {s}"))
+            .unwrap_or_default();
+        let choices = gi
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 28)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let hint = if gi.options.is_empty() {
+            "[Enter submit · Esc back]".to_string()
+        } else if gi.allow_freeform {
+            format!("{choices}   [number · or type reply · Esc back]")
+        } else {
+            format!("{choices}   [number choose · Esc back]")
+        };
+        f.render_widget(
+            Paragraph::new(format!("{label}: {}▏{err}   {hint}", gi.buffer))
+                .style(Style::default().fg(Color::Cyan)),
+            chunks[1],
+        );
+    } else if !action_hint.is_empty() {
+        f.render_widget(
+            Paragraph::new(action_hint).style(Style::default().fg(Color::DarkGray)),
+            chunks[1],
+        );
+    }
 }
 
 /// Render the compose editor with wrapped lines and an inverted cursor cell.
@@ -4514,6 +4824,25 @@ mod tests {
         assert_eq!(g.id, "int-1");
         let active = active_gate(&entries, &entries, Some(&later_row), &empty, &empty).unwrap();
         assert_eq!(active.id, "int-1");
+    }
+
+    #[test]
+    fn newest_blocking_gate_event_prefers_latest_approval_over_older_ask() {
+        let mut approval = gate_entry("approval.pending");
+        approval.event_id = "ev-appr".into();
+        approval.refs.approval_request_id = Some("apr-new".into());
+        let mut ask = gate_entry("user.ask.pending");
+        ask.event_id = "ev-ask".into();
+        let entries = vec![ask, gate_entry("tool.completed"), approval];
+        let empty = HashSet::new();
+        let (gate, event_id) = newest_blocking_gate_event(&entries, &empty, &empty).unwrap();
+        assert_eq!(gate.kind, GateKind::Approval);
+        assert_eq!(gate.id, "apr-new");
+        assert_eq!(event_id, "ev-appr");
+        assert!(!gate_modal_kind(&GateRef {
+            kind: GateKind::Plan,
+            id: "plan-1".into(),
+        }));
     }
 
     #[test]

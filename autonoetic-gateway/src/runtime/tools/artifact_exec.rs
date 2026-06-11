@@ -9,8 +9,8 @@ use crate::runtime::remote_access::{
     NetworkCoverage, RemoteAccessAnalyzer,
 };
 use crate::runtime::tools::{
-    build_approval_details, load_session_content_mounts, CredentialEnvMapping, NativeTool,
-    NativeToolRegistry,
+    build_approval_details, load_session_content_mounts, promotion::manifest_may_record_promotion_verdicts,
+    CredentialEnvMapping, NativeTool, NativeToolRegistry,
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
 use autonoetic_types::agent::AgentManifest;
@@ -433,6 +433,18 @@ impl NativeTool for ArtifactExecTool {
         }
 
         if remote_analysis.requires_approval && !approval_validated_for_command {
+            if manifest_may_record_promotion_verdicts(manifest) {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "exit_code": null,
+                    "stdout": "",
+                    "stderr": "Promotion-gate execution (P-3.10): artifact test run requires network access. Unit tests must be deterministic without live network.",
+                    "promotion_gate_network_denied": true,
+                    "recommendation": "unable_to_evaluate",
+                    "detected_patterns": remote_analysis.detected_patterns,
+                })
+                .to_string());
+            }
             let detected_patterns = remote_analysis.detected_patterns.clone();
             let concrete_targets = normalize_targets(&detected_patterns);
             let coverage = classify_network_coverage(&detected_patterns, concrete_targets.clone());
@@ -850,9 +862,12 @@ impl NativeTool for ArtifactExecTool {
             }
         }
 
-        let mut overrides =
-            crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
-        if approval_validated_for_command {
+        let mut overrides = if manifest_may_record_promotion_verdicts(manifest) {
+            crate::sandbox::BwrapIsolationOverrides::promotion_gate_overrides()
+        } else {
+            crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities)
+        };
+        if approval_validated_for_command && !manifest_may_record_promotion_verdicts(manifest) {
             overrides.share_net = true;
         }
 
