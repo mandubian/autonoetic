@@ -10,7 +10,8 @@ use super::channel::{Channel, GateAction, GateKind, GateOption, GateRef, TuiChan
 use super::client::RoomClient;
 use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
-use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
+use autonoetic_types::principal::Principal;
+use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry, SessionTimelineListResult};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
@@ -2116,7 +2117,11 @@ pub fn run(
                                             Err(e) => status = Some(format!("artifact list failed: {e}")),
                                         }
                                     } else {
-                                        status = Some("no artifact on this row".to_string());
+                                        let tool_name = entry.payload.as_ref()
+                                            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                                            .and_then(|v| v.get("tool_name").and_then(|t| t.as_str()).map(String::from))
+                                            .unwrap_or_default();
+                                        status = Some(format!("no artifact on this row (type={} tool={})", entry.event_type, tool_name));
                                     }
                                 }
                             }
@@ -5566,5 +5571,87 @@ mod tests {
         disarm_quit(&mut armed, &mut status);
         assert!(armed.is_none());
         assert!(status.is_none());
+    }
+
+    #[test]
+    fn artifact_ref_for_entry_extracts_from_tool_completed() {
+        let result_json = serde_json::json!({
+            "ok": true,
+            "artifact_ref": "ar.abc12345",
+            "artifact_canonical_digest": "sha256:def456",
+            "kind": "binary",
+            "files": [{"name": "main.py", "alias": "main.py"}],
+            "message": "Created new artifact"
+        });
+        let result_str = serde_json::to_string(&result_json).unwrap();
+        let payload = serde_json::json!({
+            "tool_name": "artifact_build",
+            "result": result_str,
+        });
+        let entry = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("test"),
+            role: SessionRole::Specialist { kind: "coder".into() },
+            event_type: "tool.completed".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            payload: Some(serde_json::to_string(&payload).unwrap()),
+            refs: Default::default(),
+        };
+        assert_eq!(
+            artifact_ref_for_entry(&entry),
+            Some("ar.abc12345".to_string())
+        );
+    }
+
+    #[test]
+    fn artifact_ref_for_entry_returns_none_for_non_artifact() {
+        let payload = serde_json::json!({
+            "tool_name": "sandbox_exec",
+            "result": "{\"ok\":true}",
+        });
+        let entry = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("test"),
+            role: SessionRole::Specialist { kind: "coder".into() },
+            event_type: "tool.completed".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            payload: Some(serde_json::to_string(&payload).unwrap()),
+            refs: Default::default(),
+        };
+        assert_eq!(artifact_ref_for_entry(&entry), None);
+    }
+
+    #[test]
+    fn artifact_ref_for_entry_extracts_from_args_preview() {
+        let payload = serde_json::json!({
+            "tool_name": "artifact_build",
+            "result": "{}",
+            "args_preview": "ar.xyz99999",
+        });
+        let entry = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("test"),
+            role: SessionRole::Specialist { kind: "coder".into() },
+            event_type: "tool.completed".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            payload: Some(serde_json::to_string(&payload).unwrap()),
+            refs: Default::default(),
+        };
+        assert_eq!(
+            artifact_ref_for_entry(&entry),
+            Some("ar.xyz99999".to_string())
+        );
     }
 }
