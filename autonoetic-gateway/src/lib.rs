@@ -16,6 +16,7 @@ pub mod enforcement_register;
 pub mod exec_request;
 pub mod execution;
 pub mod fail_mode;
+pub mod host_capabilities;
 pub mod interaction_answer;
 pub mod layer_store;
 pub mod llm;

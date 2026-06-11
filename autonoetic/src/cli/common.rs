@@ -357,6 +357,12 @@ pub enum GatewayCommands {
     },
     /// Gracefully terminates a background Gateway daemon
     Stop,
+    /// Probe host capabilities (sandbox tiers + language toolchains) without starting.
+    Preflight {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Outputs a table of Gateway health, loaded policies, etc.
     Status {
         /// Emit machine-readable JSON output.
