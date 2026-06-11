@@ -662,6 +662,35 @@ fn payload_field_str(p: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Wrap plain text to `max_width` display cells (Unicode-aware).
+pub fn wrap_display_lines(text: &str, max_width: usize) -> Vec<String> {
+    let width = max_width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for word in text.split_whitespace() {
+        let word_w = unicode_width::UnicodeWidthStr::width(word);
+        let extra = if current.is_empty() { word_w } else { word_w + 1 };
+        if current_w + extra > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_w += 1;
+        }
+        current.push_str(word);
+        current_w += word_w;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// High-visibility approval gate card (`approval.pending`).
 fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     let p = parse_entry_payload(entry);
@@ -671,10 +700,50 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
         .unwrap_or_default();
     let action = field("action").unwrap_or_else(|| "approval".into());
     let level = field("approval_level");
-    let headline = format!("⏸ APPROVAL REQUIRED — {}", one_line(&action, 72));
+    let headline = if action == "revision_promote" {
+        let agent = field("agent_id").unwrap_or_else(|| "agent".into());
+        format!("⏸ PROMOTION APPROVAL — {agent}")
+    } else {
+        format!("⏸ APPROVAL REQUIRED — {}", one_line(&action, 72))
+    };
     let mut lines = vec![format!("  request: {request_id}")];
     if let Some(lvl) = level {
         lines.push(format!("  level: {lvl}"));
+    }
+    if action == "revision_promote" {
+        if let Some(agent) = field("agent_id") {
+            lines.push(format!("  agent: {agent}"));
+        }
+        if let Some(rev) = field("revision_id") {
+            lines.push(format!("  revision: {}", one_line(&rev, 120)));
+        }
+        if let Some(summary) = field("summary") {
+            lines.push("  about:".to_string());
+            for line in wrap_display_lines(&summary, 76) {
+                lines.push(format!("    {line}"));
+            }
+        }
+        for (label, key) in [
+            ("added capabilities", "added_capabilities"),
+            ("broadened capabilities", "broadened_capabilities"),
+        ] {
+            if let Some(values) = p
+                .as_ref()
+                .and_then(|v| v.get(key))
+                .and_then(|v| v.as_array())
+            {
+                let joined: Vec<_> = values
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect();
+                if !joined.is_empty() {
+                    lines.push(format!("  {label}:"));
+                    for cap in joined {
+                        lines.push(format!("    · {cap}"));
+                    }
+                }
+            }
+        }
     }
     if let Some(cmd) = field("command") {
         lines.push(format!("  command: {}", one_line(&cmd, 140)));
@@ -695,11 +764,10 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
     if let Some(risk) = field("risk_summary") {
         lines.push(format!("  risk: {}", one_line(&risk, 120)));
     }
-    if let Some(phrase) = field("confirm_phrase") {
-        lines.push(format!("  confirm phrase: {}", one_line(&phrase, 120)));
-        lines.push("  ↳ y then type confirm phrase · n reject".to_string());
+    if field("confirm_phrase").is_some() {
+        lines.push("  ↳ y approve (confirm phrase shown below) · n reject · Esc peek timeline".to_string());
     } else {
-        lines.push("  ↳ y approve · n reject".to_string());
+        lines.push("  ↳ y approve · n reject · Esc peek timeline".to_string());
     }
     (headline, Some(lines.join("\n")))
 }
@@ -2989,6 +3057,35 @@ mod tests {
         let ask_detail = ask_spec.detail.expect("ask card body");
         assert!(ask_detail.contains("[1] Postgres"));
         assert!(ask_detail.contains("Enter/i/r"));
+    }
+
+    #[test]
+    fn render_spec_revision_promote_approval_shows_agent_context() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-promo",
+                "action": "revision_promote",
+                "approval_level": "elevated",
+                "agent_id": "weather-lookup",
+                "revision_id": "rev_sha256:abc123",
+                "summary": "Promote after federation pass",
+                "added_capabilities": ["NetworkAccess(hosts=[api.open-meteo.com])"],
+                "confirm_phrase": "promote weather-lookup rev_sha256:abc123",
+            }),
+        );
+        let spec = render_spec(&appr);
+        assert!(spec.headline.contains("PROMOTION APPROVAL"));
+        assert!(spec.headline.contains("weather-lookup"));
+        let detail = spec.detail.expect("promotion detail");
+        assert!(detail.contains("weather-lookup"));
+        assert!(detail.contains("rev_sha256"));
+        assert!(detail.contains("federation pass"));
+        assert!(detail.contains("NetworkAccess"));
+        assert!(detail.contains("Esc peek timeline"));
     }
 
     #[test]

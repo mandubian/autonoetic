@@ -697,6 +697,9 @@ struct GateInput {
 struct GateModal {
     gate: GateRef,
     scroll: u16,
+    /// When true, the timeline stays interactive; a compact banner reminds the
+    /// operator that a gate is still open (`g` reopens the full modal).
+    peek_timeline: bool,
 }
 
 fn gate_modal_kind(gate: &GateRef) -> bool {
@@ -1590,10 +1593,59 @@ pub fn run(
                         continue;
                     }
 
-                    // Blocking gate modal — capture y/n/Enter before timeline nav.
+                    // Gate modal — full overlay blocks nav; peek mode leaves timeline usable.
                     if let Some(modal) = gate_modal.as_ref() {
-                        if input.is_none() {
+                        if modal.peek_timeline {
                             match key.code {
+                                KeyCode::Char('g') | KeyCode::Enter => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.peek_timeline = false;
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('y') | KeyCode::Char('n')
+                                    if input.is_none()
+                                        && matches!(
+                                            modal.gate.kind,
+                                            GateKind::Approval
+                                                | GateKind::WikiProposal
+                                                | GateKind::Escalation
+                                        ) =>
+                                {
+                                    let gate_id = modal.gate.id.clone();
+                                    let approve = key.code == KeyCode::Char('y');
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.peek_timeline = false;
+                                    }
+                                    input = Some(approval_gate_input(
+                                        client,
+                                        if approve {
+                                            GateAction::Approve
+                                        } else {
+                                            GateAction::Reject
+                                        },
+                                        gate_id,
+                                        &entries,
+                                        !approve,
+                                    ));
+                                    status = None;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        } else if input.is_none() {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.peek_timeline = true;
+                                        m.scroll = 0;
+                                    }
+                                    status = Some(
+                                        "approval peeking — browse timeline · g resolve · y/n act"
+                                            .to_string(),
+                                    );
+                                    continue;
+                                }
                                 KeyCode::Char('y') | KeyCode::Char('n')
                                     if matches!(
                                         modal.gate.kind,
@@ -1665,6 +1717,9 @@ pub fn run(
                                     continue;
                                 }
                             }
+                        } else {
+                            // Input mode inside the modal — block timeline navigation.
+                            continue;
                         }
                     }
 
@@ -2412,6 +2467,7 @@ pub fn run(
                     gate_modal = Some(GateModal {
                         gate: gate_ref,
                         scroll: 0,
+                        peek_timeline: false,
                     });
                 }
             }
@@ -4062,103 +4118,6 @@ fn draw(
         }
     }
 
-    // Info panel overlay (? key) — shows session stats, toggles, active gates.
-    if let Some(panel) = info_panel {
-        let area = centered_rect(60, 70, f.area());
-        f.render_widget(Clear, area);
-        let inner_height = area.height.saturating_sub(2) as usize;
-        let total_lines = panel.lines.len();
-        let max_scroll = total_lines.saturating_sub(inner_height) as u16;
-        let scroll = info_scroll.min(max_scroll);
-        let text: Vec<Line> = panel
-            .lines
-            .iter()
-            .map(|l| Line::from(Span::styled(l.clone(), Style::default().bg(Color::Black))))
-            .collect();
-        f.render_widget(
-            Paragraph::new(text)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Session Info [?/Esc close] ")
-                        .border_style(Style::default().fg(Color::Cyan))
-                        .style(Style::default().bg(Color::Black)),
-                )
-                .scroll((scroll, 0)),
-            area,
-        );
-    }
-
-    // Artifact file content overlay (level 2 of artifact viewer).
-    if let Some(ref view) = artifact_file_view {
-        let area = centered_rect(80, 85, f.area());
-        f.render_widget(Clear, area);
-        let lines: Vec<Line> = view
-            .content
-            .lines()
-            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().bg(Color::Black))))
-            .collect();
-        let inner_height = area.height.saturating_sub(2) as usize;
-        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
-        let scroll = view.scroll.min(max_scroll);
-        let title = format!(
-            " {} {} → {} [Esc back] ",
-            view.artifact_id, view.file_name, lines.len()
-        );
-        f.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(title)
-                        .border_style(Style::default().fg(Color::Green))
-                        .style(Style::default().bg(Color::Black)),
-                )
-                .scroll((scroll, 0)),
-            area,
-        );
-    } else if let Some(ref viewer) = artifact_viewer {
-        // Artifact file list overlay (level 1).
-        let area = centered_rect(60, 60, f.area());
-        f.render_widget(Clear, area);
-        let lines: Vec<Line> = viewer
-            .files
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let marker = if i == viewer.selected { " > " } else { "   " };
-                let style = if i == viewer.selected {
-                    Style::default().fg(Color::Yellow).bg(Color::Black)
-                } else {
-                    Style::default().bg(Color::Black)
-                };
-                Line::from(Span::styled(
-                    format!("{}{}", marker, f.name),
-                    style,
-                ))
-            })
-            .collect();
-        let title = format!(
-            " {} [{}] {} files [Enter/Esc] ",
-            viewer.artifact_id, viewer.kind, viewer.files.len()
-        );
-        let inner_height = area.height.saturating_sub(2) as usize;
-        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
-        let scroll = viewer.scroll.min(max_scroll);
-        f.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(title)
-                        .border_style(Style::default().fg(Color::Green))
-                        .style(Style::default().bg(Color::Black)),
-                )
-                .scroll((scroll, 0)),
-            area,
-        );
-    }
-
     // The terminal width caps each line. Reserve 2 cells for the actor rail
     // and 3 cells for the altitude glyph + space, leaving the rest for the
     // label + headline + detail.
@@ -4350,9 +4309,244 @@ fn draw(
     };
     f.render_widget(footer, chunks[footer_idx]);
 
+    // Overlays render last (on top of everything) so they are never painted over.
+    if let Some(panel) = info_panel {
+        let area = centered_rect(60, 70, f.area());
+        f.render_widget(Clear, area);
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let total_lines = panel.lines.len();
+        let max_scroll = total_lines.saturating_sub(inner_height) as u16;
+        let scroll = info_scroll.min(max_scroll);
+        let text: Vec<Line> = panel
+            .lines
+            .iter()
+            .map(|l| Line::from(Span::styled(l.clone(), Style::default().bg(Color::Black))))
+            .collect();
+        f.render_widget(
+            Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Session Info [?/Esc close] ")
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    }
+
+    if let Some(ref view) = artifact_file_view {
+        let area = centered_rect(80, 85, f.area());
+        f.render_widget(Clear, area);
+        let lines: Vec<Line> = view
+            .content
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().bg(Color::Black))))
+            .collect();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+        let scroll = view.scroll.min(max_scroll);
+        let title = format!(
+            " {} {} → {} [Esc back] ",
+            view.artifact_id, view.file_name, lines.len()
+        );
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Green))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    } else if let Some(ref viewer) = artifact_viewer {
+        let area = centered_rect(60, 60, f.area());
+        f.render_widget(Clear, area);
+        let lines: Vec<Line> = viewer
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let marker = if i == viewer.selected { " > " } else { "   " };
+                let style = if i == viewer.selected {
+                    Style::default().fg(Color::Yellow).bg(Color::Black)
+                } else {
+                    Style::default().bg(Color::Black)
+                };
+                Line::from(Span::styled(
+                    format!("{}{}", marker, f.name),
+                    style,
+                ))
+            })
+            .collect();
+        let title = format!(
+            " {} [{}] {} files [Enter/Esc] ",
+            viewer.artifact_id, viewer.kind, viewer.files.len()
+        );
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+        let scroll = viewer.scroll.min(max_scroll);
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Green))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    }
+
     if let Some(modal) = gate_modal {
         draw_gate_modal(f, modal, gate_modal_entry, input, status);
     }
+}
+
+fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
+    if let Some(entry) = entry {
+        if payload_field_str(entry, "action").as_deref() == Some("revision_promote") {
+            let agent = payload_field_str(entry, "agent_id").unwrap_or_else(|| "agent".into());
+            return format!(" ⚠ PROMOTE AGENT — {agent} ");
+        }
+    }
+    match modal.gate.kind {
+        GateKind::Approval => " ⚠ APPROVAL REQUIRED ".to_string(),
+        GateKind::WikiProposal => " ⚠ WIKI PROPOSAL ".to_string(),
+        GateKind::Escalation => " ⚠ ESCALATION ".to_string(),
+        GateKind::Interaction => " ❓ QUESTION PENDING ".to_string(),
+        GateKind::Plan => " ⚠ ACTION REQUIRED ".to_string(),
+    }
+}
+
+fn gate_modal_peek_summary(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
+    if let Some(entry) = entry {
+        let spec = render::render_spec(entry);
+        return render::one_line(&spec.headline, 72);
+    }
+    format!("Gate {}", modal.gate.id)
+}
+
+fn gate_modal_input_panel_lines(
+    gi: &GateInput,
+    width: usize,
+    status: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let wrap_w = width.saturating_sub(2).max(20);
+
+    if let Some(ref phrase) = gi.required_confirm_phrase {
+        lines.push(Line::from(Span::styled(
+            "Type this phrase exactly to approve:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for line in render::wrap_display_lines(phrase, wrap_w) {
+            lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::Green),
+            )));
+        }
+        lines.push(Line::raw(""));
+    } else if matches!(gi.action, GateAction::Reject) {
+        lines.push(Line::from(Span::styled(
+            "Rejection reason (required):",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if gi.motivation_required {
+        lines.push(Line::from(Span::styled(
+            "Approval motivation (required):",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    let input_label = if gi.required_confirm_phrase.is_some() {
+        "Your input".to_string()
+    } else {
+        gate_input_label(gi).trim_end_matches(':').to_string()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("{input_label}: "), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{}▏", gi.buffer), Style::default().fg(Color::White)),
+    ]));
+
+    if let Some(err) = status.filter(|s| s.starts_with('✗')) {
+        lines.push(Line::from(Span::styled(
+            err.to_string(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let choices = gi
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 28)))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let hint = if gi.options.is_empty() {
+        "Enter submit · Esc back · Esc×2 peek timeline".to_string()
+    } else if gi.allow_freeform {
+        format!("{choices}   Enter submit · Esc back")
+    } else {
+        format!("{choices}   number choose · Esc back")
+    };
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines
+}
+
+fn gate_modal_input_panel_height(gi: &GateInput, width: u16, status: Option<&str>) -> u16 {
+    let lines = gate_modal_input_panel_lines(gi, width as usize, status);
+    lines.len().max(3) as u16 + 1
+}
+
+fn draw_gate_modal_peek_banner(
+    f: &mut Frame,
+    modal: &GateModal,
+    entry: Option<&SessionTimelineEntry>,
+) {
+    let full = f.area();
+    let banner_h = 3u16.min(full.height);
+    let area = Rect {
+        x: full.x,
+        y: full.y,
+        width: full.width,
+        height: banner_h,
+    };
+    f.render_widget(Clear, area);
+    let summary = gate_modal_peek_summary(modal, entry);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" ⚠ OPERATOR ACTION PENDING ")
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(area);
+    let text = vec![
+        Line::from(Span::styled(
+            summary,
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            format!("id: {}  ·  g or Enter resolve  ·  y approve  ·  n reject", modal.gate.id),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(block, area);
+    f.render_widget(Paragraph::new(text), inner);
 }
 
 fn draw_gate_modal(
@@ -4362,26 +4556,26 @@ fn draw_gate_modal(
     input: Option<&GateInput>,
     status: Option<&str>,
 ) {
+    if modal.peek_timeline {
+        draw_gate_modal_peek_banner(f, modal, entry);
+        return;
+    }
+
     let full = f.area();
+    f.render_widget(Clear, full);
     f.render_widget(
         Paragraph::new("").style(Style::default().bg(Color::Rgb(20, 20, 20))),
         full,
     );
 
-    let area = centered_rect(78, 72, full);
+    let area = centered_rect(82, 78, full);
     f.render_widget(Clear, area);
 
-    let title = match modal.gate.kind {
-        GateKind::Approval => " ⚠ APPROVAL REQUIRED ",
-        GateKind::WikiProposal => " ⚠ WIKI PROPOSAL ",
-        GateKind::Escalation => " ⚠ ESCALATION ",
-        GateKind::Interaction => " ❓ QUESTION PENDING ",
-        GateKind::Plan => " ⚠ ACTION REQUIRED ",
-    };
     let border_color = match modal.gate.kind {
         GateKind::Interaction => Color::Cyan,
         _ => Color::Yellow,
     };
+    let title = gate_modal_title(modal, entry);
 
     let mut content_lines: Vec<Line<'static>> = Vec::new();
     if let Some(entry) = entry {
@@ -4401,31 +4595,28 @@ fn draw_gate_modal(
         content_lines.push(Line::from(format!("Gate id: {}", modal.gate.id)));
     }
 
-    let action_hint = if input.is_some() {
-        String::new()
-    } else {
-        match modal.gate.kind {
-            GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation => {
-                "y approve · n reject · j/k scroll".to_string()
-            }
-            GateKind::Interaction => "Enter/r answer · j/k scroll".to_string(),
-            GateKind::Plan => String::new(),
-        }
-    };
-
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(Style::default().fg(border_color).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(area);
-    let footer_h = if input.is_some() || !action_hint.is_empty() {
-        2u16
+    let inner_width = inner.width;
+
+    let preview_phrase = input
+        .is_none()
+        .then(|| entry.and_then(|e| payload_field_str(e, "confirm_phrase")))
+        .flatten();
+    let footer_h = if let Some(gi) = input {
+        gate_modal_input_panel_height(gi, inner_width, status)
+    } else if preview_phrase.is_some() {
+        4 + render::wrap_display_lines(preview_phrase.as_deref().unwrap_or(""), inner_width as usize - 2)
+            .len() as u16
     } else {
-        0
+        2
     };
     let chunks = Layout::vertical([
-        Constraint::Min(4),
+        Constraint::Min(6),
         Constraint::Length(footer_h),
     ])
     .split(inner);
@@ -4441,35 +4632,43 @@ fn draw_gate_modal(
     );
 
     if let Some(gi) = input {
-        let label = gate_input_label(gi);
-        let err = status
-            .filter(|s| s.starts_with('✗'))
-            .map(|s| format!("  {s}"))
-            .unwrap_or_default();
-        let choices = gi
-            .options
-            .iter()
-            .enumerate()
-            .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 28)))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let hint = if gi.options.is_empty() {
-            "[Enter submit · Esc back]".to_string()
-        } else if gi.allow_freeform {
-            format!("{choices}   [number · or type reply · Esc back]")
-        } else {
-            format!("{choices}   [number choose · Esc back]")
+        let panel_lines = gate_modal_input_panel_lines(gi, inner_width as usize, status);
+        let panel_block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().bg(Color::Black));
+        let panel_inner = panel_block.inner(chunks[1]);
+        f.render_widget(panel_block, chunks[1]);
+        f.render_widget(Paragraph::new(panel_lines), panel_inner);
+    } else {
+        let mut footer_lines: Vec<Line<'static>> = Vec::new();
+        if let Some(ref phrase) = preview_phrase {
+            footer_lines.push(Line::from(Span::styled(
+                "Confirm phrase (shown now — type after y):",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for line in render::wrap_display_lines(phrase, inner_width as usize - 2) {
+                footer_lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::Green),
+                )));
+            }
+            footer_lines.push(Line::raw(""));
+        }
+        let action_hint = match modal.gate.kind {
+            GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation => {
+                "y approve · n reject · j/k scroll details · Esc peek timeline"
+            }
+            GateKind::Interaction => "Enter/r answer · j/k scroll · Esc peek timeline",
+            GateKind::Plan => "",
         };
-        f.render_widget(
-            Paragraph::new(format!("{label}: {}▏{err}   {hint}", gi.buffer))
-                .style(Style::default().fg(Color::Cyan)),
-            chunks[1],
-        );
-    } else if !action_hint.is_empty() {
-        f.render_widget(
-            Paragraph::new(action_hint).style(Style::default().fg(Color::DarkGray)),
-            chunks[1],
-        );
+        footer_lines.push(Line::from(Span::styled(
+            action_hint,
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(Paragraph::new(footer_lines), chunks[1]);
     }
 }
 
