@@ -173,17 +173,24 @@ impl NativeTool for ContentPatchTool {
     }
 
     fn guidance(&self) -> Vec<GuidanceBlock> {
-        vec![GuidanceBlock {
-            id: "editing.content_patch",
-            // Gating is belt-and-suspenders: collect_guidance only reaches here
-            // when content_patch is available (WriteAccess), but the explicit
-            // condition keeps the block self-describing.
-            when: GuidanceCondition::All(vec![
+        // The general doctrine is family-agnostic; the format hints below are
+        // model-family-specific (#465), mirroring the Hermes finding that
+        // different model families drive different edit formats most reliably.
+        let present = || {
+            GuidanceCondition::All(vec![
                 GuidanceCondition::Capability("write_access"),
                 GuidanceCondition::ToolPresent("content_patch"),
-            ]),
-            priority: 10,
-            prose: "**Editing existing content.** Two tools put content in the store: `content_write` \
+            ])
+        };
+        vec![
+            GuidanceBlock {
+                id: "editing.content_patch",
+                // Gating is belt-and-suspenders: collect_guidance only reaches
+                // here when content_patch is available (WriteAccess), but the
+                // explicit condition keeps the block self-describing.
+                when: present(),
+                priority: 10,
+                prose: "**Editing existing content.** Two tools put content in the store: `content_write` \
 authors a NEW entry; `content_patch` edits an EXISTING one. To change an entry you already wrote, \
 prefer `content_patch` — send only the changed region, never the whole file. \
 `content_patch(mode=\"replace\", name, old_string, new_string)` matches a unique snippet (tolerant of \
@@ -192,8 +199,31 @@ several places. Use `mode=\"v4a\"` only when one logical edit spans several entr
 `content_write` to edit only when authoring a brand-new entry, or when the region genuinely can't be \
 uniquely anchored. If a patch fails to match, `resolve` the entry to re-read its current content before \
 retrying — don't guess variations of the same snippet."
-                .to_string(),
-        }]
+                    .to_string(),
+            },
+            GuidanceBlock {
+                id: "editing.content_patch.format.claude",
+                when: GuidanceCondition::All(vec![
+                    present(),
+                    GuidanceCondition::ModelFamily(&["claude", "sonnet", "opus", "haiku"]),
+                ]),
+                priority: 11,
+                prose: "Edit format: prefer `mode=\"replace\"` — match a unique snippet and swap it. \
+Reach for `mode=\"v4a\"` only when one edit genuinely spans several entries at once."
+                    .to_string(),
+            },
+            GuidanceBlock {
+                id: "editing.content_patch.format.gpt",
+                when: GuidanceCondition::All(vec![
+                    present(),
+                    GuidanceCondition::ModelFamily(&["gpt", "codex"]),
+                ]),
+                priority: 11,
+                prose: "Edit format: for edits spanning several entries prefer `mode=\"v4a\"` (the \
+multi-entry diff format you handle most reliably); use `mode=\"replace\"` for a single small swap."
+                    .to_string(),
+            },
+        ]
     }
 }
 
@@ -577,6 +607,38 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&res).unwrap();
         assert_eq!(v["ok"], false);
         assert!(res.contains("invalid Add File name"));
+    }
+
+    #[test]
+    fn guidance_selects_family_specific_format_hint() {
+        use crate::runtime::guidance::{compose_guidance, GuidanceContext};
+        let blocks = ContentPatchTool.guidance();
+        let caps = vec![Capability::WriteAccess { scopes: vec!["*".to_string()] }];
+        let tools = vec!["content_patch".to_string()];
+        let base = GuidanceContext {
+            capabilities: &caps,
+            active_tool_names: &tools,
+            model_family: None,
+            role: None,
+        };
+
+        // Claude → replace-first hint, not the v4a-first one.
+        let claude = GuidanceContext { model_family: Some("claude-opus-4-8"), ..base.clone() };
+        let out = compose_guidance(&blocks, &claude);
+        assert!(out.contains("Editing existing content"));
+        assert!(out.contains("prefer `mode=\"replace\"`"));
+        assert!(!out.contains("most reliably"));
+
+        // GPT → v4a-for-multi-entry hint, not the replace-first one.
+        let gpt = GuidanceContext { model_family: Some("gpt-4o"), ..base.clone() };
+        let out = compose_guidance(&blocks, &gpt);
+        assert!(out.contains("most reliably"));
+        assert!(!out.contains("Edit format: prefer `mode=\"replace\"`"));
+
+        // No model family → general doctrine only, no format hint.
+        let out = compose_guidance(&blocks, &base);
+        assert!(out.contains("Editing existing content"));
+        assert!(!out.contains("Edit format:"));
     }
 }
 

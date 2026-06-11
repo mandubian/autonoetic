@@ -898,7 +898,10 @@ impl AgentExecutor {
         let ctx = crate::runtime::guidance::GuidanceContext {
             capabilities: &self.manifest.capabilities,
             active_tool_names,
-            model_family: None, // populated by #465
+            // The configured model id; `ModelFamily` substring-matches it
+            // (e.g. ["claude"] matches "claude-opus-4-8"). None when unset, so
+            // family-gated guidance simply doesn't fire (#465).
+            model_family: self.manifest.llm_config.as_ref().map(|c| c.model.as_str()),
             role: crate::runtime::context::role_from_manifest(&self.manifest),
         };
         crate::runtime::guidance::compose_guidance(&blocks, &ctx)
