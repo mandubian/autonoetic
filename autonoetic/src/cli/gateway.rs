@@ -34,6 +34,17 @@ pub async fn handle_gateway_start(
         info!("{}", line);
     }
 
+    let caps = autonoetic_gateway::host_capabilities::HostCapabilities::gather();
+    for line in caps.summary_lines() {
+        info!("{}", line);
+    }
+    if !caps.has_any_sandbox_tier() {
+        tracing::warn!(
+            "No sandbox tier is runnable on this host (no bwrap/docker/firecracker, no wasm-tier build) — \
+             agents will fail to spawn. Run `autonoetic gateway preflight` for details."
+        );
+    }
+
     let server = autonoetic_gateway::GatewayServer::new(config);
     let _mcp_runtime = mcp_runtime;
     if let Err(e) = server.run().await {
@@ -45,6 +56,25 @@ pub async fn handle_gateway_start(
 
 pub fn handle_gateway_stop() {
     info!("Stopping Gateway");
+}
+
+/// Probe and report host capabilities (sandbox tiers + language toolchains).
+/// Exit code is non-zero when no execution tier is runnable at all.
+pub fn handle_gateway_preflight(json: bool) -> anyhow::Result<()> {
+    let caps = autonoetic_gateway::host_capabilities::HostCapabilities::gather();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&caps)?);
+    } else {
+        for line in caps.summary_lines() {
+            println!("{line}");
+        }
+    }
+    if !caps.has_any_sandbox_tier() {
+        anyhow::bail!(
+            "No sandbox tier is runnable on this host — install bwrap or docker, or build with the wasm-tier feature."
+        );
+    }
+    Ok(())
 }
 
 pub async fn handle_gateway_status(config_path: &Path, json_output: bool) -> anyhow::Result<()> {

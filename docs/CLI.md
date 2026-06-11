@@ -102,6 +102,17 @@ Show gateway status including connected agents, MCP servers, and scheduler state
 autonoetic gateway status [--json]
 ```
 
+### `autonoetic gateway preflight`
+
+Probe host capabilities without starting the gateway: which sandbox tiers
+(bubblewrap, docker, microvm, wasm) and language toolchains (python, javascript)
+are runnable on this host/build. The same summary is logged at `gateway start`.
+Exits non-zero when no sandbox tier is runnable at all.
+
+```bash
+autonoetic gateway preflight [--json]
+```
+
 ### `autonoetic gateway constitution show`
 
 Show the active constitution: version, canonical digest, signer, enforcement
