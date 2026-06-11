@@ -885,12 +885,19 @@ impl AgentExecutor {
 
     /// Render tool-contributed prompt guidance (#463/#464) for the native tools
     /// that pass `tier_filter`, plus the builtin blocks. Empty when none apply.
-    fn render_tool_guidance(&self, tier_filter: &crate::runtime::tools::ToolTierFilter) -> String {
-        let (tool_names, mut blocks) = self.registry.collect_guidance(&self.manifest, tier_filter);
+    /// `active_tool_names` must be the FINAL advertised tool set (post
+    /// MCP-merge/dedupe/cap), so `ToolPresent` gating matches what the model
+    /// actually sees rather than the native-only candidate set.
+    fn render_tool_guidance(
+        &self,
+        tier_filter: &crate::runtime::tools::ToolTierFilter,
+        active_tool_names: &[String],
+    ) -> String {
+        let mut blocks = self.registry.collect_guidance_blocks(&self.manifest, tier_filter);
         blocks.extend(crate::runtime::guidance::builtin_blocks());
         let ctx = crate::runtime::guidance::GuidanceContext {
             capabilities: &self.manifest.capabilities,
-            active_tool_names: &tool_names,
+            active_tool_names,
             model_family: None, // populated by #465
             role: crate::runtime::context::role_from_manifest(&self.manifest),
         };
@@ -902,7 +909,9 @@ impl AgentExecutor {
         let user_context = self.build_user_context_snippet();
         let memory_context = self.build_memory_context_snippet();
         let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
-        let guidance_rendered = self.render_tool_guidance(&self.compute_tier_filter());
+        // This pre-loop system message is replaced by the per-turn compose before
+        // the model sees it, so ToolPresent gating (empty here) doesn't matter.
+        let guidance_rendered = self.render_tool_guidance(&self.compute_tier_filter(), &[]);
         let mut system_instructions = compose_system_instructions_full(
             &inlined_instructions,
             &self.manifest,
@@ -1459,50 +1468,12 @@ impl AgentExecutor {
                 digest_turn_active = true;
             }
 
-            // Tool-contributed prompt guidance (#463/#464). The tier filter is
-            // shared with the tool list below so guidance and advertised tools agree.
+            // The tool list (below) and tool-contributed guidance share this tier
+            // filter; guidance is rendered AFTER the tool list so `ToolPresent`
+            // gates on the final advertised set (#463/#464).
             let tier_filter = self.compute_tier_filter();
-            let guidance_rendered = self.render_tool_guidance(&tier_filter);
-
-            // Update system message — ensure exactly one system message at position 0
-            let user_context = self.build_user_context_snippet();
-            let memory_context = self.build_memory_context_snippet();
-            let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
-            let mut system_instructions = compose_system_instructions_full(
-                &inlined_instructions,
-                &self.manifest,
-                self.manifest
-                    .io
-                    .as_ref()
-                    .and_then(|io| io.output_policy.as_ref()),
-                user_context.as_deref(),
-                self.persona.as_deref(),
-                Some(guidance_rendered.as_str()),
-            );
-            if let Some(ref snippet) = memory_context {
-                system_instructions.push_str("\n\n");
-                system_instructions.push_str(snippet);
-            }
-            if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
-                system_instructions.push_str("\n\n");
-                system_instructions.push_str(&notice);
-            }
-            // R++1: re-sign the state-attestation tail every turn so the
-            // facts in the block (turn counter, pending approvals, budget)
-            // reflect the current state, not last-turn's snapshot.
-            if let Some(tail) = self.build_state_attestation_tail()? {
-                system_instructions.push_str("\n\n");
-                system_instructions.push_str(&tail);
-            }
-
-            // Remove any existing system messages (could be stale from previous turns)
-            history.retain(|m| !matches!(m.role, crate::llm::Role::System));
-
-            // Insert fresh system message at the front
-            history.insert(0, Message::system(&system_instructions));
 
             let mut tools: Vec<ToolDefinition> = {
-                // `tier_filter` is computed once above (shared with guidance).
                 let mut t: Vec<ToolDefinition> = mcp_runtime
                     .tool_definitions()?
                     .into_iter()
@@ -1566,6 +1537,45 @@ impl AgentExecutor {
                     t
                 }
             };
+
+            // Update system message — composed after the tool list so
+            // tool-contributed guidance (#463/#464) gates `ToolPresent` on the
+            // FINAL advertised tool set the model actually sees.
+            let advertised_tool_names: Vec<String> =
+                tools.iter().map(|t| t.name.clone()).collect();
+            let guidance_rendered = self.render_tool_guidance(&tier_filter, &advertised_tool_names);
+            let user_context = self.build_user_context_snippet();
+            let memory_context = self.build_memory_context_snippet();
+            let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
+            let mut system_instructions = compose_system_instructions_full(
+                &inlined_instructions,
+                &self.manifest,
+                self.manifest
+                    .io
+                    .as_ref()
+                    .and_then(|io| io.output_policy.as_ref()),
+                user_context.as_deref(),
+                self.persona.as_deref(),
+                Some(guidance_rendered.as_str()),
+            );
+            if let Some(ref snippet) = memory_context {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(snippet);
+            }
+            if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(&notice);
+            }
+            // R++1: re-sign the state-attestation tail every turn so the
+            // facts in the block (turn counter, pending approvals, budget)
+            // reflect the current state, not last-turn's snapshot.
+            if let Some(tail) = self.build_state_attestation_tail()? {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(&tail);
+            }
+            // Exactly one system message, at the front (stale ones removed).
+            history.retain(|m| !matches!(m.role, crate::llm::Role::System));
+            history.insert(0, Message::system(&system_instructions));
 
             // --- Prompt Budget Transparency + Enforcement ---
             let budget_breakdown = crate::runtime::prompt_budget::PromptBudgetBreakdown::compute(

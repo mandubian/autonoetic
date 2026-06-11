@@ -292,23 +292,23 @@ impl NativeToolRegistry {
             .collect()
     }
 
-    /// Names of, and guidance blocks contributed by, the native tools available
-    /// to `manifest` that pass `filter` (#464). The names feed
-    /// `GuidanceCondition::ToolPresent`; the blocks ride into the prompt.
-    pub fn collect_guidance(
+    /// Guidance blocks contributed by the native tools available to `manifest`
+    /// that pass `filter` (#464). `ToolPresent` gating is evaluated separately
+    /// against the *final advertised* tool set (which includes MCP/discovered
+    /// tools and reflects dedupe/cap), so a collected block whose tool was
+    /// later dropped still won't render.
+    pub fn collect_guidance_blocks(
         &self,
         manifest: &AgentManifest,
         filter: &ToolTierFilter,
-    ) -> (Vec<String>, Vec<crate::runtime::guidance::GuidanceBlock>) {
-        let mut names = Vec::new();
+    ) -> Vec<crate::runtime::guidance::GuidanceBlock> {
         let mut blocks = Vec::new();
         for tool in &self.tools {
             if tool.is_available(manifest) && filter.allows_tool(tool.name(), tool.tier()) {
-                names.push(tool.name().to_string());
                 blocks.extend(tool.guidance());
             }
         }
-        (names, blocks)
+        blocks
     }
 
     pub fn execute(
