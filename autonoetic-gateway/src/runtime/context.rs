@@ -78,13 +78,15 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
 
 /// Best-effort role for guidance gating: the agent id segment before the first
 /// `.` (e.g. `coder.default` → `coder`), or the whole id if there is none.
+/// Returns `None` for an empty id or one with an empty leading segment
+/// (e.g. `.coder`), so role-gated guidance never matches on `""`.
 fn role_from_manifest(manifest: &AgentManifest) -> Option<&str> {
-    let id = manifest.agent.id.as_str();
-    if id.is_empty() {
-        None
-    } else {
-        Some(id.split('.').next().unwrap_or(id))
-    }
+    manifest
+        .agent
+        .id
+        .split('.')
+        .next()
+        .filter(|seg| !seg.is_empty())
 }
 
 const TOOL_BRIDGING_APPENDIX: &str = r#"---
