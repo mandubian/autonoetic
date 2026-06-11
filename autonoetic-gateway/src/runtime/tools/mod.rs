@@ -753,6 +753,20 @@ where
     }
 }
 
+/// Lenient `Option<String>`: accepts a string, coerces other non-null JSON to
+/// its string form, and maps null/absent to `None`.
+pub fn deserialize_opt_string_lenient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s),
+        other => Some(other.to_string()),
+    })
+}
+
 pub fn deserialize_string_map_values_lenient<'de, D>(
     deserializer: D,
 ) -> Result<std::collections::HashMap<String, String>, D::Error>
@@ -986,6 +1000,7 @@ pub mod agent_inspect;
 pub mod capsule;
 pub mod constitution;
 pub mod content;
+pub mod content_patch;
 pub mod credential;
 pub mod resolve;
 pub mod digest;
@@ -1036,6 +1051,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::digest::register_tools(&mut registry);
     crate::runtime::tools::session::register_tools(&mut registry);
     crate::runtime::tools::content::register_tools(&mut registry);
+    crate::runtime::tools::content_patch::register_tools(&mut registry);
     crate::runtime::tools::resolve::register_tools(&mut registry);
     crate::runtime::tools::agent::register_tools(&mut registry);
     crate::runtime::tools::agent_inspect::register_tools(&mut registry);

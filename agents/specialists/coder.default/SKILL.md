@@ -158,8 +158,8 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
 
 When planner returns evaluator/auditor findings for your script:
 
-1. **DO** update the script to fix the reported issues.
-2. **DO** save the revised files via `content_write`, rebuild the artifact, and return the new artifact_ref plus the key file names.
+1. **DO** update the script to fix the reported issues — prefer `content_patch` to edit the existing files in place rather than re-writing whole files with `content_write`.
+2. **DO** rebuild the artifact after editing, and return the new artifact_ref plus the key file names.
 3. **DO NOT** install the agent yourself.
 4. **DO NOT** claim success until findings are addressed.
 
