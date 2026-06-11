@@ -3604,13 +3604,20 @@ fn draw(
         let total_lines = panel.lines.len();
         let max_scroll = total_lines.saturating_sub(inner_height) as u16;
         let scroll = info_scroll.min(max_scroll);
-        let text: Vec<Line> = panel.lines.iter().map(|l| Line::from(l.clone())).collect();
+        let text: Vec<Line> = panel
+            .lines
+            .iter()
+            .map(|l| Line::from(Span::styled(l.clone(), Style::default().bg(Color::Black))))
+            .collect();
         f.render_widget(
             Paragraph::new(text)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Session Info [?/Esc close] ")
-                    .border_style(Style::default().fg(Color::Cyan)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Session Info [?/Esc close] ")
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .style(Style::default().bg(Color::Black)),
+                )
                 .scroll((scroll, 0)),
             area,
         );
