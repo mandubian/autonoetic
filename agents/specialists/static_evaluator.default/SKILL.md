@@ -111,8 +111,6 @@ After completing your evaluation, call `promotion_record`:
 }
 ```
 
-If your evaluation fails (evaluator_pass=false), you MUST still call `promotion_record` with pass=false to document the failure.
-
 ## Status Field Mapping
 
 When returning your final response JSON, map your evaluation result to the status field:

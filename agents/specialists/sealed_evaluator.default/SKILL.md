@@ -182,7 +182,7 @@ promotion_record({
 })
 ```
 
-This records the evaluation to the PromotionStore and causal chain. If your evaluation fails (evaluator_pass=false), you MUST still call `promotion_record` with pass=false to document the failure.
+This records the evaluation to the PromotionStore and causal chain.
 
 Exception: if execution is blocked on operator approval, do not call `promotion_record` until the evaluation is complete.
 

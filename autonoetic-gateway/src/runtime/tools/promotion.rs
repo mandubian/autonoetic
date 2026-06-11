@@ -102,6 +102,26 @@ impl NativeTool for PromotionRecordTool {
         is_promotion_agent(manifest)
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        // Centralized from static_evaluator/sealed_evaluator/auditor SKILL.md
+        // (#466): the call protocol is uniform across promotion agents.
+        // Role-specific exceptions (e.g. unit_test_runner's "no tests → don't
+        // call", sealed_evaluator's "defer until approval resolves") stay in
+        // those manifests.
+        vec![GuidanceBlock {
+            id: "promotion.record_protocol",
+            when: GuidanceCondition::ToolPresent("promotion_record"),
+            priority: 10,
+            prose: "**Recording your verdict.** When your evaluation/audit is complete, call \
+`promotion_record` with the `artifact_ref` you reviewed. Required fields are `role` and `pass` (plus \
+`findings` and `summary`) — do not use alternate names like `outcome`. `pass` is the boolean \
+equivalent of your verdict (`evaluator_pass` / `auditor_pass`). Record BOTH outcomes: on a failing \
+verdict you must still call it with `pass: false` to document the result."
+                .to_string(),
+        }]
+    }
+
     fn execute(
         &self,
         manifest: &AgentManifest,
@@ -513,5 +533,24 @@ impl NativeTool for PromotionQueryTool {
                 .map_err(Into::into)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::*;
+    use crate::runtime::guidance::{compose_guidance, GuidanceContext};
+
+    #[test]
+    fn promotion_record_contributes_verdict_block() {
+        let blocks = PromotionRecordTool.guidance();
+        let tools = vec!["promotion_record".to_string()];
+        let ctx = GuidanceContext { active_tool_names: &tools, ..Default::default() };
+        let out = compose_guidance(&blocks, &ctx);
+        assert!(out.contains("Recording your verdict"), "block text missing: {out}");
+        assert!(out.contains("do not use alternate names"));
+
+        // Absent when promotion_record isn't in the advertised tool set.
+        assert_eq!(compose_guidance(&blocks, &GuidanceContext::default()), "");
     }
 }

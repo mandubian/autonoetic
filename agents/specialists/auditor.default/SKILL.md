@@ -111,10 +111,6 @@ Use this exact argument shape:
 }
 ```
 
-Mapping rule: `pass` must be the boolean equivalent of your audit decision (`auditor_pass`).
-
-Do NOT use alternate field names like `outcome`; `promotion_record` requires `role` and `pass`.
-
 ## Review Protocol
 
 1. **Security first**: secrets, privilege escalation, data leaks
