@@ -96,6 +96,14 @@ def test_fetch(mock_request):
 
 If the task fundamentally requires a running server or real network integration testing, return `clarification_needed` or signal to the planner to delegate that part to `executor.default`.
 
+## CRITICAL: Test with the standard library — no test-framework dependencies
+
+Write gate tests with Python's built-in **`unittest`** (and `unittest.mock`), run as `python3 -m unittest`. Do **NOT** add `pytest`, `nose`, `hypothesis`, or any third-party test framework to `requirements.txt` / `pyproject.toml`.
+
+Why: the promotion test run (`unit_test_runner`) executes in a **no-network sandbox** that mounts only the agent's **runtime dependency layers** — and those layers become the shipped capsule. A test-only framework would therefore have to be baked into the runtime layers just to import (no network to install it at test time), bloating every capsule with a dependency the agent never uses at runtime and widening its supply-chain surface. `unittest` ships with Python, so it needs no dependency at all.
+
+A library the agent **already** depends on at runtime is fine to use in tests — it's already in the closure. The rule is only: don't introduce a dependency *for tests*.
+
 ## Behavior
 - Write clean, documented code
 - **Scripts that need API keys or secrets must read them from environment variables** (`os.environ.get("API_KEY")`), never from command-line arguments or hardcoded values. The gateway injects credentials at runtime via the `credential_env` parameter — the secret never reaches LLM context. The env var name is derived mechanically from the service name: e.g. service `"my-service"` → `"MY_SERVICE_SECRET"`. If the planner delegates with `service: "my-service"`, your script must use `os.environ["MY_SERVICE_SECRET"]`.
