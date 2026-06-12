@@ -2,7 +2,8 @@
 
 use autonoetic_types::agent::{
     AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, CompressionConfig,
-    ExecutionMode, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration, ScriptInputMode,
+    ExecutionMode, IoReturnsEnforcement, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration,
+    ScriptInputMode,
 };
 use autonoetic_types::background::BackgroundPolicy;
 use autonoetic_types::capability::Capability;
@@ -147,13 +148,16 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
 
     // External (AgentSkills) imports rarely declare `io.returns`. Give them a
     // default envelope so they hand off a predictable shape and inherit the
-    // centralized Output Contract instruction (#481). Enforcement is left to the
-    // execution-mode default — reasoning → advisory — so a non-conforming reply
-    // from a skill we don't control is surfaced as a hint, never blocked.
+    // centralized Output Contract instruction (#481). The synthesized default is
+    // a guess about a skill we don't control, so force **advisory** enforcement
+    // (preserving any explicit choice) — a non-conforming reply is surfaced as a
+    // hint, never blocked, regardless of execution_mode (which would otherwise
+    // default script agents to strict).
     let io = if agentskills_import.is_some() {
         let mut io = meta.io.unwrap_or_default();
         if io.returns.is_none() {
             io.returns = Some(default_imported_returns_schema());
+            io.returns_enforcement = io.returns_enforcement.or(Some(IoReturnsEnforcement::Advisory));
         }
         Some(io)
     } else {
@@ -186,7 +190,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
 }
 
 /// Permissive default `io.returns` envelope for imported external skills that
-/// declare no schema. Combined with reasoning-mode advisory enforcement, it
+/// declare no schema. Injected with forced advisory enforcement (see caller), it
 /// nudges the skill toward a predictable handoff shape without blocking output.
 fn default_imported_returns_schema() -> serde_json::Value {
     serde_json::json!({
@@ -630,7 +634,8 @@ Use Bash(git log) to inspect history.
             .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
 
         // Imported skill with no declared schema gets a default io.returns
-        // envelope, enforced advisorily (reasoning mode) so it never blocks.
+        // envelope with enforcement FORCED to advisory (not mode-derived), so it
+        // never blocks even if the skill were script-mode.
         let io = manifest.io.expect("imported skill should get a default io");
         let returns = io.returns.as_ref().expect("default io.returns envelope");
         let props = returns
@@ -639,8 +644,9 @@ Use Bash(git log) to inspect history.
             .expect("envelope properties");
         assert!(props.contains_key("status") && props.contains_key("summary"));
         assert_eq!(
-            io.effective_returns_enforcement(manifest.execution_mode),
-            autonoetic_types::agent::IoReturnsEnforcement::Advisory
+            io.returns_enforcement,
+            Some(autonoetic_types::agent::IoReturnsEnforcement::Advisory),
+            "synthesized default must be explicitly advisory, not mode-derived"
         );
     }
 
