@@ -106,7 +106,21 @@ pub fn compose_guidance(blocks: &[GuidanceBlock], ctx: &GuidanceContext) -> Stri
 
 /// The built-in guidance blocks. Empty until #464/#466 migrate doctrine here.
 pub fn builtin_blocks() -> Vec<GuidanceBlock> {
-    Vec::new()
+    vec![GuidanceBlock {
+        // Universal clarification principle (#466 recurring-section migration).
+        // Each role keeps its own *triggers* (what counts as blocked); this is
+        // the shared "ask-or-default, don't fabricate" rule.
+        id: "clarification.ask_or_default",
+        when: GuidanceCondition::Always,
+        priority: 5,
+        prose: "**Don't fabricate a missing fact.** When you're blocked on something only the \
+caller or operator can supply — a missing required parameter, a genuinely ambiguous instruction, or \
+conflicting requirements — do not guess and do not spin discovery tools (`agent_list`, \
+`workflow_state`, repeated re-reads) to manufacture the answer. Return `clarification_needed` (or use \
+`user_ask` if you hold that tool) and end the turn. Otherwise proceed with a sensible, documented \
+default — a reasonable default or a clearly-better interpretation does not warrant a round-trip."
+            .to_string(),
+    }]
 }
 
 /// Stable discriminant string for a capability, matched by
@@ -256,5 +270,13 @@ mod tests {
         let ctx = GuidanceContext::default();
         let b = block("n", GuidanceCondition::Capability("network_access"), 0);
         assert_eq!(compose_guidance(&[b], &ctx), "");
+    }
+
+    #[test]
+    fn builtin_clarification_block_is_always_active() {
+        // The clarification principle (#466) is an Always builtin → renders for
+        // any agent, even with no capabilities/tools.
+        let out = compose_guidance(&builtin_blocks(), &GuidanceContext::default());
+        assert!(out.contains("Don't fabricate a missing fact"), "got: {out:?}");
     }
 }

@@ -197,4 +197,4 @@ Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markd
 
 ## Clarification
 
-Request clarification only when a missing parameter changes the command or script materially. Otherwise use sensible defaults and execute.
+Your clarification trigger: a missing parameter that materially changes the command or script. Otherwise default and execute.

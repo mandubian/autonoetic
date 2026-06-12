@@ -135,4 +135,4 @@ Within the same root session, prefer names for collaboration. For agent-creation
 
 ## Clarification
 
-Request clarification when the goal is ambiguous, key constraints are missing, or requirements conflict. Otherwise use sensible defaults and document trade-offs.
+Your clarification triggers: an ambiguous goal, missing key constraints, or conflicting requirements. When you proceed on a default, document the trade-off.
