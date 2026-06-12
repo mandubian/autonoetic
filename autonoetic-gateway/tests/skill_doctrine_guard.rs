@@ -33,6 +33,10 @@ const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
         "never restart from scratch",
         "resumption.workflow_state_first (workflow_state.guidance)",
     ),
+    (
+        "warrant a round-trip",
+        "clarification.ask_or_default (builtin block)",
+    ),
 ];
 
 fn agents_root() -> PathBuf {

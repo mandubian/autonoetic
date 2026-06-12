@@ -6,11 +6,10 @@
 //! ordered by priority, deduped by `id`, and rendered into one section of the
 //! system prompt (see `context::compose_system_instructions_full`).
 //!
-//! This module is the mechanism only. The block *content* (e.g. moving the
-//! editing doctrine out of `foundation_editing.md`) arrives in #464/#466, and
-//! model-family population of [`GuidanceContext`] in #465. Until then
-//! [`builtin_blocks`] is empty, so wiring it in is a no-op on the rendered
-//! prompt.
+//! Block *content* lives with whatever owns it: tools contribute blocks via
+//! `NativeTool::guidance()` (#464), model-family conditions are populated from
+//! the manifest (#465), and cross-cutting doctrine not owned by any tool lives
+//! in [`builtin_blocks`] (#466, e.g. the clarification principle).
 
 use autonoetic_types::capability::Capability;
 use std::collections::HashSet;
@@ -104,9 +103,26 @@ pub fn compose_guidance(blocks: &[GuidanceBlock], ctx: &GuidanceContext) -> Stri
     rendered.join("\n\n")
 }
 
-/// The built-in guidance blocks. Empty until #464/#466 migrate doctrine here.
+/// Cross-cutting guidance blocks not owned by any single tool (#466). Tool- and
+/// role-specific doctrine lives with its tool's `guidance()`; this is for
+/// genuinely universal doctrine (e.g. the clarification principle).
 pub fn builtin_blocks() -> Vec<GuidanceBlock> {
-    Vec::new()
+    vec![GuidanceBlock {
+        // Universal clarification principle (#466 recurring-section migration).
+        // Each role keeps its own *triggers* (what counts as blocked); this is
+        // the shared "ask-or-default, don't fabricate" rule.
+        id: "clarification.ask_or_default",
+        when: GuidanceCondition::Always,
+        priority: 5,
+        prose: "**Don't fabricate a missing fact.** When you're blocked on something only the \
+caller or operator can supply — a missing required parameter, a genuinely ambiguous instruction, or \
+conflicting requirements — do not guess and do not spin discovery tools (`agent_list`, \
+`workflow_state`, repeated re-reads) to manufacture the answer. Return `clarification_needed` (or use \
+`user_ask` if you hold that tool) and end the turn — the reply must still satisfy your declared \
+output schema (required fields, types). Otherwise proceed with a sensible, documented default — a \
+reasonable default or a clearly-better interpretation does not warrant a round-trip."
+            .to_string(),
+    }]
 }
 
 /// Stable discriminant string for a capability, matched by
@@ -256,5 +272,13 @@ mod tests {
         let ctx = GuidanceContext::default();
         let b = block("n", GuidanceCondition::Capability("network_access"), 0);
         assert_eq!(compose_guidance(&[b], &ctx), "");
+    }
+
+    #[test]
+    fn builtin_clarification_block_is_always_active() {
+        // The clarification principle (#466) is an Always builtin → renders for
+        // any agent, even with no capabilities/tools.
+        let out = compose_guidance(&builtin_blocks(), &GuidanceContext::default());
+        assert!(out.contains("Don't fabricate a missing fact"), "got: {out:?}");
     }
 }

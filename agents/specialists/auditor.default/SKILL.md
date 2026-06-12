@@ -198,4 +198,4 @@ is the intent-only bundle agent-factory built.
 
 ## Clarification
 
-Request clarification when security policy, approval criteria, or scope are undefined. Otherwise apply standard security practices with conservative defaults.
+Your clarification triggers: undefined security policy, approval criteria, or scope. Otherwise apply standard security practices with conservative defaults.

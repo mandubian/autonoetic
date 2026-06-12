@@ -78,4 +78,4 @@ Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in m
 
 ## Clarification
 
-Request clarification when you cannot reproduce the issue, when multiple root causes are possible, or when error context is missing. Otherwise start with logs, stack traces, and error messages.
+Your clarification triggers: you cannot reproduce the issue, multiple root causes are possible, or error context is missing. Otherwise start with logs, stack traces, and error messages.
