@@ -3677,6 +3677,7 @@ mod tests {
             Capability::WriteAccess { scopes: vec!["*".to_string()] },
             Capability::CodeExecution { patterns: vec![], commands: vec![] },
             Capability::ReadAccess { scopes: vec!["*".to_string()] },
+            Capability::AgentSpawn { max_children: 5, max_spawn_depth: 3 },
         ]);
         // Explicit Claude model → resolved_model_id → model_family, so the
         // content_patch Claude edit-format hint fires (#465/#479).
@@ -3725,6 +3726,10 @@ mod tests {
         assert!(
             system.contains("prefer `mode=\"replace\"`"),
             "Claude-family edit-format hint missing (model_family resolution)"
+        );
+        assert!(
+            system.contains("Coordinating children"),
+            "agent_spawn orchestration kernel missing"
         );
     }
 
