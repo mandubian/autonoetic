@@ -113,11 +113,12 @@ impl NativeTool for PromotionRecordTool {
             id: "promotion.record_protocol",
             when: GuidanceCondition::ToolPresent("promotion_record"),
             priority: 10,
-            prose: "**Recording your verdict.** When your evaluation/audit is complete, call \
-`promotion_record` with the `artifact_ref` you reviewed. Required fields are `role` and `pass` (plus \
-`findings` and `summary`) — do not use alternate names like `outcome`. `pass` is the boolean \
-equivalent of your verdict (`evaluator_pass` / `auditor_pass`). Record BOTH outcomes: on a failing \
-verdict you must still call it with `pass: false` to document the result."
+            prose: "**Recording your verdict.** When your evaluation/audit reaches a verdict, call \
+`promotion_record` with the `artifact_ref` you reviewed. Only `role` and `pass` are required; include \
+`findings` and `summary` too. Use those exact field names — not alternates like `outcome`. `pass` is \
+the boolean equivalent of your verdict (`evaluator_pass` / `auditor_pass`); record a failing verdict \
+as well, with `pass: false`. (Your role may define cases where the gate is inapplicable and you should \
+NOT call this — e.g. no tests found; follow that role-specific guidance.)"
                 .to_string(),
         }]
     }
@@ -548,7 +549,7 @@ mod guidance_tests {
         let ctx = GuidanceContext { active_tool_names: &tools, ..Default::default() };
         let out = compose_guidance(&blocks, &ctx);
         assert!(out.contains("Recording your verdict"), "block text missing: {out}");
-        assert!(out.contains("do not use alternate names"));
+        assert!(out.contains("not alternates like `outcome`"));
 
         // Absent when promotion_record isn't in the advertised tool set.
         assert_eq!(compose_guidance(&blocks, &GuidanceContext::default()), "");
