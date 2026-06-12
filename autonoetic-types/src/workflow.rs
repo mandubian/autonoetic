@@ -42,6 +42,24 @@ impl WorkflowRunStatus {
             WorkflowRunStatus::Cancelled => "cancelled",
         }
     }
+
+    pub fn try_transition(self, next: WorkflowRunStatus) -> bool {
+        use WorkflowRunStatus::*;
+        if self == next {
+            return true;
+        }
+        match (self, next) {
+            (Completed | Failed | Cancelled | EmergencyStopped, _) => false,
+            (EmergencyStopping, EmergencyStopped) => true,
+            (EmergencyStopping, _) => false,
+            (Active, _) => true,
+            (WaitingChildren, _) => false,
+            (BlockedApproval, Resumable | EmergencyStopping | Failed | Cancelled) => true,
+            (BlockedApproval, _) => false,
+            (Resumable, Active | EmergencyStopping | Completed | Failed | Cancelled) => true,
+            _ => false,
+        }
+    }
 }
 
 impl Default for WorkflowRunStatus {
@@ -79,6 +97,28 @@ impl TaskRunStatus {
             TaskRunStatus::Succeeded => "succeeded",
             TaskRunStatus::Failed => "failed",
             TaskRunStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn try_transition(self, next: TaskRunStatus) -> bool {
+        use TaskRunStatus::*;
+        if self == next {
+            return true;
+        }
+        match (self, next) {
+            (Succeeded | Failed | Aborted | Cancelled, _) => false,
+            (Pending, Runnable | Cancelled) => true,
+            (Pending, _) => false,
+            (Runnable, Running | Cancelled | Failed) => true,
+            (Runnable, _) => false,
+            (Running, AwaitingApproval | Paused | Aborting | Succeeded | Failed) => true,
+            (Running, _) => false,
+            (AwaitingApproval, Runnable | Aborting | Failed) => true,
+            (AwaitingApproval, _) => false,
+            (Paused, Runnable | Aborting | Failed) => true,
+            (Paused, _) => false,
+            (Aborting, Aborted) => true,
+            (Aborting, _) => false,
         }
     }
 }

@@ -3672,6 +3672,10 @@ mod tests {
             system.contains("Forbidden shell commands"),
             "sandbox_exec forbidden-commands block missing"
         );
+        assert!(
+            system.contains("Approval continuation"),
+            "exec approval-continuation block missing"
+        );
     }
 
     struct ApprovalRequiredLifecycleTool;

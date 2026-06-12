@@ -66,8 +66,6 @@ When you wake up after any interruption (approval, timeout, hibernation):
 3. If you were mid-task (e.g., wrote files but didn't build artifact), continue from where you left off.
 4. **Never EndTurn immediately after resumption** — if building an agent script, you MUST call `artifact_build` and return the `artifact_ref` before ending.
 
-Approval retry: if `sandbox_exec` previously returned `approval_required: true` with an `approval_ref`, retry the **exact same command** with `approval_ref` set to the approved request ID.
-
 ## CRITICAL: No Network Access — Your Sandbox Has NO Network
 
 You do **NOT** have `NetworkAccess`. The sandbox is network-isolated. The gateway runs **static analysis** on your code and test files — it scans for URL strings, hostnames, IP addresses, and HTTP client calls **inside the source code itself**, not just the command. If any pattern is detected, `sandbox_exec` is blocked.
@@ -158,7 +156,6 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
    On success (`status: "ok"`): include `artifact_ref` and the install intent payload via `reason` or optional fields. The returned `artifact_ref` is the canonical install handoff. Prefer it over loose `cnt_...` handles for downstream packaging, validation, or installation.
 8. Suggested handoff text:
   "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."
-9. If a tool returns **`approval_required: true`**, **stop** and return the **exact** approval id fields to the planner — **never** invent an `approval_ref` or retry with a guessed id.
 
 <!-- extended -->
 
@@ -360,13 +357,7 @@ The gateway's LoopGuard will block `sandbox_exec` after too many failures. To av
 
 When your command may hit the network/API approval gate, **always** pass `"intent"` on `sandbox_exec`: one clear sentence for the operator (what runs, why it is needed, and whether traffic is real or mocked).
 
-When `sandbox_exec` returns `approval_required: true` with `request_id`, the gateway will suspend your session until the operator approves.
-
-**After resumption (approval resolved):**
-
-1. Retry `sandbox_exec` with the `approval_ref` set to the approved `request_id`. The gateway will use the approved command automatically.
-2. Use the output from this retried command to continue your work.
-3. Do NOT `EndTurn` immediately after approval — review your history and finish your task (build artifact, return artifact_ref, etc.).
+(The approval-continuation protocol — retry with `approval_ref` after resumption — is in the shared `sandbox_exec` guidance. After resumption, finish your task: build the artifact and return its `artifact_ref` before ending.)
 
 ## Permission Denied
 
