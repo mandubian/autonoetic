@@ -783,6 +783,27 @@ fn collect_layer_scope_issues(
     Ok(issues)
 }
 
+/// Shared approval-continuation doctrine (#466), contributed by both
+/// `sandbox_exec` and `artifact_exec` (same `id`, deduped at compose). Centralized
+/// from coder/sealed_evaluator SKILL.md.
+pub(crate) fn exec_approval_continuation_block() -> crate::runtime::guidance::GuidanceBlock {
+    use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+    GuidanceBlock {
+        id: "exec.approval_continuation",
+        when: GuidanceCondition::Any(vec![
+            GuidanceCondition::ToolPresent("sandbox_exec"),
+            GuidanceCondition::ToolPresent("artifact_exec"),
+        ]),
+        priority: 11,
+        prose: "**Approval continuation.** If `sandbox_exec`/`artifact_exec` returns \
+`approval_required: true` with an `approval_ref`, do not invent or guess an id — return the exact \
+approval fields to your caller and stop. After the operator approves and you resume, retry the \
+**exact same** command with `approval_ref` set to the approved `request_id`, then continue your task; \
+do NOT `EndTurn` immediately after resumption."
+            .to_string(),
+    }
+}
+
 impl NativeTool for SandboxExecTool {
     fn name(&self) -> &'static str {
         "sandbox_exec"
@@ -800,17 +821,20 @@ impl NativeTool for SandboxExecTool {
         // Centralized from coder/debugger/executor SKILL.md (#466). The gateway
         // enforces this for every `sandbox_exec` call, so it belongs with the
         // tool rather than copy-pasted per role.
-        vec![GuidanceBlock {
-            id: "sandbox.forbidden_commands",
-            when: GuidanceCondition::ToolPresent("sandbox_exec"),
-            priority: 10,
-            prose: "**Forbidden shell commands** (blocked by gateway security policy): destructive \
+        vec![
+            GuidanceBlock {
+                id: "sandbox.forbidden_commands",
+                when: GuidanceCondition::ToolPresent("sandbox_exec"),
+                priority: 10,
+                prose: "**Forbidden shell commands** (blocked by gateway security policy): destructive \
 file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shred`, `wipefs`, \
 `dd if=`/`dd of=/dev/…`, redirects to `/dev/…`); privilege escalation (`sudo`, `su`, `doas`, \
 `setuid`/`setgid`, `chmod +s`, `chown root`); and environment/process-secret disclosure (`env`, \
 `printenv`, `declare -x`, and reads of `/proc/self/environ`, `/proc/1/environ`, `/etc/environment`)."
-                .to_string(),
-        }]
+                    .to_string(),
+            },
+            exec_approval_continuation_block(),
+        ]
     }
 
     fn definition(&self) -> ToolDefinition {

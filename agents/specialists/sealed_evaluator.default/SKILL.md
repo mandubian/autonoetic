@@ -106,7 +106,7 @@ This has three consequences:
 When you wake up after any interruption:
 
 1. Call `workflow_state` to check current status.
-2. If approval was pending and is now resolved, retry the **exact same** exec command with `approval_ref` set to the approved request ID.
+2. If approval was pending and is now resolved, retry the blocked exec per the shared approval-continuation guidance.
 3. Complete the evaluation and call `promotion_record`.
 
 ## Behavior
