@@ -888,6 +888,29 @@ impl AgentExecutor {
     /// `active_tool_names` must be the FINAL advertised tool set (post
     /// MCP-merge/dedupe/cap), so `ToolPresent` gating matches what the model
     /// actually sees rather than the native-only candidate set.
+    /// The concrete model id for this spawn. Agents declare a **preset**
+    /// (`llm_preset`), not a pinned model — so the source of truth is the
+    /// resolved inference profile (preset → concrete `llm_config`), not
+    /// `manifest.llm_config` (normally `None`). Falls back to a legacy explicit
+    /// `manifest.llm_config.model`, then `"unknown"`. Shared by tracing/
+    /// context-window sizing and guidance (`model_family`).
+    fn resolved_model_id(&self) -> String {
+        // Preferred: the resolved profile's concrete model (from the preset).
+        if let Some(profile) = self.resolved_inference.as_ref() {
+            let m = profile.llm_config.model.trim();
+            if !m.is_empty() && m != "unknown" {
+                return m.to_string();
+            }
+        }
+        // Legacy fallback: an explicit pinned model in the manifest.
+        self.manifest
+            .llm_config
+            .as_ref()
+            .map(|c| c.model.clone())
+            .filter(|m| !m.is_empty() && m != "unknown")
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
     fn render_tool_guidance(
         &self,
         tier_filter: &crate::runtime::tools::ToolTierFilter,
@@ -895,13 +918,20 @@ impl AgentExecutor {
     ) -> String {
         let mut blocks = self.registry.collect_guidance_blocks(&self.manifest, tier_filter);
         blocks.extend(crate::runtime::guidance::builtin_blocks());
+        // Resolve the model id (preset-aware) so `ModelFamily` matches even for
+        // preset-configured agents whose `llm_config.model` is empty (#465/#479).
+        // `ModelFamily` substring-matches it (e.g. ["claude"] matches
+        // "claude-opus-4-8"); "unknown"/empty → None so family guidance just
+        // doesn't fire.
+        let model = self.resolved_model_id();
+        let model_family = match model.as_str() {
+            "" | "unknown" => None,
+            m => Some(m),
+        };
         let ctx = crate::runtime::guidance::GuidanceContext {
             capabilities: &self.manifest.capabilities,
             active_tool_names,
-            // The configured model id; `ModelFamily` substring-matches it
-            // (e.g. ["claude"] matches "claude-opus-4-8"). None when unset, so
-            // family-gated guidance simply doesn't fire (#465).
-            model_family: self.manifest.llm_config.as_ref().map(|c| c.model.as_str()),
+            model_family,
             role: crate::runtime::context::role_from_manifest(&self.manifest),
         };
         crate::runtime::guidance::compose_guidance(&blocks, &ctx)
@@ -1261,32 +1291,7 @@ impl AgentExecutor {
                 .unwrap_or_else(DisclosurePolicy::default),
         );
 
-        let model = self
-            .manifest
-            .llm_config
-            .as_ref()
-            .and_then(|c| {
-                // If the model is explicitly set, use it.
-                // Otherwise try to derive one from the routing preset's first model.
-                if !c.model.is_empty() && c.model != "unknown" {
-                    Some(c.model.clone())
-                } else {
-                    c.routing_preset.as_ref().and_then(|preset_name| {
-                        self.config
-                            .as_ref()
-                            .and_then(|cfg| cfg.llm_presets.get(preset_name))
-                            .and_then(|preset| preset.routing.as_ref())
-                            .and_then(|routing| routing.models.first())
-                            .and_then(|first_model_name| {
-                                self.config
-                                    .as_ref()
-                                    .and_then(|cfg| cfg.llm_presets.get(first_model_name))
-                                    .and_then(|fixed| fixed.model.clone())
-                            })
-                    })
-                }
-            })
-            .unwrap_or_else(|| "unknown".to_string());
+        let model = self.resolved_model_id();
         let temperature = self
             .manifest
             .llm_config
@@ -3668,11 +3673,26 @@ mod tests {
         // WriteAccess ⇒ content_write block; CodeExecution ⇒ sandbox_exec
         // forbidden-commands + approval blocks; ReadAccess ⇒ workflow_state
         // resumption kernel (#466 migration from per-SKILL.md prose).
-        let manifest = manifest_with_capabilities(vec![
+        let mut manifest = manifest_with_capabilities(vec![
             Capability::WriteAccess { scopes: vec!["*".to_string()] },
             Capability::CodeExecution { patterns: vec![], commands: vec![] },
             Capability::ReadAccess { scopes: vec!["*".to_string()] },
         ]);
+        // Explicit Claude model → resolved_model_id → model_family, so the
+        // content_patch Claude edit-format hint fires (#465/#479).
+        manifest.llm_config = Some(autonoetic_types::agent::LlmConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            temperature: 0.0,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: false,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            routing_preset: None,
+            thinking: None,
+        });
         let temp = tempdir().expect("tempdir should create");
         let captured = Arc::new(Mutex::new(None));
         let driver = CaptureSystemDriver { system_message: Arc::clone(&captured) };
@@ -3701,6 +3721,10 @@ mod tests {
         assert!(
             system.contains("On any wake-up"),
             "workflow_state resumption kernel missing"
+        );
+        assert!(
+            system.contains("prefer `mode=\"replace\"`"),
+            "Claude-family edit-format hint missing (model_family resolution)"
         );
     }
 

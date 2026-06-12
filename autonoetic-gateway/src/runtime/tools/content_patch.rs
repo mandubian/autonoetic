@@ -173,9 +173,13 @@ impl NativeTool for ContentPatchTool {
     }
 
     fn guidance(&self) -> Vec<GuidanceBlock> {
-        // The general doctrine is family-agnostic; the format hints below are
-        // model-family-specific (#465), mirroring the Hermes finding that
-        // different model families drive different edit formats most reliably.
+        // The general doctrine is family-agnostic. The format hints (#465) take
+        // the Hermes *insight* — only gpt/codex reliably drive the multi-entry
+        // V4A diff; every other family drives `replace` better — but express it
+        // openly: `replace` is the DEFAULT (gated `Not(gpt/codex)`), so local
+        // models (qwen, minimax, nemotron, …) and unknown models all get it,
+        // with no model allowlist to maintain. Only gpt/codex are special-cased.
+        const V4A_FAMILIES: &[&str] = &["gpt", "codex"];
         let present = || {
             GuidanceCondition::All(vec![
                 GuidanceCondition::Capability("write_access"),
@@ -202,10 +206,11 @@ retrying — don't guess variations of the same snippet."
                     .to_string(),
             },
             GuidanceBlock {
-                id: "editing.content_patch.format.claude",
+                // Default for every family except gpt/codex (and for unknown models).
+                id: "editing.content_patch.format.replace",
                 when: GuidanceCondition::All(vec![
                     present(),
-                    GuidanceCondition::ModelFamily(&["claude", "sonnet", "opus", "haiku"]),
+                    GuidanceCondition::Not(Box::new(GuidanceCondition::ModelFamily(V4A_FAMILIES))),
                 ]),
                 priority: 11,
                 prose: "Edit format: prefer `mode=\"replace\"` — match a unique snippet and swap it. \
@@ -213,10 +218,10 @@ Reach for `mode=\"v4a\"` only when one edit genuinely spans several entries at o
                     .to_string(),
             },
             GuidanceBlock {
-                id: "editing.content_patch.format.gpt",
+                id: "editing.content_patch.format.v4a",
                 when: GuidanceCondition::All(vec![
                     present(),
-                    GuidanceCondition::ModelFamily(&["gpt", "codex"]),
+                    GuidanceCondition::ModelFamily(V4A_FAMILIES),
                 ]),
                 priority: 11,
                 prose: "Edit format: for edits spanning several entries prefer `mode=\"v4a\"` (the \
@@ -622,23 +627,31 @@ mod tests {
             role: None,
         };
 
-        // Claude → replace-first hint, not the v4a-first one.
+        // Claude → replace-first hint (it's not gpt/codex), not the v4a one.
         let claude = GuidanceContext { model_family: Some("claude-opus-4-8"), ..base.clone() };
         let out = compose_guidance(&blocks, &claude);
         assert!(out.contains("Editing existing content"));
         assert!(out.contains("prefer `mode=\"replace\"`"));
         assert!(!out.contains("most reliably"));
 
-        // GPT → v4a-for-multi-entry hint, not the replace-first one.
+        // GPT/codex → v4a-for-multi-entry hint, not the replace-first one.
         let gpt = GuidanceContext { model_family: Some("gpt-4o"), ..base.clone() };
         let out = compose_guidance(&blocks, &gpt);
         assert!(out.contains("most reliably"));
         assert!(!out.contains("Edit format: prefer `mode=\"replace\"`"));
 
-        // No model family → general doctrine only, no format hint.
+        // Local/other models (qwen, minimax, …) → replace is the default.
+        for m in ["qwen2.5-coder", "minimax/minimax-m2.7", "nemotron-4"] {
+            let ctx = GuidanceContext { model_family: Some(m), ..base.clone() };
+            let out = compose_guidance(&blocks, &ctx);
+            assert!(out.contains("prefer `mode=\"replace\"`"), "{m} should get replace hint");
+            assert!(!out.contains("most reliably"), "{m} should not get v4a hint");
+        }
+
+        // Unknown model → replace is still the safe default.
         let out = compose_guidance(&blocks, &base);
-        assert!(out.contains("Editing existing content"));
-        assert!(!out.contains("Edit format:"));
+        assert!(out.contains("prefer `mode=\"replace\"`"));
+        assert!(!out.contains("most reliably"));
     }
 }
 

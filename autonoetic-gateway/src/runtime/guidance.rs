@@ -32,6 +32,8 @@ pub enum GuidanceCondition {
     All(Vec<GuidanceCondition>),
     /// Any sub-condition holds.
     Any(Vec<GuidanceCondition>),
+    /// The sub-condition does NOT hold (for exclusions).
+    Not(Box<GuidanceCondition>),
 }
 
 /// A unit of prompt prose with a declarative activation condition.
@@ -78,6 +80,7 @@ impl GuidanceCondition {
             GuidanceCondition::Role(role) => ctx.role == Some(*role),
             GuidanceCondition::All(conds) => conds.iter().all(|c| c.matches(ctx)),
             GuidanceCondition::Any(conds) => conds.iter().any(|c| c.matches(ctx)),
+            GuidanceCondition::Not(cond) => !cond.matches(ctx),
         }
     }
 }
@@ -280,5 +283,37 @@ mod tests {
         // any agent, even with no capabilities/tools.
         let out = compose_guidance(&builtin_blocks(), &GuidanceContext::default());
         assert!(out.contains("Don't fabricate a missing fact"), "got: {out:?}");
+    }
+
+    #[test]
+    fn not_negates() {
+        let caps = write_access();
+        let ctx = GuidanceContext { capabilities: &caps, ..Default::default() };
+        // write_access present → Not(write_access) is false → excluded.
+        let a = block(
+            "a",
+            GuidanceCondition::Not(Box::new(GuidanceCondition::Capability("write_access"))),
+            0,
+        );
+        assert_eq!(compose_guidance(&[a], &ctx), "");
+        // network_access absent → Not(network_access) is true → included.
+        let b = block(
+            "b",
+            GuidanceCondition::Not(Box::new(GuidanceCondition::Capability("network_access"))),
+            0,
+        );
+        assert_eq!(compose_guidance(&[b], &ctx), "b");
+    }
+
+    #[test]
+    fn approval_block_excluded_for_promotion_gate_roles() {
+        // P-3.10: promotion-gate agents can't get network approval, so the
+        // exec approval-continuation block must not fire for them.
+        let block = vec![crate::runtime::tools::sandbox::exec_approval_continuation_block()];
+        let tools = vec!["artifact_exec".to_string()];
+        let coder = GuidanceContext { active_tool_names: &tools, role: Some("coder"), ..Default::default() };
+        assert!(compose_guidance(&block, &coder).contains("Approval continuation"));
+        let utr = GuidanceContext { active_tool_names: &tools, role: Some("unit_test_runner"), ..Default::default() };
+        assert_eq!(compose_guidance(&block, &utr), "");
     }
 }
