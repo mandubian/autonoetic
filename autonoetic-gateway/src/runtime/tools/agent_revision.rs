@@ -2314,39 +2314,6 @@ impl NativeTool for AgentRevisionPromoteTool {
                     guard.disarm();
                 }
 
-                // Emit approval.pending on the canonical timeline so the Room TUI
-                // can surface the gate (same pattern as human_gate.rs #363).
-                if let Some(root) = &root_sid {
-                    let role = crate::runtime::session_timeline::derive_role(&manifest.agent.id);
-                    let principal = autonoetic_types::principal::Principal::agent(manifest.agent.id.clone());
-                    let refs = autonoetic_types::session_timeline::TimelineRefs {
-                        approval_request_id: Some(request_id.clone()),
-                        ..Default::default()
-                    };
-                    let event = crate::runtime::session_timeline::build_timeline_event(
-                        root.clone(),
-                        session_id.unwrap_or("").to_string(),
-                        turn_id.map(str::to_string),
-                        &principal,
-                        &role,
-                        "approval.pending",
-                        None,
-                        Some(serde_json::json!({
-                            "request_id": request_id,
-                            "approval_level": approval_level.to_config(),
-                            "action": "revision_promote",
-                            "agent_id": args.agent_id,
-                            "revision_id": args.revision_id,
-                            "added_capabilities": added_capabilities,
-                            "broadened_capabilities": broadened_capabilities,
-                        })),
-                        refs,
-                    );
-                    if let Err(e) = gateway_store.create_live_digest_event(&event) {
-                        tracing::debug!(target: "session_timeline", error = %e, "approval.pending timeline emit failed for revision promote");
-                    }
-                }
-
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "permission",

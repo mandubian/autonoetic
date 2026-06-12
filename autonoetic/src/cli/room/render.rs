@@ -662,6 +662,35 @@ fn payload_field_str(p: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Wrap plain text to `max_width` display cells (Unicode-aware).
+pub fn wrap_display_lines(text: &str, max_width: usize) -> Vec<String> {
+    let width = max_width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for word in text.split_whitespace() {
+        let word_w = unicode_width::UnicodeWidthStr::width(word);
+        let extra = if current.is_empty() { word_w } else { word_w + 1 };
+        if current_w + extra > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_w += 1;
+        }
+        current.push_str(word);
+        current_w += word_w;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// High-visibility approval gate card (`approval.pending`).
 fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     let p = parse_entry_payload(entry);
@@ -671,10 +700,50 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
         .unwrap_or_default();
     let action = field("action").unwrap_or_else(|| "approval".into());
     let level = field("approval_level");
-    let headline = format!("⏸ APPROVAL REQUIRED — {}", one_line(&action, 72));
+    let headline = if action == "revision_promote" {
+        let agent = field("agent_id").unwrap_or_else(|| "agent".into());
+        format!("⏸ PROMOTION APPROVAL — {agent}")
+    } else {
+        format!("⏸ APPROVAL REQUIRED — {}", one_line(&action, 72))
+    };
     let mut lines = vec![format!("  request: {request_id}")];
     if let Some(lvl) = level {
         lines.push(format!("  level: {lvl}"));
+    }
+    if action == "revision_promote" {
+        if let Some(agent) = field("agent_id") {
+            lines.push(format!("  agent: {agent}"));
+        }
+        if let Some(rev) = field("revision_id") {
+            lines.push(format!("  revision: {}", one_line(&rev, 120)));
+        }
+        if let Some(summary) = field("summary") {
+            lines.push("  about:".to_string());
+            for line in wrap_display_lines(&summary, 76) {
+                lines.push(format!("    {line}"));
+            }
+        }
+        for (label, key) in [
+            ("added capabilities", "added_capabilities"),
+            ("broadened capabilities", "broadened_capabilities"),
+        ] {
+            if let Some(values) = p
+                .as_ref()
+                .and_then(|v| v.get(key))
+                .and_then(|v| v.as_array())
+            {
+                let joined: Vec<_> = values
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect();
+                if !joined.is_empty() {
+                    lines.push(format!("  {label}:"));
+                    for cap in joined {
+                        lines.push(format!("    · {cap}"));
+                    }
+                }
+            }
+        }
     }
     if let Some(cmd) = field("command") {
         lines.push(format!("  command: {}", one_line(&cmd, 140)));
@@ -695,7 +764,11 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
     if let Some(risk) = field("risk_summary") {
         lines.push(format!("  risk: {}", one_line(&risk, 120)));
     }
-    lines.push("  ↳ y approve · n reject".to_string());
+    if field("confirm_phrase").is_some() {
+        lines.push("  ↳ y approve (confirm phrase shown below) · n reject · Esc peek timeline".to_string());
+    } else {
+        lines.push("  ↳ y approve · n reject · Esc peek timeline".to_string());
+    }
     (headline, Some(lines.join("\n")))
 }
 
@@ -778,18 +851,95 @@ fn plan_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     (headline, Some(lines.join("\n")))
 }
 
-/// High-visibility escalation gate card (`escalation.pending`).
+/// High-visibility session-escalate gate card (`approval.pending` + session_escalate).
+fn session_escalate_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
+    let p = parse_entry_payload(entry);
+    let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
+    let request_id = field("request_id")
+        .or_else(|| entry.refs.approval_request_id.clone())
+        .unwrap_or_default();
+    let reason_field = field("reason");
+    let summary_field = field("summary");
+    let reason = reason_field
+        .clone()
+        .or_else(|| summary_field.clone())
+        .unwrap_or_else(|| "agent needs human guidance".into());
+    let headline = format!("⏸ SESSION ESCALATION — {}", one_line(&reason, 88));
+    let mut lines = vec![format!("  request: {request_id}")];
+    lines.push("  reason:".to_string());
+    for line in wrap_display_lines(&reason, 76) {
+        lines.push(format!("    {line}"));
+    }
+    if let Some(agent) = field("requested_by_agent_id") {
+        lines.push(format!("  requested by: {agent}"));
+    }
+    if let Some(u) = field("urgency") {
+        lines.push(format!("  urgency: {u}"));
+    }
+    if let Some(sid) = field("session_id") {
+        lines.push(format!("  session: {sid}"));
+    }
+    if let Some(ctx) = field("context").filter(|c| !c.is_empty()) {
+        lines.push("  context:".to_string());
+        for line in wrap_display_lines(&ctx, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    if let Some(summary) = summary_field.filter(|s| {
+        !s.is_empty() && reason_field.as_ref().map(String::as_str) != Some(s.as_str())
+    }) {
+        lines.push("  summary:".to_string());
+        for line in wrap_display_lines(&summary, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    if let Some(actions) = p
+        .as_ref()
+        .and_then(|v| v.get("suggested_actions"))
+        .and_then(|v| v.as_array())
+    {
+        let joined: Vec<_> = actions
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        if !joined.is_empty() {
+            lines.push(format!("  suggested: {}", joined.join(" · ")));
+        }
+    }
+    lines.push("  ↳ y approve (resume with your guidance) · n reject · Esc peek timeline".to_string());
+    (headline, Some(lines.join("\n")))
+}
+
+/// High-visibility federation/promotion escalation gate card (`escalation.pending`).
 fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     let p = parse_entry_payload(entry);
     let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
     let synthesis = field("synthesis").unwrap_or_else(|| "operator decision requested".into());
-    let rev = field("revision_id");
-    let headline = format!("⏸ ESCALATION — {}", one_line(&synthesis, 88));
+    let headline = format!("⏸ PROMOTION ESCALATION — {}", one_line(&synthesis, 88));
     let mut lines = Vec::new();
-    if let Some(r) = rev.filter(|r| !r.is_empty()) {
-        lines.push(format!("  revision: {r}"));
+    if let Some(id) = field("escalation_id") {
+        lines.push(format!("  escalation: {id}"));
     }
-    lines.push("  ↳ review in detail pane · resolve via gateway approvals".to_string());
+    if let Some(req) = entry.refs.approval_request_id.clone().or(field("request_id")) {
+        lines.push(format!("  approval: {req}"));
+    }
+    if let Some(agent) = field("agent_id") {
+        lines.push(format!("  agent: {agent}"));
+    }
+    if let Some(rev) = field("revision_id").filter(|r| !r.is_empty()) {
+        lines.push(format!("  revision: {}", one_line(&rev, 120)));
+    }
+    if let Some(kind) = field("escalation_type") {
+        lines.push(format!("  type: {kind}"));
+    }
+    if let Some(artifact) = entry.refs.artifact_id.clone() {
+        lines.push(format!("  artifact: {artifact}"));
+    }
+    lines.push("  synthesis:".to_string());
+    for line in wrap_display_lines(&synthesis, 76) {
+        lines.push(format!("    {line}"));
+    }
+    lines.push("  ↳ y approve · n reject · Esc peek timeline".to_string());
     (headline, Some(lines.join("\n")))
 }
 
@@ -994,6 +1144,33 @@ fn extract_tool_summary(p: Option<&serde_json::Value>) -> Option<String> {
     None
 }
 
+/// Extract the key argument from a `tool.requested` or `tool.completed` payload.
+/// For `tool.requested` the `arguments` field is a JSON string; for `tool.completed`
+/// there is an `args_preview` field written by the tracer.
+fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Option<String> {
+    let v = p.as_ref()?;
+    // tool.completed may have a pre-extracted args_preview
+    if let Some(preview) = v.get("args_preview").and_then(|x| x.as_str()) {
+        return Some(preview.to_string());
+    }
+    // tool.requested has arguments as a JSON string
+    let args_str = v.get("arguments")?.as_str()?;
+    let args: serde_json::Value = serde_json::from_str(args_str).ok()?;
+    let key = match tool_name {
+        "artifact_inspect" => args.get("artifact_ref").and_then(|x| x.as_str()),
+        "content_write" => args.get("name").and_then(|x| x.as_str()),
+        "agent_spawn" => args.get("agent_id").and_then(|x| x.as_str()),
+        _ => return None,
+    };
+    key.map(|s| {
+        if s.len() > 80 {
+            format!("{}…", &s[..79])
+        } else {
+            s.to_string()
+        }
+    })
+}
+
 /// Human summary of an event, from its type + payload. Keeps the most useful
 /// field per known event type; falls back to the bare event type.
 pub fn summarize(entry: &SessionTimelineEntry) -> String {
@@ -1072,9 +1249,24 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             one_line(&field("question").unwrap_or_default(), 200),
         ),
         // Payload key is `tool_name`; keep `tool` as a fallback for older rows.
-        // Show just the result summary — status is conveyed by altitude color.
+        // Show the result summary — status is conveyed by altitude color.
+        // For tool.completed, also include the key argument (args_preview) when
+        // available so the row tells you what artifact/file/agent was involved.
+        "tool.requested" => {
+            let tool_name = field("tool_name").unwrap_or_default();
+            match extract_tool_key_param(&p, &tool_name) {
+                Some(kp) => format!("{tool_name} → {kp}"),
+                None => format!("{tool_name} requested"),
+            }
+        }
         "tool.completed" => {
             let summary = extract_tool_summary(p.as_ref());
+            let tool_name = field("tool_name")
+                .or_else(|| field("tool"))
+                .unwrap_or_else(|| "completed".into());
+            let key_suffix = extract_tool_key_param(&p, &tool_name)
+                .map(|kp| format!(" ({kp})"))
+                .unwrap_or_default();
             match summary {
                 Some(s) => {
                     let plain = if super::markdown::looks_like_markdown(&s) {
@@ -1082,11 +1274,10 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                     } else {
                         s
                     };
-                    one_line(&plain, 160)
+                    let base = one_line(&plain, 160);
+                    format!("{base}{key_suffix}")
                 }
-                None => format!("tool {}", field("tool_name")
-                    .or_else(|| field("tool"))
-                    .unwrap_or_else(|| "completed".into())),
+                None => format!("tool {tool_name}{key_suffix}"),
             }
         }
         // A promotion/governance escalation awaiting the operator's decision (#413).
@@ -1244,13 +1435,29 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
     };
 
     match entry.event_type.as_str() {
+        // Tool requested: show the key argument (artifact_ref, name, agent_id)
+        // from the arguments JSON.
+        "tool.requested" => {
+            let tool = s("tool_name").or_else(|| s("tool"));
+            match tool.as_deref() {
+                Some(name) => extract_tool_key_param(&p, name).map(|kp| cap_preview(&kp, 80)),
+                None => None,
+            }
+        }
         // Tool calls: a one-line hint at the args or the result preview.
         "tool.completed" => {
             let tool = s("tool_name").or_else(|| s("tool"));
             // For sandbox_exec-like tools, surface the result.stdout (or first
-            // 80 chars of any string result). For content_write, surface path.
+            // 80 chars of any string result). For content_write, surface path
+            // or args_preview. For artifact_inspect/agent_spawn, show the key
+            // argument from args_preview (extracted by the tracer).
             match tool.as_deref() {
-                Some("content_write") => s("path").map(|p| cap_preview(&p, 80)),
+                Some("content_write") => s("args_preview")
+                    .or_else(|| s("name")).or_else(|| s("path"))
+                    .map(|p| cap_preview(&p, 80)),
+                Some("artifact_inspect") => s("args_preview")
+                    .or_else(|| s("artifact_ref"))
+                    .map(|p| cap_preview(&p, 80)),
                 Some("sandbox_exec") | Some("artifact_exec") => p
                     .as_ref()
                     .and_then(|v| v.get("result"))
@@ -1261,7 +1468,9 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                         // The result may be a JSON string (not an object).
                         s("result").map(|r| cap_preview(&r, 80))
                     }),
-                Some("agent_spawn") => s("message").map(|m| cap_preview(&m, 80)),
+                Some("agent_spawn") => s("args_preview")
+                    .or_else(|| s("message"))
+                    .map(|m| cap_preview(&m, 80)),
                 Some("workflow_wait") | Some("workflow_state") => p
                     .as_ref()
                     .and_then(|v| v.get("task_ids"))
@@ -1424,15 +1633,15 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
             }
         }
         "approval.pending" => {
-            let is_wiki = entry
+            let action = entry
                 .payload
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                .is_some_and(|v| v.get("action").and_then(|a| a.as_str()) == Some("wiki_propose"));
-            if is_wiki {
-                wiki_proposal_gate_card(entry)
-            } else {
-                approval_gate_card(entry)
+                .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string));
+            match action.as_deref() {
+                Some("wiki_propose") => wiki_proposal_gate_card(entry),
+                Some("session_escalate") => session_escalate_gate_card(entry),
+                _ => approval_gate_card(entry),
             }
         }
         "user.ask.pending" => interaction_gate_card(entry),
@@ -2928,6 +3137,62 @@ mod tests {
     }
 
     #[test]
+    fn render_spec_session_escalate_approval_shows_guidance_context() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "esc-abc123",
+                "action": "session_escalate",
+                "approval_level": "operator",
+                "requested_by_agent_id": "planner.default",
+                "urgency": "normal",
+                "reason": "Unit tests require live network and cannot be evaluated",
+                "context": "Federation blocked on environment.",
+                "suggested_actions": ["accept without dynamic evidence", "retry with mocks"],
+            }),
+        );
+        let spec = render_spec(&appr);
+        assert!(spec.headline.contains("SESSION ESCALATION"));
+        let detail = spec.detail.expect("session escalate detail");
+        assert!(detail.contains("planner.default"));
+        assert!(detail.contains("live network"));
+        assert!(detail.contains("Federation blocked"));
+        assert!(detail.contains("retry with mocks"));
+    }
+
+    #[test]
+    fn render_spec_revision_promote_approval_shows_agent_context() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-promo",
+                "action": "revision_promote",
+                "approval_level": "elevated",
+                "agent_id": "weather-lookup",
+                "revision_id": "rev_sha256:abc123",
+                "summary": "Promote after federation pass",
+                "added_capabilities": ["NetworkAccess(hosts=[api.open-meteo.com])"],
+                "confirm_phrase": "promote weather-lookup rev_sha256:abc123",
+            }),
+        );
+        let spec = render_spec(&appr);
+        assert!(spec.headline.contains("PROMOTION APPROVAL"));
+        assert!(spec.headline.contains("weather-lookup"));
+        let detail = spec.detail.expect("promotion detail");
+        assert!(detail.contains("weather-lookup"));
+        assert!(detail.contains("rev_sha256"));
+        assert!(detail.contains("federation pass"));
+        assert!(detail.contains("NetworkAccess"));
+        assert!(detail.contains("Esc peek timeline"));
+    }
+
+    #[test]
     fn render_spec_plan_proposal_card_hides_raw_json_envelope() {
         let msg = serde_json::json!({
             "status": "awaiting_approval",
@@ -3143,6 +3408,46 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("build the weather skill"));
+    }
+
+    #[test]
+    fn render_spec_tool_completed_shows_args_preview_from_timeline_payload() {
+        let spawn = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "result": r#"{"accepted":true}"#,
+                "args_preview": "coder.default"
+            }),
+        );
+        let spawn_spec = render_spec(&spawn);
+        assert!(
+            spawn_spec.headline.contains("coder.default"),
+            "headline: {}",
+            spawn_spec.headline
+        );
+        assert_eq!(spawn_spec.detail.as_deref(), Some("coder.default"));
+
+        let write = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "content_write",
+                "result": r#"{"ok":true}"#,
+                "args_preview": "skills/weather/SKILL.md"
+            }),
+        );
+        let write_spec = render_spec(&write);
+        assert!(write_spec.headline.contains("skills/weather/SKILL.md"));
+        assert_eq!(
+            write_spec.detail.as_deref(),
+            Some("skills/weather/SKILL.md")
+        );
     }
 
     #[test]

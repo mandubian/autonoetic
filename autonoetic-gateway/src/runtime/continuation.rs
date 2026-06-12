@@ -675,6 +675,55 @@ pub fn execute_approved_action(
             )
         }
 
+        ScheduledAction::RevisionPromote {
+            agent_id,
+            revision_id,
+            ..
+        } => {
+            let mut args = if let Some(pending) = pending_tool_call {
+                if pending.tool_name == "agent_revision_promote" {
+                    match serde_json::from_str::<serde_json::Value>(&pending.arguments) {
+                        Ok(serde_json::Value::Object(map)) => map,
+                        _ => serde_json::Map::new(),
+                    }
+                } else {
+                    serde_json::Map::new()
+                }
+            } else {
+                serde_json::Map::new()
+            };
+            if !args.contains_key("agent_id") {
+                args.insert("agent_id".to_string(), serde_json::json!(agent_id));
+            }
+            if !args.contains_key("revision_id") {
+                args.insert("revision_id".to_string(), serde_json::json!(revision_id));
+            }
+            args.insert(
+                "approval_ref".to_string(),
+                serde_json::json!(decision.request_id),
+            );
+            tracing::info!(
+                target: "continuation",
+                request_id = %decision.request_id,
+                agent_id = %agent_id,
+                revision_id = %revision_id,
+                "Executing approved agent_revision_promote action"
+            );
+            registry.execute(
+                "agent_revision_promote",
+                manifest,
+                &policy,
+                agent_dir,
+                gateway_dir,
+                &serde_json::Value::Object(args).to_string(),
+                session_id,
+                None,
+                Some(config),
+                gateway_store,
+                None,
+            )
+        }
+
         other => {
             anyhow::bail!(
                 "execute_approved_action: unsupported ScheduledAction variant {:?}",

@@ -70,6 +70,10 @@ impl GatewayStore {
                 risk_summary_json,
             ],
         )?;
+        // Release the conn lock before timeline emit — create_live_digest_event
+        // re-locks the same Mutex and would deadlock otherwise.
+        drop(conn);
+        crate::runtime::session_timeline::emit_approval_pending_timeline_event(self, request, None);
         Ok(())
     }
 
@@ -406,6 +410,17 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT status FROM approvals WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn get_pending_approval_request_id_for_task(&self, task_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT request_id FROM approvals WHERE task_id = ?1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
             params![task_id],
             |row| row.get(0),
         )

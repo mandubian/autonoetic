@@ -655,6 +655,44 @@ pub fn cancel_request(
     Ok(decision)
 }
 
+/// Withdraw a still-pending approval bound to a workflow task (e.g. task cancelled).
+pub fn cancel_pending_approval_for_workflow_task(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    task_id: &str,
+    cancelled_by: &str,
+    reason: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(store) = gateway_store else {
+        return Ok(None);
+    };
+    let Some(request_id) = store.get_pending_approval_request_id_for_task(task_id)? else {
+        return Ok(None);
+    };
+    let cancelled_at = chrono::Utc::now().to_rfc3339();
+    match store.cancel_approval(&request_id, cancelled_by, &cancelled_at) {
+        Ok(()) => {
+            tracing::info!(
+                target: "approval",
+                request_id = %request_id,
+                task_id = %task_id,
+                reason = %reason,
+                "Cancelled pending approval for workflow task"
+            );
+            Ok(Some(request_id))
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "approval",
+                request_id = %request_id,
+                task_id = %task_id,
+                error = %error,
+                "Failed to cancel pending approval for workflow task"
+            );
+            Ok(None)
+        }
+    }
+}
+
 fn cancel_approval_request(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -778,6 +816,7 @@ fn resume_session_after_approval(
             | autonoetic_types::background::ScheduledAction::WebFetch { .. }
             | autonoetic_types::background::ScheduledAction::WebCall { .. }
             | autonoetic_types::background::ScheduledAction::WebSearch { .. }
+            | autonoetic_types::background::ScheduledAction::RevisionPromote { .. }
     );
 
     if !is_supported_action {
@@ -910,6 +949,23 @@ fn resume_session_after_approval(
                 ),
                 ApprovalStatus::Cancelled => format!(
                     "approval_cancelled:web:{}:cancelled",
+                    decision.request_id
+                ),
+            };
+            (decision.agent_id.clone(), msg)
+        }
+        autonoetic_types::background::ScheduledAction::RevisionPromote { .. } => {
+            let msg = match decision.status {
+                ApprovalStatus::Approved => format!(
+                    "approval_resumed:revision_promote:{}:approved",
+                    decision.request_id
+                ),
+                ApprovalStatus::Rejected => format!(
+                    "approval_rejected:revision_promote:{}:rejected",
+                    decision.request_id
+                ),
+                ApprovalStatus::Cancelled => format!(
+                    "approval_cancelled:revision_promote:{}:cancelled",
                     decision.request_id
                 ),
             };
@@ -2008,6 +2064,53 @@ mod tests {
         assert!(
             pending.is_empty(),
             "workflow-bound approvals should continue through workflow re-queue only"
+        );
+    }
+
+    #[test]
+    fn revision_promote_approval_signal_prompts_agent_retry() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir,
+            ..Default::default()
+        };
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let decision = ApprovalDecision {
+            request_id: "apr-promote01".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: "session-88f313bd/specialized_builder.default-c671e74b".to_string(),
+            action: ScheduledAction::RevisionPromote {
+                agent_id: "weather-lookup".to_string(),
+                revision_id: "ar-weather01".to_string(),
+                outgoing_revision_id: String::new(),
+                added_capabilities: vec!["NetworkAccess".to_string()],
+                broadened_capabilities: vec![],
+                payload: None,
+            },
+            status: ApprovalStatus::Approved,
+            decided_at: chrono::Utc::now().to_rfc3339(),
+            decided_by: "operator".to_string(),
+            reason: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("session-88f313bd".to_string()),
+            approval_level: ApprovalLevel::Operator,
+        };
+
+        super::resume_session_after_approval(&cfg, Some(store.as_ref()), &decision, None).unwrap();
+
+        let pending = store.list_pending_notifications().unwrap();
+        assert!(!pending.is_empty(), "should have created a notification");
+        let payload = &pending[0].payload;
+        assert_eq!(
+            payload.get("message").and_then(|v| v.as_str()),
+            Some("approval_resumed:revision_promote:apr-promote01:approved")
         );
     }
 

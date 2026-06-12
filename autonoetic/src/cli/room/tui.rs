@@ -10,7 +10,8 @@ use super::channel::{Channel, GateAction, GateKind, GateOption, GateRef, TuiChan
 use super::client::RoomClient;
 use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
-use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
+use autonoetic_types::principal::Principal;
+use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry, SessionTimelineListResult};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
@@ -21,7 +22,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 use std::collections::{HashMap, HashSet};
@@ -463,6 +464,215 @@ fn clear_detail(
     *h_scroll = 0;
 }
 
+struct InfoPanel {
+    lines: Vec<String>,
+}
+
+impl InfoPanel {
+    fn new(lines: Vec<String>) -> Self {
+        Self { lines }
+    }
+}
+
+fn build_info_panel(
+    root: &str,
+    channel_kind: &str,
+    stats: &SessionStats,
+    floor: Altitude,
+    squash: bool,
+    follow: bool,
+    show_reasoning: bool,
+    row_count: usize,
+    gate: Option<&GateRef>,
+    pending_plan_count: usize,
+    status: Option<&str>,
+    selected_spawn_agent: Option<&str>,
+) -> InfoPanel {
+    let mut lines = Vec::new();
+    let short_id = if root.len() > 32 {
+        format!("{}…{}", &root[..12], &root[root.len()-8..])
+    } else {
+        root.to_string()
+    };
+    lines.push(format!("  Session    {short_id}"));
+    lines.push(format!("  Channel    {channel_kind}"));
+    lines.push(String::new());
+    if stats.llm_calls > 0 {
+        let model_tag = if stats.models.len() == 1 {
+            stats.models[0].clone()
+        } else {
+            format!("{} models", stats.models.len())
+        };
+        lines.push(format!("  Model      {model_tag}  ({} calls)", stats.llm_calls));
+        lines.push(format!("  Tokens     in {}   out {}", format_tokens(stats.total_input), format_tokens(stats.total_output)));
+    }
+    lines.push(String::new());
+    lines.push(format!("  Toggles    floor:{}  squash:{}  reasoning:{}  follow:{}",
+        floor.as_str(),
+        if squash { "on" } else { "off" },
+        if show_reasoning { "on" } else { "off" },
+        if follow { "●" } else { "○" },
+    ));
+    lines.push(format!("  Rows       {row_count}"));
+    lines.push(String::new());
+    let mut active = Vec::new();
+    if let Some(g) = gate {
+        active.push(format!("  ⏸  gate: {} ({:?})", g.id, g.kind));
+    }
+    if pending_plan_count > 0 {
+        active.push(format!("  ⚠  {pending_plan_count} plan(s) pending"));
+    }
+    if let Some(agent) = selected_spawn_agent {
+        active.push(format!("  ↳  agent_spawn → {agent}"));
+    }
+    if active.is_empty() {
+        lines.push("  Active     —".to_string());
+    } else {
+        lines.push("  Active".to_string());
+        for a in active {
+            lines.push(a);
+        }
+    }
+    if let Some(s) = status {
+        lines.push(String::new());
+        lines.push(format!("  Status     {s}"));
+    }
+    InfoPanel::new(lines)
+}
+
+fn truncate_id(id: &str, max: usize) -> String {
+    if id.len() <= max {
+        id.to_string()
+    } else {
+        format!("{}…{}", &id[..max / 2], &id[id.len() - (max - max / 2 - 1)..])
+    }
+}
+
+fn build_header(
+    root: &str,
+    channel_kind: &str,
+    stats: &SessionStats,
+    gate_count: usize,
+    follow: bool,
+    width: u16,
+) -> String {
+    let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
+    let mut right_parts = Vec::new();
+    if stats.llm_calls > 0 {
+        right_parts.push(format!("{}→{} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
+    }
+    if gate_count > 0 {
+        right_parts.push(format!("⚠{gate_count}"));
+    }
+    if follow {
+        right_parts.push("[following]".to_string());
+    }
+    let right = right_parts.join("  ");
+    let left_w = left.width();
+    let right_w = right.width();
+    let avail = width as usize;
+    if left_w + right_w + 2 >= avail {
+        format!("{left} {right}")
+    } else {
+        let pad = avail - left_w - right_w;
+        format!("{}{}{}", left, " ".repeat(pad), right)
+    }
+}
+
+/// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
+fn count_active_gates(entries: &[SessionTimelineEntry], resolved: &HashSet<String>) -> usize {
+    entries.iter().filter(|e| {
+        matches!(e.event_type.as_str(),
+            "approval.pending" | "plan.pending" | "user.ask.pending" | "escalation.pending"
+        ) && !resolved.contains(approval_or_interaction_id(e).as_deref().unwrap_or(&e.event_id))
+    }).count()
+}
+
+fn approval_or_interaction_id(e: &SessionTimelineEntry) -> Option<String> {
+    if e.event_type == "user.ask.pending" {
+        e.payload.as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("interaction_id").and_then(|x| x.as_str()).map(String::from))
+    } else {
+        e.payload.as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("request_id").and_then(|x| x.as_str()).map(String::from))
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+struct ArtifactFileEntry {
+    name: String,
+    alias: String,
+}
+
+struct ArtifactViewer {
+    artifact_id: String,
+    artifact_ref: String,
+    kind: String,
+    files: Vec<ArtifactFileEntry>,
+    selected: usize,
+    scroll: u16,
+}
+
+struct ArtifactFileView {
+    artifact_id: String,
+    file_name: String,
+    content: String,
+    scroll: u16,
+}
+
+/// Extract artifact_ref from a timeline entry, if it has one.
+/// Returns an `ar.*` or `art_*` ref that the gateway can resolve.
+fn artifact_ref_for_entry(entry: &SessionTimelineEntry) -> Option<String> {
+    if let Some(ref aid) = entry.refs.artifact_id {
+        return Some(aid.clone());
+    }
+    if entry.event_type == "tool.completed" {
+        if let Some(ref payload) = entry.payload {
+            if let Ok(p) = serde_json::from_str::<serde_json::Value>(payload) {
+                let tool_name = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                if tool_name.starts_with("artifact") {
+                    if let Some(result_str) = p.get("result").and_then(|v| v.as_str()) {
+                        if let Ok(result) = serde_json::from_str::<serde_json::Value>(result_str) {
+                            if let Some(aref) = result.get("artifact_ref").and_then(|v| v.as_str()) {
+                                return Some(aref.to_string());
+                            }
+                            if let Some(aid) = result.get("artifact_id").and_then(|v| v.as_str()) {
+                                return Some(aid.to_string());
+                            }
+                        }
+                    }
+                    if let Some(preview) = p.get("args_preview").and_then(|v| v.as_str()) {
+                        if preview.starts_with("ar.") || preview.starts_with("art_") {
+                            return Some(preview.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// An in-flight operator decision — captures an optional motivation (approvals,
 /// §3.5) or the answer (interactions) before committing. `GateRef`, `GateKind`,
 /// and `GateAction` are the channel-neutral primitives, shared from
@@ -479,30 +689,280 @@ struct GateInput {
     /// Rejections always require motivation (§O). Approvals may require it for
     /// elevated/external actions — the gateway enforces that on submit.
     motivation_required: bool,
+    /// R++4: destructive approval classes require typing this phrase exactly
+    /// (case-insensitive) instead of optional motivation.
+    required_confirm_phrase: Option<String>,
+    /// R++2: `revision_promote` approvals — auto-filled from the timeline payload.
+    acknowledged_capabilities: Vec<String>,
 }
 
-fn gate_commit_validation_error(gi: &GateInput) -> Option<&'static str> {
+/// Blocking popup for operator gates — auto-opens when a new approval, question,
+/// or escalation appears so the operator does not have to hunt the timeline.
+struct GateModal {
+    gate: GateRef,
+    scroll: u16,
+    /// When true, the timeline stays interactive; a compact banner reminds the
+    /// operator that a gate is still open (`g` reopens the full modal).
+    peek_timeline: bool,
+    /// Fallback detail from `approvals.inspect` when the timeline row is sparse.
+    inspect_lines: Vec<String>,
+}
+
+fn gate_modal_kind(gate: &GateRef) -> bool {
+    matches!(
+        gate.kind,
+        GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation | GateKind::Interaction
+    )
+}
+
+/// Newest unresolved operator gate that should block the session (plans use the
+/// plan-review pane instead).
+fn newest_blocking_gate_event(
+    entries: &[SessionTimelineEntry],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Option<(GateRef, String)> {
+    for e in entries.iter().rev() {
+        if let Some(gate) = gate_for_entry(e, resolved, acted) {
+            if gate_modal_kind(&gate) {
+                return Some((gate, e.event_id.clone()));
+            }
+        }
+    }
+    None
+}
+
+fn gate_inspect_detail_lines(value: &serde_json::Value) -> Vec<String> {
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let mut lines = Vec::new();
+    if let Some(action) = field("action") {
+        lines.push(format!("  action: {action}"));
+    }
+    if let Some(level) = field("approval_level") {
+        lines.push(format!("  level: {level}"));
+    }
+    match field("action").as_deref() {
+        Some("session_escalate") => {
+            if let Some(agent) = field("requested_by_agent_id") {
+                lines.push(format!("  requested by: {agent}"));
+            }
+            if let Some(u) = field("urgency") {
+                lines.push(format!("  urgency: {u}"));
+            }
+            if let Some(reason) = field("reason").or_else(|| field("summary")) {
+                lines.push("  reason:".to_string());
+                for line in render::wrap_display_lines(&reason, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            if let Some(ctx) = field("context") {
+                lines.push("  context:".to_string());
+                for line in render::wrap_display_lines(&ctx, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            if let Some(actions) = value.get("suggested_actions").and_then(|v| v.as_array()) {
+                let joined: Vec<_> = actions.iter().filter_map(|v| v.as_str()).collect();
+                if !joined.is_empty() {
+                    lines.push(format!("  suggested: {}", joined.join(" · ")));
+                }
+            }
+        }
+        Some("revision_promote") => {
+            if let Some(agent) = field("agent_id") {
+                lines.push(format!("  agent: {agent}"));
+            }
+            if let Some(rev) = field("revision_id") {
+                lines.push(format!("  revision: {}", render::one_line(&rev, 120)));
+            }
+            if let Some(summary) = field("summary") {
+                lines.push("  about:".to_string());
+                for line in render::wrap_display_lines(&summary, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+        }
+        _ => {
+            if let Some(summary) = field("summary") {
+                lines.push("  about:".to_string());
+                for line in render::wrap_display_lines(&summary, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            if let Some(risk) = field("risk_summary") {
+                lines.push(format!("  risk: {}", render::one_line(&risk, 120)));
+            }
+        }
+    }
+    lines
+}
+
+fn fetch_gate_inspect_detail(client: &RoomClient, request_id: &str) -> Vec<String> {
+    rpc(
+        client,
+        "approvals.inspect",
+        serde_json::json!({ "request_id": request_id }),
+    )
+    .map(|v| gate_inspect_detail_lines(&v))
+    .unwrap_or_default()
+}
+
+fn gate_entry_for_ref<'a>(
+    entries: &'a [SessionTimelineEntry],
+    gate: &GateRef,
+) -> Option<&'a SessionTimelineEntry> {
+    entries.iter().rev().find(|e| match gate.kind {
+        GateKind::Approval | GateKind::WikiProposal => {
+            e.event_type == "approval.pending"
+                && approval_id_for(e).as_deref() == Some(gate.id.as_str())
+        }
+        GateKind::Escalation => {
+            (e.event_type == "escalation.pending"
+                && e.refs.approval_request_id.as_deref() == Some(gate.id.as_str()))
+                || (e.event_type == "approval.pending"
+                    && approval_id_for(e).as_deref() == Some(gate.id.as_str()))
+        }
+        GateKind::Interaction => {
+            e.event_type == "user.ask.pending"
+                && interaction_id_for(e).as_deref() == Some(gate.id.as_str())
+        }
+        GateKind::Plan => false,
+    })
+}
+
+fn approval_entry_for_id<'a>(
+    entries: &'a [SessionTimelineEntry],
+    request_id: &str,
+) -> Option<&'a SessionTimelineEntry> {
+    entries.iter().find(|entry| approval_id_for(entry).as_deref() == Some(request_id))
+}
+
+fn approval_gate_requirements_from_entry(
+    entry: &SessionTimelineEntry,
+) -> (Option<String>, Vec<String>) {
+    let confirm_phrase = payload_field_str(entry, "confirm_phrase");
+    let mut acknowledged_capabilities = Vec::new();
+    if let Some(payload) = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    {
+        for key in ["added_capabilities", "broadened_capabilities"] {
+            if let Some(values) = payload.get(key).and_then(|v| v.as_array()) {
+                for value in values {
+                    if let Some(cap) = value.as_str() {
+                        acknowledged_capabilities.push(cap.to_string());
+                    }
+                }
+            }
+        }
+    }
+    acknowledged_capabilities.sort();
+    acknowledged_capabilities.dedup();
+    (confirm_phrase, acknowledged_capabilities)
+}
+
+fn approval_gate_requirements(
+    client: &RoomClient,
+    entries: &[SessionTimelineEntry],
+    request_id: &str,
+) -> (Option<String>, Vec<String>) {
+    if let Some(entry) = approval_entry_for_id(entries, request_id) {
+        let (mut confirm_phrase, mut acknowledged_capabilities) =
+            approval_gate_requirements_from_entry(entry);
+        if confirm_phrase.is_none() || acknowledged_capabilities.is_empty() {
+            if let Ok(value) = rpc(
+                client,
+                "approvals.inspect",
+                serde_json::json!({ "request_id": request_id }),
+            ) {
+                if confirm_phrase.is_none() {
+                    confirm_phrase = value
+                        .get("confirm_phrase")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                }
+                if acknowledged_capabilities.is_empty() {
+                    for key in ["added_capabilities", "broadened_capabilities"] {
+                        if let Some(values) = value.get(key).and_then(|v| v.as_array()) {
+                            for cap in values {
+                                if let Some(name) = cap.as_str() {
+                                    acknowledged_capabilities.push(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                    acknowledged_capabilities.sort();
+                    acknowledged_capabilities.dedup();
+                }
+            }
+        }
+        return (confirm_phrase, acknowledged_capabilities);
+    }
+    (None, Vec::new())
+}
+
+fn approval_gate_input(
+    client: &RoomClient,
+    action: GateAction,
+    id: String,
+    entries: &[SessionTimelineEntry],
+    motivation_required: bool,
+) -> GateInput {
+    let (required_confirm_phrase, acknowledged_capabilities) =
+        approval_gate_requirements(client, entries, &id);
+    GateInput {
+        action,
+        id,
+        buffer: String::new(),
+        options: Vec::new(),
+        allow_freeform: true,
+        motivation_required,
+        required_confirm_phrase,
+        acknowledged_capabilities,
+    }
+}
+
+fn gate_commit_validation_error(gi: &GateInput) -> Option<String> {
+    if matches!(gi.action, GateAction::Approve) {
+        if let Some(ref required) = gi.required_confirm_phrase {
+            if !gi.buffer.trim().eq_ignore_ascii_case(required) {
+                return Some(format!(
+                    "✗ type confirm phrase exactly: '{required}'"
+                ));
+            }
+            return None;
+        }
+    }
     if matches!(gi.action, GateAction::Approve | GateAction::Reject)
         && gi.motivation_required
         && gi.buffer.trim().is_empty()
     {
-        Some("✗ motivation required — type a reason and press Enter")
+        Some("✗ motivation required — type a reason and press Enter".to_string())
     } else {
         None
     }
 }
 
-fn gate_input_label(gi: &GateInput) -> &'static str {
+fn gate_input_label(gi: &GateInput) -> String {
     match gi.action {
-        GateAction::Answer => "ANSWER",
+        GateAction::Answer => "ANSWER".to_string(),
         GateAction::Approve => {
-            if gi.motivation_required {
-                "APPROVE — motivation (required)"
+            if gi.required_confirm_phrase.is_some() {
+                "APPROVE — confirm phrase (required)".to_string()
+            } else if gi.motivation_required {
+                "APPROVE — motivation (required)".to_string()
             } else {
-                "APPROVE — motivation (optional)"
+                "APPROVE — motivation (optional)".to_string()
             }
         }
-        GateAction::Reject => "REJECT — motivation (required)",
+        GateAction::Reject => "REJECT — motivation (required)".to_string(),
     }
 }
 
@@ -843,9 +1303,15 @@ pub fn run(
     // Display toggles + spinner state for the in-flight row indicator.
     let mut show_reasoning = true;
     let mut spinner_frame: usize = 0;
+    let mut info_panel_open = false;
+    let mut info_scroll: u16 = 0;
+    let mut artifact_viewer: Option<ArtifactViewer> = None;
+    let mut artifact_file_view: Option<ArtifactFileView> = None;
     let mut quit_armed_until: Option<Instant> = None;
     let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
     let mut last_announced_plan_event: Option<String> = None;
+    let mut last_announced_gate_event: Option<String> = None;
+    let mut gate_modal: Option<GateModal> = None;
     let mut last_session_status_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
@@ -1187,6 +1653,12 @@ pub fn run(
                                 match resolve_gate(client, &gi, chosen.as_ref()) {
                                     Ok(msg) => {
                                         acted.insert(gi.id.clone());
+                                        if gate_modal
+                                            .as_ref()
+                                            .is_some_and(|m| m.gate.id == gi.id)
+                                        {
+                                            gate_modal = None;
+                                        }
                                         status = Some(msg);
                                         follow = true;
                                         force_timeline_refresh = true;
@@ -1210,6 +1682,136 @@ pub fn run(
                         continue;
                     }
 
+                    // Gate modal — full overlay blocks nav; peek mode leaves timeline usable.
+                    if let Some(modal) = gate_modal.as_ref() {
+                        if modal.peek_timeline {
+                            match key.code {
+                                KeyCode::Char('g') | KeyCode::Enter => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.peek_timeline = false;
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('y') | KeyCode::Char('n')
+                                    if input.is_none()
+                                        && matches!(
+                                            modal.gate.kind,
+                                            GateKind::Approval
+                                                | GateKind::WikiProposal
+                                                | GateKind::Escalation
+                                        ) =>
+                                {
+                                    let gate_id = modal.gate.id.clone();
+                                    let approve = key.code == KeyCode::Char('y');
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.peek_timeline = false;
+                                    }
+                                    input = Some(approval_gate_input(
+                                        client,
+                                        if approve {
+                                            GateAction::Approve
+                                        } else {
+                                            GateAction::Reject
+                                        },
+                                        gate_id,
+                                        &entries,
+                                        !approve,
+                                    ));
+                                    status = None;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        } else if input.is_none() {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.peek_timeline = true;
+                                        m.scroll = 0;
+                                    }
+                                    status = Some(
+                                        "approval peeking — browse timeline · g resolve · y/n act"
+                                            .to_string(),
+                                    );
+                                    continue;
+                                }
+                                KeyCode::Char('y') | KeyCode::Char('n')
+                                    if matches!(
+                                        modal.gate.kind,
+                                        GateKind::Approval
+                                            | GateKind::WikiProposal
+                                            | GateKind::Escalation
+                                    ) =>
+                                {
+                                    input = Some(approval_gate_input(
+                                        client,
+                                        if key.code == KeyCode::Char('y') {
+                                            GateAction::Approve
+                                        } else {
+                                            GateAction::Reject
+                                        },
+                                        modal.gate.id.clone(),
+                                        &entries,
+                                        key.code == KeyCode::Char('n'),
+                                    ));
+                                    status = None;
+                                    continue;
+                                }
+                                KeyCode::Char('r') | KeyCode::Enter
+                                    if modal.gate.kind == GateKind::Interaction =>
+                                {
+                                    let (options, allow_freeform) =
+                                        interaction_choices(&entries, &modal.gate.id);
+                                    input = Some(GateInput {
+                                        action: GateAction::Answer,
+                                        id: modal.gate.id.clone(),
+                                        buffer: String::new(),
+                                        options,
+                                        allow_freeform,
+                                        motivation_required: false,
+                                        required_confirm_phrase: None,
+                                        acknowledged_capabilities: Vec::new(),
+                                    });
+                                    status = None;
+                                    continue;
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.scroll = m.scroll.saturating_add(1);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.scroll = m.scroll.saturating_sub(1);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('q') => {
+                                    if quit_armed(&quit_armed_until) {
+                                        break 'room;
+                                    }
+                                    arm_quit(&mut quit_armed_until, &mut status);
+                                    continue;
+                                }
+                                _ => {
+                                    let ctrl_c = key.code == KeyCode::Char('c')
+                                        && key.modifiers.contains(KeyModifiers::CONTROL);
+                                    if ctrl_c {
+                                        if quit_armed(&quit_armed_until) {
+                                            break 'room;
+                                        }
+                                        arm_quit(&mut quit_armed_until, &mut status);
+                                    }
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // Input mode inside the modal — block timeline navigation.
+                            continue;
+                        }
+                    }
+
                     let ctrl_c = key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL);
                     if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
@@ -1221,7 +1823,14 @@ pub fn run(
                     }
                     match key.code {
                         KeyCode::Esc => {
-                            if detail.is_some() {
+                            if artifact_file_view.is_some() {
+                                artifact_file_view = None;
+                            } else if artifact_viewer.is_some() {
+                                artifact_viewer = None;
+                            } else if info_panel_open {
+                                info_panel_open = false;
+                                info_scroll = 0;
+                            } else if detail.is_some() {
                                 detail = None;
                                 detail_scroll = 0;
                                 detail_h_scroll = 0;
@@ -1319,18 +1928,17 @@ pub fn run(
                                 view_gate.as_ref().filter(|g| matches!(g.kind, GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation))
                             {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
-                                input = Some(GateInput {
-                                    action: if key.code == KeyCode::Char('y') {
+                                input = Some(approval_gate_input(
+                                    client,
+                                    if key.code == KeyCode::Char('y') {
                                         GateAction::Approve
                                     } else {
                                         GateAction::Reject
                                     },
-                                    id: g.id.clone(),
-                                    buffer: String::new(),
-                                    options: Vec::new(),
-                                    allow_freeform: true,
-                                    motivation_required: key.code == KeyCode::Char('n'),
-                                });
+                                    g.id.clone(),
+                                    &entries,
+                                    key.code == KeyCode::Char('n'),
+                                ));
                                 status = None;
                                 continue;
                             }
@@ -1350,6 +1958,8 @@ pub fn run(
                                     options,
                                     allow_freeform,
                                     motivation_required: false,
+                                    required_confirm_phrase: None,
+                                    acknowledged_capabilities: Vec::new(),
                                 });
                                 status = None;
                             }
@@ -1401,6 +2011,8 @@ pub fn run(
                                     options,
                                     allow_freeform,
                                     motivation_required: false,
+                                    required_confirm_phrase: None,
+                                    acknowledged_capabilities: Vec::new(),
                                 });
                                 status = None;
                             } else {
@@ -1486,6 +2098,8 @@ pub fn run(
                                     options,
                                     allow_freeform,
                                     motivation_required: false,
+                                    required_confirm_phrase: None,
+                                    acknowledged_capabilities: Vec::new(),
                                 });
                                 status = None;
                             } else {
@@ -1496,13 +2110,118 @@ pub fn run(
                         }
                         // /: slash-command mode (vim/Discord convention). `:`
                         // and `?` are accepted aliases for muscle memory.
-                        KeyCode::Char('/') | KeyCode::Char(':') | KeyCode::Char('?') => {
+                        KeyCode::Char('/') | KeyCode::Char(':') => {
                             detail = None;
+                            info_panel_open = false;
+                            artifact_viewer = None;
+                            artifact_file_view = None;
                             slash = Some(String::new());
                             status = None;
                         }
+                        KeyCode::Char('?') => {
+                            if info_panel_open {
+                                info_panel_open = false;
+                                info_scroll = 0;
+                            } else {
+                                info_panel_open = true;
+                                info_scroll = 0;
+                                status = Some("info: j/k scroll · Esc close".to_string());
+                            }
+                        }
+                        KeyCode::Char('o') => {
+                            if artifact_file_view.is_some() {
+                            } else if let Some(ref viewer) = artifact_viewer {
+                                if let Some(file) = viewer.files.get(viewer.selected) {
+                                    let result = rpc(
+                                        client,
+                                        "artifact.read_file",
+                                        serde_json::json!({
+                                            "artifact_ref": viewer.artifact_ref,
+                                            "file_name": file.name,
+                                            "session_id": root_session_id.clone(),
+                                        }),
+                                    );
+                                    match result {
+                                        Ok(v) => {
+                                            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                                artifact_file_view = Some(ArtifactFileView {
+                                                    artifact_id: viewer.artifact_id.clone(),
+                                                    file_name: file.name.clone(),
+                                                    content: content.to_string(),
+                                                    scroll: 0,
+                                                });
+                                            } else {
+                                                status = Some("artifact.read_file: no content field".to_string());
+                                            }
+                                        }
+                                        Err(e) => status = Some(format!("artifact read failed: {e}")),
+                                    }
+                                }
+                            } else if let Some((_, src)) = view_indexed.get(selected) {
+                                let idx = match src {
+                                    RowSource::Single(i) => *i,
+                                    RowSource::Run { start, .. } => *start,
+                                };
+                                if let Some(entry) = view_visible.get(idx) {
+                                    if let Some(artifact_ref) = artifact_ref_for_entry(entry) {
+                                        let result = rpc(
+                                            client,
+                                            "artifact.list_files",
+                                            serde_json::json!({
+                                                "artifact_ref": artifact_ref,
+                                                "session_id": root_session_id.clone(),
+                                            }),
+                                        );
+                                        match result {
+                                            Ok(v) => {
+                                                let resolved_id = v.get("artifact_id").and_then(|i| i.as_str()).unwrap_or(&artifact_ref).to_string();
+                                                let files: Vec<ArtifactFileEntry> = v.get("files")
+                                                    .and_then(|f| f.as_array())
+                                                    .map(|arr| {
+                                                        arr.iter().filter_map(|item| {
+                                                            Some(ArtifactFileEntry {
+                                                                name: item.get("name")?.as_str()?.to_string(),
+                                                                alias: item.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                                                            })
+                                                        }).collect()
+                                                    })
+                                                    .unwrap_or_default();
+                                                if files.is_empty() {
+                                                    status = Some("artifact has no files".to_string());
+                                                } else {
+                                                    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("unknown").to_string();
+                                                    artifact_viewer = Some(ArtifactViewer {
+                                                        artifact_id: resolved_id,
+                                                        artifact_ref,
+                                                        kind,
+                                                        files,
+                                                        selected: 0,
+                                                        scroll: 0,
+                                                    });
+                                                    status = Some("artifact: o to view · Esc close".to_string());
+                                                }
+                                            }
+                                            Err(e) => status = Some(format!("artifact list failed: {e}")),
+                                        }
+                                    } else {
+                                        let tool_name = entry.payload.as_ref()
+                                            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                                            .and_then(|v| v.get("tool_name").and_then(|t| t.as_str()).map(String::from))
+                                            .unwrap_or_default();
+                                        status = Some(format!("no artifact on this row (type={} tool={})", entry.event_type, tool_name));
+                                    }
+                                }
+                            }
+                        }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if detail.is_some() {
+                            if artifact_file_view.is_some() {
+                                artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_add(1);
+                            } else if artifact_viewer.is_some() {
+                                let viewer = artifact_viewer.as_mut().unwrap();
+                                viewer.selected = (viewer.selected + 1).min(viewer.files.len().saturating_sub(1));
+                            } else if info_panel_open {
+                                info_scroll = info_scroll.saturating_add(1);
+                            } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_add(1);
                             } else {
                                 follow = false;
@@ -1511,7 +2230,14 @@ pub fn run(
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if detail.is_some() {
+                            if artifact_file_view.is_some() {
+                                artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_sub(1);
+                            } else if artifact_viewer.is_some() {
+                                let viewer = artifact_viewer.as_mut().unwrap();
+                                viewer.selected = viewer.selected.saturating_sub(1);
+                            } else if info_panel_open {
+                                info_scroll = info_scroll.saturating_sub(1);
+                            } else if detail.is_some() {
                                 detail_scroll = detail_scroll.saturating_sub(1);
                             } else {
                                 follow = false;
@@ -1809,6 +2535,50 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
+        if input.is_none() && compose.is_none() && slash.is_none() {
+            if let Some((gate_ref, event_id)) =
+                newest_blocking_gate_event(&entries, &resolved, &acted)
+            {
+                let needs_open = gate_modal
+                    .as_ref()
+                    .map(|m| m.gate.id != gate_ref.id)
+                    .unwrap_or(true);
+                if needs_open && last_announced_gate_event.as_deref() != Some(event_id.as_str())
+                {
+                    last_announced_gate_event = Some(event_id);
+                    if let Some(row_idx) = newest_gate_row_index(
+                        &visible,
+                        &indexed,
+                        &entries,
+                        &resolved,
+                        &acted,
+                        &gate_ref,
+                    ) {
+                        selected = row_idx;
+                        follow = false;
+                    }
+                    detail = None;
+                    info_panel_open = false;
+                    artifact_viewer = None;
+                    artifact_file_view = None;
+                    let inspect_lines = fetch_gate_inspect_detail(client, &gate_ref.id);
+                    gate_modal = Some(GateModal {
+                        gate: gate_ref,
+                        scroll: 0,
+                        peek_timeline: false,
+                        inspect_lines,
+                    });
+                }
+            }
+        }
+        if let Some(modal) = &gate_modal {
+            let still_active = find_active_gate(&entries, &resolved, &acted)
+                .is_some_and(|g| g.id == modal.gate.id);
+            if !still_active {
+                gate_modal = None;
+            }
+        }
+
         let gate = active_gate(&entries, &visible, indexed.get(selected), &resolved, &acted);
 
         spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
@@ -1850,6 +2620,25 @@ pub fn run(
         } else {
             compute_viewport_offset(safe_selected, list_height, &row_heights)
         };
+        let gate_count = count_active_gates(&entries, &resolved);
+        let info_panel = if info_panel_open {
+            Some(build_info_panel(
+                root_session_id,
+                TuiChannel.kind(),
+                &session_stats,
+                floor,
+                squash,
+                follow,
+                show_reasoning,
+                row_count,
+                gate.as_ref(),
+                pending_plan_count,
+                status.as_deref(),
+                selected_spawn_agent.as_deref(),
+            ))
+        } else {
+            None
+        };
 
         terminal.draw(|f| {
             draw(
@@ -1874,6 +2663,15 @@ pub fn run(
                 &session_stats,
                 pending_plan_count,
                 selected_spawn_agent.as_deref(),
+                info_panel.as_ref(),
+                info_scroll,
+                gate_count,
+                artifact_viewer.as_ref(),
+                artifact_file_view.as_ref(),
+                gate_modal.as_ref(),
+                gate_modal
+                    .as_ref()
+                    .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
             )
         })?;
 
@@ -2042,11 +2840,13 @@ fn gate_for_entry(
     match e.event_type.as_str() {
         "approval.pending" => {
             let id = approval_id_for(e)?;
-            let is_wiki = payload_field_str(e, "action").as_deref() == Some("wiki_propose");
-            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
-                kind: if is_wiki { GateKind::WikiProposal } else { GateKind::Approval },
-                id,
-            })
+            let action = payload_field_str(e, "action");
+            let kind = match action.as_deref() {
+                Some("wiki_propose") => GateKind::WikiProposal,
+                Some("session_escalate") => GateKind::Escalation,
+                _ => GateKind::Approval,
+            };
+            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef { kind, id })
         }
         "plan.pending" => {
             let id = plan_id_for(e)?;
@@ -2143,16 +2943,35 @@ fn answer_params(gi: &GateInput, chosen: Option<&GateOption>) -> Result<serde_js
 /// Returns `Ok(msg)` only when the gateway accepted the decision (the caller
 /// uses this to mark the gate acted); `Err(msg)` on validation or transport
 /// failure, leaving the gate offerable so the operator can retry.
+fn approval_approve_params(gi: &GateInput) -> serde_json::Value {
+    let text = gi.buffer.trim();
+    let mut params = serde_json::json!({
+        "request_id": gi.id,
+        "decided_by": "operator",
+    });
+    // §O: destructive / elevated approvals need a non-empty motivation on the
+    // `reason` field. For R++4 confirm-phrase gates the typed phrase satisfies
+    // both obligations — do not send confirm_phrase without reason.
+    if gi.required_confirm_phrase.is_some() {
+        if !text.is_empty() {
+            params["confirm_phrase"] = serde_json::json!(text);
+            params["reason"] = serde_json::json!(text);
+        }
+    } else if !text.is_empty() {
+        params["reason"] = serde_json::json!(text);
+    }
+    if !gi.acknowledged_capabilities.is_empty() {
+        params["acknowledged_capabilities"] = serde_json::json!(gi.acknowledged_capabilities);
+    }
+    params
+}
+
 fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>) -> Result<String, String> {
     let text = gi.buffer.trim();
     let reason = (!text.is_empty()).then(|| text.to_string());
     let (result, verb) = match gi.action {
         GateAction::Approve => (
-            rpc(
-                client,
-                "approvals.approve",
-                serde_json::json!({ "request_id": gi.id, "decided_by": "operator", "reason": reason }),
-            ),
+            rpc(client, "approvals.approve", approval_approve_params(gi)),
             "approved",
         ),
         GateAction::Reject => (
@@ -3332,6 +4151,13 @@ fn draw(
     stats: &SessionStats,
     pending_plan_count: usize,
     selected_spawn_agent: Option<&str>,
+    info_panel: Option<&InfoPanel>,
+    info_scroll: u16,
+    gate_count: usize,
+    artifact_viewer: Option<&ArtifactViewer>,
+    artifact_file_view: Option<&ArtifactFileView>,
+    gate_modal: Option<&GateModal>,
+    gate_modal_entry: Option<&SessionTimelineEntry>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -3353,40 +4179,7 @@ fn draw(
     let footer_idx = if compose_open { 3 } else { 2 };
     let list_idx = 1usize;
 
-    let stats_tag = if stats.llm_calls > 0 {
-        let models_tag = if stats.models.len() == 1 {
-            stats.models[0].clone()
-        } else {
-            format!("{} models", stats.models.len())
-        };
-        format!(
-            "   in:{} out:{} calls:{} [{}]",
-            format_tokens(stats.total_input),
-            format_tokens(stats.total_output),
-            stats.llm_calls,
-            models_tag,
-        )
-    } else {
-        String::new()
-    };
-    let plan_chip = if pending_plan_count > 0 {
-        format!("   ⚠ {pending_plan_count} plan(s) pending")
-    } else {
-        String::new()
-    };
-    let spawn_chip = selected_spawn_agent
-        .map(|id| format!("   ↳ agent_spawn → {id}"))
-        .unwrap_or_default();
-    let header = format!(
-        " Session Room [{}] — {root}   floor: {}   squash: {}   reasoning: {}   {} rows{spawn_chip}{plan_chip}{stats_tag}{}{}",
-        TuiChannel.kind(),
-        floor.as_str(),
-        if squash { "on" } else { "off" },
-        if show_reasoning { "on" } else { "off" },
-        rows.len(),
-        if follow { "   (following)" } else { "" },
-        status.map(|s| format!("   {s}")).unwrap_or_default(),
-    );
+    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, chunks[0].width);
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
@@ -3578,20 +4371,453 @@ fn draw(
         Paragraph::new(format!(" {label}: {}▏{err}   {hint}", gi.buffer))
             .style(Style::default().fg(Color::Cyan))
     } else {
-        // The gate affordance hint is the channel's concern (#393) — route it
-        // through the channel so a Discord/WhatsApp bridge can render its own.
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
-        let follow_indicator = if follow { " ● following" } else { " ○ paused" };
         let turn_hint = rows.get(safe_selected).and_then(|r| match r {
-            RenderedRow::Line(s) => s.turn_index.map(|n| format!(" · turn {n}")),
+            RenderedRow::Line(s) => s.turn_index.map(|n| format!("turn {n}")),
             _ => None,
-        }).unwrap_or_default();
-        Paragraph::new(format!(
-            " q quit (2×) · j/k scroll · PgUp/PgDn page · f/Space follow{follow_indicator}{turn_hint} · g/G top/bottom · a altitude · s squash · R reasoning · i message · / cmd · Enter/p plan review{gate_hint}"
-        ))
-        .style(Style::default().fg(Color::DarkGray))
+        });
+        let footer_w = chunks[footer_idx].width as usize;
+        let nav = "q quit · j↓ k↑ · Enter detail · o artifact · ? info";
+        let nav_display = if footer_w < 50 {
+            "j↓ k↑ · o · ?"
+        } else if footer_w < 70 {
+            "q quit · j↓ k↑ · o · ?"
+        } else {
+            nav
+        };
+        let center = turn_hint.unwrap_or_else(|| "—".to_string());
+        let right = if info_panel.is_some() {
+            "info: j/k scroll · Esc close".to_string()
+        } else if !gate_hint.is_empty() {
+            gate_hint
+        } else {
+            String::new()
+        };
+        let nav_w = nav_display.width();
+        let center_w = center.width();
+        let right_w = right.width();
+        let total = nav_w + center_w + right_w + 4;
+        if total <= footer_w && !right.is_empty() {
+            let pad1 = (footer_w - total) / 3;
+            let pad2 = footer_w - nav_w - center_w - right_w - pad1;
+            Paragraph::new(format!(" {nav_display}{}{center}{}{right}", " ".repeat(pad1), " ".repeat(pad2)))
+                .style(Style::default().fg(Color::DarkGray))
+        } else if total <= footer_w {
+            let pad = footer_w - nav_w - center_w;
+            Paragraph::new(format!(" {nav_display}{}{center}", " ".repeat(pad)))
+                .style(Style::default().fg(Color::DarkGray))
+        } else {
+            let right_part = if right.is_empty() { String::new() } else { format!("  {right}") };
+            Paragraph::new(format!(" {nav_display}{right_part}"))
+                .style(Style::default().fg(Color::DarkGray))
+        }
     };
     f.render_widget(footer, chunks[footer_idx]);
+
+    // Overlays render last (on top of everything) so they are never painted over.
+    if let Some(panel) = info_panel {
+        let area = centered_rect(60, 70, f.area());
+        f.render_widget(Clear, area);
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let total_lines = panel.lines.len();
+        let max_scroll = total_lines.saturating_sub(inner_height) as u16;
+        let scroll = info_scroll.min(max_scroll);
+        let text: Vec<Line> = panel
+            .lines
+            .iter()
+            .map(|l| Line::from(Span::styled(l.clone(), Style::default().bg(Color::Black))))
+            .collect();
+        f.render_widget(
+            Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Session Info [?/Esc close] ")
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    }
+
+    if let Some(ref view) = artifact_file_view {
+        let area = centered_rect(80, 85, f.area());
+        f.render_widget(Clear, area);
+        let lines: Vec<Line> = view
+            .content
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().bg(Color::Black))))
+            .collect();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+        let scroll = view.scroll.min(max_scroll);
+        let title = format!(
+            " {} {} → {} [Esc back] ",
+            view.artifact_id, view.file_name, lines.len()
+        );
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Green))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    } else if let Some(ref viewer) = artifact_viewer {
+        let area = centered_rect(60, 60, f.area());
+        f.render_widget(Clear, area);
+        let lines: Vec<Line> = viewer
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let marker = if i == viewer.selected { " > " } else { "   " };
+                let style = if i == viewer.selected {
+                    Style::default().fg(Color::Yellow).bg(Color::Black)
+                } else {
+                    Style::default().bg(Color::Black)
+                };
+                Line::from(Span::styled(
+                    format!("{}{}", marker, f.name),
+                    style,
+                ))
+            })
+            .collect();
+        let title = format!(
+            " {} [{}] {} files [o/Esc] ",
+            viewer.artifact_id, viewer.kind, viewer.files.len()
+        );
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height);
+        let scroll = viewer
+            .selected
+            .saturating_sub(inner_height / 2)
+            .min(max_scroll) as u16;
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Green))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    }
+
+    if let Some(modal) = gate_modal {
+        draw_gate_modal(f, modal, gate_modal_entry, input, status);
+    }
+}
+
+fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
+    if let Some(entry) = entry {
+        match payload_field_str(entry, "action").as_deref() {
+            Some("revision_promote") => {
+                let agent = payload_field_str(entry, "agent_id").unwrap_or_else(|| "agent".into());
+                return format!(" ⚠ PROMOTE AGENT — {agent} ");
+            }
+            Some("session_escalate") => {
+                let reason = payload_field_str(entry, "reason")
+                    .or_else(|| payload_field_str(entry, "summary"))
+                    .unwrap_or_else(|| "needs guidance".into());
+                return format!(
+                    " ⚠ SESSION ESCALATION — {} ",
+                    render::one_line(&reason, 48)
+                );
+            }
+            _ => {}
+        }
+        if entry.event_type == "escalation.pending" {
+            let synthesis = payload_field_str(entry, "synthesis")
+                .unwrap_or_else(|| "operator decision".into());
+            return format!(
+                " ⚠ PROMOTION ESCALATION — {} ",
+                render::one_line(&synthesis, 48)
+            );
+        }
+    }
+    match modal.gate.kind {
+        GateKind::Approval => " ⚠ APPROVAL REQUIRED ".to_string(),
+        GateKind::WikiProposal => " ⚠ WIKI PROPOSAL ".to_string(),
+        GateKind::Escalation => " ⚠ ESCALATION ".to_string(),
+        GateKind::Interaction => " ❓ QUESTION PENDING ".to_string(),
+        GateKind::Plan => " ⚠ ACTION REQUIRED ".to_string(),
+    }
+}
+
+fn gate_modal_peek_summary(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
+    if let Some(entry) = entry {
+        let spec = render::render_spec(entry);
+        return render::one_line(&spec.headline, 72);
+    }
+    format!("Gate {}", modal.gate.id)
+}
+
+fn gate_modal_input_panel_lines(
+    gi: &GateInput,
+    width: usize,
+    status: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let wrap_w = width.saturating_sub(2).max(20);
+
+    if let Some(ref phrase) = gi.required_confirm_phrase {
+        lines.push(Line::from(Span::styled(
+            "Type this phrase exactly (also records your §O motivation):",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for line in render::wrap_display_lines(phrase, wrap_w) {
+            lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::Green),
+            )));
+        }
+        lines.push(Line::raw(""));
+    } else if matches!(gi.action, GateAction::Reject) {
+        lines.push(Line::from(Span::styled(
+            "Rejection reason (required):",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if gi.motivation_required {
+        lines.push(Line::from(Span::styled(
+            "Approval motivation (required):",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    let input_label = if gi.required_confirm_phrase.is_some() {
+        "Your input".to_string()
+    } else {
+        gate_input_label(gi).trim_end_matches(':').to_string()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("{input_label}: "), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{}▏", gi.buffer), Style::default().fg(Color::White)),
+    ]));
+
+    if let Some(err) = status.filter(|s| s.starts_with('✗')) {
+        lines.push(Line::from(Span::styled(
+            err.to_string(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let choices = gi
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 28)))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let hint = if gi.options.is_empty() {
+        "Enter submit · Esc back · Esc×2 peek timeline".to_string()
+    } else if gi.allow_freeform {
+        format!("{choices}   Enter submit · Esc back")
+    } else {
+        format!("{choices}   number choose · Esc back")
+    };
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines
+}
+
+fn gate_modal_input_panel_height(gi: &GateInput, width: u16, status: Option<&str>) -> u16 {
+    let lines = gate_modal_input_panel_lines(gi, width as usize, status);
+    lines.len().max(3) as u16 + 1
+}
+
+fn draw_gate_modal_peek_banner(
+    f: &mut Frame,
+    modal: &GateModal,
+    entry: Option<&SessionTimelineEntry>,
+) {
+    let full = f.area();
+    let banner_h = 3u16.min(full.height);
+    let area = Rect {
+        x: full.x,
+        y: full.y,
+        width: full.width,
+        height: banner_h,
+    };
+    f.render_widget(Clear, area);
+    let summary = gate_modal_peek_summary(modal, entry);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" ⚠ OPERATOR ACTION PENDING ")
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(area);
+    let text = vec![
+        Line::from(Span::styled(
+            summary,
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            format!("id: {}  ·  g or Enter resolve  ·  y approve  ·  n reject", modal.gate.id),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(block, area);
+    f.render_widget(Paragraph::new(text), inner);
+}
+
+fn draw_gate_modal(
+    f: &mut Frame,
+    modal: &GateModal,
+    entry: Option<&SessionTimelineEntry>,
+    input: Option<&GateInput>,
+    status: Option<&str>,
+) {
+    let inspect_lines = &modal.inspect_lines;
+    if modal.peek_timeline {
+        draw_gate_modal_peek_banner(f, modal, entry);
+        return;
+    }
+
+    let full = f.area();
+    f.render_widget(Clear, full);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(Color::Rgb(20, 20, 20))),
+        full,
+    );
+
+    let area = centered_rect(82, 78, full);
+    f.render_widget(Clear, area);
+
+    let border_color = match modal.gate.kind {
+        GateKind::Interaction => Color::Cyan,
+        _ => Color::Yellow,
+    };
+    let title = gate_modal_title(modal, entry);
+
+    let mut content_lines: Vec<Line<'static>> = Vec::new();
+    if let Some(entry) = entry {
+        let spec = render::render_spec(entry);
+        content_lines.push(Line::from(Span::styled(
+            spec.headline,
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(detail) = spec.detail {
+            for line in detail.lines() {
+                content_lines.push(Line::from(line.to_string()));
+            }
+        }
+    } else {
+        content_lines.push(Line::from(format!("Gate id: {}", modal.gate.id)));
+    }
+    if content_lines.len() <= 2 && !inspect_lines.is_empty() {
+        content_lines.push(Line::from(Span::styled(
+            "From approval record:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for line in inspect_lines {
+            content_lines.push(Line::from(line.clone()));
+        }
+    } else if !inspect_lines.is_empty()
+        && entry.is_some_and(|e| {
+            payload_field_str(e, "reason").is_none()
+                && payload_field_str(e, "synthesis").is_none()
+                && payload_field_str(e, "summary").is_none()
+        })
+    {
+        for line in inspect_lines {
+            content_lines.push(Line::from(line.clone()));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(border_color).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(area);
+    let inner_width = inner.width;
+
+    let preview_phrase = input
+        .is_none()
+        .then(|| entry.and_then(|e| payload_field_str(e, "confirm_phrase")))
+        .flatten();
+    let footer_h = if let Some(gi) = input {
+        gate_modal_input_panel_height(gi, inner_width, status)
+    } else if preview_phrase.is_some() {
+        4 + render::wrap_display_lines(preview_phrase.as_deref().unwrap_or(""), inner_width as usize - 2)
+            .len() as u16
+    } else {
+        2
+    };
+    let chunks = Layout::vertical([
+        Constraint::Min(6),
+        Constraint::Length(footer_h),
+    ])
+    .split(inner);
+
+    let inner_height = chunks[0].height as usize;
+    let max_scroll = content_lines.len().saturating_sub(inner_height) as u16;
+    let scroll = modal.scroll.min(max_scroll);
+
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(content_lines).scroll((scroll, 0)),
+        chunks[0],
+    );
+
+    if let Some(gi) = input {
+        let panel_lines = gate_modal_input_panel_lines(gi, inner_width as usize, status);
+        let panel_block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().bg(Color::Black));
+        let panel_inner = panel_block.inner(chunks[1]);
+        f.render_widget(panel_block, chunks[1]);
+        f.render_widget(Paragraph::new(panel_lines), panel_inner);
+    } else {
+        let mut footer_lines: Vec<Line<'static>> = Vec::new();
+        if let Some(ref phrase) = preview_phrase {
+            footer_lines.push(Line::from(Span::styled(
+                "Confirm phrase (shown now — type after y):",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for line in render::wrap_display_lines(phrase, inner_width as usize - 2) {
+                footer_lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::Green),
+                )));
+            }
+            footer_lines.push(Line::raw(""));
+        }
+        let action_hint = match modal.gate.kind {
+            GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation => {
+                "y approve · n reject · j/k scroll details · Esc peek timeline"
+            }
+            GateKind::Interaction => "Enter/r answer · j/k scroll · Esc peek timeline",
+            GateKind::Plan => "",
+        };
+        footer_lines.push(Line::from(Span::styled(
+            action_hint,
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(Paragraph::new(footer_lines), chunks[1]);
+    }
 }
 
 /// Render the compose editor with wrapped lines and an inverted cursor cell.
@@ -3948,6 +5174,72 @@ mod tests {
     }
 
     #[test]
+    fn newest_blocking_gate_event_prefers_latest_approval_over_older_ask() {
+        let mut approval = gate_entry("approval.pending");
+        approval.event_id = "ev-appr".into();
+        approval.refs.approval_request_id = Some("apr-new".into());
+        let mut ask = gate_entry("user.ask.pending");
+        ask.event_id = "ev-ask".into();
+        let entries = vec![ask, gate_entry("tool.completed"), approval];
+        let empty = HashSet::new();
+        let (gate, event_id) = newest_blocking_gate_event(&entries, &empty, &empty).unwrap();
+        assert_eq!(gate.kind, GateKind::Approval);
+        assert_eq!(gate.id, "apr-new");
+        assert_eq!(event_id, "ev-appr");
+        assert!(!gate_modal_kind(&GateRef {
+            kind: GateKind::Plan,
+            id: "plan-1".into(),
+        }));
+    }
+
+    #[test]
+    fn approval_approve_params_sends_phrase_as_reason_for_section_o() {
+        let gi = GateInput {
+            action: GateAction::Approve,
+            id: "apr-1".into(),
+            buffer: "promote weather-lookup rev_sha256:abc".into(),
+            options: Vec::new(),
+            allow_freeform: true,
+            motivation_required: false,
+            required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
+            acknowledged_capabilities: vec!["NetworkAccess".into()],
+        };
+        let params = approval_approve_params(&gi);
+        assert_eq!(
+            params.get("confirm_phrase").and_then(|v| v.as_str()),
+            Some("promote weather-lookup rev_sha256:abc")
+        );
+        assert_eq!(
+            params.get("reason").and_then(|v| v.as_str()),
+            Some("promote weather-lookup rev_sha256:abc")
+        );
+        assert_eq!(
+            params.get("acknowledged_capabilities")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn gate_commit_validation_requires_confirm_phrase_for_promotion() {
+        let gi = GateInput {
+            action: GateAction::Approve,
+            id: "apr-promote".into(),
+            buffer: "agreed".into(),
+            options: Vec::new(),
+            allow_freeform: true,
+            motivation_required: false,
+            required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
+            acknowledged_capabilities: vec!["NetworkAccess".into()],
+        };
+        assert!(gate_commit_validation_error(&gi).is_some());
+        let mut ok = gi;
+        ok.buffer = "promote weather-lookup rev_sha256:abc".into();
+        assert!(gate_commit_validation_error(&ok).is_none());
+    }
+
+    #[test]
     fn gate_commit_validation_requires_motivation_for_reject() {
         let gi = GateInput {
             action: GateAction::Reject,
@@ -3956,6 +5248,8 @@ mod tests {
             options: Vec::new(),
             allow_freeform: true,
             motivation_required: true,
+            required_confirm_phrase: None,
+            acknowledged_capabilities: Vec::new(),
         };
         assert!(gate_commit_validation_error(&gi).is_some());
         let mut ok = gi;
@@ -3975,6 +5269,8 @@ mod tests {
             options: Vec::new(),
             allow_freeform: true,
             motivation_required: false,
+            required_confirm_phrase: None,
+            acknowledged_capabilities: Vec::new(),
         };
         let err = resolve_gate(&client, &gi, None).unwrap_err();
         assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
@@ -3993,6 +5289,8 @@ mod tests {
             options,
             allow_freeform,
             motivation_required: false,
+            required_confirm_phrase: None,
+            acknowledged_capabilities: Vec::new(),
         };
 
         // A typed number selects the matching option — even when free-text is
@@ -4407,5 +5705,87 @@ mod tests {
         disarm_quit(&mut armed, &mut status);
         assert!(armed.is_none());
         assert!(status.is_none());
+    }
+
+    #[test]
+    fn artifact_ref_for_entry_extracts_from_tool_completed() {
+        let result_json = serde_json::json!({
+            "ok": true,
+            "artifact_ref": "ar.abc12345",
+            "artifact_canonical_digest": "sha256:def456",
+            "kind": "binary",
+            "files": [{"name": "main.py", "alias": "main.py"}],
+            "message": "Created new artifact"
+        });
+        let result_str = serde_json::to_string(&result_json).unwrap();
+        let payload = serde_json::json!({
+            "tool_name": "artifact_build",
+            "result": result_str,
+        });
+        let entry = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("test"),
+            role: SessionRole::Specialist { kind: "coder".into() },
+            event_type: "tool.completed".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            payload: Some(serde_json::to_string(&payload).unwrap()),
+            refs: Default::default(),
+        };
+        assert_eq!(
+            artifact_ref_for_entry(&entry),
+            Some("ar.abc12345".to_string())
+        );
+    }
+
+    #[test]
+    fn artifact_ref_for_entry_returns_none_for_non_artifact() {
+        let payload = serde_json::json!({
+            "tool_name": "sandbox_exec",
+            "result": "{\"ok\":true}",
+        });
+        let entry = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("test"),
+            role: SessionRole::Specialist { kind: "coder".into() },
+            event_type: "tool.completed".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            payload: Some(serde_json::to_string(&payload).unwrap()),
+            refs: Default::default(),
+        };
+        assert_eq!(artifact_ref_for_entry(&entry), None);
+    }
+
+    #[test]
+    fn artifact_ref_for_entry_extracts_from_args_preview() {
+        let payload = serde_json::json!({
+            "tool_name": "artifact_build",
+            "result": "{}",
+            "args_preview": "ar.xyz99999",
+        });
+        let entry = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("test"),
+            role: SessionRole::Specialist { kind: "coder".into() },
+            event_type: "tool.completed".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            payload: Some(serde_json::to_string(&payload).unwrap()),
+            refs: Default::default(),
+        };
+        assert_eq!(
+            artifact_ref_for_entry(&entry),
+            Some("ar.xyz99999".to_string())
+        );
     }
 }

@@ -883,13 +883,14 @@ impl SessionTracer {
     }
 
     pub fn log_tool_completed(&mut self, tool_name: &str, result: &str) -> anyhow::Result<String> {
-        self.log_tool_completed_with_approval(tool_name, result, None)
+        self.log_tool_completed_with_approval(tool_name, result, None, None)
     }
 
     pub fn log_tool_completed_with_approval(
         &mut self,
         tool_name: &str,
         result: &str,
+        arguments: Option<&str>,
         approval_ref: Option<&str>,
     ) -> anyhow::Result<String> {
         let parsed_result = serde_json::from_str::<serde_json::Value>(result).ok();
@@ -899,6 +900,20 @@ impl SessionTracer {
             "result_sha256": sha256_hex(result),
             "result_preview": redact_text_for_logs(&truncate_for_log(result, TOOL_RESULT_PREVIEW_MAX_CHARS))
         });
+        let args_preview = arguments.and_then(|a| extract_tool_args_preview(tool_name, a))
+            .or_else(|| {
+                if tool_name == "artifact_build" {
+                    parsed_result.as_ref()
+                        .and_then(|r| r.get("artifact_ref"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(ref preview) = args_preview {
+            completed_payload["args_preview"] = serde_json::json!(preview);
+        }
         if let Some(enforced_rules) = parsed_result
             .as_ref()
             .and_then(|v| v.get("enforced_rules"))
@@ -1018,13 +1033,16 @@ impl SessionTracer {
                 }
             }
         }
-        self.append_live_digest_event(
-            "tool.completed",
-            Some(serde_json::json!({
-                "tool_name": tool_name,
-                "result": crate::log_redaction::redact_text_for_logs(result)
-            })),
-        );
+        // Room TUI reads the canonical timeline — carry the same args_preview the
+        // causal row stores so list rows can show artifact_ref / name / agent_id.
+        let mut timeline_payload = serde_json::json!({
+            "tool_name": tool_name,
+            "result": crate::log_redaction::redact_text_for_logs(result),
+        });
+        if let Some(preview) = args_preview {
+            timeline_payload["args_preview"] = serde_json::json!(preview);
+        }
+        self.append_live_digest_event("tool.completed", Some(timeline_payload));
         Ok(event_id)
     }
 
@@ -1145,6 +1163,26 @@ fn cap_chars(value: &str, max: usize) -> String {
     }
     let truncated: String = value.chars().take(max - 1).collect();
     format!("{truncated}…")
+}
+
+/// Extract a short preview of the key argument for known tools.
+/// Returned string is the argument value, which is small (artifact ref, file name,
+/// agent id) and does not need truncation.
+fn extract_tool_args_preview(tool_name: &str, arguments: &str) -> Option<String> {
+    let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let preview = match tool_name {
+        "artifact_inspect" => args.get("artifact_ref").and_then(|v| v.as_str()),
+        "content_write" => args.get("name").and_then(|v| v.as_str()),
+        "agent_spawn" => args.get("agent_id").and_then(|v| v.as_str()),
+        _ => return None,
+    };
+    preview.map(|s| {
+        if s.len() > 80 {
+            format!("{}…", &s[..79])
+        } else {
+            s.to_string()
+        }
+    })
 }
 
 fn sanitize_token(value: &str) -> String {
@@ -1321,6 +1359,69 @@ mod tests {
         assert!(!should_force_tool_result_evidence(
             r#"{"ok":true,"exit_code":0,"stdout":"all good"}"#
         ));
+    }
+
+    #[test]
+    fn tool_completed_timeline_includes_args_preview() {
+        let temp = tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        let agent_dir = agents_dir.join("planner.default");
+        let gateway_dir = agents_dir.join(".gateway");
+        fs::create_dir_all(agent_dir.join("history")).unwrap();
+        fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+        let mut tracer = SessionTracer::test_tracer_with_store(&agent_dir, store.clone());
+        tracer.set_turn_id("turn-000001");
+
+        tracer
+            .log_tool_completed_with_approval(
+                "agent_spawn",
+                r#"{"accepted":true,"agent_id":"coder.default"}"#,
+                Some(r#"{"agent_id":"coder.default","message":"implement feature"}"#),
+                None,
+            )
+            .unwrap();
+
+        let result = store
+            .list_session_timeline("test-session", None, 10, None, None)
+            .unwrap();
+        let completed = result
+            .entries
+            .iter()
+            .find(|e| e.event_type == "tool.completed")
+            .expect("tool.completed on timeline");
+        let payload: serde_json::Value =
+            serde_json::from_str(completed.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            payload.get("args_preview").and_then(|v| v.as_str()),
+            Some("coder.default")
+        );
+    }
+
+    #[test]
+    fn extract_tool_args_preview_for_known_tools() {
+        assert_eq!(
+            extract_tool_args_preview(
+                "content_write",
+                r#"{"name":"skills/weather/SKILL.md","content":"..."}"#
+            )
+            .as_deref(),
+            Some("skills/weather/SKILL.md")
+        );
+        assert_eq!(
+            extract_tool_args_preview(
+                "agent_spawn",
+                r#"{"agent_id":"researcher.default","message":"find APIs"}"#
+            )
+            .as_deref(),
+            Some("researcher.default")
+        );
+        assert_eq!(
+            extract_tool_args_preview("spawn", r#"{"agent_id":"coder.default"}"#),
+            None
+        );
     }
 
     #[test]

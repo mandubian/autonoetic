@@ -50,6 +50,208 @@ pub fn build_timeline_event(
     }
 }
 
+/// Optional structured fields for an `approval.pending` timeline payload, derived
+/// from the persisted `ScheduledAction`.
+pub fn approval_timeline_extra_from_action(
+    action: &autonoetic_types::background::ScheduledAction,
+) -> Option<serde_json::Value> {
+    use autonoetic_types::background::ScheduledAction;
+    match action {
+        ScheduledAction::WikiProposal {
+            page_id,
+            title,
+            content_sha256,
+            tags,
+            ..
+        } => Some(serde_json::json!({
+            "page_id": page_id,
+            "title": title,
+            "content_sha256": content_sha256,
+            "tags": tags,
+        })),
+        ScheduledAction::SandboxExec {
+            command,
+            detected_hosts,
+            ..
+        } => Some(serde_json::json!({
+            "command": command,
+            "host_patterns": detected_hosts,
+        })),
+        ScheduledAction::SessionEscalate {
+            session_id,
+            root_session_id,
+            requested_by_agent_id,
+            reason,
+            context,
+            urgency,
+            suggested_actions,
+            ..
+        } => Some(serde_json::json!({
+            "reason": reason,
+            "urgency": urgency,
+            "session_id": session_id,
+            "root_session_id": root_session_id,
+            "requested_by_agent_id": requested_by_agent_id,
+            "context": context,
+            "suggested_actions": suggested_actions,
+        })),
+        ScheduledAction::RevisionPromote {
+            agent_id,
+            revision_id,
+            added_capabilities,
+            broadened_capabilities,
+            ..
+        } => Some(serde_json::json!({
+            "agent_id": agent_id,
+            "revision_id": revision_id,
+            "added_capabilities": added_capabilities,
+            "broadened_capabilities": broadened_capabilities,
+        })),
+        ScheduledAction::ProfileShare {
+            user_id,
+            scope,
+            ..
+        } => Some(serde_json::json!({
+            "user_id": user_id,
+            "scope": scope,
+        })),
+        ScheduledAction::SessionContinue {
+            max_turns,
+            turn_counter,
+            ..
+        } => Some(serde_json::json!({
+            "max_turns": max_turns,
+            "turn_counter": turn_counter,
+        })),
+        _ => None,
+    }
+}
+
+/// Emit `approval.pending` on the canonical timeline after persisting an approval row.
+///
+/// The Room TUI resolves gates from timeline events, not from the `approvals`
+/// table alone (#363). `GatewayStore::create_approval` invokes this automatically.
+pub fn emit_approval_pending_timeline_event(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    approval: &autonoetic_types::background::ApprovalRequest,
+    turn_id: Option<&str>,
+) {
+    let action_label = approval.action.kind();
+    let extra_payload = approval_timeline_extra_from_action(&approval.action);
+    let root = approval
+        .root_session_id
+        .clone()
+        .unwrap_or_else(|| approval.session_id.clone());
+    let role = derive_role(&approval.agent_id);
+    let principal = autonoetic_types::principal::Principal::agent(approval.agent_id.clone());
+    let refs = TimelineRefs {
+        approval_request_id: Some(approval.request_id.clone()),
+        ..Default::default()
+    };
+    let mut payload = serde_json::json!({
+        "request_id": approval.request_id,
+        "approval_level": approval.approval_level.to_config(),
+        "action": action_label,
+    });
+    if let Some(extra) = extra_payload {
+        if let (Some(obj), Some(extra_obj)) = (payload.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if let Some(reason) = approval.reason.as_ref().filter(|r| !r.is_empty()) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "summary".into(),
+                serde_json::Value::String(crate::log_redaction::redact_text_for_logs(reason)),
+            );
+        }
+    }
+    if let Some(phrase) = approval.confirm_phrase.as_ref().filter(|p| !p.is_empty()) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("confirm_phrase".into(), serde_json::Value::String(phrase.clone()));
+        }
+    }
+    let event = build_timeline_event(
+        root,
+        approval.session_id.clone(),
+        turn_id.map(str::to_string),
+        &principal,
+        &role,
+        "approval.pending",
+        None,
+        Some(payload),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(
+            target: "session_timeline",
+            error = %e,
+            request_id = %approval.request_id,
+            "approval.pending timeline emit failed"
+        );
+    }
+}
+
+/// Emit `user.ask.pending` on the canonical timeline after persisting an interaction.
+///
+/// `GatewayStore::create_user_interaction` invokes this automatically so every
+/// clarification path is visible in the Room TUI (#363).
+pub fn emit_user_ask_pending_timeline_event(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    interaction: &autonoetic_types::background::UserInteraction,
+) {
+    let root = if interaction.root_session_id.is_empty() {
+        crate::runtime::content_store::root_session_id(&interaction.session_id).to_string()
+    } else {
+        interaction.root_session_id.clone()
+    };
+    let role = derive_role(&interaction.agent_id);
+    let principal = autonoetic_types::principal::Principal::agent(interaction.agent_id.clone());
+    let refs = TimelineRefs {
+        interaction_id: Some(interaction.interaction_id.clone()),
+        ..Default::default()
+    };
+    let options_for_event: Vec<serde_json::Value> = interaction
+        .options
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "id": o.id,
+                "label": o.label,
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({
+        "interaction_id": interaction.interaction_id,
+        "question": crate::log_redaction::redact_text_for_logs(&interaction.question),
+        "kind": interaction.kind.as_str(),
+        "options_count": interaction.options.len(),
+        "options": options_for_event,
+        "allow_freeform": interaction.allow_freeform,
+    });
+    let event = build_timeline_event(
+        root,
+        interaction.session_id.clone(),
+        Some(interaction.turn_id.clone()).filter(|t| !t.is_empty() && t != "unknown"),
+        &principal,
+        &role,
+        "user.ask.pending",
+        None,
+        Some(payload),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(
+            target: "session_timeline",
+            error = %e,
+            interaction_id = %interaction.interaction_id,
+            "user.ask.pending timeline emit failed"
+        );
+    }
+}
+
 /// Build the `operator.message` timeline event for an operator-originated chat
 /// message into a session (#405) — so channels show both sides of the
 /// conversation, not just agent replies. Attribution: a human chat (no
@@ -391,6 +593,95 @@ mod tests {
         assert_eq!(
             altitude_for("turn.start", &SessionRole::Planner),
             Altitude::Detail
+        );
+    }
+
+    #[test]
+    fn create_approval_emits_approval_pending_timeline_event() {
+        use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let mut approval = ApprovalRequest {
+            request_id: "apr-test01".to_string(),
+            agent_id: "unit_test_runner.default".to_string(),
+            session_id: "root/unit_test_runner-abc".to_string(),
+            root_session_id: Some("root".to_string()),
+            workflow_id: None,
+            task_id: None,
+            action: ScheduledAction::SandboxExec {
+                command: "python3 test.py".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+                detected_hosts: None,
+            },
+            created_at: chrono::Utc::now().to_rfc3339(),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            reason: Some("run tests".to_string()),
+            evidence_ref: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+        };
+        store.create_approval(&mut approval).unwrap();
+        let page = store
+            .list_session_timeline("root", None, 10, None, None)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].event_type, "approval.pending");
+        assert_eq!(
+            page.entries[0].refs.approval_request_id.as_deref(),
+            Some("apr-test01")
+        );
+    }
+
+    #[test]
+    fn create_user_interaction_emits_user_ask_pending_timeline_event() {
+        use autonoetic_types::background::{
+            UserInteraction, UserInteractionKind, UserInteractionStatus,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let interaction = UserInteraction {
+            interaction_id: "ui-test01".to_string(),
+            session_id: "root/planner-abc".to_string(),
+            root_session_id: "root".to_string(),
+            workflow_id: None,
+            task_id: None,
+            agent_id: "planner.default".to_string(),
+            turn_id: "turn-000002".to_string(),
+            kind: UserInteractionKind::Clarification,
+            question: "Which API should I use?".to_string(),
+            context: None,
+            options: vec![],
+            allow_freeform: true,
+            status: UserInteractionStatus::Pending,
+            answer_option_id: None,
+            answer_text: None,
+            answered_by: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            answered_at: None,
+            expires_at: None,
+            checkpoint_turn_id: Some("turn-000002".to_string()),
+        };
+        store.create_user_interaction(&interaction).unwrap();
+        let page = store
+            .list_session_timeline("root", None, 10, None, None)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].event_type, "user.ask.pending");
+        assert_eq!(
+            page.entries[0].refs.interaction_id.as_deref(),
+            Some("ui-test01")
         );
     }
 
