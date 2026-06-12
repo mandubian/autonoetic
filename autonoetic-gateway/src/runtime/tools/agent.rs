@@ -140,13 +140,15 @@ impl NativeTool for AgentSpawnTool {
             id: "orchestration.coordinate_children",
             when: GuidanceCondition::ToolPresent("agent_spawn"),
             priority: 7,
-            prose: "**Coordinating children — yield, don't block or poll.** Spawn with \
-`async=true`. For a sequential/single child: reply with a short status and **end your turn** — the \
-gateway suspends you as `WaitingForChild` and wakes you automatically when the child reaches a \
-terminal state or a gate (Ri-0.14), with its typed state in your turn-start context. For a parallel \
-fan-out you must fully join: call `workflow_wait(task_ids=[…])` **once** (a join, not a poll). \
-**Never** loop `workflow_wait` or spin `workflow_state` to discover progress — the wake-up or the \
-single join already does that. Yielding is cheaper than blocking and costs one resumption."
+            prose: "**Coordinating children — yield, don't block or poll.** Delegating means \
+**actually calling `agent_spawn`**: emitting a `delegated`/handoff status *without* a real \
+`agent_spawn` call in this turn does nothing — the workflow just ends and no child runs. So to \
+delegate: call `agent_spawn` with `async=true` **first**, then reply with a short status and end \
+your turn — the gateway suspends you as `WaitingForChild` and wakes you automatically when the child \
+reaches a terminal state or a gate (Ri-0.14), with its typed state in your turn-start context. For a \
+parallel fan-out you must fully join: call `workflow_wait(task_ids=[…])` **once** (a join, not a \
+poll). **Never** loop `workflow_wait` or spin `workflow_state` to discover progress — the wake-up or \
+the single join already does that."
                 .to_string(),
         }]
     }
