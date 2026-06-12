@@ -888,35 +888,26 @@ impl AgentExecutor {
     /// `active_tool_names` must be the FINAL advertised tool set (post
     /// MCP-merge/dedupe/cap), so `ToolPresent` gating matches what the model
     /// actually sees rather than the native-only candidate set.
-    /// The agent's configured model id, resolving a routing preset to its first
-    /// concrete model when `llm_config.model` is unset. Returns `"unknown"` when
-    /// nothing resolves. Shared by tracing/context-window sizing and guidance
-    /// (`model_family`) so both observe the same model.
+    /// The concrete model id for this spawn. Agents declare a **preset**
+    /// (`llm_preset`), not a pinned model — so the source of truth is the
+    /// resolved inference profile (preset → concrete `llm_config`), not
+    /// `manifest.llm_config` (normally `None`). Falls back to a legacy explicit
+    /// `manifest.llm_config.model`, then `"unknown"`. Shared by tracing/
+    /// context-window sizing and guidance (`model_family`).
     fn resolved_model_id(&self) -> String {
+        // Preferred: the resolved profile's concrete model (from the preset).
+        if let Some(profile) = self.resolved_inference.as_ref() {
+            let m = profile.llm_config.model.trim();
+            if !m.is_empty() && m != "unknown" {
+                return m.to_string();
+            }
+        }
+        // Legacy fallback: an explicit pinned model in the manifest.
         self.manifest
             .llm_config
             .as_ref()
-            .and_then(|c| {
-                // Explicit model wins; otherwise derive from the routing preset's
-                // first concrete model.
-                if !c.model.is_empty() && c.model != "unknown" {
-                    Some(c.model.clone())
-                } else {
-                    c.routing_preset.as_ref().and_then(|preset_name| {
-                        self.config
-                            .as_ref()
-                            .and_then(|cfg| cfg.llm_presets.get(preset_name))
-                            .and_then(|preset| preset.routing.as_ref())
-                            .and_then(|routing| routing.models.first())
-                            .and_then(|first_model_name| {
-                                self.config
-                                    .as_ref()
-                                    .and_then(|cfg| cfg.llm_presets.get(first_model_name))
-                                    .and_then(|fixed| fixed.model.clone())
-                            })
-                    })
-                }
-            })
+            .map(|c| c.model.clone())
+            .filter(|m| !m.is_empty() && m != "unknown")
             .unwrap_or_else(|| "unknown".to_string())
     }
 
