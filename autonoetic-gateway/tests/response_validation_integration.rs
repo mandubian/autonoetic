@@ -533,6 +533,7 @@ async fn test_reasoning_io_returns_advisory_skips_non_json() -> anyhow::Result<(
     type: object
     required:
       - status
+execution_mode: "reasoning"
 "#,
     )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "advisory.agent")?;
@@ -547,7 +548,7 @@ async fn test_reasoning_io_returns_advisory_skips_non_json() -> anyhow::Result<(
     let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
     let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
 
-    let execution = GatewayExecutionService::new(config, Some(store));
+    let execution = GatewayExecutionService::new(config, Some(store.clone()));
     let result = execution
         .spawn_agent_once(
             "advisory.agent",
@@ -567,6 +568,21 @@ async fn test_reasoning_io_returns_advisory_skips_non_json() -> anyhow::Result<(
         result.is_ok(),
         "advisory io.returns must not block a non-JSON reply, got: {result:?}"
     );
+
+    // Lock the logging side: advisory mode records an `io.returns.advisory`
+    // contract event with result `advisory_skip` (logged, not blocked).
+    let events =
+        store.search_causal_events(Some("sess-advisory-1"), Some("advisory.agent"), 100)?;
+    let event = events
+        .iter()
+        .find(|e| e.category == "contract" && e.action == "io.returns.advisory")
+        .expect("expected io.returns.advisory contract event");
+    let payload = event
+        .payload
+        .as_ref()
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+        .expect("payload should be valid json");
+    assert_eq!(payload["result"], "advisory_skip");
 
     Ok(())
 }
