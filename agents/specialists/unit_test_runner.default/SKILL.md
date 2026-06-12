@@ -159,10 +159,6 @@ If you found NO tests, **do NOT call `promotion_record`**. The role is inapplica
 - **If imports fail and the artifact has dependency layers**: return `status: "unable_to_evaluate"` with a warning finding — the layers are mounted but may have a runtime wiring issue
 - **If imports fail and the artifact has NO dependency layers**: return `status: "fail"`, `evaluator_pass = false`, and state that the promoted artifact is not execution-ready for tests
 
-## Output Format
-
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 ## Status Field Mapping
 
 When returning your final response JSON, map your test execution result to the status field:

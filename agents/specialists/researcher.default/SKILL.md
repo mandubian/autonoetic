@@ -141,9 +141,6 @@ When research is blocked by missing context, request clarification.
 
 ### Output Format
 
-Return a single raw JSON object that matches `io.returns`.
-Do not wrap JSON in markdown code fences (no ```json blocks).
-
 When requesting clarification, output this structure:
 
 ```json

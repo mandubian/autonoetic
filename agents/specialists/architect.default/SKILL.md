@@ -92,8 +92,6 @@ Your job is to **design and decompose**, not to **implement**.
 
 ## Output Format
 
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 ### Design Output
 
 ```json

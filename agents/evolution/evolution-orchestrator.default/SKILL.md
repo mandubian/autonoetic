@@ -205,10 +205,6 @@ Report:
 - Agents queued for evolution (agent IDs + outcome)
 - Bookmark generation number
 
-## Output Format
-
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 ## Error Handling
 
 - If curator fails → do NOT update bookmark. Next run re-processes the same window.

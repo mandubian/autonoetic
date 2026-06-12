@@ -185,8 +185,6 @@ Use absolute paths when running saved scripts.
 
 ## Completion
 
-Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markdown code fences.
-
 ```json
 {
   "status": "ok",

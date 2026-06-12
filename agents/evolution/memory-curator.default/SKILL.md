@@ -122,8 +122,6 @@ You are a leaf agent (no `AgentSpawn`) responsible for cross-session learning di
 
 ## Output
 
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 Return a single JSON object. The shape is enforced by the gateway's
 output-schema check (`io.returns` in the frontmatter) and the
 `decision_journal` array is persisted to the causal chain as one

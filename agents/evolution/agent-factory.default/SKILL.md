@@ -70,8 +70,6 @@ When a pipeline stage is owned by another installed agent, your default action i
 
 ## Output
 
-Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markdown code fences.
-
 ```json
 {
   "status": "ok",

@@ -44,7 +44,6 @@ metadata:
             description: "One-paragraph evidence summary."
 ---
 
-
 # Outcome Grader
 
 You grade ONE finished session. Output a single `Completion` verdict on the first line, then a brief evidence paragraph. You have no tools — judge from the SessionOverview in the kickoff message.

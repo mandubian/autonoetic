@@ -72,10 +72,6 @@ When `sandbox_exec` fails:
 3. If prior runs already produced the needed logs or traces, continue from those handles instead of rerunning immediately
 4. Fix the actual error and retry
 
-## Output Format
-
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 ## Clarification
 
 Your clarification triggers: you cannot reproduce the issue, multiple root causes are possible, or error context is missing. Otherwise start with logs, stack traces, and error messages.
