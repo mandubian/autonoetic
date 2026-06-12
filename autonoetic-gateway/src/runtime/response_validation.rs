@@ -251,40 +251,33 @@ fn compute_total_output_size_bytes(
     Ok(total_bytes)
 }
 
-/// Guard against a spawn-less `delegated` self-report.
+/// True iff the reply is a JSON object whose `status` is exactly `"delegated"`.
+/// Cheap — used to gate the (filesystem-touching) spawn-less-delegation guard so
+/// task listing only happens for actual delegation claims.
+fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
+    assistant_reply
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "delegated"))
+        .unwrap_or(false)
+}
+
+/// The violation for a spawn-less `delegated` self-report.
 ///
-/// An `AgentSpawn`-capable agent that ends its turn with `status: "delegated"`
-/// is asserting it handed work to a child — but if it never called `agent_spawn`
-/// (no child was spawned), the assertion is false and the workflow would just end
-/// with nothing delegated. This is a deterministic truthfulness check on the
-/// agent's own declared `io.returns` status; the violation feeds the existing
-/// bounded repair loop (P-5.8), and on exhaustion returns an error (Ri-0.12 (e)).
-/// A legitimate delegation (a child was spawned) never trips it.
-pub fn check_delegated_without_spawn(
-    assistant_reply: Option<&str>,
-    agent_is_spawn_capable: bool,
-    spawned_child: bool,
-) -> Option<ValidationViolation> {
-    if !agent_is_spawn_capable || spawned_child {
-        return None;
-    }
-    let reply = assistant_reply?;
-    let status = serde_json::from_str::<serde_json::Value>(reply)
-        .ok()?
-        .get("status")?
-        .as_str()?
-        .to_string();
-    if status != "delegated" {
-        return None;
-    }
-    Some(ValidationViolation {
+/// An `AgentSpawn`-capable agent reporting `status: "delegated"` asserts it
+/// handed work to a child; if it never called `agent_spawn`, the assertion is
+/// false and the workflow would just end with nothing delegated. Deterministic
+/// truthfulness check on the agent's own `io.returns` status; the violation feeds
+/// the existing bounded repair loop (P-5.8), and on exhaustion returns an error
+/// (Ri-0.12 (e)). A legitimate delegation (a child was spawned) never trips it.
+fn delegated_without_spawn_violation() -> ValidationViolation {
+    ValidationViolation {
         rule: "delegated_without_spawn".into(),
         message: "reported status \"delegated\" but no child agent was spawned this turn".into(),
         repair_hint: "To delegate you must actually call `agent_spawn` (async=true), then report \
 `delegated`. If you are not delegating, report a truthful status (`ok`, `partial`, \
 `clarification_needed`, or `failed`)."
             .into(),
-    })
+    }
 }
 
 /// Validate that a required promotion.record was called during the session.
@@ -933,26 +926,32 @@ impl GatewayExecutionService {
         ));
         // Spawn-less `delegated` guard: a `delegated` status asserts a child was
         // spawned; verify one actually was (a child TaskRun exists in the
-        // workflow, distinct from this agent's own task). Deterministic; feeds
-        // the same bounded repair loop below.
-        if agent_is_spawn_capable {
-            let spawned_child = workflow_id
-                .and_then(|wid| {
-                    crate::scheduler::workflow_store::list_task_runs_for_workflow(
-                        self.config().as_ref(),
-                        self.gateway_store().as_deref(),
-                        wid,
-                    )
-                    .ok()
-                })
-                .map(|tasks| tasks.iter().any(|t| Some(t.task_id.as_str()) != task_id))
-                .unwrap_or(false);
-            if let Some(v) = check_delegated_without_spawn(
-                result.assistant_reply.as_deref(),
-                agent_is_spawn_capable,
-                spawned_child,
-            ) {
-                violations.push(v);
+        // workflow, distinct from this agent's own task). Gate the filesystem
+        // task-listing on the cheap status check so it only runs for actual
+        // delegation claims; if listing fails, skip the guard rather than risk a
+        // false positive from a transient/operational error.
+        if agent_is_spawn_capable && reply_is_delegated(result.assistant_reply.as_deref()) {
+            let spawned_child: Option<bool> = match workflow_id {
+                None => Some(false), // no workflow at all → nothing was spawned
+                Some(wid) => match crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                    self.config().as_ref(),
+                    self.gateway_store().as_deref(),
+                    wid,
+                ) {
+                    Ok(tasks) => Some(tasks.iter().any(|t| Some(t.task_id.as_str()) != task_id)),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "response_validation",
+                            workflow_id = %wid,
+                            error = %e,
+                            "delegated-spawn guard: task listing failed; skipping guard"
+                        );
+                        None
+                    }
+                },
+            };
+            if spawned_child == Some(false) {
+                violations.push(delegated_without_spawn_violation());
             }
         }
         if violations.is_empty() {
@@ -1844,23 +1843,18 @@ mod tests {
     }
 
     #[test]
-    fn delegated_without_spawn_guard() {
-        let delegated = r#"{"status":"delegated","summary":"handed off"}"#;
-        let ok = r#"{"status":"ok","summary":"done"}"#;
+    fn reply_is_delegated_detection() {
+        assert!(reply_is_delegated(Some(r#"{"status":"delegated","summary":"x"}"#)));
+        // truthful non-delegated status
+        assert!(!reply_is_delegated(Some(r#"{"status":"ok"}"#)));
+        // non-JSON / no status / none → not delegated
+        assert!(!reply_is_delegated(Some("just prose")));
+        assert!(!reply_is_delegated(Some(r#"{"summary":"no status"}"#)));
+        assert!(!reply_is_delegated(None));
+    }
 
-        // spawn-capable + delegated + no child → violation
-        let v = check_delegated_without_spawn(Some(delegated), true, false);
-        assert!(v.is_some());
-        assert_eq!(v.unwrap().rule, "delegated_without_spawn");
-
-        // a child was spawned → no violation (legitimate delegation)
-        assert!(check_delegated_without_spawn(Some(delegated), true, true).is_none());
-        // not spawn-capable → never fires
-        assert!(check_delegated_without_spawn(Some(delegated), false, false).is_none());
-        // truthful non-delegated status → no violation
-        assert!(check_delegated_without_spawn(Some(ok), true, false).is_none());
-        // non-JSON / no status → no violation
-        assert!(check_delegated_without_spawn(Some("just prose"), true, false).is_none());
-        assert!(check_delegated_without_spawn(None, true, false).is_none());
+    #[test]
+    fn delegated_without_spawn_violation_shape() {
+        assert_eq!(delegated_without_spawn_violation().rule, "delegated_without_spawn");
     }
 }
