@@ -796,10 +796,10 @@ pub(crate) fn exec_approval_continuation_block() -> crate::runtime::guidance::Gu
         ]),
         priority: 11,
         prose: "**Approval continuation.** If `sandbox_exec`/`artifact_exec` returns \
-`approval_required: true` with an `approval_ref`, do not invent or guess an id — return the exact \
-approval fields to your caller and stop. After the operator approves and you resume, retry the \
-**exact same** command with `approval_ref` set to the approved `request_id`, then continue your task; \
-do NOT `EndTurn` immediately after resumption."
+`approval_required: true` with a `request_id`, do not invent or guess ids — return that exact \
+`request_id` to your caller and stop. After the operator approves and you resume, retry the \
+**exact same** command with the `approval_ref` input set to the approved `request_id`, then continue \
+your task; do NOT `EndTurn` immediately after resumption."
             .to_string(),
     }
 }
