@@ -81,14 +81,49 @@ test-framework (base, Role∈{coder,unit_test_runner}): "Python gate tests use s
 (low priority) followed by role variants (higher priority) renders cleanly. This
 lets us migrate no-network and single-pass too without flattening nuance.
 
-### C. Drive output contracts from schema, not prose (medium, mildly breaking)
+### C. Separate output structure (schema) from output pragmatics (block) (medium)
 
 `Output Format` is the single most-repeated section (×15) and overlaps the
-`io.returns` mechanism that *already* renders an "Output Contract." Recommend:
-make `io.returns` the single source of truth for output shape, render it as a
-block, and **delete hand-written `Output Format` prose**. Agents that need a
-strict JSON reply declare it in frontmatter; the composer renders the template.
-Removes ~15 bespoke sections and the prose/schema drift between them.
+`io.returns` mechanism that *already* renders an "Output Contract." But this is
+**not** a clean delete-the-prose migration like the others, because the prose
+and the schema are not equivalent:
+
+- **`io.returns` expresses structure** — fields, types, `required`, enums. It is
+  machine-checked and drives output validation and the repair loop. It is
+  load-bearing; downstream consumers depend on it.
+- **The prose expresses pragmatics** — *which* field to use, *when*, tone,
+  worked examples, and (for orchestrators) the fact that different situations
+  emit different shapes (e.g. planner's operator-facing chat reply vs a spawn
+  handoff). A JSON Schema cannot hold judgment like "put walkthroughs in
+  `summary`, never nested in `result`."
+
+The fix is **not** "schema replaces prose" (that loses the pragmatics) and **not**
+"remove `io.returns`" (that loses enforcement). It is a clean **separation of
+ownership**, deleting only the overlap:
+
+| Concern | Owner | Notes |
+|---|---|---|
+| Fields, types, `required`, enums, JSON skeleton | **`io.returns`** (rendered + enforced) | single source of truth for structure |
+| *Which* field / *when* / tone / shape-by-situation | **guidance block / role intent** | the judgment a schema can't encode |
+| One-field hint | schema `description` (terse) | lives with its field; **not** cross-field rules |
+
+Rule of thumb: *if it could be a JSON Schema keyword, it belongs in `io.returns`;
+if it is "do X, not Y," it is guidance.* Delete the structural half of every
+`## Output Format` section (it just restates the schema and is the drift source).
+
+**The lever that collapses most of the pragmatics:** the recurring judgment is
+almost always the same envelope — **operator-facing prose in a `summary` field;
+flat string facts in a `result` field; never nest walkthrough trees.**
+Standardize that `summary`+`result` envelope as **one shared convention** (a
+single block, or a documented envelope) instead of ~15 per-agent restatements.
+Then most agents need **no `## Output Format` section at all** (schema for
+structure + the shared convention), and only the few orchestrators keep a short
+role-specific note about their chat-vs-handoff shapes.
+
+Symptom to fix while doing this: `planner.default` is `returns_enforcement:
+advisory` and currently crams a cross-field rule into a field `description`
+("…No nested walkthrough trees — use `summary`…"). Pull that sentence *out* into
+the shared convention block; leave the `description` terse.
 
 ### D. Shared orchestrator doctrine block (medium)
 
@@ -134,7 +169,8 @@ large fraction fleet-wide.
 1. **F (regression guard)** first — cheap, and it backstops everything after.
 2. **A** (finish recurring sections) — proven pattern, immediate dedup.
 3. **B** (base+variant) — closes the role-divergent clusters #466 deferred.
-4. **C** (output contracts from schema) — removes the ×15 section.
+4. **C** (separate output structure/pragmatics; standardize the `summary`+`result`
+   envelope) — removes most of the ×15 `Output Format` sections.
 5. **D** (orchestrator block) — biggest reduction in the largest files.
 6. **E** (unify foundation+blocks) — the structural simplification; do last,
    behind prompt snapshot tests.
