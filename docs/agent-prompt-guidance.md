@@ -127,15 +127,19 @@ raw JSON object matching this schema. No prose before or after the JSON, and no
 markdown code fences."* Agents therefore **must not** restate that — `io.returns`
 delivers it once.
 
-Enforcement: `returns_enforcement` is `strict` (block on violation; default for
-script agents) or `advisory` (log + emit a repair hint, never block; default for
-reasoning agents).
+Enforcement (`returns_enforcement`) governs **`io.returns` schema** validation:
+`strict` (a schema violation blocks the response; default for script agents) or
+`advisory` (schema violations are logged and emitted as causal events but do not
+block; default for reasoning agents). Non-schema `output_policy` constraints
+(e.g. `prohibited_text_patterns`, size limits) are a separate mechanism and are
+enforced regardless of this mode.
 
 **Imported AgentSkills** rarely declare `io.returns`. On import
-(`runtime/parser.rs`) they get a permissive default envelope
-(`{status, summary, result}`) with enforcement forced to **advisory** — so they
-hand off a predictable shape and inherit the Output Contract instruction without
-ever hard-failing output we don't control.
+(`runtime/parser.rs`), when a skill has no `io.returns`, it gets a permissive
+default envelope (`{status, summary, result}`), and `returns_enforcement`
+**defaults to `advisory`** (an explicit choice, if any, is preserved). So the
+schema never hard-fails output from a skill we don't control, while the skill
+still hands off a predictable shape and inherits the Output Contract instruction.
 
 ## The regression guard
 
