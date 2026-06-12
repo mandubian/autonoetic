@@ -58,6 +58,9 @@ fn skill_md_does_not_reintroduce_migrated_doctrine() {
 
     let mut files = Vec::new();
     collect_skill_files(&root, &mut files);
+    // read_dir order is filesystem-dependent; sort so violation output is
+    // deterministic across runs / CI.
+    files.sort();
     assert!(
         files.len() > 10,
         "expected many SKILL.md files under {}, found {}",
@@ -67,9 +70,12 @@ fn skill_md_does_not_reintroduce_migrated_doctrine() {
 
     let mut violations = Vec::new();
     for file in &files {
-        let body = fs::read_to_string(file).unwrap_or_default();
+        // Read failures (IO or non-UTF-8) must be loud — a silent empty body
+        // would let drift hide behind an unreadable file.
+        let body = fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", file.display()));
         let rel = file.strip_prefix(&root).unwrap_or(file);
-        for (fingerprint, owner) in MIGRATED_DOCTRINE_FINGERPRINTS {
+        for (fingerprint, owner) in MIGRATED_DOCTRINE_FINGERPRINTS.iter().copied() {
             if body.contains(fingerprint) {
                 violations.push(format!(
                     "  agents/{}: re-introduces migrated doctrine \"{}\"\n    \
