@@ -145,6 +145,21 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         None
     };
 
+    // External (AgentSkills) imports rarely declare `io.returns`. Give them a
+    // default envelope so they hand off a predictable shape and inherit the
+    // centralized Output Contract instruction (#481). Enforcement is left to the
+    // execution-mode default — reasoning → advisory — so a non-conforming reply
+    // from a skill we don't control is surfaced as a hint, never blocked.
+    let io = if agentskills_import.is_some() {
+        let mut io = meta.io.unwrap_or_default();
+        if io.returns.is_none() {
+            io.returns = Some(default_imported_returns_schema());
+        }
+        Some(io)
+    } else {
+        meta.io
+    };
+
     AgentManifest {
         version: meta.version.unwrap_or_else(|| "1.0".to_string()),
         runtime,
@@ -156,7 +171,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         limits: meta.limits,
         background: meta.background,
         disclosure: meta.disclosure,
-        io: meta.io,
+        io,
         middleware: meta.middleware,
         execution_mode: meta.execution_mode.unwrap_or_default(),
         script_entry: meta.script_entry,
@@ -168,6 +183,30 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         compression: meta.compression,
         sandbox_network: meta.sandbox_network.unwrap_or_default(),
     }
+}
+
+/// Permissive default `io.returns` envelope for imported external skills that
+/// declare no schema. Combined with reasoning-mode advisory enforcement, it
+/// nudges the skill toward a predictable handoff shape without blocking output.
+fn default_imported_returns_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "description": "Outcome of the turn, e.g. ok | partial | failed | clarification_needed."
+            },
+            "summary": {
+                "type": "string",
+                "description": "Human-readable result or answer (prose)."
+            },
+            "result": {
+                "type": "object",
+                "description": "Optional structured facts for downstream agents."
+            }
+        },
+        "required": ["status", "summary"]
+    })
 }
 
 fn reject_legacy_response_contract(content: &str) -> anyhow::Result<()> {
@@ -589,6 +628,40 @@ Use Bash(git log) to inspect history.
         assert!(caps
             .iter()
             .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
+
+        // Imported skill with no declared schema gets a default io.returns
+        // envelope, enforced advisorily (reasoning mode) so it never blocks.
+        let io = manifest.io.expect("imported skill should get a default io");
+        let returns = io.returns.as_ref().expect("default io.returns envelope");
+        let props = returns
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("envelope properties");
+        assert!(props.contains_key("status") && props.contains_key("summary"));
+        assert_eq!(
+            io.effective_returns_enforcement(manifest.execution_mode),
+            autonoetic_types::agent::IoReturnsEnforcement::Advisory
+        );
+    }
+
+    #[test]
+    fn test_native_skill_without_io_keeps_none() {
+        // Native (non-AgentSkills) skills are not given a default envelope.
+        let content = r#"---
+name: "simple-native"
+description: "native, no io"
+metadata:
+  autonoetic:
+    agent:
+      id: "simple-native"
+      name: "Simple"
+      description: "native"
+---
+# Simple
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert!(manifest.agentskills_import.is_none());
+        assert!(manifest.io.is_none(), "native skill without io stays None");
     }
 
     #[test]
