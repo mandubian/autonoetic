@@ -790,9 +790,22 @@ pub(crate) fn exec_approval_continuation_block() -> crate::runtime::guidance::Gu
     use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
     GuidanceBlock {
         id: "exec.approval_continuation",
-        when: GuidanceCondition::Any(vec![
-            GuidanceCondition::ToolPresent("sandbox_exec"),
-            GuidanceCondition::ToolPresent("artifact_exec"),
+        // Fires for exec-capable agents, but NOT promotion-gate agents: under
+        // P-3.10 their sandbox has network permanently denied, so "seek approval
+        // and retry" is wrong for them (artifact_exec returns
+        // `promotion_gate_network_denied`, not `approval_required`). Roles here
+        // mirror `promotion::manifest_may_record_promotion_verdicts` — keep in sync.
+        when: GuidanceCondition::All(vec![
+            GuidanceCondition::Any(vec![
+                GuidanceCondition::ToolPresent("sandbox_exec"),
+                GuidanceCondition::ToolPresent("artifact_exec"),
+            ]),
+            GuidanceCondition::Not(Box::new(GuidanceCondition::Any(vec![
+                GuidanceCondition::Role("sealed_evaluator"),
+                GuidanceCondition::Role("auditor"),
+                GuidanceCondition::Role("static_evaluator"),
+                GuidanceCondition::Role("unit_test_runner"),
+            ]))),
         ]),
         priority: 11,
         prose: "**Approval continuation.** If `sandbox_exec`/`artifact_exec` returns \
