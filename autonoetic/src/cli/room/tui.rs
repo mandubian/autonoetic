@@ -2138,6 +2138,7 @@ pub fn run(
                                         serde_json::json!({
                                             "artifact_ref": viewer.artifact_ref,
                                             "file_name": file.name,
+                                            "session_id": root_session_id.clone(),
                                         }),
                                     );
                                     match result {
@@ -2168,6 +2169,7 @@ pub fn run(
                                             "artifact.list_files",
                                             serde_json::json!({
                                                 "artifact_ref": artifact_ref,
+                                                "session_id": root_session_id.clone(),
                                             }),
                                         );
                                         match result {
@@ -2196,7 +2198,7 @@ pub fn run(
                                                         selected: 0,
                                                         scroll: 0,
                                                     });
-                                                    status = Some("artifact: Enter to view · Esc close".to_string());
+                                                    status = Some("artifact: o to view · Esc close".to_string());
                                                 }
                                             }
                                             Err(e) => status = Some(format!("artifact list failed: {e}")),
@@ -4398,15 +4400,15 @@ fn draw(
         if total <= footer_w && !right.is_empty() {
             let pad1 = (footer_w - total) / 3;
             let pad2 = footer_w - nav_w - center_w - right_w - pad1;
-            Paragraph::new(format!(" {nav}{}{center}{}{right}", " ".repeat(pad1), " ".repeat(pad2)))
+            Paragraph::new(format!(" {nav_display}{}{center}{}{right}", " ".repeat(pad1), " ".repeat(pad2)))
                 .style(Style::default().fg(Color::DarkGray))
         } else if total <= footer_w {
             let pad = footer_w - nav_w - center_w;
-            Paragraph::new(format!(" {nav}{}{center}", " ".repeat(pad)))
+            Paragraph::new(format!(" {nav_display}{}{center}", " ".repeat(pad)))
                 .style(Style::default().fg(Color::DarkGray))
         } else {
             let right_part = if right.is_empty() { String::new() } else { format!("  {right}") };
-            Paragraph::new(format!(" {nav}{right_part}"))
+            Paragraph::new(format!(" {nav_display}{right_part}"))
                 .style(Style::default().fg(Color::DarkGray))
         }
     };
@@ -4487,12 +4489,15 @@ fn draw(
             })
             .collect();
         let title = format!(
-            " {} [{}] {} files [Enter/Esc] ",
+            " {} [{}] {} files [o/Esc] ",
             viewer.artifact_id, viewer.kind, viewer.files.len()
         );
         let inner_height = area.height.saturating_sub(2) as usize;
-        let max_scroll = lines.len().saturating_sub(inner_height) as u16;
-        let scroll = viewer.scroll.min(max_scroll);
+        let max_scroll = lines.len().saturating_sub(inner_height);
+        let scroll = viewer
+            .selected
+            .saturating_sub(inner_height / 2)
+            .min(max_scroll) as u16;
         f.render_widget(
             Paragraph::new(lines)
                 .block(

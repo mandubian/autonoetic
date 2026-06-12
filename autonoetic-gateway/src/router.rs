@@ -2058,6 +2058,8 @@ impl JsonRpcRouter {
                 #[derive(Deserialize)]
                 struct ArtifactListParams {
                     artifact_ref: String,
+                    #[serde(default)]
+                    session_id: String,
                 }
                 let params: ArtifactListParams = match serde_json::from_value(req.params) {
                     Ok(v) => v,
@@ -2093,7 +2095,7 @@ impl JsonRpcRouter {
                             );
                         }
                     };
-                    match gw_store.resolve_artifact_ref_any_scope(&params.artifact_ref, "") {
+                    match gw_store.resolve_artifact_ref_any_scope(&params.artifact_ref, &params.session_id) {
                         Ok(Some(rec)) => rec.artifact_id,
                         Ok(None) => {
                             return JsonRpcResponse::error(
@@ -2148,6 +2150,8 @@ impl JsonRpcRouter {
                 struct ArtifactReadParams {
                     artifact_ref: String,
                     file_name: String,
+                    #[serde(default)]
+                    session_id: String,
                 }
                 let params: ArtifactReadParams = match serde_json::from_value(req.params) {
                     Ok(v) => v,
@@ -2183,7 +2187,7 @@ impl JsonRpcRouter {
                             );
                         }
                     };
-                    match gw_store.resolve_artifact_ref_any_scope(&params.artifact_ref, "") {
+                    match gw_store.resolve_artifact_ref_any_scope(&params.artifact_ref, &params.session_id) {
                         Ok(Some(rec)) => rec.artifact_id,
                         Ok(None) => {
                             return JsonRpcResponse::error(
