@@ -154,6 +154,12 @@ impl NativeTool for ArtifactExecTool {
         })
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        // Same approval-continuation block as sandbox_exec (deduped by id at
+        // compose), so artifact_exec-only agents still get it (#466).
+        vec![crate::runtime::tools::sandbox::exec_approval_continuation_block()]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
