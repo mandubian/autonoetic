@@ -3064,6 +3064,11 @@ impl GatewayExecutionService {
             let mut output_policy = manifest_output_policy.unwrap_or_default();
             output_policy.normalize();
             let validation_session_id = result.session_id.clone();
+            let agent_is_spawn_capable = manifest_loaded.as_ref().map_or(false, |m| {
+                m.capabilities
+                    .iter()
+                    .any(|c| matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. }))
+            });
             match self
                 .validate_and_maybe_repair(
                     agent_id,
@@ -3074,6 +3079,7 @@ impl GatewayExecutionService {
                     source_agent_id,
                     workflow_id,
                     task_id,
+                    agent_is_spawn_capable,
                 )
                 .await
             {
