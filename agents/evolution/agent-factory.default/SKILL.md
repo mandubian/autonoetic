@@ -102,12 +102,10 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 
 ## Tools for delegation
 
-**IMPORTANT**: To delegate to a sub-agent, always use `agent_spawn` (NOT `workflow.spawn` — that tool does not exist).
-- `agent_spawn` with `async=true` — enqueues a sub-agent and returns a `task_id`.
-- **Sequential step (one child, then the next) → end your turn.** Most of this pipeline is sequential: architect → coder → packager → install. After spawning the stage owner, reply with a short status line and stop. The gateway suspends you as `WaitingForChild` and **wakes you automatically** when that sub-agent reaches a terminal state or hits a gate (constitutional right Ri-0.14); its typed state is already in your turn-start context. Yielding is cheaper than blocking and costs exactly one resumption. So each sequential step is: spawn the stage owner → end turn → resume on wake → spawn the next stage.
-- **Parallel fan-out you must fully join (the promotion gates) → one `workflow_wait` join.** When you spawn several independent children at once and need all of them before proceeding (Step 4), call `workflow_wait(task_ids=[<all of them>], timeout_secs=300)` **once**. It blocks until the whole group is terminal and is cheaper than being woken once per child. This is a join, not polling.
-- `workflow_state` — on resume, the one call that gives mechanical `reuse_guards` truth (which stages already completed). Call it once per resume, never in a loop.
-- **Never** loop `workflow_wait` or spin `workflow_state` to discover progress — the wake-up (sequential) or the single join (parallel) already does that.
+**IMPORTANT**: To delegate to a sub-agent, always use `agent_spawn` (NOT `workflow.spawn` — that tool does not exist). Coordinate children per the shared `agent_spawn` guidance (yield on a sequential child; one `workflow_wait` join on a parallel fan-out; never poll). Mapped onto this pipeline:
+- **Sequential stages** (architect → coder → packager → install): spawn the stage owner with `async=true`, end your turn, resume on wake, then spawn the next stage.
+- **Parallel fan-out** (the Step 4 promotion gates): spawn the independent roles, then call `workflow_wait(task_ids=[<all of them>], timeout_secs=300)` once.
+- On resume, read `reuse_guards` from `workflow_state` (which stages already completed) — once per resume, never in a loop.
 
 Do not use write tools to produce the primary output of design, implementation, evaluation, audit, packaging, or installation stages. Spawn the stage owner instead. If that owner is unavailable or fails, report the failed stage rather than completing it yourself.
 

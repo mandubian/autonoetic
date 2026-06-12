@@ -130,6 +130,27 @@ impl NativeTool for AgentSpawnTool {
             .any(|cap| matches!(cap, Capability::AgentSpawn { .. }))
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        // The Ri-0.14 yield/join doctrine, uniform across every spawner (#466).
+        // The heavy orchestrators (planner, agent-factory) keep their detailed,
+        // role-specific coordination sections; this guarantees the light spawners
+        // (agent-adapter, evolution-steward, specialized_builder) get the rule too.
+        vec![GuidanceBlock {
+            id: "orchestration.coordinate_children",
+            when: GuidanceCondition::ToolPresent("agent_spawn"),
+            priority: 7,
+            prose: "**Coordinating children — yield, don't block or poll.** Spawn with \
+`async=true`. For a sequential/single child: reply with a short status and **end your turn** — the \
+gateway suspends you as `WaitingForChild` and wakes you automatically when the child reaches a \
+terminal state or a gate (Ri-0.14), with its typed state in your turn-start context. For a parallel \
+fan-out you must fully join: call `workflow_wait(task_ids=[…])` **once** (a join, not a poll). \
+**Never** loop `workflow_wait` or spin `workflow_state` to discover progress — the wake-up or the \
+single join already does that. Yielding is cheaper than blocking and costs one resumption."
+                .to_string(),
+        }]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
