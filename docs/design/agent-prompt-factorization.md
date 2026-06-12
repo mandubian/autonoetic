@@ -8,7 +8,9 @@ favors the correct end-state over back-compat.
 
 A composed system prompt today is assembled from **four parallel mechanisms**:
 
-1. `foundation_*.md` — capability-gated `include_str!` layers (`context.rs`).
+1. `foundation_*.md` — capability- **and execution-mode**-gated `include_str!`
+   layers (`context.rs`; e.g. the workflow/script layers branch on
+   `execution_mode`, not just capabilities).
 2. **Guidance blocks** — tool/capability/role/model-gated (`guidance.rs`, #463–#465).
 3. **`SKILL.md` prose** — the agent body, inlined verbatim.
 4. **`io.returns` / output_policy** — output contract rendered from manifest.
@@ -77,9 +79,15 @@ test-framework (base, Role∈{coder,unit_test_runner}): "Python gate tests use s
   └─ Role(unit_test_runner): "...prefer the stdlib runner; use pytest only if vendored."
 ```
 
-`compose_guidance` already orders by priority and dedups by id, so a base block
-(low priority) followed by role variants (higher priority) renders cleanly. This
-lets us migrate no-network and single-pass too without flattening nuance.
+Each block keeps a **distinct id** (`x.base`, `x.coder`, `x.runner`) — *not* a
+shared id. `compose_guidance` dedups by id keeping the first after sorting, so
+reusing one id would drop the variants; distinct ids let the base and the
+matching variant(s) all render, ordered by priority (base low, variants higher).
+This is exactly the pattern `content_patch` already uses (`editing.content_patch`
++ `editing.content_patch.format.claude` / `.gpt`, #465). It lets us migrate
+no-network and single-pass too without flattening nuance. (True *override*
+semantics — a variant replacing a base under one id — would need a composer
+change; we don't need it.)
 
 ### C. Separate output structure (schema) from output pragmatics (block) (medium)
 
