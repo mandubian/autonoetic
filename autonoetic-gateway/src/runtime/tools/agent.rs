@@ -141,7 +141,7 @@ impl NativeTool for AgentSpawnTool {
             when: GuidanceCondition::ToolPresent("agent_spawn"),
             priority: 7,
             prose: "**Coordinating children — yield, don't block or poll.** Delegating means \
-**actually calling `agent_spawn`**: emitting a `delegated`/handoff status *without* a real \
+**actually calling `agent_spawn`**: emitting a `delegated` status *without* a real \
 `agent_spawn` call in this turn does nothing — the workflow just ends and no child runs. So to \
 delegate: call `agent_spawn` with `async=true` **first**, then reply with a short status and end \
 your turn — the gateway suspends you as `WaitingForChild` and wakes you automatically when the child \
