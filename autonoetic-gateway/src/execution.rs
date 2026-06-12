@@ -148,6 +148,71 @@ impl SessionCloseReason {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloseOrigin {
+    JsonRpcSpawn,
+    CheckpointRespawn,
+}
+
+impl CloseOrigin {
+    fn make_close_reason(
+        self,
+        suspended_for_approval: bool,
+        suspended_for_user_input: bool,
+        has_assistant_reply: bool,
+    ) -> SessionCloseReason {
+        match self {
+            Self::JsonRpcSpawn => SessionCloseReason::for_jsonrpc_spawn(
+                suspended_for_approval,
+                suspended_for_user_input,
+                has_assistant_reply,
+            ),
+            Self::CheckpointRespawn => SessionCloseReason::for_checkpoint_respawn(
+                suspended_for_approval,
+                suspended_for_user_input,
+                has_assistant_reply,
+            ),
+        }
+    }
+
+    fn should_signal_background(self) -> bool {
+        matches!(self, Self::JsonRpcSpawn)
+    }
+}
+
+struct SessionCloseFlags {
+    assistant_reply: Option<String>,
+    suspended_for_approval: Option<String>,
+    suspended_for_user_input: bool,
+}
+
+fn session_close_flags_from_turn_outcome(
+    outcome: TurnOutcome,
+) -> SessionCloseFlags {
+    match outcome {
+        TurnOutcome::Completed(reply) => SessionCloseFlags {
+            assistant_reply: reply,
+            suspended_for_approval: None,
+            suspended_for_user_input: false,
+        },
+        TurnOutcome::Suspended { approval_request_id, .. } => SessionCloseFlags {
+            assistant_reply: None,
+            suspended_for_approval: Some(approval_request_id),
+            suspended_for_user_input: false,
+        },
+        TurnOutcome::SuspendedUserInput { .. } => SessionCloseFlags {
+            assistant_reply: None,
+            suspended_for_approval: None,
+            suspended_for_user_input: true,
+        },
+        TurnOutcome::Escalated { .. } => SessionCloseFlags {
+            assistant_reply: None,
+            suspended_for_approval: None,
+            suspended_for_user_input: true,
+        },
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactMetadata {
     pub id: String,   // content handle (sha256:...)
@@ -1540,6 +1605,201 @@ impl GatewayExecutionService {
         .await
     }
 
+    async fn finalize_session(
+        &self,
+        runtime: &mut AgentExecutor,
+        session_id: String,
+        agent_id: &str,
+        source_agent_id: Option<&str>,
+        close_flags: SessionCloseFlags,
+        close_origin: CloseOrigin,
+        consumed_checkpoint_turn_id: Option<String>,
+    ) -> anyhow::Result<SpawnResult> {
+        let SessionCloseFlags {
+            assistant_reply,
+            suspended_for_approval,
+            suspended_for_user_input,
+        } = close_flags;
+        let is_suspended = suspended_for_approval.is_some()
+            || suspended_for_user_input;
+        let close_reason = close_origin.make_close_reason(
+            suspended_for_approval.is_some(),
+            suspended_for_user_input,
+            assistant_reply.is_some(),
+        ).as_str();
+        let digest_turn_count = runtime.turn_counter;
+        let gw_dir = self.config.agents_dir.join(".gateway");
+
+        if let Some(store) = self.gateway_store.as_ref() {
+            crate::runtime::session_outcome_writer::write_session_outcome_metrics(
+                &runtime,
+                store,
+                &session_id,
+                agent_id,
+            );
+        }
+        if close_origin == CloseOrigin::JsonRpcSpawn {
+            if let Some(store) = self.gateway_store.as_ref() {
+                if close_reason == "jsonrpc_spawn_complete_empty" {
+                    if let Ok(tool_count) =
+                        store.count_execution_traces_for_session(&session_id)
+                    {
+                        if let Some(draft) =
+                            crate::runtime::operator_activity::classify_session_lifecycle(
+                                close_reason,
+                                tool_count.min(u32::MAX as u64) as u32,
+                            )
+                        {
+                            let root_id = crate::runtime::live_digest::base_session_id(
+                                &session_id,
+                            )
+                            .to_string();
+                            let record = draft.into_record(
+                                root_id,
+                                session_id.clone(),
+                                agent_id.to_string(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            );
+                            let rate_limit_per_min = self.config.operator_activity.rate_limit_per_min;
+                            match store.insert_operator_activity_throttled(&record, rate_limit_per_min) {
+                                Ok(crate::scheduler::gateway_store::OperatorActivityInsert::Dropped) => {
+                                    tracing::debug!(
+                                        target: "operator_activity",
+                                        rate_limit_per_min,
+                                        "Session lifecycle operator activity dropped by per-root rate limit"
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "operator_activity",
+                                        error = %e,
+                                        "Failed to persist session lifecycle operator activity"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        runtime.close_session(close_reason)?;
+        {
+            let root_id = crate::runtime::live_digest::base_session_id(&session_id).to_string();
+            let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
+                &root_id,
+                &session_id,
+                agent_id,
+                close_reason,
+                digest_turn_count,
+                Some(&gw_dir),
+            );
+            if is_suspended {
+                let mut suspended_ctx = ctx.clone();
+                suspended_ctx.event = autonoetic_types::hooks::HookEvent::SessionSuspended;
+                self.hook_executor.dispatch_async(suspended_ctx);
+            } else {
+                self.hook_executor.dispatch_async(ctx);
+            }
+        }
+        if close_origin == CloseOrigin::JsonRpcSpawn && !is_suspended {
+            if let Err(e) = crate::runtime::checkpoint::prune_checkpoints(
+                self.config.as_ref(),
+                &session_id,
+                2,
+            ) {
+                tracing::debug!(
+                    target: "checkpoint",
+                    session_id = %session_id,
+                    error = %e,
+                    "Failed to prune session checkpoints after completion"
+                );
+            }
+        }
+        crate::runtime::post_session_digest::maybe_run_post_session_digest(
+            self.config.as_ref(),
+            &gw_dir,
+            self.gateway_store.as_ref(),
+            &self.http_client,
+            &session_id,
+            agent_id,
+            digest_turn_count,
+            is_suspended,
+        )
+        .await;
+        crate::runtime::session_outcome_writer::maybe_run_outcome_grader(
+            self.config.as_ref(),
+            &gw_dir,
+            self.gateway_store.as_ref(),
+            &self.http_client,
+            &session_id,
+            agent_id,
+            digest_turn_count,
+            is_suspended,
+        )
+        .await;
+        if let Some(gs) = self.gateway_store.as_ref() {
+            let mem_store = crate::runtime::memory::SqliteMemoryStore::new(gs.clone());
+            crate::runtime::quality_signal::maybe_emit_quality_signal(
+                self.config.as_ref(),
+                self.gateway_store.as_ref(),
+                &mem_store,
+                &session_id,
+                agent_id,
+                digest_turn_count,
+                is_suspended,
+            )
+            .await;
+        }
+        let llm_usage = runtime.take_llm_usage_last_run();
+        if let Some(ref checkpoint_turn_id) = consumed_checkpoint_turn_id {
+            if let Err(e) = crate::runtime::checkpoint::delete_checkpoint(
+                &self.config,
+                &session_id,
+                checkpoint_turn_id,
+            ) {
+                tracing::warn!(
+                    target: "checkpoint",
+                    session_id = %session_id,
+                    turn_id = %checkpoint_turn_id,
+                    error = %e,
+                    "Failed to delete consumed checkpoint"
+                );
+            }
+        }
+        let workflow_note = if !is_suspended {
+            build_gateway_workflow_note(self.config.as_ref(), &session_id, assistant_reply.as_deref())
+        } else {
+            None
+        };
+        let artifacts = extract_artifacts_from_content_store(&gw_dir, &session_id).unwrap_or_default();
+        let files = collect_named_content(&gw_dir, &session_id);
+        let shared_knowledge = collect_shared_knowledge(
+            &gw_dir,
+            source_agent_id.unwrap_or(agent_id),
+            agent_id,
+            Some(&session_id),
+        );
+        Ok(SpawnResult {
+            agent_id: agent_id.to_string(),
+            session_id,
+            assistant_reply,
+            workflow_note,
+            should_signal_background: close_origin.should_signal_background(),
+            artifacts,
+            files,
+            shared_knowledge,
+            llm_usage,
+            suspended_for_approval,
+            suspended_for_user_input,
+        })
+    }
+
     /// Resume from a loaded checkpoint by dispatching on its `yield_reason`.
     ///
     /// Handles all checkpoint-based resume paths (ApprovalRequired,
@@ -2332,7 +2592,6 @@ impl GatewayExecutionService {
             }
 
             use crate::runtime::checkpoint::YieldReason;
-            use crate::runtime::lifecycle::TurnOutcome;
 
             // --- Turn continuation / checkpoint resume ---
             // Priority order:
@@ -2719,230 +2978,23 @@ impl GatewayExecutionService {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("runtime session_id missing after execution"))?;
 
-            let (assistant_reply, suspended_for_approval, suspended_for_user_input) = match outcome {
-                TurnOutcome::Completed(reply) => (reply, None, false),
-                TurnOutcome::Suspended { approval_request_id, .. } => {
-                    // Continuation already saved by execute_with_history.
-                    (None, Some(approval_request_id), false)
-                }
-                TurnOutcome::SuspendedUserInput { interaction_id: _ } => {
-                    // Checkpoint already saved by execute_with_history with
-                    // YieldReason::UserInputRequired. Signal that the session
-                    // is blocked on user input (not "completed empty").
-                    (None, None, true)
-                }
-                TurnOutcome::Escalated { .. } => {
-                    // Checkpoint already saved by execute_with_history with
-                    // YieldReason::HumanEscalation. Signal that the session
-                    // is blocked on operator approval.
-                    (None, None, true)
-                }
-            };
-
-            if let Some(checkpoint_turn_id) = consumed_checkpoint_turn_id {
-                if let Err(e) = crate::runtime::checkpoint::delete_checkpoint(
-                    &self.config,
-                    session_id,
-                    &checkpoint_turn_id,
-                ) {
-                    tracing::warn!(
-                        target: "checkpoint",
-                        session_id = %session_id,
-                        turn_id = %checkpoint_turn_id,
-                        error = %e,
-                        "Failed to delete consumed checkpoint"
-                    );
-                }
-            }
+            let close_flags = session_close_flags_from_turn_outcome(outcome);
 
             persist_session_context_turn(
                 &runtime.agent_dir,
                 &resolved_session_id,
                 &resume_initial_message,
-                assistant_reply.as_deref(),
+                close_flags.assistant_reply.as_deref(),
             );
-            let close_reason = SessionCloseReason::for_jsonrpc_spawn(
-                suspended_for_approval.is_some(),
-                suspended_for_user_input,
-                assistant_reply.is_some(),
-            )
-            .as_str();
-            let digest_turn_count = runtime.turn_counter;
-            // Write the auto-populated SessionOutcome row before close_session
-            // so we capture the runtime state in one place. The metrics are
-            // session-end snapshots (cumulative cost, tokens, turns,
-            // wall-clock) — best-effort write, errors logged but not
-            // propagated. Self-Improvement loop P0 (#245).
-            if let Some(store) = self.gateway_store.as_ref() {
-                crate::runtime::session_outcome_writer::write_session_outcome_metrics(
-                    &runtime,
-                    store,
-                    &resolved_session_id,
-                    agent_id,
-                );
-                if close_reason == "jsonrpc_spawn_complete_empty" {
-                    if let Ok(tool_count) =
-                        store.count_execution_traces_for_session(&resolved_session_id)
-                    {
-                        if let Some(draft) =
-                            crate::runtime::operator_activity::classify_session_lifecycle(
-                                close_reason,
-                                tool_count.min(u32::MAX as u64) as u32,
-                            )
-                        {
-                            let root_id = crate::runtime::live_digest::base_session_id(
-                                &resolved_session_id,
-                            )
-                            .to_string();
-                            let record = draft.into_record(
-                                root_id,
-                                resolved_session_id.clone(),
-                                agent_id.to_string(),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                            );
-                            let rate_limit_per_min = self.config.operator_activity.rate_limit_per_min;
-                            match store.insert_operator_activity_throttled(&record, rate_limit_per_min) {
-                                Ok(crate::scheduler::gateway_store::OperatorActivityInsert::Dropped) => {
-                                    tracing::debug!(
-                                        target: "operator_activity",
-                                        rate_limit_per_min,
-                                        "Session lifecycle operator activity dropped by per-root rate limit"
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    tracing::warn!(
-                                        target: "operator_activity",
-                                        error = %e,
-                                        "Failed to persist session lifecycle operator activity"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            runtime.close_session(close_reason)?;
-            {
-                let root_id = crate::runtime::live_digest::base_session_id(&resolved_session_id).to_string();
-                let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
-                let gw_dir = self.config.agents_dir.join(".gateway");
-                let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
-                    &root_id,
-                    &resolved_session_id,
-                    agent_id,
-                    close_reason,
-                    digest_turn_count,
-                    Some(&gw_dir),
-                );
-                if is_suspended {
-                    let mut suspended_ctx = ctx.clone();
-                    suspended_ctx.event = autonoetic_types::hooks::HookEvent::SessionSuspended;
-                    self.hook_executor.dispatch_async(suspended_ctx);
-                } else {
-                    self.hook_executor.dispatch_async(ctx);
-                }
-            }
-            let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
-            if !is_suspended {
-                if let Err(e) = crate::runtime::checkpoint::prune_checkpoints(
-                    self.config.as_ref(),
-                    &resolved_session_id,
-                    2,
-                ) {
-                    tracing::debug!(
-                        target: "checkpoint",
-                        session_id = %resolved_session_id,
-                        error = %e,
-                        "Failed to prune session checkpoints after completion"
-                    );
-                }
-            }
-            crate::runtime::post_session_digest::maybe_run_post_session_digest(
-                self.config.as_ref(),
-                &self.config.agents_dir.join(".gateway"),
-                self.gateway_store.as_ref(),
-                &self.http_client,
-                &resolved_session_id,
+            self.finalize_session(
+                &mut runtime,
+                resolved_session_id.clone(),
                 agent_id,
-                digest_turn_count,
-                is_suspended,
-            )
-            .await;
-            // Outcome grader: attach an LLM-judged Completion verdict to
-            // the auto-populated SessionOutcome row. Off by default; gated
-            // on `outcome_grader.enabled`. Runs after the post-session
-            // digest so the SessionOverview snapshot the grader sees
-            // includes the latest digest tail. Self-Improvement loop P0.
-            crate::runtime::session_outcome_writer::maybe_run_outcome_grader(
-                self.config.as_ref(),
-                &self.config.agents_dir.join(".gateway"),
-                self.gateway_store.as_ref(),
-                &self.http_client,
-                &resolved_session_id,
-                agent_id,
-                digest_turn_count,
-                is_suspended,
-            )
-            .await;
-            if let Some(gs) = self.gateway_store.as_ref() {
-                let mem_store = crate::runtime::memory::SqliteMemoryStore::new(gs.clone());
-                crate::runtime::quality_signal::maybe_emit_quality_signal(
-                    self.config.as_ref(),
-                    self.gateway_store.as_ref(),
-                    &mem_store,
-                    &resolved_session_id,
-                    agent_id,
-                    digest_turn_count,
-                    is_suspended,
-                )
-                .await;
-            }
-            let llm_usage = runtime.take_llm_usage_last_run();
-            let workflow_note = if suspended_for_approval.is_none() && !suspended_for_user_input {
-                build_gateway_workflow_note(self.config.as_ref(), &resolved_session_id, assistant_reply.as_deref())
-            } else {
-                None
-            };
-
-            // Extract artifacts from content store
-            let artifacts = extract_artifacts_from_content_store(
-                &self.config.agents_dir.join(".gateway"),
-                &resolved_session_id,
-            ).unwrap_or_default();
-
-            // Collect all named content written by the child agent
-            let files = collect_named_content(
-                &self.config.agents_dir.join(".gateway"),
-                &resolved_session_id,
-            );
-
-            // Collect knowledge shared with the caller
-            let shared_knowledge = collect_shared_knowledge(
-                &self.config.agents_dir.join(".gateway"),
-                source_agent_id.unwrap_or(agent_id),
-                agent_id,
-                Some(&resolved_session_id),
-            );
-
-            Ok(SpawnResult {
-                agent_id: agent_id.to_string(),
-                session_id: resolved_session_id,
-                assistant_reply,
-                workflow_note,
-                should_signal_background,
-                artifacts,
-                files,
-                shared_knowledge,
-                llm_usage,
-                suspended_for_approval,
-                suspended_for_user_input,
-            })
+                source_agent_id,
+                close_flags,
+                CloseOrigin::JsonRpcSpawn,
+                consumed_checkpoint_turn_id,
+            ).await
         })
         .await?;
         if source_agent_id.is_some() {
@@ -3215,7 +3267,6 @@ impl GatewayExecutionService {
         task_id: Option<&str>,
     ) -> anyhow::Result<SpawnResult> {
         use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
-        use crate::runtime::lifecycle::TurnOutcome;
 
         let span = tracing::info_span!(
             "respawn_from_checkpoint",
@@ -3311,15 +3362,7 @@ impl GatewayExecutionService {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("runtime session_id missing after execution"))?;
 
-        let (assistant_reply, suspended_for_approval, suspended_for_user_input) = match outcome {
-            TurnOutcome::Completed(reply) => (reply, None, false),
-            TurnOutcome::Suspended {
-                approval_request_id,
-                ..
-            } => (None, Some(approval_request_id), false),
-            TurnOutcome::SuspendedUserInput { interaction_id: _ } => (None, None, true),
-            TurnOutcome::Escalated { .. } => (None, None, true),
-        };
+        let close_flags = session_close_flags_from_turn_outcome(outcome);
 
         let initial_msg = history
             .iter()
@@ -3331,136 +3374,17 @@ impl GatewayExecutionService {
             &runtime.agent_dir,
             &resolved_session_id,
             &initial_msg,
-            assistant_reply.as_deref(),
+            close_flags.assistant_reply.as_deref(),
         );
-        let close_reason = SessionCloseReason::for_checkpoint_respawn(
-            suspended_for_approval.is_some(),
-            suspended_for_user_input,
-            assistant_reply.is_some(),
-        )
-        .as_str();
-        let digest_turn_count = runtime.turn_counter;
-        // SessionOutcome metrics — auto-populated on every session close
-        // (Self-Improvement P0 #245). Mirrors the spawn-path call above.
-        if let Some(store) = self.gateway_store.as_ref() {
-            crate::runtime::session_outcome_writer::write_session_outcome_metrics(
-                &runtime,
-                store,
-                &resolved_session_id,
-                agent_id,
-            );
-        }
-        runtime.close_session(close_reason)?;
-        {
-            let root_id =
-                crate::runtime::live_digest::base_session_id(&resolved_session_id).to_string();
-            let is_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
-            let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
-                &root_id,
-                &resolved_session_id,
-                agent_id,
-                close_reason,
-                digest_turn_count,
-                Some(&self.config.agents_dir.join(".gateway")),
-            );
-            if is_suspended {
-                let mut suspended_ctx = ctx.clone();
-                suspended_ctx.event = autonoetic_types::hooks::HookEvent::SessionSuspended;
-                self.hook_executor.dispatch_async(suspended_ctx);
-            } else {
-                self.hook_executor.dispatch_async(ctx);
-            }
-        }
-        let is_checkpoint_suspended = suspended_for_approval.is_some() || suspended_for_user_input;
-        crate::runtime::post_session_digest::maybe_run_post_session_digest(
-            self.config.as_ref(),
-            &self.config.agents_dir.join(".gateway"),
-            self.gateway_store.as_ref(),
-            &self.http_client,
-            &resolved_session_id,
+        self.finalize_session(
+            &mut runtime,
+            resolved_session_id,
             agent_id,
-            digest_turn_count,
-            is_checkpoint_suspended,
-        )
-        .await;
-        crate::runtime::session_outcome_writer::maybe_run_outcome_grader(
-            self.config.as_ref(),
-            &self.config.agents_dir.join(".gateway"),
-            self.gateway_store.as_ref(),
-            &self.http_client,
-            &resolved_session_id,
-            agent_id,
-            digest_turn_count,
-            is_checkpoint_suspended,
-        )
-        .await;
-        if let Some(gs) = self.gateway_store.as_ref() {
-            let mem_store = crate::runtime::memory::SqliteMemoryStore::new(gs.clone());
-            crate::runtime::quality_signal::maybe_emit_quality_signal(
-                self.config.as_ref(),
-                self.gateway_store.as_ref(),
-                &mem_store,
-                &resolved_session_id,
-                agent_id,
-                digest_turn_count,
-                is_checkpoint_suspended,
-            )
-            .await;
-        }
-        let llm_usage = runtime.take_llm_usage_last_run();
-
-        let artifacts = extract_artifacts_from_content_store(
-            &self.config.agents_dir.join(".gateway"),
-            &resolved_session_id,
-        )
-        .unwrap_or_default();
-
-        let files = collect_named_content(
-            &self.config.agents_dir.join(".gateway"),
-            &resolved_session_id,
-        );
-
-        let shared_knowledge = collect_shared_knowledge(
-            &self.config.agents_dir.join(".gateway"),
-            source_agent_id.unwrap_or(agent_id),
-            agent_id,
-            Some(&resolved_session_id),
-        );
-
-        // Delete consumed checkpoint only after successful resume execution.
-        if let Err(e) = crate::runtime::checkpoint::delete_checkpoint(
-            &self.config,
-            session_id,
-            &checkpoint.turn_id,
-        ) {
-            tracing::warn!(
-                target: "checkpoint",
-                session_id = %session_id,
-                turn_id = %checkpoint.turn_id,
-                error = %e,
-                "Failed to delete consumed checkpoint"
-            );
-        }
-
-        let workflow_note = build_gateway_workflow_note(
-            self.config.as_ref(),
-            &resolved_session_id,
-            assistant_reply.as_deref(),
-        );
-
-        Ok(SpawnResult {
-            agent_id: agent_id.to_string(),
-            session_id: resolved_session_id,
-            assistant_reply,
-            workflow_note,
-            should_signal_background: false,
-            artifacts,
-            files,
-            shared_knowledge,
-            llm_usage,
-            suspended_for_approval,
-            suspended_for_user_input,
-        })
+            source_agent_id,
+            close_flags,
+            CloseOrigin::CheckpointRespawn,
+            Some(checkpoint.turn_id.clone()),
+        ).await
     }
 
     /// Spawn a clarification child session of the agent that requested a
