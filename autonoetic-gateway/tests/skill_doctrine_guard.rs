@@ -1,0 +1,92 @@
+//! Regression guard for the agent-prompt factorization (#466, roadmap item F).
+//!
+//! Doctrine that has been centralized into tool-contributed guidance blocks must
+//! NOT be re-pasted into individual `SKILL.md` files — that is exactly the
+//! "built on the fly" duplication the migration removed (and where three latent
+//! prose-vs-enforcement inaccuracies had drifted). This test fails if any
+//! `agents/**/SKILL.md` re-introduces a migrated doctrine phrase.
+//!
+//! When you centralize a new doctrine block, add its distinctive fingerprint
+//! here. Keep fingerprints specific enough that they only match the migrated
+//! prose, not legitimately-kept role-specific wording.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// `(fingerprint, owning guidance block — where the doctrine lives now)`.
+/// Each phrase was verified absent from every `SKILL.md` at migration time.
+const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
+    ("Forbidden shell commands", "sandbox.forbidden_commands (sandbox_exec.guidance)"),
+    (
+        "requires both `name` and `content`",
+        "content.write_protocol (content_write.guidance)",
+    ),
+    (
+        "alternate names like `outcome`",
+        "promotion.record_protocol (promotion_record.guidance)",
+    ),
+    (
+        "do not invent or guess",
+        "exec.approval_continuation (sandbox_exec/artifact_exec.guidance)",
+    ),
+    (
+        "never restart from scratch",
+        "resumption.workflow_state_first (workflow_state.guidance)",
+    ),
+];
+
+fn agents_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("agents")
+}
+
+fn collect_skill_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_skill_files(&path, out);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn skill_md_does_not_reintroduce_migrated_doctrine() {
+    let root = agents_root();
+    assert!(root.is_dir(), "agents/ directory not found at {}", root.display());
+
+    let mut files = Vec::new();
+    collect_skill_files(&root, &mut files);
+    assert!(
+        files.len() > 10,
+        "expected many SKILL.md files under {}, found {}",
+        root.display(),
+        files.len()
+    );
+
+    let mut violations = Vec::new();
+    for file in &files {
+        let body = fs::read_to_string(file).unwrap_or_default();
+        let rel = file.strip_prefix(&root).unwrap_or(file);
+        for (fingerprint, owner) in MIGRATED_DOCTRINE_FINGERPRINTS {
+            if body.contains(fingerprint) {
+                violations.push(format!(
+                    "  agents/{}: re-introduces migrated doctrine \"{}\"\n    \
+                     → this now lives in the {} block; delete the prose. \
+                     See docs/design/agent-prompt-factorization.md.",
+                    rel.display(),
+                    fingerprint,
+                    owner
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "SKILL.md doctrine drift detected ({} violation(s)):\n{}",
+        violations.len(),
+        violations.join("\n")
+    );
+}
