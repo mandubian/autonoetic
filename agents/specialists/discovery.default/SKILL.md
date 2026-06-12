@@ -74,8 +74,6 @@ You find installed agents that best match a task intent. You do not execute task
 
 ## Output
 
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 ```json
 {
   "ranked_candidates": [

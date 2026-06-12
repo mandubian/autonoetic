@@ -142,7 +142,7 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
    ```
    - **`kind: "agent_bundle"` is mandatory for every script agent — never use `kind: "skill_bundle"`.** `skill_bundle` cannot be installed by `agent_revision_create_from_intent` (it requires `agent_bundle` or `binary`). If your first `artifact_build` attempt used the wrong kind, the result is unusable downstream and you must call `artifact_build` again with `kind: "agent_bundle"`. Return ONLY the final, correctly-typed `artifact_ref` to the planner.
    - If no test files are included, the promotion `unit_test_runner` may return `unable_to_evaluate`; this does not block promotion.
-7. **Return a single raw JSON object matching `io.returns`** to the planner. Do not wrap JSON in markdown code fences.
+7. **Return your structured JSON result to the planner.**
 
    ```json
    {

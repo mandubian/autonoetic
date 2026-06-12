@@ -37,6 +37,10 @@ const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
         "warrant a round-trip",
         "clarification.ask_or_default (builtin block)",
     ),
+    (
+        "wrap JSON in markdown code fences",
+        "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
+    ),
 ];
 
 fn agents_root() -> PathBuf {

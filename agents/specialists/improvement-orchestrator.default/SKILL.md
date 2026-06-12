@@ -174,7 +174,7 @@ If you receive `queued`, end your turn and return the status to the caller. When
 
 ## Output Format
 
-Return a single raw JSON object matching `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks). The exact shape depends on the status:
+The exact shape depends on the status:
 
 - **queued**: pass through the tool's `queued` response fields (`status`, `suite_id`, `queued_eval_run_ids`, `message`)
 - **completed**: pass through the tool's `completed` response fields (`status`, `summary`, `holdout`, `regressions`, `improvements`, `stats`, `cost`)

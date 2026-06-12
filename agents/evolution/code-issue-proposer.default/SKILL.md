@@ -106,4 +106,3 @@ Any expansion of this capability set requires a constitutional amendment through
 3. Identify the failing tool call or schema mismatch
 ```
 
-

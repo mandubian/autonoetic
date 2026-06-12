@@ -276,11 +276,11 @@ pub(crate) fn compose_system_instructions_full(
                 if has_required || has_properties {
                     let template = generate_json_template(schema);
                     lines.push(format!(
-                        "- **io.returns** — your ENTIRE final reply must be a single JSON object matching this schema. No prose before or after the JSON.\n  Schema: `{compact}`\n  Template:\n  ```json\n  {template}\n  ```"
+                        "- **io.returns** — your ENTIRE final reply must be a single raw JSON object matching this schema. No prose before or after the JSON, and no markdown code fences (no ```json blocks).\n  Schema: `{compact}`\n  Template:\n  ```json\n  {template}\n  ```"
                     ));
                 } else {
                     lines.push(format!(
-                        "- **io.returns** — your final reply should be a JSON object. Schema: `{compact}`"
+                        "- **io.returns** — your final reply should be a single raw JSON object matching this schema, with no markdown code fences. Schema: `{compact}`"
                     ));
                 }
             }
@@ -694,6 +694,29 @@ mod agentskills_bridging_tests {
         assert!(
             !output.contains("Tool Compatibility Notes"),
             "should not include tool bridging for native agents"
+        );
+    }
+
+    #[test]
+    fn output_contract_states_no_markdown_fences() {
+        // The io.returns renderer owns the "single raw JSON, no fences"
+        // instruction now (#466 dedup) — agents no longer restate it.
+        let mut manifest = default_test_manifest();
+        manifest.io = Some(autonoetic_types::agent::AgentIO {
+            accepts: None,
+            returns: Some(serde_json::json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": { "status": { "type": "string" } }
+            })),
+            returns_enforcement: None,
+            output_policy: None,
+        });
+        let output = compose_system_instructions_with_metadata("Do things.", &manifest, None);
+        assert!(output.contains("Your Output Contract"));
+        assert!(
+            output.contains("no markdown code fences"),
+            "io.returns contract must instruct no fences: {output}"
         );
     }
 

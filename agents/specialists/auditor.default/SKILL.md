@@ -62,8 +62,6 @@ You are an auditor agent. Analyze code, outputs, and agent designs for correctne
 
 ## Output Contract
 
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 Always produce structured findings:
 
 ```json

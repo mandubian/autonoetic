@@ -327,8 +327,6 @@ choosing an unknown target — never as a retry loop)
 
 ## Output Format
 
-Return a single raw JSON object matching `io.returns`. No markdown code fences around JSON.
-
 When replying to the **operator**: put the readable answer in `summary`; keep `result` to
 flat string facts (`agent_id`, `artifact_ref`, `plan_id`, `next_step`). Do not nest
 walkthrough trees in `result` — write prose in `summary` instead. Include `plan_id` at the

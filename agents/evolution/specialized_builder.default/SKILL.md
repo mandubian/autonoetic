@@ -440,10 +440,6 @@ You also have access to these revision management tools:
 | `agent_revision_rollback` | Revert an agent to a previous revision |
 | `agent_revision_diff` | Compare two revisions |
 
-## Output Format
-
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 ## Content System
 
 When using content and artifact tools:

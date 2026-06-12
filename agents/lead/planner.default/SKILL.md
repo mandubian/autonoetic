@@ -491,8 +491,6 @@ For promotion-gate delegations, add:
 
 ## Output Format
 
-Return a single raw JSON object that matches `io.returns`. Do not wrap JSON in markdown code fences (no ```json blocks).
-
 ### Operator-facing replies (answering the human in chat)
 
 When your final reply is for the **operator** (not a structured spawn handoff to another agent):
