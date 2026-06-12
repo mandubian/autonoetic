@@ -41,6 +41,10 @@ const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
         "wrap JSON in markdown code fences",
         "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
     ),
+    (
+        "Return a single raw JSON object",
+        "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
+    ),
 ];
 
 fn agents_root() -> PathBuf {
