@@ -686,6 +686,23 @@ impl NativeTool for WorkflowStateTool {
             .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        // Shared resumption kernel (#466), centralized from
+        // planner/coder/sealed_evaluator/packager SKILL.md. Each role keeps its
+        // own reuse-guard specifics; this is the universal principle.
+        vec![GuidanceBlock {
+            id: "resumption.workflow_state_first",
+            when: GuidanceCondition::ToolPresent("workflow_state"),
+            priority: 8,
+            prose: "**On any wake-up** (approval resolved, child join, timeout, hibernation), call \
+`workflow_state` FIRST and treat its `reuse_guards`/`resume_hint` as mechanical truth: continue from \
+where the workflow left off — never restart from scratch or re-spawn work a guard says is already \
+done. Read child outputs from `named_outputs` (don't guess content names)."
+                .to_string(),
+        }]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),

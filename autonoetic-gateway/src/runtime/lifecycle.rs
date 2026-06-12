@@ -3645,11 +3645,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_loop_includes_migrated_tool_doctrine() {
-        // WriteAccess ⇒ content_write protocol block; CodeExecution ⇒ sandbox_exec
-        // forbidden-commands block (#466 migration from per-SKILL.md prose).
+        // WriteAccess ⇒ content_write block; CodeExecution ⇒ sandbox_exec
+        // forbidden-commands + approval blocks; ReadAccess ⇒ workflow_state
+        // resumption kernel (#466 migration from per-SKILL.md prose).
         let manifest = manifest_with_capabilities(vec![
             Capability::WriteAccess { scopes: vec!["*".to_string()] },
             Capability::CodeExecution { patterns: vec![], commands: vec![] },
+            Capability::ReadAccess { scopes: vec!["*".to_string()] },
         ]);
         let temp = tempdir().expect("tempdir should create");
         let captured = Arc::new(Mutex::new(None));
@@ -3675,6 +3677,10 @@ mod tests {
         assert!(
             system.contains("Approval continuation"),
             "exec approval-continuation block missing"
+        );
+        assert!(
+            system.contains("On any wake-up"),
+            "workflow_state resumption kernel missing"
         );
     }
 

@@ -140,11 +140,9 @@ These agents are the system's vocabulary. Know them by name. They are **agent ID
 
 ## Resumption & Reuse Guards
 
-On every wake-up after interruption (approval, timeout, join, hibernation):
-
-**Step 1:** Call `workflow_state` immediately.
-**Step 2:** Read `resume_hint` and `reuse_guards`. They are mechanical truth.
-**Step 3:** Continue from where the workflow left off. Never restart from scratch.
+On every wake-up, follow the shared resumption rule (call `workflow_state` first;
+`reuse_guards`/`resume_hint` are mechanical truth; never restart). The
+planner-specific hard guards:
 
 **Hard Reuse Guards:**
 
