@@ -2,7 +2,8 @@
 
 use autonoetic_types::agent::{
     AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, CompressionConfig,
-    ExecutionMode, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration, ScriptInputMode,
+    ExecutionMode, IoReturnsEnforcement, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration,
+    ScriptInputMode,
 };
 use autonoetic_types::background::BackgroundPolicy;
 use autonoetic_types::capability::Capability;
@@ -145,6 +146,24 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         None
     };
 
+    // External (AgentSkills) imports rarely declare `io.returns`. Give them a
+    // default envelope so they hand off a predictable shape and inherit the
+    // centralized Output Contract instruction (#481). The synthesized default is
+    // a guess about a skill we don't control, so force **advisory** enforcement
+    // (preserving any explicit choice) — a non-conforming reply is surfaced as a
+    // hint, never blocked, regardless of execution_mode (which would otherwise
+    // default script agents to strict).
+    let io = if agentskills_import.is_some() {
+        let mut io = meta.io.unwrap_or_default();
+        if io.returns.is_none() {
+            io.returns = Some(default_imported_returns_schema());
+            io.returns_enforcement = io.returns_enforcement.or(Some(IoReturnsEnforcement::Advisory));
+        }
+        Some(io)
+    } else {
+        meta.io
+    };
+
     AgentManifest {
         version: meta.version.unwrap_or_else(|| "1.0".to_string()),
         runtime,
@@ -156,7 +175,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         limits: meta.limits,
         background: meta.background,
         disclosure: meta.disclosure,
-        io: meta.io,
+        io,
         middleware: meta.middleware,
         execution_mode: meta.execution_mode.unwrap_or_default(),
         script_entry: meta.script_entry,
@@ -168,6 +187,30 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         compression: meta.compression,
         sandbox_network: meta.sandbox_network.unwrap_or_default(),
     }
+}
+
+/// Permissive default `io.returns` envelope for imported external skills that
+/// declare no schema. Injected with forced advisory enforcement (see caller), it
+/// nudges the skill toward a predictable handoff shape without blocking output.
+fn default_imported_returns_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "description": "Outcome of the turn, e.g. ok | partial | failed | clarification_needed."
+            },
+            "summary": {
+                "type": "string",
+                "description": "Human-readable result or answer (prose)."
+            },
+            "result": {
+                "type": "object",
+                "description": "Optional structured facts for downstream agents."
+            }
+        },
+        "required": ["status", "summary"]
+    })
 }
 
 fn reject_legacy_response_contract(content: &str) -> anyhow::Result<()> {
@@ -589,6 +632,42 @@ Use Bash(git log) to inspect history.
         assert!(caps
             .iter()
             .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
+
+        // Imported skill with no declared schema gets a default io.returns
+        // envelope with enforcement FORCED to advisory (not mode-derived), so it
+        // never blocks even if the skill were script-mode.
+        let io = manifest.io.expect("imported skill should get a default io");
+        let returns = io.returns.as_ref().expect("default io.returns envelope");
+        let props = returns
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("envelope properties");
+        assert!(props.contains_key("status") && props.contains_key("summary"));
+        assert_eq!(
+            io.returns_enforcement,
+            Some(autonoetic_types::agent::IoReturnsEnforcement::Advisory),
+            "synthesized default must be explicitly advisory, not mode-derived"
+        );
+    }
+
+    #[test]
+    fn test_native_skill_without_io_keeps_none() {
+        // Native (non-AgentSkills) skills are not given a default envelope.
+        let content = r#"---
+name: "simple-native"
+description: "native, no io"
+metadata:
+  autonoetic:
+    agent:
+      id: "simple-native"
+      name: "Simple"
+      description: "native"
+---
+# Simple
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert!(manifest.agentskills_import.is_none());
+        assert!(manifest.io.is_none(), "native skill without io stays None");
     }
 
     #[test]
