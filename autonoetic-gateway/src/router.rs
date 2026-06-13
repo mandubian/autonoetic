@@ -2244,6 +2244,136 @@ impl JsonRpcRouter {
                 }
             }
 
+            "content.list" => {
+                // List every content-store entry (name → handle) for a session.
+                // Mirrors `artifact.list_files` but over the live content store,
+                // so the operator can see what the session is producing in
+                // realtime — before any artifact is built (Pillar D, t=0
+                // visibility). Drafts are content-addressed blobs under mutable
+                // names; immutability is untouched.
+                #[derive(Deserialize)]
+                struct ContentListParams {
+                    session_id: String,
+                }
+                let params: ContentListParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.list: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                let names_handles = match store.list_names_with_handles(&params.session_id) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content.list failed: {}", e),
+                        );
+                    }
+                };
+                let visibility_map = store
+                    .load_manifest(&params.session_id)
+                    .map(|m| m.visibility)
+                    .unwrap_or_default();
+                let files: Vec<serde_json::Value> = names_handles
+                    .into_iter()
+                    .map(|(name, handle)| {
+                        let alias = crate::runtime::content_store::ContentStore::get_short_alias(&handle);
+                        let visibility = visibility_map
+                            .get(&handle)
+                            .map(|v| match v {
+                                crate::runtime::content_store::ContentVisibility::Private => "private",
+                                crate::runtime::content_store::ContentVisibility::Session => "session",
+                                crate::runtime::content_store::ContentVisibility::Global => "global",
+                            })
+                            .unwrap_or("session");
+                        serde_json::json!({
+                            "name": name,
+                            "handle": handle,
+                            "alias": alias,
+                            "visibility": visibility,
+                        })
+                    })
+                    .collect();
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "session_id": params.session_id,
+                        "files": files,
+                    }),
+                )
+            }
+
+            "content.read" => {
+                // Read a content-store entry's bytes by name or handle. Mirrors
+                // `artifact.read_file` but over the live content store.
+                #[derive(Deserialize)]
+                struct ContentReadParams {
+                    session_id: String,
+                    name: String,
+                }
+                let params: ContentReadParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.read: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                match store.read_by_name_or_handle(&params.session_id, &params.name) {
+                    Ok(bytes) => {
+                        let handle = store
+                            .resolve_name_or_handle_to_handle(&params.session_id, &params.name)
+                            .unwrap_or_default();
+                        // Lossy UTF-8: the viewer is text-oriented (markdown);
+                        // binary blobs surface a replacement-char placeholder.
+                        let content = String::from_utf8_lossy(&bytes).into_owned();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "name": params.name,
+                                "handle": handle,
+                                "bytes": bytes.len(),
+                                "content": content,
+                            }),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("content.read failed: {}", e),
+                    ),
+                }
+            }
+
             "gate.get_messages" => {
                 #[derive(Deserialize)]
                 struct GetMessagesParams {

@@ -1084,4 +1084,64 @@ mod tests {
         );
         assert_eq!(root_session_id("a/b/c"), "a");
     }
+
+    #[test]
+    fn list_with_handles_and_visibility_then_read_round_trip() {
+        // Exercises the exact path the `content.list` + `content.read` JSON-RPC
+        // methods (router.rs) use: write a few entries under different
+        // visibilities, list them with handles + visibility, and read each back
+        // by name. This is the foundation of the Pillar-D content-tree pane.
+        let temp = tempdir().unwrap();
+        let store = ContentStore::new(temp.path()).unwrap();
+        let session = "root-session-content";
+
+        let h1 = store.write(b"# title\n\nbody of draft one").unwrap();
+        store
+            .register_name_with_visibility(
+                session,
+                "skills/weather/SKILL.md",
+                &h1,
+                ContentVisibility::Session,
+            )
+            .unwrap();
+        let h2 = store.write(b"SECRET-LIKE").unwrap();
+        store
+            .register_name_with_visibility(
+                session,
+                "config/secrets.yaml",
+                &h2,
+                ContentVisibility::Private,
+            )
+            .unwrap();
+
+        // list_names_with_handles returns (name, handle), sorted by name.
+        let listed = store.list_names_with_handles(session).unwrap();
+        assert_eq!(listed.len(), 2, "both drafts should be listed from t=0");
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["config/secrets.yaml", "skills/weather/SKILL.md"]);
+
+        // load_manifest gives visibility — the RPC's visibility badge source.
+        let manifest = store.load_manifest(session).unwrap();
+        let vis_for = |name: &str| -> &'static str {
+            let (_, handle) = listed.iter().find(|(n, _)| n == name).unwrap();
+            match manifest
+                .visibility
+                .get(handle)
+                .copied()
+                .unwrap_or(ContentVisibility::Session)
+            {
+                ContentVisibility::Private => "private",
+                ContentVisibility::Session => "session",
+                ContentVisibility::Global => "global",
+            }
+        };
+        assert_eq!(vis_for("config/secrets.yaml"), "private");
+        assert_eq!(vis_for("skills/weather/SKILL.md"), "session");
+
+        // read_by_name_or_handle resolves each name back to its bytes.
+        let one = store.read_by_name_or_handle(session, "skills/weather/SKILL.md").unwrap();
+        assert_eq!(String::from_utf8_lossy(&one), "# title\n\nbody of draft one");
+        let two = store.read_by_name_or_handle(session, "config/secrets.yaml").unwrap();
+        assert_eq!(String::from_utf8_lossy(&two), "SECRET-LIKE");
+    }
 }

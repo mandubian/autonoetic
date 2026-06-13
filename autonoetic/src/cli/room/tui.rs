@@ -646,6 +646,32 @@ struct ArtifactFileView {
     scroll: u16,
 }
 
+/// One entry in the live session content tree (Pillar D). The name is a
+/// mutable pointer over an immutable content-addressed blob — a *draft* the
+/// operator can watch being written, before any artifact is built.
+struct ContentEntry {
+    name: String,
+    alias: String,
+    visibility: String,
+}
+
+/// Live session content tree: every `content_write`/`content_patch` name the
+/// session has registered, listed from t=0. Toggle with `c`; `o`/`Enter` opens
+/// a markdown-aware viewer for the selected entry.
+struct ContentTree {
+    entries: Vec<ContentEntry>,
+    selected: usize,
+    scroll: u16,
+}
+
+/// Markdown-aware viewer for one content-store entry (mirror of
+/// `ArtifactFileView` but rendered through the markdown pipeline).
+struct ContentView {
+    name: String,
+    content: String,
+    scroll: u16,
+}
+
 /// Extract artifact_ref from a timeline entry, if it has one.
 /// Returns an `ar.*` or `art_*` ref that the gateway can resolve.
 fn artifact_ref_for_entry(entry: &SessionTimelineEntry) -> Option<String> {
@@ -1317,6 +1343,9 @@ pub fn run(
     let mut info_scroll: u16 = 0;
     let mut artifact_viewer: Option<ArtifactViewer> = None;
     let mut artifact_file_view: Option<ArtifactFileView> = None;
+    // Pillar D: live session content tree (drafts visible from t=0) + viewer.
+    let mut content_tree: Option<ContentTree> = None;
+    let mut content_view: Option<ContentView> = None;
     let mut quit_armed_until: Option<Instant> = None;
     let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
     let mut last_announced_plan_event: Option<String> = None;
@@ -1833,7 +1862,11 @@ pub fn run(
                     }
                     match key.code {
                         KeyCode::Esc => {
-                            if artifact_file_view.is_some() {
+                            if content_view.is_some() {
+                                content_view = None;
+                            } else if content_tree.is_some() {
+                                content_tree = None;
+                            } else if artifact_file_view.is_some() {
                                 artifact_file_view = None;
                             } else if artifact_viewer.is_some() {
                                 artifact_viewer = None;
@@ -2166,8 +2199,79 @@ pub fn run(
                                 status = Some("info: j/k scroll · Esc close".to_string());
                             }
                         }
+                        // c: toggle the live session content tree (Pillar D).
+                        // Lists every content_write/content_patch name from t=0
+                        // so the operator can watch what the session is producing
+                        // before any artifact is built.
+                        KeyCode::Char('c') => {
+                            if content_view.is_some() || artifact_file_view.is_some()
+                                || artifact_viewer.is_some() || detail.is_some()
+                                || input.is_some() || compose.is_some()
+                            {
+                                // don't grab 'c' while another overlay/text input is active
+                            } else if content_tree.is_some() {
+                                content_tree = None;
+                            } else {
+                                match rpc(
+                                    client,
+                                    "content.list",
+                                    serde_json::json!({ "session_id": root_session_id.clone() }),
+                                ) {
+                                    Ok(v) => {
+                                        let entries: Vec<ContentEntry> = v
+                                            .get("files")
+                                            .and_then(|f| f.as_array())
+                                            .map(|arr| {
+                                                arr.iter().filter_map(|f| {
+                                                    Some(ContentEntry {
+                                                        name: f.get("name")?.as_str()?.to_string(),
+                                                        alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                                                        visibility: f.get("visibility").and_then(|v| v.as_str()).unwrap_or("session").to_string(),
+                                                    })
+                                                }).collect()
+                                            })
+                                            .unwrap_or_default();
+                                        if entries.is_empty() {
+                                            status = Some("no content entries yet (session has not written any drafts)".to_string());
+                                        } else {
+                                            content_tree = Some(ContentTree { entries, selected: 0, scroll: 0 });
+                                            status = Some(format!("content: {} entries · j/k navigate · o view · Esc close", content_tree.as_ref().unwrap().entries.len()));
+                                        }
+                                    }
+                                    Err(e) => status = Some(format!("content list failed: {e}")),
+                                }
+                            }
+                        }
                         KeyCode::Char('o') => {
-                            if artifact_file_view.is_some() {
+                            // Content tree open → open a markdown-aware viewer
+                            // Content tree open → open a markdown-aware viewer
+                            // for the selected entry (before the artifact branch).
+                            if content_view.is_some() {
+                                // already viewing content; ignore
+                            } else if let Some(tree) = content_tree.as_ref() {
+                                if let Some(entry) = tree.entries.get(tree.selected) {
+                                    let name = entry.name.clone();
+                                    match rpc(
+                                        client,
+                                        "content.read",
+                                        serde_json::json!({
+                                            "session_id": root_session_id.clone(),
+                                            "name": name,
+                                        }),
+                                    ) {
+                                        Ok(v) => {
+                                            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                                content_view = Some(ContentView {
+                                                    name,
+                                                    content: content.to_string(),
+                                                    scroll: 0,
+                                                });
+                                            }
+                                        }
+                                        Err(e) => status = Some(format!("content read failed: {e}")),
+                                    }
+                                }
+                            } else if artifact_file_view.is_some() {
                             } else if let Some(ref viewer) = artifact_viewer {
                                 if let Some(file) = viewer.files.get(viewer.selected) {
                                     let result = rpc(
@@ -2252,7 +2356,11 @@ pub fn run(
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if artifact_file_view.is_some() {
+                            if let Some(view) = content_view.as_mut() {
+                                view.scroll = view.scroll.saturating_add(1);
+                            } else if let Some(tree) = content_tree.as_mut() {
+                                tree.selected = (tree.selected + 1).min(tree.entries.len().saturating_sub(1));
+                            } else if artifact_file_view.is_some() {
                                 artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_add(1);
                             } else if artifact_viewer.is_some() {
                                 let viewer = artifact_viewer.as_mut().unwrap();
@@ -2268,7 +2376,11 @@ pub fn run(
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if artifact_file_view.is_some() {
+                            if let Some(view) = content_view.as_mut() {
+                                view.scroll = view.scroll.saturating_sub(1);
+                            } else if let Some(tree) = content_tree.as_mut() {
+                                tree.selected = tree.selected.saturating_sub(1);
+                            } else if artifact_file_view.is_some() {
                                 artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_sub(1);
                             } else if artifact_viewer.is_some() {
                                 let viewer = artifact_viewer.as_mut().unwrap();
@@ -2721,6 +2833,8 @@ pub fn run(
                 gate_count,
                 artifact_viewer.as_ref(),
                 artifact_file_view.as_ref(),
+                content_tree.as_ref(),
+                content_view.as_ref(),
                 gate_modal.as_ref(),
                 gate_modal
                     .as_ref()
@@ -4209,6 +4323,8 @@ fn draw(
     gate_count: usize,
     artifact_viewer: Option<&ArtifactViewer>,
     artifact_file_view: Option<&ArtifactFileView>,
+    content_tree: Option<&ContentTree>,
+    content_view: Option<&ContentView>,
     gate_modal: Option<&GateModal>,
     gate_modal_entry: Option<&SessionTimelineEntry>,
 ) {
@@ -4558,6 +4674,89 @@ fn draw(
                         .borders(Borders::ALL)
                         .title(title)
                         .border_style(Style::default().fg(Color::Green))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    }
+
+    // Pillar D: live session content tree + markdown-aware viewer. These layer
+    // above the timeline/artifact overlays; the content viewer renders the
+    // blob through the markdown pipeline (the key win over ArtifactFileView's
+    // plain-text rendering).
+    if let Some(ref view) = content_view {
+        let area = centered_rect(80, 85, f.area());
+        f.render_widget(Clear, area);
+        let lines = super::markdown::render_markdown(
+            &super::markdown::normalize_narrative_prose(&view.content),
+        );
+        let inner_height = area.height.saturating_sub(2) as usize;
+        // Wrap-aware scroll: count wrapped lines, not raw Lines, so the scroll
+        // offset tracks what the operator sees (mirrors detail-pane wrap).
+        let wrap_w = area.width.saturating_sub(2) as u16;
+        let total = detail_wrap_line_count(&lines, wrap_w);
+        let max_scroll = total.saturating_sub(inner_height) as u16;
+        let scroll = view.scroll.min(max_scroll);
+        let title = format!(
+            " 📝 {} [draft · not a vetted artifact] [Esc back] ",
+            view.name
+        );
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .style(Style::default().bg(Color::Black)),
+                )
+                .scroll((scroll, 0)),
+            area,
+        );
+    } else if let Some(ref tree) = content_tree {
+        let area = centered_rect(65, 70, f.area());
+        f.render_widget(Clear, area);
+        let lines: Vec<Line> = tree
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let marker = if i == tree.selected { " > " } else { "   " };
+                let style = if i == tree.selected {
+                    Style::default().fg(Color::Yellow).bg(Color::Black)
+                } else {
+                    Style::default().bg(Color::Black)
+                };
+                let vis_tag = match e.visibility.as_str() {
+                    "private" => " 🔒",
+                    "global" => " 🌐",
+                    _ => "",
+                };
+                Line::from(Span::styled(
+                    format!("{}{}{}", marker, e.name, vis_tag),
+                    style,
+                ))
+            })
+            .collect();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(inner_height);
+        let scroll = tree
+            .selected
+            .saturating_sub(inner_height / 2)
+            .min(max_scroll) as u16;
+        let title = format!(
+            " 📝 session content (drafts · t=0) — {} entries [o view · Esc close] ",
+            tree.entries.len()
+        );
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Cyan))
                         .style(Style::default().bg(Color::Black)),
                 )
                 .scroll((scroll, 0)),
