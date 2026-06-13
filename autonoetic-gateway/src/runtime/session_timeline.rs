@@ -383,29 +383,111 @@ pub fn operator_message_event(
 }
 
 /// Base importance of a digest event type, before any role refinement.
+/// Base importance for a timeline event type. The effective altitude written
+/// to a row is `max(base_altitude(et), role_floor(role))` (see [`altitude_for`]),
+/// unless an emitter passes an explicit altitude that *raises* it further
+/// (e.g. `runtime.lock_drift` → `Error` when rejected).
+///
+/// # Altitude policy
+///
+/// The four altitudes (`Detail < Normal < Attention < Error`) partition events
+/// by what the operator needs to see:
+///
+/// - **Error** — failures and integrity breaches. Always visible; the operator
+///   must know these happened.
+/// - **Attention** — operator **gates**: the full lifecycle of a decision that
+///   suspends for, or records, operator input. Both the *request* (`*.pending`,
+///   `*.proposed`) and the *decision* (`*.approved`, `*.rejected`, `*.promoted`)
+///   share this altitude so each gate reads as a paired ask↔resolution.
+///   Abandonments (`*.cancelled`, `*.withdrawn`) are NOT decisions → Normal.
+/// - **Normal** — visible progress: agent/operator narrative, session
+///   boundaries, workbench creation (a milestone), audits, retries, and gate
+///   abandonments. The default floor.
+/// - **Detail** — hidable plumbing: turns, LLM rounds, reasoning, tool
+///   requests *and* successful tool completions, workflow bookkeeping,
+///   scheduled jobs, workbench reconcile/discard.
+///
+/// # Per-event rationale
+///
+/// | Event type | Altitude | Why |
+/// |---|---|---|
+/// | `turn.start` / `turn.end` | Detail | turn plumbing |
+/// | `llm.round` | Detail | per-round token accounting |
+/// | `agent.reasoning` | Detail | verbose "why"; surfaced on dial-down |
+/// | `tool.requested` | Detail | the request is plumbing; the agent's message carries intent |
+/// | `tool.completed` | Detail | success completion pairs with the request; **failures** (`ok:false`) are bumped to Attention at the emit site so they aren't hidden |
+/// | `workbench.created` | Normal | milestone — content becomes reviewable (NOT plumbing) |
+/// | `workbench.reconciled` / `workbench.discarded` | Detail | edit/discard mechanics around the real work |
+/// | `workflow.child_state` / `workflow.join_satisfied` / `workflow.signal` | Detail | workflow bookkeeping |
+/// | `scheduled_job.*` | Detail | cron plumbing |
+/// | `agent.message` | Normal | primary agent narrative — the thing to read |
+/// | `operator.message` | Normal | operator input — primary |
+/// | `session.start` / `session.end` | Normal | session boundaries a new agent joins/leaves |
+/// | `digest_annotate` | Normal | auditor/evaluator annotation — output worth seeing |
+/// | `llm.retry` | Normal | a retry is notable (transient trouble) but not a failure |
+/// | `plan.pending` / `plan.approved` | Attention | plan gate lifecycle (request + decision) |
+/// | `approval.pending` / `approval.approved` / `approval.rejected` | Attention | approval gate lifecycle |
+/// | `approval.cancelled` | Normal | abandonment, not a decision |
+/// | `escalation.pending` | Attention | escalation gate request |
+/// | `user.ask.pending` | Attention | conversational clarification gate |
+/// | `wiki.proposed` / `wiki.promoted` / `wiki.rejected` | Attention | wiki-contribution gate lifecycle |
+/// | `wiki.withdrawn` | Normal | abandonment, not a decision |
+/// | `divergence.intervention` | Attention | sentinel intervention (emit site raises to Error when critical) |
+/// | `runtime.lock_drift` | Attention | integrity event (emit site stores Error when rejected) |
+/// | `security.escape_threshold` | Attention | escape-probability threshold reached |
+/// | `llm.request_failed` / `llm.empty_response` | Error | LLM failures |
+/// | `guard.tripped` | Error | LoopGuard circuit breaker |
+/// | `session.emergency_stop` | Error | emergency stop fired |
+/// | `security.sandbox_escape` | Error | sandbox breach |
+/// | `tool.failed` | Error | reserved — no emitter today (failures use `tool.completed` with `ok:false`, bumped to Attention at the emit site). Kept so a future dedicated failure event lands at Error. |
+///
+/// This match is **exhaustive over every event type the gateway emits**; the
+/// `_ => Normal` arm is a safe fallback for forward-compat (a new event type
+/// defaults to visible progress until consciously classified here).
 pub fn base_altitude(event_type: &str) -> Altitude {
     match event_type {
-        // Mechanics / poll-ish / infra — hidden at the normal floor. Workbench
-        // lifecycle is plumbing around the real work (edits/artifacts), so it
-        // stays Detail and surfaces only when the operator dials down.
-        // Extended-thinking "why" is verbose; hidable by default, surfaced on dial-down.
-        "turn.start" | "turn.end" | "llm.round" | "tool.requested" | "agent.reasoning"
-        | "workbench.created" | "workbench.reconciled" | "workbench.discarded"
+        // ─── Error: failures and integrity breaches. ───
+        "llm.request_failed" | "llm.empty_response" | "guard.tripped"
+        | "session.emergency_stop" | "security.sandbox_escape"
+        | "tool.failed" => Altitude::Error,
+
+        // ─── Attention: operator gates — requests AND decisions. ───
+        // The full lifecycle of a gate shares one altitude so each ask reads
+        // paired with its resolution. Abandonments (cancelled/withdrawn) are
+        // NOT decisions → Normal below.
+        "plan.pending" | "plan.approved"
+        | "approval.pending" | "approval.approved" | "approval.rejected"
+        | "escalation.pending"
+        | "user.ask.pending"
+        | "wiki.proposed" | "wiki.promoted" | "wiki.rejected"
+        | "divergence.intervention"
+        | "runtime.lock_drift"
+        | "security.escape_threshold" => Altitude::Attention,
+
+        // ─── Normal: visible progress (the default floor). ───
+        // Agent/operator narrative, session boundaries, the workbench-CREATED
+        // milestone, audits, retries, and gate abandonments.
+        "agent.message" | "operator.message"
+        | "session.start" | "session.end"
+        | "workbench.created"
+        | "digest_annotate"
+        | "llm.retry"
+        | "approval.cancelled" | "wiki.withdrawn" => Altitude::Normal,
+
+        // ─── Detail: hidable plumbing. ───
+        // Turns, LLM rounds, reasoning, tool requests AND successful tool
+        // completions (failures are bumped to Attention at the emit site),
+        // workflow bookkeeping, scheduled jobs, workbench reconcile/discard.
+        "turn.start" | "turn.end" | "llm.round" | "agent.reasoning"
+        | "tool.requested" | "tool.completed"
+        | "workbench.reconciled" | "workbench.discarded"
         | "workflow.child_state" | "workflow.join_satisfied" | "workflow.signal"
         | "scheduled_job.triggered" | "scheduled_job.completed" | "scheduled_job.failed" => {
             Altitude::Detail
         }
-        "llm.request_failed" | "llm.empty_response" | "tool.failed" | "session.emergency_stop"
-        | "security.sandbox_escape" | "guard.tripped" => Altitude::Error,
-        // Gates awaiting the operator (conversational asks, RFC §3.5) and
-        // integrity events. `runtime.lock_drift` stores an explicit altitude
-        // (Error when rejected, Attention when overridden); this is just the
-        // safe floor for any NULL-altitude fallback.
-        "user.ask.pending" | "approval.pending" | "plan.pending" | "divergence.intervention"
-        | "runtime.lock_drift" | "escalation.pending" | "security.escape_threshold" => {
-            Altitude::Attention
-        }
-        // Everything else is normal progress.
+
+        // Unknown event type: Normal is the safe default (visible). New event
+        // types surface until consciously classified above.
         _ => Altitude::Normal,
     }
 }
@@ -724,6 +806,53 @@ mod tests {
             altitude_for("agent.reasoning", &SessionRole::Sentinel),
             Altitude::Attention
         );
+    }
+
+    #[test]
+    fn altitude_policy_gate_lifecycle_shares_attention() {
+        // A gate's request AND decision share Attention so each ask reads
+        // paired with its resolution. Abandonments (cancelled/withdrawn) are
+        // NOT decisions → Normal.
+        for approved in ["plan.approved", "approval.approved", "approval.rejected"] {
+            assert_eq!(base_altitude(approved), Altitude::Attention, "{approved}");
+        }
+        for pending in [
+            "plan.pending", "approval.pending", "escalation.pending",
+            "user.ask.pending", "wiki.proposed", "wiki.promoted", "wiki.rejected",
+        ] {
+            assert_eq!(base_altitude(pending), Altitude::Attention, "{pending}");
+        }
+        // Abandonments — visible, but not decision checkpoints.
+        assert_eq!(base_altitude("approval.cancelled"), Altitude::Normal);
+        assert_eq!(base_altitude("wiki.withdrawn"), Altitude::Normal);
+    }
+
+    #[test]
+    fn altitude_policy_tool_completion_is_detail_success() {
+        // tool.requested and tool.completed are a matched pair at Detail
+        // (success = plumbing). Failures are bumped to Attention at the emit
+        // site (see session_tracer), not here.
+        assert_eq!(base_altitude("tool.requested"), Altitude::Detail);
+        assert_eq!(base_altitude("tool.completed"), Altitude::Detail);
+    }
+
+    #[test]
+    fn altitude_policy_workbench_created_is_normal_milestone() {
+        // Creation is a milestone (content becomes reviewable); reconcile/
+        // discard remain plumbing.
+        assert_eq!(base_altitude("workbench.created"), Altitude::Normal);
+        assert_eq!(base_altitude("workbench.reconciled"), Altitude::Detail);
+        assert_eq!(base_altitude("workbench.discarded"), Altitude::Detail);
+    }
+
+    #[test]
+    fn altitude_policy_explicit_normal_progress() {
+        for et in [
+            "agent.message", "operator.message", "session.start", "session.end",
+            "digest_annotate", "llm.retry",
+        ] {
+            assert_eq!(base_altitude(et), Altitude::Normal, "{et}");
+        }
     }
 
     #[test]
