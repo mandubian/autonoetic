@@ -397,7 +397,9 @@ impl PlanEnvelopeDiff {
     }
 
     /// Compact one-line human summary, e.g.
-    /// `+step s5  owner s3→operator  −validation v2`. Empty for cosmetic-only.
+    /// `+step s5  owner s3→operator  −validation v2`. Returns the literal
+    /// `"no envelope change"` for a cosmetic-only diff (callers display this
+    /// to explain why the operator was not asked to re-approve).
     pub fn summary(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if !self.steps_added.is_empty() {
@@ -502,6 +504,16 @@ pub fn plan_envelope_diff(parent: &PlanFrame, child: &PlanFrame) -> PlanEnvelope
             }
         }
     }
+
+    // Sort every collected vector for deterministic output. The diff feeds an
+    // operator-facing `diff_summary` and a timeline payload, so it MUST be
+    // stable regardless of HashMap iteration order.
+    steps_added.sort();
+    steps_removed.sort();
+    owners_changed.sort_by(|a, b| a.0.cmp(&b.0));
+    agents_changed.sort_by(|a, b| a.0.cmp(&b.0));
+    validation_removed.sort();
+    validation_weakened.sort_by(|a, b| a.0.cmp(&b.0));
 
     PlanEnvelopeDiff {
         steps_added,
@@ -687,6 +699,50 @@ mod tests {
         assert!(d.requires_regate());
         assert_eq!(d.steps_removed, vec!["s2".to_string()]);
         assert_eq!(d.validation_removed, vec!["v2".to_string()]);
+    }
+
+    #[test]
+    fn diff_multi_item_output_is_deterministic() {
+        // With several added steps + removed steps + weakened validations, the
+        // collected vectors (and the operator-facing summary) MUST be sorted,
+        // not dependent on HashMap iteration order. Run a few times — a
+        // non-deterministic ordering would flake here against the asserted order.
+        let parent = plan_with(
+            vec![
+                step("s_alpha", StepOwner::Agent, None),
+                step("s_beta", StepOwner::Agent, None),
+                step("s_gamma", StepOwner::Agent, None),
+            ],
+            vec![
+                ent("v_one", ValidationRequirement::Required),
+                ent("v_two", ValidationRequirement::Required),
+            ],
+        );
+        let child = plan_with(
+            // s_beta + s_gamma removed; s_delta + s_epsilon added
+            vec![
+                step("s_alpha", StepOwner::Agent, None),
+                step("s_delta", StepOwner::Agent, None),
+                step("s_epsilon", StepOwner::Agent, None),
+            ],
+            // both weakened Required → Advisory
+            vec![
+                ent("v_one", ValidationRequirement::Advisory),
+                ent("v_two", ValidationRequirement::Advisory),
+            ],
+        );
+        for _ in 0..8 {
+            let d = plan_envelope_diff(&parent, &child);
+            // Sorted lexicographically — not insertion order.
+            assert_eq!(d.steps_added, vec!["s_delta".to_string(), "s_epsilon".to_string()]);
+            assert_eq!(d.steps_removed, vec!["s_beta".to_string(), "s_gamma".to_string()]);
+            assert_eq!(d.validation_weakened.iter().map(|(v, _, _)| v).collect::<Vec<_>>(),
+                vec![&"v_one".to_string(), &"v_two".to_string()]);
+            // Summary is stable too.
+            let s = d.summary();
+            assert!(s.contains("+step s_delta,s_epsilon"), "sorted added in summary: {s}");
+            assert!(s.contains("−step s_beta,s_gamma"), "sorted removed in summary: {s}");
+        }
     }
 
     // helper alias used above

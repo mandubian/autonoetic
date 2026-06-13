@@ -952,11 +952,15 @@ impl NativeTool for PlanFrameAmendTool {
                 plan_id: Some(new_revision.plan_id.clone()),
                 ..Default::default()
             };
+            // Both checkpoints carry the same triple (`inherited`,
+            // `requires_regate`, `diff_summary`) so the timeline schema is
+            // uniform and consumers don't have to infer a missing boolean.
             let (event_type, extra) = if inherit {
                 (
                     "plan.approved",
                     serde_json::json!({
                         "inherited": true,
+                        "requires_regate": envelope_diff.requires_regate(),
                         "inherited_from": old_version,
                         "diff_summary": envelope_diff.summary(),
                     }),
@@ -965,8 +969,9 @@ impl NativeTool for PlanFrameAmendTool {
                 (
                     "plan.pending",
                     serde_json::json!({
-                        "diff_summary": envelope_diff.summary(),
+                        "inherited": false,
                         "requires_regate": envelope_diff.requires_regate(),
+                        "diff_summary": envelope_diff.summary(),
                     }),
                 )
             };
