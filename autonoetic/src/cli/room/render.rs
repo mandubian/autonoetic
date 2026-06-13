@@ -1892,10 +1892,16 @@ pub enum RowSource {
     Run { start: usize, len: usize },
 }
 
-/// Fold consecutive `Detail` events into a single collapsed row so routine
-/// plumbing (turns, workbench bookkeeping, polls) doesn't flood the view when
-/// the floor is low. A lone Detail event renders normally — collapsing one is
-/// pointless. Higher altitudes always render individually. Coalescing is
+/// Fold consecutive **routine** events into a single collapsed row so plumbing
+/// (turns, LLM rounds, read-only tool calls, workflow bookkeeping) doesn't
+/// flood the view. Classification is by [`event_tier`], not raw altitude, so
+/// that routine `tool.completed` rows (which the gateway tags `Normal`) also
+/// fold — previously only `Detail`-altitude events collapsed, which left the
+/// asymmetric `tool.requested` (Detail, folded) vs `tool.completed` (Normal,
+/// individual) pair and produced dozens of completion rows.
+///
+/// A lone routine event renders normally — collapsing one is pointless.
+/// Checkpoint and Significant tiers always render individually. Coalescing is
 /// page-local; a run split across reads collapses per page.
 pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
     coalesce_indexed(entries).into_iter().map(|(r, _)| r).collect()
@@ -1907,7 +1913,7 @@ pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, R
     let mut run_start: Option<usize> = None;
     let mut run_len: usize = 0;
     for (i, e) in entries.iter().enumerate() {
-        if e.altitude == Altitude::Detail {
+        if event_tier(e) == EventTier::Routine {
             if run_start.is_none() {
                 run_start = Some(i);
             }
@@ -1922,6 +1928,92 @@ pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, R
     }
     flush_run(entries, &mut run_start, &mut run_len, &mut out);
     out
+}
+
+/// Visibility tier for a timeline event — drives squashing in the default
+/// (squashed) view. Pure-view classification; the gateway-assigned altitude
+/// remains the source of truth for glyph/color, and the floor filter still
+/// applies before coalescing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTier {
+    /// Decisions, boundaries, and errors — plans, approvals, escalations,
+    /// operator messages, session starts. Always rendered individually; the
+    /// TUI elevates these with banner chrome and jump-to-checkpoint keys.
+    Checkpoint,
+    /// Agent output and state-changing actions — `agent.message`, audits, and
+    /// `tool.completed` for privileged/state-changing tools. Always rendered
+    /// individually so the operator sees what the session *produced*.
+    Significant,
+    /// Plumbing — turns, LLM rounds, reasoning, tool requests, read-only tool
+    /// completions, workflow bookkeeping. Folded into collapsed runs.
+    Routine,
+}
+
+/// `tool.completed` for these state-changing tools is Significant (shown
+/// individually); every other `tool.completed` is Routine (folded).
+const SIGNIFICANT_TOOL_NAMES: &[&str] = &[
+    "agent_spawn",
+    "content_write",
+    "content_patch",
+    "artifact_build",
+    "artifact_project",
+    "artifact_exec",
+    "sandbox_exec",
+    "promotion_record",
+    "agent_revision_create",
+    "agent_revision_create_from_intent",
+    "agent_revision_promote",
+    "agent_revision_rollback",
+    "skill_install",
+    "federation.escalate",
+];
+
+/// Classify a timeline event into a visibility tier. Used by the squashed
+/// view to decide what folds vs renders individually.
+pub fn event_tier(entry: &SessionTimelineEntry) -> EventTier {
+    match entry.event_type.as_str() {
+        "plan.pending" | "plan.approved" | "plan.rejected" | "plan.withdrawn"
+        | "approval.pending" | "approval.approved" | "approval.rejected"
+        | "approval.cancelled" | "approval.withdrawn"
+        | "escalation.pending" | "escalation.approved" | "escalation.rejected"
+        | "operator.message"
+        | "session.start" | "session.end"
+        | "workbench.created" | "workbench.reconciled" | "workbench.discarded"
+        | "runtime.lock_drift"
+        | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" | "wiki.withdrawn" => {
+            EventTier::Checkpoint
+        }
+        "agent.message" | "digest_annotate" => EventTier::Significant,
+        "tool.completed" => tool_completed_tier(entry),
+        _ => EventTier::Routine,
+    }
+}
+
+/// `tool.completed` is Significant only for a state-changing tool; routine
+/// (folded) otherwise. Reads `tool_name` from the payload defensively.
+fn tool_completed_tier(entry: &SessionTimelineEntry) -> EventTier {
+    let Some(p) = entry.payload.as_deref() else {
+        return EventTier::Significant;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(p) else {
+        return EventTier::Significant;
+    };
+    let tool = v
+        .get("tool_name")
+        .or_else(|| v.get("tool"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    if SIGNIFICANT_TOOL_NAMES.contains(&tool) {
+        EventTier::Significant
+    } else {
+        EventTier::Routine
+    }
+}
+
+/// True when the event is a first-class checkpoint (see [`EventTier::Checkpoint`]).
+/// Convenience for the TUI to mark checkpoint rows for banner/jump handling.
+pub fn is_checkpoint(entry: &SessionTimelineEntry) -> bool {
+    event_tier(entry) == EventTier::Checkpoint
 }
 
 fn flush_run(
@@ -2558,7 +2650,7 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_folds_detail_runs_but_keeps_higher_altitudes() {
+    fn coalesce_folds_routine_runs_but_keeps_checkpoints_and_significant() {
         let mk = |et: &str, alt: Altitude| {
             entry(
                 SessionRole::Planner,
@@ -2570,24 +2662,120 @@ mod tests {
         };
         let entries = vec![
             mk("turn.start", Altitude::Detail),
-            mk("workbench.created", Altitude::Detail),
+            mk("llm.round", Altitude::Detail),
             mk("turn.start", Altitude::Detail),
-            mk("approval.pending", Altitude::Attention), // breaks the run
-            mk("turn.end", Altitude::Detail),            // lone detail ⇒ normal line
+            mk("approval.pending", Altitude::Attention), // checkpoint — breaks the run
+            mk("turn.end", Altitude::Detail),            // lone routine ⇒ normal line
         ];
         let rows = coalesce(&entries);
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 3, "run + checkpoint + lone routine");
         match &rows[0] {
             RenderedRow::Collapsed { count, summary } => {
                 assert_eq!(*count, 3);
                 assert!(summary.contains("turn.start×2"));
+                assert!(summary.contains("llm.round"));
             }
             other => panic!("expected collapsed run, got {other:?}"),
         }
         assert!(matches!(&rows[1], RenderedRow::Line(spec) if spec.headline.contains("APPROVAL REQUIRED")));
-        // The trailing lone Detail event is a normal line, not collapsed.
+        // The trailing lone routine event is a normal line, not collapsed.
         assert!(matches!(&rows[2], RenderedRow::Line { .. }));
         assert!(row_text(&rows[0]).contains("⟨3 routine events"));
+    }
+
+    #[test]
+    fn coalesce_folds_routine_tool_completed_but_keeps_significant() {
+        // The clutter fix: a read-only tool.completed (e.g. workflow_wait)
+        // folds as Routine, while a state-changing tool.completed
+        // (e.g. agent_spawn) renders individually as Significant.
+        let mk_tool = |et: &str, tool: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({ "tool_name": tool }),
+            )
+        };
+        let entries = vec![
+            mk_tool("tool.completed", "workflow_wait"), // routine
+            mk_tool("tool.completed", "workflow_wait"), // routine  (run of 2)
+            mk_tool("tool.completed", "agent_spawn"),   // significant — breaks run
+            mk_tool("tool.completed", "resolve"),       // routine (lone ⇒ individual)
+        ];
+        let rows = coalesce(&entries);
+        assert_eq!(rows.len(), 3, "run(2) + agent_spawn + lone resolve");
+        assert!(
+            matches!(&rows[0], RenderedRow::Collapsed { count: 2, .. }),
+            "two read-only completions should fold; got {:?}",
+            rows[0]
+        );
+        assert!(matches!(&rows[1], RenderedRow::Line { .. }));
+        assert!(matches!(&rows[2], RenderedRow::Line { .. }));
+    }
+
+    #[test]
+    fn event_tier_classification() {
+        let mk = |et: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({}),
+            )
+        };
+        // Checkpoints
+        for et in [
+            "plan.pending", "plan.approved", "approval.pending", "approval.approved",
+            "escalation.pending", "operator.message", "session.start", "workbench.created",
+            "runtime.lock_drift",
+        ] {
+            assert_eq!(
+                event_tier(&mk(et)),
+                EventTier::Checkpoint,
+                "{et} should be a checkpoint"
+            );
+        }
+        // Significant
+        assert_eq!(event_tier(&mk("agent.message")), EventTier::Significant);
+        assert_eq!(event_tier(&mk("digest_annotate")), EventTier::Significant);
+        // Routine
+        for et in [
+            "turn.start", "turn.end", "llm.round", "agent.reasoning",
+            "tool.requested", "workflow.child_state", "workflow.join_satisfied",
+        ] {
+            assert_eq!(event_tier(&mk(et)), EventTier::Routine, "{et} should be routine");
+        }
+    }
+
+    #[test]
+    fn event_tier_tool_completed_splits_by_tool_name() {
+        let mk = |tool: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                "tool.completed",
+                Altitude::Normal,
+                serde_json::json!({ "tool_name": tool }),
+            )
+        };
+        // Significant tools
+        for tool in ["agent_spawn", "content_write", "artifact_build", "sandbox_exec"] {
+            assert_eq!(
+                event_tier(&mk(tool)),
+                EventTier::Significant,
+                "tool.completed({tool}) should be significant"
+            );
+        }
+        // Routine tools
+        for tool in ["resolve", "artifact_inspect", "workflow_wait", "agent_list"] {
+            assert_eq!(
+                event_tier(&mk(tool)),
+                EventTier::Routine,
+                "tool.completed({tool}) should be routine"
+            );
+        }
     }
 
     #[test]
@@ -2598,8 +2786,8 @@ mod tests {
         let entries = vec![
             mk("turn.start", Altitude::Detail),   // 0 ┐ run
             mk("turn.end", Altitude::Detail),     // 1 ┘
-            mk("approval.pending", Altitude::Attention), // 2 single
-            mk("turn.start", Altitude::Detail),   // 3 lone detail → single
+            mk("approval.pending", Altitude::Attention), // 2 single (checkpoint)
+            mk("turn.start", Altitude::Detail),   // 3 lone routine → single
         ];
         let rows = coalesce_indexed(&entries);
         assert_eq!(rows.len(), 3);
