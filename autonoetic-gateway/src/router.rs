@@ -2244,6 +2244,165 @@ impl JsonRpcRouter {
                 }
             }
 
+            "content.list" => {
+                // List every content-store entry (name → handle) for a session.
+                // Mirrors `artifact.list_files` but over the live content store,
+                // so the operator can see what the session is producing in
+                // realtime — before any artifact is built (Pillar D, t=0
+                // visibility). Drafts are content-addressed blobs under mutable
+                // names; immutability is untouched.
+                #[derive(Deserialize)]
+                struct ContentListParams {
+                    session_id: String,
+                }
+                let params: ContentListParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.list: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                let names_handles = match store.list_names_with_handles(&params.session_id) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content.list failed: {}", e),
+                        );
+                    }
+                };
+                // Cross-session visibility: a handle can be registered under
+                // a child session but declared global. We need the LOCAL
+                // manifest (per-session visibility for this session_id) AND
+                // a probe of the GLOBAL manifest (where global entries are
+                // registered under the sentinel "__global__" session).
+                // The local map is authoritative for private/session; if a
+                // handle is missing locally, we fall back to the global
+                // manifest so global entries written by child sessions are
+                // labelled "global" (not "session") — and the UI shows the
+                // 🌐 badge correctly.
+                let visibility_map = store
+                    .load_manifest(&params.session_id)
+                    .map(|m| m.visibility)
+                    .unwrap_or_default();
+                let global_handles: std::collections::HashSet<String> = store
+                    .load_manifest(crate::runtime::content_store::GLOBAL_SESSION_ID)
+                    .map(|m| m.names.values().cloned().collect())
+                    .unwrap_or_default();
+                let files: Vec<serde_json::Value> = names_handles
+                    .into_iter()
+                    .map(|(name, handle)| {
+                        let alias = crate::runtime::content_store::ContentStore::get_short_alias(&handle);
+                        let visibility = visibility_map
+                            .get(&handle)
+                            .map(|v| match v {
+                                crate::runtime::content_store::ContentVisibility::Private => "private",
+                                crate::runtime::content_store::ContentVisibility::Session => "session",
+                                crate::runtime::content_store::ContentVisibility::Global => "global",
+                            })
+                            .unwrap_or(if global_handles.contains(&handle) { "global" } else { "session" });
+                        serde_json::json!({
+                            "name": name,
+                            "handle": handle,
+                            "alias": alias,
+                            "visibility": visibility,
+                        })
+                    })
+                    .collect();
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "session_id": params.session_id,
+                        "files": files,
+                    }),
+                )
+            }
+
+            "content.read" => {
+                // Read a content-store entry's bytes by name or handle. Mirrors
+                // `artifact.read_file` but over the live content store.
+                #[derive(Deserialize)]
+                struct ContentReadParams {
+                    session_id: String,
+                    name: String,
+                }
+                let params: ContentReadParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.read: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                // Resolve the handle ONCE first, then read by the resolved
+                // handle. A read that succeeds against a name/alias must have
+                // a real handle behind it; returning an empty string when
+                // resolution fails would produce an inconsistent response
+                // (bytes present, handle missing). If the name/handle does
+                // not resolve at all, fail fast with -32000.
+                let handle = match store
+                    .resolve_name_or_handle_to_handle(&params.session_id, &params.name)
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content.read resolve failed: {}", e),
+                        );
+                    }
+                };
+                match store.read_by_name_or_handle(&params.session_id, &handle) {
+                    Ok(bytes) => {
+                        // Lossy UTF-8: the viewer is text-oriented (markdown);
+                        // binary blobs surface a replacement-char placeholder.
+                        let content = String::from_utf8_lossy(&bytes).into_owned();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "name": params.name,
+                                "handle": handle,
+                                "bytes": bytes.len(),
+                                "content": content,
+                            }),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("content.read failed: {}", e),
+                    ),
+                }
+            }
+
             "gate.get_messages" => {
                 #[derive(Deserialize)]
                 struct GetMessagesParams {

@@ -56,7 +56,10 @@ pub struct SessionManifest {
 }
 
 /// Session ID used for the global content manifest.
-const GLOBAL_SESSION_ID: &str = "__global__";
+/// Sentinel session id under which the content store tracks globally-visible
+/// handles. Exposed so callers (e.g. the `content.list` JSON-RPC method)
+/// can probe the global manifest to resolve cross-session visibility.
+pub const GLOBAL_SESSION_ID: &str = "__global__";
 
 /// Short alias prefix length (8 hex chars = 32 bits, collision probability < 1/4B)
 pub const SHORT_ALIAS_LEN: usize = 8;
@@ -1083,5 +1086,144 @@ mod tests {
             "demo-session"
         );
         assert_eq!(root_session_id("a/b/c"), "a");
+    }
+
+    #[test]
+    fn list_with_handles_and_visibility_then_read_round_trip() {
+        // Exercises the exact path the `content.list` + `content.read` JSON-RPC
+        // methods (router.rs) use: write a few entries under different
+        // visibilities, list them with handles + visibility, and read each back
+        // by name. This is the foundation of the Pillar-D content-tree pane.
+        let temp = tempdir().unwrap();
+        let store = ContentStore::new(temp.path()).unwrap();
+        let session = "root-session-content";
+
+        let h1 = store.write(b"# title\n\nbody of draft one").unwrap();
+        store
+            .register_name_with_visibility(
+                session,
+                "skills/weather/SKILL.md",
+                &h1,
+                ContentVisibility::Session,
+            )
+            .unwrap();
+        let h2 = store.write(b"SECRET-LIKE").unwrap();
+        store
+            .register_name_with_visibility(
+                session,
+                "config/secrets.yaml",
+                &h2,
+                ContentVisibility::Private,
+            )
+            .unwrap();
+
+        // list_names_with_handles returns (name, handle), sorted by name.
+        let listed = store.list_names_with_handles(session).unwrap();
+        assert_eq!(listed.len(), 2, "both drafts should be listed from t=0");
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["config/secrets.yaml", "skills/weather/SKILL.md"]);
+
+        // load_manifest gives visibility — the RPC's visibility badge source.
+        let manifest = store.load_manifest(session).unwrap();
+        let vis_for = |name: &str| -> &'static str {
+            let (_, handle) = listed.iter().find(|(n, _)| n == name).unwrap();
+            match manifest
+                .visibility
+                .get(handle)
+                .copied()
+                .unwrap_or(ContentVisibility::Session)
+            {
+                ContentVisibility::Private => "private",
+                ContentVisibility::Session => "session",
+                ContentVisibility::Global => "global",
+            }
+        };
+        assert_eq!(vis_for("config/secrets.yaml"), "private");
+        assert_eq!(vis_for("skills/weather/SKILL.md"), "session");
+
+        // read_by_name_or_handle resolves each name back to its bytes.
+        let one = store.read_by_name_or_handle(session, "skills/weather/SKILL.md").unwrap();
+        assert_eq!(String::from_utf8_lossy(&one), "# title\n\nbody of draft one");
+        let two = store.read_by_name_or_handle(session, "config/secrets.yaml").unwrap();
+        assert_eq!(String::from_utf8_lossy(&two), "SECRET-LIKE");
+    }
+
+    #[test]
+    fn global_manifest_probe_for_cross_session_visibility() {
+        // The `content.list` JSON-RPC method (router.rs) probes the
+        // GLOBAL_SESSION_ID manifest so a global entry written by a
+        // child session is labelled "global" (not "session") when the
+        // operator lists from a parent session. This test exercises the
+        // underlying ContentStore API that the router relies on.
+        let temp = tempdir().unwrap();
+        let store = ContentStore::new(temp.path()).unwrap();
+        let child = "root-x/child-a";
+
+        let h = store.write(b"shared").unwrap();
+        store
+            .register_name_with_visibility(
+                child,
+                "shared/lib.py",
+                &h,
+                ContentVisibility::Global,
+            )
+            .unwrap();
+
+        // The local child manifest knows the handle + global visibility.
+        let child_manifest = store.load_manifest(child).unwrap();
+        assert_eq!(
+            child_manifest.visibility.get(&h).copied(),
+            Some(ContentVisibility::Global)
+        );
+
+        // The global sentinel manifest contains the handle (this is the
+        // probe the router uses to promote missing-local entries to
+        // "global").
+        let global_manifest = store
+            .load_manifest(GLOBAL_SESSION_ID)
+            .expect("global manifest must exist after a global register");
+        let global_handles: std::collections::HashSet<String> =
+            global_manifest.names.values().cloned().collect();
+        assert!(
+            global_handles.contains(&h),
+            "the global manifest must record the handle for cross-session probes"
+        );
+
+        let got = store.read_by_name_or_handle(child, "shared/lib.py").unwrap();
+        assert_eq!(got, b"shared");
+    }
+
+    #[test]
+    fn resolve_handle_then_read_succeeds_for_named_entry() {
+        // Mirrors the router `content.read` path (Fix 2): resolve the
+        // handle once, then read by the resolved handle. Ensures the
+        // name->handle->bytes path returns the same content and the
+        // resolved handle is non-empty. Also locks in that a missing
+        // name surfaces a clear error (the bug Fix 2 closed).
+        let temp = tempdir().unwrap();
+        let store = ContentStore::new(temp.path()).unwrap();
+        let sid = "root-rs";
+        let h = store.write(b"body-of-draft").unwrap();
+        store
+            .register_name_with_visibility(sid, "notes.md", &h, ContentVisibility::Session)
+            .unwrap();
+
+        let resolved = store
+            .resolve_name_or_handle_to_handle(sid, "notes.md")
+            .expect("name must resolve");
+        assert_eq!(resolved, h);
+
+        let bytes = store.read_by_name_or_handle(sid, &resolved).unwrap();
+        assert_eq!(bytes, b"body-of-draft");
+
+        let err = store
+            .resolve_name_or_handle_to_handle(sid, "missing.md")
+            .err()
+            .expect("missing name must fail to resolve");
+        assert!(
+            err.to_string().contains("missing.md")
+                || err.to_string().to_lowercase().contains("not found"),
+            "resolve error should mention the missing name; got: {err}"
+        );
     }
 }
