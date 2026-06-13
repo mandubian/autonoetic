@@ -1379,7 +1379,7 @@ impl GatewayStore {
                  FROM live_digest_events
                  WHERE source_agent_id = ?2
                  GROUP BY root_session_id
-                 ORDER BY last_ts DESC
+                 ORDER BY last_ts DESC, root_session_id DESC
                  LIMIT ?1",
                 vec![Box::new(limit), Box::new(agent_id.unwrap().to_string())],
             ),
@@ -1387,7 +1387,7 @@ impl GatewayStore {
                 "SELECT root_session_id, source_agent_id, MAX(created_at) as last_ts
                  FROM live_digest_events
                  GROUP BY root_session_id
-                 ORDER BY last_ts DESC
+                 ORDER BY last_ts DESC, root_session_id DESC
                  LIMIT ?1",
                 vec![Box::new(limit)],
             ),

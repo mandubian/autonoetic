@@ -177,7 +177,48 @@ fn coerce_message_string(s: &str) -> serde_json::Value {
         }
         return serde_json::Value::Object(obj);
     }
+    // Fallback: the string looks like an io.returns envelope but has unescaped
+    // newlines inside string values (common with smaller LLMs). Try to salvage
+    // the `summary` field so the operator sees formatted prose, not raw JSON.
+    if s.starts_with('{') {
+        if let Some(summary) = extract_summary_from_broken_json(s) {
+            return serde_json::json!({ "status": "ok", "summary": summary });
+        }
+    }
     serde_json::Value::String(s.to_string())
+}
+
+/// Heuristic extraction of the `"summary"` value from a JSON object that has
+/// unescaped newlines in string values (making it unparseable by serde_json).
+/// Looks for `"summary":` and reads until the matching closing quote.
+fn extract_summary_from_broken_json(s: &str) -> Option<String> {
+    let key_pos = s.find("\"summary\"")?;
+    let after_key = &s[key_pos + "\"summary\"".len()..];
+    let colon = after_key.trim_start();
+    let after_colon = colon.strip_prefix(':')?;
+    let after_space = after_colon.trim_start();
+    let rest = after_space.strip_prefix('"')?;
+    // Read until the closing quote: look for `"` followed by `}` or `,` or
+    // end-of-string. Since the JSON is broken, we have to be lenient — take
+    // everything until the last `"` that's followed by `}` or EOF.
+    let raw = rest;
+    // Find the last occurrence of `"` followed by `}` (the closing of the object)
+    let mut end = raw.len();
+    for (i, ch) in raw.char_indices().rev() {
+        if ch == '"' {
+            let after = &raw[i + 1..];
+            if after.trim_start().starts_with('}') || after.trim_start().is_empty() {
+                end = i;
+                break;
+            }
+        }
+    }
+    let summary = &raw[..end];
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary.to_string())
+    }
 }
 
 /// Split agent text that may lead with prose and end with an embedded JSON object.
@@ -2063,7 +2104,26 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
 /// Payload string keys whose values are operator-facing prose — rendered as
 /// markdown in the client detail pane (gateway stays format-agnostic).
 const NARRATIVE_PAYLOAD_KEYS: &[&str] = &[
-    "summary", "prose", "message", "text", "content", "body", "question",
+    "summary",
+    "prose",
+    "message",
+    "text",
+    "content",
+    "body",
+    "question",
+    "reason",
+    "explanation",
+    "description",
+    "detail",
+    "answer",
+    "output",
+    "result",
+    "synthesis",
+    "guidance",
+    "context",
+    "risk_summary",
+    "diagnosis",
+    "recommendation",
 ];
 
 fn is_narrative_payload_key(key: &str) -> bool {
@@ -2071,15 +2131,25 @@ fn is_narrative_payload_key(key: &str) -> bool {
 }
 
 fn should_render_payload_as_narrative(key: &str, value: &str) -> bool {
-    if !is_narrative_payload_key(key) {
+    // Skip values that are valid structured JSON — those should be rendered
+    // as pretty-printed JSON, not markdown. But a value that merely *starts*
+    // with `{` but contains unescaped newlines (common when the agent emits
+    // an io.returns envelope with literal newlines inside string values)
+    // is NOT valid JSON and should be treated as narrative prose.
+    if (value.starts_with('{') || value.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(value).is_ok()
+    {
         return false;
     }
-    if value.starts_with('{') || value.starts_with('[') {
-        return false;
+    if is_narrative_payload_key(key) {
+        return value.contains('\n')
+            || value.chars().count() > 80
+            || super::markdown::looks_like_narrative_content(value);
     }
-    value.contains('\n')
-        || value.chars().count() > 80
-        || super::markdown::looks_like_narrative_content(value)
+    // For unknown keys, still render as narrative when the value clearly
+    // contains markdown formatting — the agent may put rich text in
+    // arbitrary fields.
+    value.contains('\n') && super::markdown::looks_like_markdown(value)
 }
 
 fn push_narrative_payload_lines(
@@ -3667,5 +3737,116 @@ mod tests {
         let s = row_text(&row);
         assert!(s.contains('\n'), "detail boundary must be preserved: {s:?}");
         assert!(s.contains("hello world"));
+    }
+
+    #[test]
+    fn detail_narrative_markers_for_expanded_keys() {
+        for key in ["reason", "explanation", "diagnosis", "output", "synthesis"] {
+            let e = entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                "agent.message",
+                Altitude::Normal,
+                serde_json::json!({ key: "## Heading\n\nSome text here." }),
+            );
+            let lines = format_detail(&e);
+            let joined = lines.join("\n");
+            assert!(
+                joined.contains("@@NARRATIVE@@"),
+                "key `{key}` should produce narrative markers, got:\n{joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_narrative_markers_for_unknown_key_with_markdown() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "custom_field": "### Title\n\n- item one\n- item two" }),
+        );
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("@@NARRATIVE@@"),
+            "unknown key with markdown should produce narrative markers, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn detail_no_narrative_for_plain_short_unknown_key() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "custom_field": "just a short string" }),
+        );
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("@@NARRATIVE@@"),
+            "short plain unknown key should NOT produce narrative markers, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn detail_narrative_for_summary_inside_nested_message_object() {
+        // Payload where `message` is a JSON object (not a stringified JSON
+        // envelope), with `summary` as a prose field inside it.
+        let payload_json = r#"{"message":{"result":{"conditions":"Mainly clear","current_temp":"24.6°C"},"status":"ok","summary":"Current weather in Paris, France\n\n- Temperature: 24.6°C (76°F)\n- Conditions: Mainly clear skies\n- Humidity: 51%\n- Wind: 13.4 km/h from the West\n\n| Time | Temp | Conditions |\n|------|------|------------|\n| 21:00 | 24.4°C | Mainly clear |\n| 22:00 | 23.1°C | Mainly clear |"}}"#;
+        let e = SessionTimelineEntry {
+            event_id: "ev2".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("researcher.default"),
+            role: SessionRole::Specialist { kind: "researcher".into() },
+            event_type: "agent.message".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-06-12T20:45:00Z".into(),
+            payload: Some(payload_json.to_string()),
+            refs: Default::default(),
+        };
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("@@NARRATIVE@@"),
+            "nested-message summary should have narrative markers, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("Current weather in Paris"),
+            "should contain the summary content"
+        );
+    }
+
+    #[test]
+    fn diag_realistic_weather_message() {
+        let payload_json = r#"{"message":"{\"status\":\"ok\",\"summary\":\"**Current Weather in Paris, France** (as of 4:15 PM CEST, June 12, 2026)\n\n- **Temperature:** 24.7°C (76.5°F)\n- **Conditions:** Partly cloudy\n- **Humidity:** 50%\n- **Wind Speed:** 18.5 km/h (11.5 mph)\n- **Precipitation:** 0.0 mm — no rain\n\n---\n\n**Hourly Forecast — Next 8 Hours**\n\n| Time (CEST) | Temp (°C / °F) | Conditions | Humidity | Wind (km/h) | Precip Chance |\n|---|---|---|---|---|---|\n| 5:00 PM | 24.9°C / 76.8°F | Partly cloudy | 49% | 18.2 | 0% |\"}"}"#;
+        let e = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("researcher.default"),
+            role: SessionRole::Specialist { kind: "researcher".into() },
+            event_type: "agent.message".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-06-12T14:20:00Z".into(),
+            payload: Some(payload_json.to_string()),
+            refs: Default::default(),
+        };
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("@@NARRATIVE@@"),
+            "should have narrative markers"
+        );
+        assert!(
+            joined.contains("**Temperature:**"),
+            "should contain the summary markdown content"
+        );
     }
 }

@@ -18,6 +18,9 @@ pub const POST_SESSION_NARRATIVE_CONTENT_NAME: &str = "post_session_narrative.md
 /// Writer agent id for provenance on extracted memories.
 pub const DIGEST_AGENT_ID: &str = "autonoetic.digest";
 
+/// Bundled prompt for the gateway-internal digest LLM (see `agents/digest/SKILL.md`).
+const EMBEDDED_DIGEST_SKILL: &str = include_str!("../../../agents/digest/SKILL.md");
+
 #[derive(Debug, Deserialize)]
 struct DigestMemoryItem {
     #[serde(rename = "type")]
@@ -38,8 +41,13 @@ struct DigestLlmOutput {
 
 pub fn load_digest_skill_body(agents_dir: &Path) -> anyhow::Result<String> {
     let path = agents_dir.join("digest").join("SKILL.md");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("post-session digest requires {}: {}", path.display(), e))?;
+    let raw = if path.is_file() {
+        std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("post-session digest could not read {}: {}", path.display(), e)
+        })?
+    } else {
+        EMBEDDED_DIGEST_SKILL.to_string()
+    };
     Ok(strip_markdown_frontmatter(&raw))
 }
 
@@ -473,5 +481,14 @@ mod tests {
     fn strip_frontmatter_basic() {
         let raw = "---\na: b\n---\n\nHello **body**";
         assert_eq!(strip_markdown_frontmatter(raw), "Hello **body**");
+    }
+
+    #[test]
+    fn load_digest_skill_body_falls_back_to_embedded_prompt() {
+        let body = load_digest_skill_body(Path::new("/nonexistent/agents")).unwrap();
+        assert!(
+            body.contains("post-session digest"),
+            "expected embedded digest prompt, got: {body}"
+        );
     }
 }

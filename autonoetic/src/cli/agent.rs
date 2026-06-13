@@ -1060,7 +1060,13 @@ fn discover_reference_bundles(root: &Path) -> anyhow::Result<Vec<std::path::Path
         if !group.file_type()?.is_dir() {
             continue;
         }
-        for entry in std::fs::read_dir(group.path())? {
+        let group_path = group.path();
+        if group_path.join("SKILL.md").exists() {
+            // Top-level bundle (e.g. agents/digest/) — not nested under a role group.
+            bundles.push(group_path);
+            continue;
+        }
+        for entry in std::fs::read_dir(group_path)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
                 continue;
@@ -2484,6 +2490,20 @@ Use tools when needed.
         assert_eq!(llm.model, "gemini-pro");
     }
 
+    fn write_top_level_reference_bundle(root: &std::path::Path, agent_id: &str, marker: &str) {
+        let dir = root.join(agent_id);
+        std::fs::create_dir_all(&dir).expect("bundle dir should create");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: \"{agent_id}\"\ndescription: \"{marker}\"\nmetadata:\n  autonoetic:\n    version: \"1.0\"\n    runtime:\n      engine: \"autonoetic\"\n      gateway_version: \"0.1.0\"\n      sdk_version: \"0.1.0\"\n      type: \"stateful\"\n      sandbox: \"bubblewrap\"\n      runtime_lock: \"runtime.lock\"\n    agent:\n      id: \"{agent_id}\"\n      name: \"{agent_id}\"\n      description: \"{marker}\"\n---\n#{agent_id}\n"
+            ),
+        )
+        .expect("skill should write");
+        std::fs::write(dir.join("runtime.lock"), default_runtime_lock_contents())
+            .expect("runtime.lock should write");
+    }
+
     fn write_reference_bundle(root: &std::path::Path, group: &str, agent_id: &str, marker: &str) {
         let dir = root.join(group).join(agent_id);
         std::fs::create_dir_all(&dir).expect("bundle dir should create");
@@ -2499,6 +2519,33 @@ Use tools when needed.
     }
 
     #[test]
+    fn test_discover_reference_bundles_includes_top_level_digest() {
+        let temp = tempdir().expect("tempdir should create");
+        let reference_root = temp.path().join("reference_agents");
+        write_reference_bundle(&reference_root, "lead", "planner.default", "planner");
+        write_top_level_reference_bundle(&reference_root, "digest", "post-session digest");
+
+        let bundles =
+            discover_reference_bundles(&reference_root).expect("discover should succeed");
+        let names: Vec<String> = bundles
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "digest"),
+            "expected top-level digest bundle, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "planner.default"),
+            "expected grouped planner bundle, got: {names:?}"
+        );
+    }
+
+    #[test]
     #[serial]
     fn test_handle_agent_bootstrap_installs_reference_bundles() {
         autonoetic_gateway::constitution_digest::reset_constitution_runtime_for_tests();
@@ -2506,6 +2553,7 @@ Use tools when needed.
         let reference_root = temp.path().join("reference_agents");
         write_reference_bundle(&reference_root, "lead", "planner.default", "planner");
         write_reference_bundle(&reference_root, "specialists", "coder.default", "coder");
+        write_top_level_reference_bundle(&reference_root, "digest", "post-session digest");
 
         let config_path = temp.path().join("config.yaml");
         let agents_dir = temp.path().join("runtime_agents");
@@ -2530,6 +2578,10 @@ Use tools when needed.
             .join("coder.default")
             .join("runtime.lock")
             .exists());
+        assert!(
+            agents_dir.join("digest").join("SKILL.md").exists(),
+            "top-level digest bundle should be installed by bootstrap"
+        );
 
         let constitution_root = agents_dir.join(".gateway").join("constitution");
         assert!(

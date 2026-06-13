@@ -1,4 +1,4 @@
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -113,7 +113,7 @@ pub(crate) fn normalize_fenced_code(input: &str) -> String {
 }
 
 /// Detect whether a string looks like it contains markdown formatting
-/// (headers, bold, italic, code fences, lists, links).
+/// (headers, bold, italic, code fences, lists, links, Unicode rules).
 pub fn looks_like_markdown(s: &str) -> bool {
     for line in s.lines().take(20) {
         let trimmed = line.trim();
@@ -127,8 +127,18 @@ pub fn looks_like_markdown(s: &str) -> bool {
             || trimmed.starts_with("```")
             || trimmed.contains("**")
             || trimmed.contains('`')
+            || trimmed.starts_with("| ")
+                && trimmed.contains(" |")
             || trimmed.starts_with(|c: char| c.is_ascii_digit())
                 && trimmed.contains(". ")
+        {
+            return true;
+        }
+        // Unicode horizontal rule (──, ═══, etc.)
+        if trimmed.len() >= 4
+            && trimmed
+                .chars()
+                .all(|c| matches!(c, '\u{2500}' | '\u{2501}' | '\u{2550}' | '\u{2594}' | '\u{2014}' | '\u{2013}' | '─' | '━' | '═'))
         {
             return true;
         }
@@ -182,11 +192,24 @@ pub(crate) fn normalize_inline_section_labels(input: &str) -> String {
 }
 
 /// Full narrative normalization for list/detail panes: inline section breaks,
-/// unfenced code fences, then promote standalone `Label:` lines to headings.
+/// Unicode rule conversion, unfenced code fences, then promote standalone
+/// `Label:` lines to headings.
 pub(crate) fn normalize_narrative_prose(input: &str) -> String {
+    let s = normalize_unicode_rules(input);
     normalize_prose_sections(&normalize_fenced_code(&normalize_inline_section_labels(
-        input,
+        &s,
     )))
+}
+
+/// Convert Unicode box-drawing horizontal rules (runs of `─`, `━`, `═`, `▔`,
+/// or `─`-like chars ≥ 4 long) to markdown `---` so pulldown-cmark renders
+/// them as thematic breaks.
+fn normalize_unicode_rules(input: &str) -> String {
+    static RULE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?m)^\s*[\u2500\u2501\u2502\u2503\u2504\u2505\u2506\u2507\u2508\u2509\u250a\u250b\u254c\u254d═▔▬─]{4,}\s*$")
+            .expect("unicode rule regex")
+    });
+    RULE.replace_all(input, "---").into_owned()
 }
 
 /// Promote plain section labels (`What it does:`) to markdown headings when the
@@ -233,8 +256,45 @@ pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
     let mut code_lang = String::new();
     let mut list_depth: usize = 0;
 
+    // Table collection state
+    let mut table_alignments: Vec<Alignment> = Vec::new();
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut in_table = false;
+    let mut in_table_cell = false;
+    let mut current_cell: String = String::new();
+    let mut current_row: Vec<String> = Vec::new();
+
     for event in parser {
         match event {
+            // ── Table events ──
+            Event::Start(Tag::Table(aligns)) => {
+                flush_line(&mut current_spans, &mut lines);
+                in_table = true;
+                table_alignments = aligns;
+                table_rows.clear();
+            }
+            Event::End(TagEnd::Table) => {
+                flush_line(&mut current_spans, &mut lines);
+                lines.extend(render_table(&table_rows, &table_alignments));
+                lines.push(Line::raw(""));
+                in_table = false;
+                table_rows.clear();
+                table_alignments.clear();
+            }
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
+                current_row.clear();
+            }
+            Event::End(TagEnd::TableHead) | Event::End(TagEnd::TableRow) => {
+                table_rows.push(std::mem::take(&mut current_row));
+            }
+            Event::Start(Tag::TableCell) => {
+                in_table_cell = true;
+                current_cell.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                in_table_cell = false;
+                current_row.push(std::mem::take(&mut current_cell));
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 flush_line(&mut current_spans, &mut lines);
                 in_heading = level as u8;
@@ -249,7 +309,9 @@ pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
             }
             Event::End(TagEnd::Paragraph) => {
                 flush_line(&mut current_spans, &mut lines);
-                lines.push(Line::raw(""));
+                if !in_table {
+                    lines.push(Line::raw(""));
+                }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 flush_line(&mut current_spans, &mut lines);
@@ -295,24 +357,36 @@ pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
             Event::Start(Tag::Emphasis) => in_italic = true,
             Event::End(TagEnd::Emphasis) => in_italic = false,
             Event::Text(t) => {
-                let style = compute_style(in_heading, in_bold, in_italic, in_code_block, &code_lang);
-                if in_code_block {
-                    for line_text in t.lines() {
-                        current_spans.push(Span::styled(line_text.to_string(), style));
-                        flush_line(&mut current_spans, &mut lines);
-                    }
+                if in_table_cell {
+                    current_cell.push_str(&t);
                 } else {
-                    current_spans.push(Span::styled(t.to_string(), style));
+                    let style = compute_style(in_heading, in_bold, in_italic, in_code_block, &code_lang);
+                    if in_code_block {
+                        for line_text in t.lines() {
+                            current_spans.push(Span::styled(line_text.to_string(), style));
+                            flush_line(&mut current_spans, &mut lines);
+                        }
+                    } else {
+                        current_spans.push(Span::styled(t.to_string(), style));
+                    }
                 }
             }
             Event::Code(t) => {
-                let style = Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD);
-                current_spans.push(Span::styled(t.to_string(), style));
+                if in_table_cell {
+                    current_cell.push_str(&t);
+                } else {
+                    let style = Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD);
+                    current_spans.push(Span::styled(t.to_string(), style));
+                }
             }
             Event::SoftBreak | Event::HardBreak => {
-                flush_line(&mut current_spans, &mut lines);
+                if in_table_cell {
+                    current_cell.push(' ');
+                } else {
+                    flush_line(&mut current_spans, &mut lines);
+                }
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 current_spans.push(Span::styled(
@@ -337,6 +411,88 @@ pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
         lines.pop();
     }
     lines
+}
+
+/// Render collected table rows as aligned, styled ratatui lines.
+/// The first row is the header (bold + cyan), followed by a separator,
+/// then data rows.
+fn render_table(rows: &[Vec<String>], alignments: &[Alignment]) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if ncols == 0 {
+        return Vec::new();
+    }
+
+    // Calculate column widths (character count).
+    let mut col_widths = vec![0usize; ncols];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            col_widths[i] = col_widths[i].max(cell.chars().count());
+        }
+    }
+
+    let mut out = Vec::new();
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let is_header = row_idx == 0;
+
+        for (col_idx, cell) in row.iter().enumerate() {
+            if col_idx > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let align = alignments.get(col_idx).copied().unwrap_or(Alignment::None);
+            let cell_width = cell.chars().count();
+            let target_w = col_widths[col_idx];
+            let (left_pad, right_pad) = match align {
+                Alignment::Center => {
+                    let total = target_w.saturating_sub(cell_width);
+                    (total / 2, total - total / 2)
+                }
+                Alignment::Right => (target_w.saturating_sub(cell_width), 0),
+                _ => (0, target_w.saturating_sub(cell_width)),
+            };
+            if left_pad > 0 {
+                spans.push(Span::raw(" ".repeat(left_pad)));
+            }
+            let style = if is_header {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            spans.push(Span::styled(cell.clone(), style));
+            if right_pad > 0 {
+                spans.push(Span::raw(" ".repeat(right_pad)));
+            }
+        }
+        out.push(Line::from(spans));
+
+        // Separator after header row
+        if is_header {
+            let sep: String = col_widths
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| {
+                    let bar = "─".repeat(w);
+                    if i + 1 < ncols {
+                        format!("{bar}  ")
+                    } else {
+                        bar
+                    }
+                })
+                .collect();
+            out.push(Line::from(Span::styled(
+                sep,
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    out
 }
 
 /// True when a rendered line belongs to a fenced/indented code block.
@@ -445,5 +601,50 @@ mod tests {
         let joined = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("python"));
         assert!(joined.contains("import autonoetic_sdk"));
+    }
+
+    #[test]
+    fn normalize_unicode_rules_converted_to_markdown() {
+        let raw = "Some text\n\n──────────────────────\n\nMore text";
+        let out = normalize_narrative_prose(raw);
+        assert!(out.contains("---"), "expected markdown rule, got: {out}");
+        assert!(!out.contains('\u{2500}'), "unicode rule should be gone: {out}");
+    }
+
+    #[test]
+    fn looks_like_markdown_detects_unicode_rule() {
+        assert!(looks_like_markdown("text\n\n──────────────────\n\nmore"));
+        assert!(looks_like_markdown("════════════════════"));
+    }
+
+    #[test]
+    fn looks_like_markdown_detects_table_row() {
+        assert!(looks_like_markdown("| Time | Temp |\n|------|------|"));
+    }
+
+    #[test]
+    fn render_markdown_table_produces_aligned_columns() {
+        let md = "| Time | Temp | Conditions |\n|------|------|------------|\n| 5 PM | 24.6C | Cloudy |\n| 6 PM | 24.0C | Clear |\n";
+        let lines = render_markdown(md);
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        // Header row
+        assert!(
+            text.iter().any(|t| t.contains("Time") && t.contains("Temp") && t.contains("Conditions")),
+            "header row should contain all column names: {text:?}"
+        );
+        // Separator line (───)
+        assert!(
+            text.iter().any(|t| t.contains('─')),
+            "should have separator line: {text:?}"
+        );
+        // Data rows
+        assert!(
+            text.iter().any(|t| t.contains("5 PM") && t.contains("24.6C") && t.contains("Cloudy")),
+            "data row 1 should be on one line: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("6 PM") && t.contains("24.0C") && t.contains("Clear")),
+            "data row 2 should be on one line: {text:?}"
+        );
     }
 }

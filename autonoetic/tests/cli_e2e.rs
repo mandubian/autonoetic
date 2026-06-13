@@ -19,6 +19,8 @@ fn run_autonoetic_with_env(
     let mut command = Command::new(bin);
     command.args(args);
     command.envs(envs.iter().copied());
+    command.env("AUTONOETIC_VAULT_KEY", "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f");
+    command.env("AUTONOETIC_SHARED_SECRET", "test-secret");
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     if stdin_input.is_some() {
@@ -83,6 +85,8 @@ fn spawn_autonoetic(
     let mut command = Command::new(bin);
     command.args(args);
     command.envs(envs.iter().copied());
+    command.env("AUTONOETIC_VAULT_KEY", "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f");
+    command.env("AUTONOETIC_SHARED_SECRET", "test-secret");
     command.stdout(if capture_output {
         Stdio::piped()
     } else {
@@ -91,7 +95,7 @@ fn spawn_autonoetic(
     command.stderr(if capture_output {
         Stdio::piped()
     } else {
-        Stdio::null()
+        Stdio::inherit()
     });
     command.stdin(if stdin_piped {
         Stdio::piped()
@@ -134,7 +138,21 @@ fn write_config(
     max_pending_spawns_per_agent: usize,
 ) {
     let yaml = format!(
-        "agents_dir: \"{}\"\nport: {}\nofp_port: {}\ntls: false\nmax_pending_spawns_per_agent: {}\nmax_concurrent_spawns: 4\nbackground_scheduler_enabled: false\n",
+        "agents_dir: \"{}\"\n\
+         port: {}\n\
+         ofp_port: {}\n\
+         http_port: 0\n\
+         tls: false\n\
+         max_pending_spawns_per_agent: {}\n\
+         max_concurrent_spawns: 4\n\
+         background_scheduler_enabled: false\n\
+         digest_agent:\n  \
+           enabled: false\n\
+         llm_presets:\n  \
+           fallback:\n    \
+             provider: \"ollama\"\n    \
+             model: \"test-model\"\n    \
+             temperature: 0.2\n",
         agents_dir.display(),
         port,
         ofp_port,
