@@ -322,6 +322,7 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
     type: object
     required:
       - status
+  returns_enforcement: strict
 "#,
     )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "schema.agent")?;
@@ -438,7 +439,21 @@ async fn test_manifest_io_returns_rejects_and_logs_without_explicit_output_polic
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
 
-    install_validation_agent_with_returns(&workspace.agents_dir, "returns.fail.agent")?;
+    // Strict enforcement so a non-JSON reply is rejected (not advisory-skipped).
+    install_validation_agent(
+        &workspace.agents_dir,
+        "returns.fail.agent",
+        r#"io:
+  returns:
+    type: object
+    required:
+      - status
+    properties:
+      status:
+        type: string
+  returns_enforcement: strict
+"#,
+    )?;
     let store = setup_store_and_seed(&config, &workspace.agents_dir, "returns.fail.agent")?;
 
     let stub = OpenAiStub::spawn(move |_raw, _body| async move {
@@ -495,6 +510,79 @@ async fn test_manifest_io_returns_rejects_and_logs_without_explicit_output_polic
         .expect("payload should be valid json");
     assert_eq!(payload["contract"], "io.returns");
     assert_eq!(payload["result"], "rejected");
+
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn test_reasoning_io_returns_advisory_skips_non_json() -> anyhow::Result<()> {
+    // A reasoning agent that declares io.returns but no explicit
+    // returns_enforcement defaults to ADVISORY: a non-JSON reply is logged, not
+    // blocked. This is the documented default for LLM agents and is why the
+    // strict-rejection tests above must opt into `returns_enforcement: strict`.
+    let workspace = TestWorkspace::new()?;
+    let mut config = workspace.gateway_config();
+    config.response_validation.enabled = true;
+
+    install_validation_agent(
+        &workspace.agents_dir,
+        "advisory.agent",
+        r#"io:
+  returns:
+    type: object
+    required:
+      - status
+execution_mode: "reasoning"
+"#,
+    )?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "advisory.agent")?;
+
+    let stub = OpenAiStub::spawn(move |_raw, _body| async move {
+        serde_json::json!({
+            "choices": [{"message": {"content": "plain text output"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4}
+        })
+    })
+    .await?;
+    let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
+    let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+
+    let execution = GatewayExecutionService::new(config, Some(store.clone()));
+    let result = execution
+        .spawn_agent_once(
+            "advisory.agent",
+            "return structured json",
+            "sess-advisory-1",
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "advisory io.returns must not block a non-JSON reply, got: {result:?}"
+    );
+
+    // Lock the logging side: advisory mode records an `io.returns.advisory`
+    // contract event with result `advisory_skip` (logged, not blocked).
+    let events =
+        store.search_causal_events(Some("sess-advisory-1"), Some("advisory.agent"), 100)?;
+    let event = events
+        .iter()
+        .find(|e| e.category == "contract" && e.action == "io.returns.advisory")
+        .expect("expected io.returns.advisory contract event");
+    let payload = event
+        .payload
+        .as_ref()
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+        .expect("payload should be valid json");
+    assert_eq!(payload["result"], "advisory_skip");
 
     Ok(())
 }
