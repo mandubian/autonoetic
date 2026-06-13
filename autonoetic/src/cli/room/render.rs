@@ -1913,7 +1913,13 @@ pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, R
     let mut run_start: Option<usize> = None;
     let mut run_len: usize = 0;
     for (i, e) in entries.iter().enumerate() {
-        if event_tier(e) == EventTier::Routine {
+        // Defense-in-depth: only fold Routine-tier events that are ALSO below
+        // the Attention altitude. This preserves the original invariant that
+        // Attention/Error rows (gates, failures, interventions) NEVER collapse,
+        // even if a future event type is mis-classified as Routine by `event_tier`.
+        let foldable = event_tier(e) == EventTier::Routine
+            && e.altitude < Altitude::Attention;
+        if foldable {
             if run_start.is_none() {
                 run_start = Some(i);
             }
@@ -1970,22 +1976,43 @@ const SIGNIFICANT_TOOL_NAMES: &[&str] = &[
 
 /// Classify a timeline event into a visibility tier. Used by the squashed
 /// view to decide what folds vs renders individually.
+///
+/// The `_ => Significant` default is deliberately conservative: an unknown
+/// event type renders individually (never folds) until it is consciously
+/// classified here. Folding is opt-in for known plumbing only.
 pub fn event_tier(entry: &SessionTimelineEntry) -> EventTier {
     match entry.event_type.as_str() {
+        // ── Checkpoints: operator decisions, gates, boundaries. Jump targets. ──
         "plan.pending" | "plan.approved" | "plan.rejected" | "plan.withdrawn"
         | "approval.pending" | "approval.approved" | "approval.rejected"
         | "approval.cancelled" | "approval.withdrawn"
         | "escalation.pending" | "escalation.approved" | "escalation.rejected"
+        | "user.ask.pending"
         | "operator.message"
         | "session.start" | "session.end"
         | "workbench.created" | "workbench.reconciled" | "workbench.discarded"
         | "runtime.lock_drift"
+        | "divergence.intervention"
+        | "security.escape_threshold"
         | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" | "wiki.withdrawn" => {
             EventTier::Checkpoint
         }
-        "agent.message" | "digest_annotate" => EventTier::Significant,
+        // ── Significant: agent output, audits, and failures. Never folded. ──
+        "agent.message" | "digest_annotate"
+        | "llm.request_failed" | "llm.empty_response" | "llm.retry"
+        | "tool.failed" | "guard.tripped"
+        | "session.emergency_stop" | "security.sandbox_escape" => EventTier::Significant,
         "tool.completed" => tool_completed_tier(entry),
-        _ => EventTier::Routine,
+        // ── Routine: known plumbing only. Folded into collapsed runs. ──
+        "turn.start" | "turn.end" | "llm.round" | "agent.reasoning"
+        | "tool.requested"
+        | "workflow.child_state" | "workflow.join_satisfied" | "workflow.signal"
+        | "workflow.started" | "workflow.completed"
+        | "scheduled_job.triggered" | "scheduled_job.completed" | "scheduled_job.failed" => {
+            EventTier::Routine
+        }
+        // Unknown event type: render individually (never fold) until classified.
+        _ => EventTier::Significant,
     }
 }
 
@@ -2729,7 +2756,8 @@ mod tests {
         for et in [
             "plan.pending", "plan.approved", "approval.pending", "approval.approved",
             "escalation.pending", "operator.message", "session.start", "workbench.created",
-            "runtime.lock_drift",
+            "runtime.lock_drift", "user.ask.pending", "divergence.intervention",
+            "security.escape_threshold",
         ] {
             assert_eq!(
                 event_tier(&mk(et)),
@@ -2737,16 +2765,70 @@ mod tests {
                 "{et} should be a checkpoint"
             );
         }
-        // Significant
-        assert_eq!(event_tier(&mk("agent.message")), EventTier::Significant);
-        assert_eq!(event_tier(&mk("digest_annotate")), EventTier::Significant);
-        // Routine
+        // Significant — agent output, audits, AND failures (never folded).
+        for et in [
+            "agent.message", "digest_annotate",
+            "llm.request_failed", "llm.empty_response", "guard.tripped",
+            "tool.failed", "session.emergency_stop", "security.sandbox_escape",
+        ] {
+            assert_eq!(
+                event_tier(&mk(et)),
+                EventTier::Significant,
+                "{et} should be significant (never folded)"
+            );
+        }
+        // Unknown event type defaults to Significant (never folded).
+        assert_eq!(
+            event_tier(&mk("some.future.event_type")),
+            EventTier::Significant,
+            "unknown event type must not default to Routine (would hide it)"
+        );
+        // Routine — known plumbing only.
         for et in [
             "turn.start", "turn.end", "llm.round", "agent.reasoning",
             "tool.requested", "workflow.child_state", "workflow.join_satisfied",
         ] {
             assert_eq!(event_tier(&mk(et)), EventTier::Routine, "{et} should be routine");
         }
+    }
+
+    #[test]
+    fn coalesce_never_folds_attention_or_error_rows() {
+        // Defense-in-depth: even if a high-importance event were mis-classified
+        // as Routine, the altitude guard in coalesce_indexed must keep it
+        // individual. Attention/Error rows never collapse into a run.
+        let mk_at = |et: &str, alt: Altitude| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                alt,
+                serde_json::json!({}),
+            )
+        };
+        let entries = vec![
+            mk_at("turn.start", Altitude::Detail),                 // routine, folds
+            mk_at("user.ask.pending", Altitude::Attention),        // checkpoint — never folds
+            mk_at("turn.end", Altitude::Detail),                   // routine, folds (lone ⇒ line)
+            mk_at("llm.request_failed", Altitude::Error),          // significant — never folds
+        ];
+        let rows = coalesce(&entries);
+        // No row may be a Collapsed run containing an Attention/Error event.
+        for r in &rows {
+            if let RenderedRow::Collapsed { summary, .. } = r {
+                // A collapsed run is allowed only for Detail/Routine events; assert
+                // it does not mention the high-importance types.
+                assert!(
+                    !summary.contains("user.ask.pending") && !summary.contains("llm.request_failed"),
+                    "high-importance event leaked into a collapsed run: {summary}"
+                );
+            }
+        }
+        // The Attention and Error rows must be present as individual lines.
+        assert!(
+            rows.iter().any(|r| matches!(r, RenderedRow::Line(s) if s.headline.contains("CLARIFICATION") || s.headline.contains("user.ask"))),
+            "user.ask.pending must render individually"
+        );
     }
 
     #[test]
