@@ -828,7 +828,8 @@ impl GatewayStore {
     }
 
     pub fn prune_expired_grants(&self) -> Result<usize> {
-        let now = chrono::Utc::now().to_rfc3339();        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
         let expired_ids: Vec<i64> = {
             let mut stmt = conn.prepare(
                 "SELECT id FROM session_approval_grants WHERE expires_at IS NOT NULL AND expires_at < ?1",

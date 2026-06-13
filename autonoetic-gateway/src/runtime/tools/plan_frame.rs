@@ -39,7 +39,12 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// `source_approval_id = Some(plan_id)` so a later envelope-expanding amend
 /// can revoke it surgically via `revoke_session_grants_by_source`.
 ///
-/// Returns the number of concrete hosts materialized.
+/// Returns 1 if a plan grant row was materialized, 0 otherwise. The
+/// whole envelope is inserted as a single `RootSession`-scoped grant
+/// row (multiple `ExactHost` targets inside), so the return is binary.
+/// (Symmetric with `revoke_session_grants_by_source` which returns a
+/// grant-row count.) The host count itself is internal; the response
+/// surfaces `grants_materialized` as this 0/1 value.
 fn materialize_plan_grants(
     store: &crate::scheduler::gateway_store::GatewayStore,
     config: Option<&autonoetic_types::config::GatewayConfig>,
@@ -51,8 +56,13 @@ fn materialize_plan_grants(
     let repo = crate::AgentRepository::from_config(config);
     let mut hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for step in &plan.steps {
-        let Some(agent_id) = step.agent_id.as_deref() else { continue };
-        let loaded = match repo.get_sync(agent_id) {
+        // Empty / whitespace agent_id is treated as unset, matching the
+        // amend step-merging logic (the LLM may emit a placeholder).
+        let raw = step.agent_id.as_deref().unwrap_or("").trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let loaded = match repo.get_sync(raw) {
             Ok(l) => l,
             Err(_) => continue, // not-yet-installed agent — its tool calls go through normal approval
         };
@@ -86,7 +96,7 @@ fn materialize_plan_grants(
         tracing::warn!(target: "plan_frame", error = %e, plan_id = %plan.plan_id, "plan grant materialization failed");
         return 0;
     }
-    hosts.len()
+    1
 }
 
 fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
@@ -1007,13 +1017,17 @@ impl NativeTool for PlanFrameAmendTool {
 
         store.save_plan_frame(&new_revision)?;
 
-        // Pillar C: when the envelope expands (re-gate), the grants materialized
-        // from the prior approved revision are stale (the new approval may
-        // declare a different agent set / different network envelope). Revoke
-        // them by source so the next approval re-materializes a clean grant.
-        // Inherited (cosmetic-only) amendments keep the existing grants — the
-        // envelope didn't change.
-        let grants_revoked = if !inherit {
+        // Pillar C: revoke the prior approved plan's grants ONLY when the
+        // envelope actually expanded. The condition is tighter than
+        // `!inherit` (which also fires for non-cosmetic amends on a plan
+        // that was never approved — there is no prior approved envelope
+        // to withdraw). We need both: the parent was approved (so there
+        // are materialized grants) AND the diff shows envelope expansion
+        // (so those grants are stale). Inherited (cosmetic-only) and
+        // envelope-equivalent amendments keep the existing grants.
+        let grants_revoked = if current.status == PlanStatus::Approved
+            && envelope_diff.requires_regate()
+        {
             store
                 .revoke_session_grants_by_source(
                     &current.root_session_id,

@@ -1185,7 +1185,7 @@ fn plan_approval_reports_grants_materialized_and_amend_reports_revoke() {
     assert!(parsed["grants_materialized"].is_u64());
     assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 0);
 
-    // Cosmético amend on the approved v1 → inherit (no envelope change),
+    // Cosmetic amend on the approved v1 → inherit (no envelope change),
     // status stays approved, grants_revoked stays 0. The cosmetic branch
     // MUST run first so the parent is Approved; an amend on an
     // AwaitingApproval plan never inherits regardless of diff.
@@ -1201,6 +1201,7 @@ fn plan_approval_reports_grants_materialized_and_amend_reports_revoke() {
         .unwrap();
     let parsed_cos: serde_json::Value = serde_json::from_str(&cosmetic_result).unwrap();
     assert_eq!(parsed_cos["inherited"], true);
+    assert!(parsed_cos["grants_revoked"].is_u64());
     assert_eq!(parsed_cos["grants_revoked"].as_u64().unwrap(), 0);
 
     // Envelope-expanding amend (add a step) on the inherited-approved v2 →
