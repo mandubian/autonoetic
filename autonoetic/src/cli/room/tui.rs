@@ -483,6 +483,7 @@ fn build_info_panel(
     follow: bool,
     show_reasoning: bool,
     row_count: usize,
+    checkpoint_count: usize,
     gate: Option<&GateRef>,
     pending_plan_count: usize,
     status: Option<&str>,
@@ -514,6 +515,11 @@ fn build_info_panel(
         if follow { "●" } else { "○" },
     ));
     lines.push(format!("  Rows       {row_count}"));
+    if checkpoint_count > 0 {
+        lines.push(format!(
+            "  Checkpoints {checkpoint_count}  ([ / ] jump)"
+        ));
+    }
     lines.push(String::new());
     let mut active = Vec::new();
     if let Some(g) = gate {
@@ -1284,6 +1290,10 @@ pub fn run(
     let mut squash = true;
     let mut follow = true; // pin to newest
     let mut selected: usize = 0;
+    // View-row indices (into the squashed `rows` vec) that are first-class
+    // checkpoints (plan/approval/escalation/operator/session boundaries).
+    // Recomputed each frame after coalescing; the `[` / `]` keys jump across.
+    let mut checkpoint_rows: Vec<usize> = Vec::new();
     let mut detail: Option<DetailPane> = None;
     let mut detail_scroll: u16 = 0; // vertical scroll offset for detail pane
     let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
@@ -2033,6 +2043,34 @@ pub fn run(
                             detail = None;
                         }
                         KeyCode::Char('s') => squash = !squash,
+                        // [ / ]: jump to the previous / next first-class
+                        // checkpoint (plan, approval, escalation, operator
+                        // message, session start). Makes the decision narrative
+                        // scannable without scrolling past routine plumbing.
+                        KeyCode::Char('[') => {
+                            if detail.is_none() && !checkpoint_rows.is_empty() {
+                                follow = false;
+                                if let Some(&p) =
+                                    checkpoint_rows.iter().rev().find(|&&r| r < selected)
+                                {
+                                    selected = p;
+                                } else if let Some(&last) = checkpoint_rows.last() {
+                                    selected = last; // wrap to the end
+                                }
+                            }
+                        }
+                        KeyCode::Char(']') => {
+                            if detail.is_none() && !checkpoint_rows.is_empty() {
+                                follow = false;
+                                if let Some(&n) =
+                                    checkpoint_rows.iter().find(|&&r| r > selected)
+                                {
+                                    selected = n;
+                                } else if let Some(&first) = checkpoint_rows.first() {
+                                    selected = first; // wrap to the start
+                                }
+                            }
+                        }
                         // R: toggle the 💭 reasoning prefix on/off everywhere. Off
                         // hides the prefix; the reasoning row itself stays visible
                         // (it's a Detail-altitude event, so it's normally hidden
@@ -2505,6 +2543,20 @@ pub fn run(
         let pending_plan_count =
             unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
 
+        // First-class checkpoint view-row indices — plan/approval/escalation/
+        // operator/session-start events that survived coalescing. Collapsed
+        // runs are never checkpoints (checkpoints always render individually).
+        checkpoint_rows = indexed
+            .iter()
+            .enumerate()
+            .filter_map(|(vi, (_, src))| match src {
+                RowSource::Single(i) => {
+                    visible.get(*i).filter(|e| render::is_checkpoint(e)).map(|_| vi)
+                }
+                _ => None,
+            })
+            .collect();
+
         let new_plan = if input.is_none() && compose.is_none() {
             newest_pending_plan_event(&visible, &indexed, &resolved, &acted)
         } else {
@@ -2631,6 +2683,7 @@ pub fn run(
                 follow,
                 show_reasoning,
                 row_count,
+                checkpoint_rows.len(),
                 gate.as_ref(),
                 pending_plan_count,
                 status.as_deref(),
