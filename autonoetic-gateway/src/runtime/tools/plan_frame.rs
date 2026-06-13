@@ -21,6 +21,74 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(PlanFrameHistoryTool));
 }
 
+/// Pillar C: materialize the approved plan's declared network envelope into
+/// a single `RootSession`-scoped session approval grant. Subsequent tool calls
+/// (`sandbox_exec`, `web_fetch`, `artifact_exec`, `artifact_prepare`,
+/// `credential` URL gating) that target these hosts then dedup silently against
+/// the existing `session_approval_grants` coverage check — the operator
+/// approves the envelope once, not each tool call.
+///
+/// The envelope is derived MECHANICALLY from each plan step's `agent_id` →
+/// declared `Capability::NetworkAccess.hosts` (never LLM-judged). Wildcards
+/// (`"*"`) are skipped because they don't materialize to a concrete,
+/// matchable grant and would defeat the dedup's concreteness rule (the exec
+/// cache only auto-approves when all patterns are `url_literal`/`ip_address`).
+///
+/// Best-effort: any failure (missing config, agent not installed, DB error)
+/// returns 0 and the approval still succeeds. The grant carries
+/// `source_approval_id = Some(plan_id)` so a later envelope-expanding amend
+/// can revoke it surgically via `revoke_session_grants_by_source`.
+///
+/// Returns the number of concrete hosts materialized.
+fn materialize_plan_grants(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    plan: &PlanFrame,
+    approver: &str,
+    now: &str,
+) -> usize {
+    let Some(config) = config else { return 0 };
+    let repo = crate::AgentRepository::from_config(config);
+    let mut hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for step in &plan.steps {
+        let Some(agent_id) = step.agent_id.as_deref() else { continue };
+        let loaded = match repo.get_sync(agent_id) {
+            Ok(l) => l,
+            Err(_) => continue, // not-yet-installed agent — its tool calls go through normal approval
+        };
+        for cap in &loaded.manifest.capabilities {
+            if let autonoetic_types::capability::Capability::NetworkAccess { hosts: decl } = cap {
+                for h in decl {
+                    if h == "*" { continue; }
+                    hosts.insert(h.clone());
+                }
+            }
+        }
+    }
+    if hosts.is_empty() {
+        return 0;
+    }
+    let targets: Vec<autonoetic_types::background::GrantTarget> = hosts
+        .iter()
+        .map(|h| autonoetic_types::background::GrantTarget::ExactHost(h.clone()))
+        .collect();
+    if let Err(e) = store.insert_session_grant(
+        &plan.root_session_id,
+        &plan.root_session_id,
+        &plan.created_by_agent_id,
+        &autonoetic_types::background::GrantScope::RootSession,
+        &targets,
+        approver,
+        now,
+        Some(&plan.plan_id),
+        None,
+    ) {
+        tracing::warn!(target: "plan_frame", error = %e, plan_id = %plan.plan_id, "plan grant materialization failed");
+        return 0;
+    }
+    hosts.len()
+}
+
 fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
     manifest.capabilities.iter().any(|c| {
         matches!(c, Capability::PlanFrameAccess { .. })
@@ -625,6 +693,10 @@ impl NativeTool for PlanFrameApproveTool {
             }
         }
 
+        // Pillar C: materialize the plan's declared network envelope as a
+        // session approval grant. Best-effort — never blocks the approval.
+        let grants_materialized = materialize_plan_grants(&store, config, &plan, &approver, &now);
+
         if let Some(config) = config {
             crate::scheduler::workflow_store::append_workflow_event(
                 config,
@@ -641,6 +713,7 @@ impl NativeTool for PlanFrameApproveTool {
                     payload: serde_json::json!({
                         "plan_id": plan.plan_id,
                         "version": plan.version,
+                        "grants_materialized": grants_materialized,
                     }),
                     occurred_at: now,
                 },
@@ -652,6 +725,7 @@ impl NativeTool for PlanFrameApproveTool {
             "plan_id": plan.plan_id,
             "status": "approved",
             "version": plan.version,
+            "grants_materialized": grants_materialized,
         }))?)
     }
 
@@ -933,6 +1007,27 @@ impl NativeTool for PlanFrameAmendTool {
 
         store.save_plan_frame(&new_revision)?;
 
+        // Pillar C: when the envelope expands (re-gate), the grants materialized
+        // from the prior approved revision are stale (the new approval may
+        // declare a different agent set / different network envelope). Revoke
+        // them by source so the next approval re-materializes a clean grant.
+        // Inherited (cosmetic-only) amendments keep the existing grants — the
+        // envelope didn't change.
+        let grants_revoked = if !inherit {
+            store
+                .revoke_session_grants_by_source(
+                    &current.root_session_id,
+                    &current.plan_id,
+                    "plan-amended (envelope expanded)",
+                )
+                .unwrap_or_else(|e| {
+                    tracing::warn!(target: "plan_frame", error = %e, plan_id = %current.plan_id, "plan grant revoke failed");
+                    0
+                })
+        } else {
+            0
+        };
+
         // Canonical timeline. An envelope-expanding amendment re-opens the
         // operator gate (plan.pending with the diff so the operator sees what
         // they are approving). A cosmetic amendment inherits and emits
@@ -1053,6 +1148,7 @@ impl NativeTool for PlanFrameAmendTool {
             "inherited": inherit,
             "diff_summary": envelope_diff.summary(),
             "requires_regate": envelope_diff.requires_regate(),
+            "grants_revoked": grants_revoked,
             "message": if inherit {
                 "Plan amended (no envelope change) — operator approval inherited from the prior revision."
             } else {
