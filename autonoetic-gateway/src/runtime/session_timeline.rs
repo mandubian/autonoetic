@@ -28,6 +28,12 @@ pub fn build_timeline_event(
     refs: TimelineRefs,
 ) -> LiveDigestEventRecord {
     let altitude = altitude.unwrap_or_else(|| altitude_for(event_type, role));
+    // NOTE: an explicit `altitude` arg is used AS-IS and can undercut the
+    // seat floor (`role_floor`). This is intentional for a few plumbing
+    // emitters (e.g. `workflow.signal` pins to Detail regardless of seat),
+    // but most callers should pass `None` and let `altitude_for` apply the
+    // floor. For a raise-only override, use the session_tracer's
+    // `append_live_digest_event_at(.., Some(alt))`, which takes `max`.
     LiveDigestEventRecord {
         event_id: uuid::Uuid::new_v4().to_string(),
         root_session_id,
@@ -384,9 +390,25 @@ pub fn operator_message_event(
 
 /// Base importance of a digest event type, before any role refinement.
 /// Base importance for a timeline event type. The effective altitude written
-/// to a row is `max(base_altitude(et), role_floor(role))` (see [`altitude_for`]),
-/// unless an emitter passes an explicit altitude that *raises* it further
-/// (e.g. `runtime.lock_drift` → `Error` when rejected).
+/// to a row is normally `max(base_altitude(et), role_floor(role))` (see
+/// [`altitude_for`]).
+///
+/// # Explicit altitude — two contracts
+///
+/// Emitters can pass an explicit altitude, but the contract depends on the
+/// helper used — they are NOT the same:
+///
+/// - **`build_timeline_event(.., Some(alt))`** uses the explicit value AS-IS
+///   (it REPLACES `altitude_for`, and can undercut `role_floor`). This is
+///   relied on by a few plumbing emitters that pin to `Detail` regardless of
+///   seat (e.g. `workflow.signal`). Callers that should not undercut the
+///   floor must pass `None`.
+/// - **`session_tracer::append_live_digest_event_at(.., Some(alt))`** is
+///   **raise-only**: it takes `max(altitude_for(et, role), alt)`, so a caller
+///   can never undercut the floor. Used by `tool.completed` to bump failures
+///   (`ok:false`) from `Detail` up to `Attention`.
+///
+/// Most emitters pass `None` and let `base_altitude` + the seat floor decide.
 ///
 /// # Altitude policy
 ///
