@@ -126,6 +126,8 @@ pub fn looks_like_markdown(s: &str) -> bool {
             || trimmed.starts_with("> ")
             || trimmed.starts_with("```")
             || trimmed.contains("**")
+            || trimmed.contains("__")
+            || trimmed.contains("](")
             || trimmed.contains('`')
             || trimmed.starts_with("| ")
                 && trimmed.contains(" |")
@@ -187,7 +189,23 @@ pub(crate) fn normalize_inline_section_labels(input: &str) -> String {
     out = GLUED_KNOWN_TITLES
         .replace_all(&out, "$1\n\n### $2\n\n$3")
         .into_owned();
-    out = GLUED_TABLE_ROW.replace_all(&out, "$1\n$2").into_owned();
+    // Only split table rows that are glued to PROSE. Operating on the whole
+    // text blindly would insert newlines INSIDE intact multi-column table
+    // rows (header / delimiter / data) because the regex sees a cell boundary
+    // (`-|...|...|`) as a glued row — destroying valid GFM tables. So skip any
+    // line that already starts with `|` (it is a table row, leave it intact)
+    // and only detach table fragments glued to the end of prose lines.
+    out = out
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with('|') {
+                line.to_string()
+            } else {
+                GLUED_TABLE_ROW.replace_all(line, "$1\n$2").into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     out
 }
 
@@ -620,6 +638,13 @@ mod tests {
     #[test]
     fn looks_like_markdown_detects_table_row() {
         assert!(looks_like_markdown("| Time | Temp |\n|------|------|"));
+    }
+
+    #[test]
+    fn looks_like_markdown_detects_underscore_bold_and_links() {
+        assert!(looks_like_markdown("see __this__ value"));
+        assert!(looks_like_markdown("docs at [text](https://example.com)"));
+        assert!(!looks_like_markdown("plain prose with no markers at all"));
     }
 
     #[test]

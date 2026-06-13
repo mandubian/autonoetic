@@ -2148,8 +2148,12 @@ fn should_render_payload_as_narrative(key: &str, value: &str) -> bool {
     }
     // For unknown keys, still render as narrative when the value clearly
     // contains markdown formatting — the agent may put rich text in
-    // arbitrary fields.
-    value.contains('\n') && super::markdown::looks_like_markdown(value)
+    // arbitrary fields. Single-line markdown signals (e.g. `**bold**`,
+    // `# heading`, links) are enough; plain multiline prose without any
+    // markdown marker is left as-is to avoid over-rendering data values.
+    super::markdown::looks_like_markdown(value)
+        || (value.contains('\n')
+            && super::markdown::looks_like_narrative_content(value))
 }
 
 fn push_narrative_payload_lines(
@@ -2160,6 +2164,22 @@ fn push_narrative_payload_lines(
     comma: &str,
 ) {
     lines.push(format!("{inner}\"{key}\":"));
+    lines.push(format!("{inner}  {}", super::markdown::NARRATIVE_MD_START));
+    for sub in value.split('\n') {
+        lines.push(format!("{inner}  {sub}"));
+    }
+    lines.push(format!("{inner}  {}{comma}", super::markdown::NARRATIVE_MD_END));
+}
+
+/// Variant of [`push_narrative_payload_lines`] for array elements — no `key:`
+/// header, just the narrative markers so the TUI runs the value through the
+/// markdown pipeline.
+fn push_narrative_array_elem(
+    value: &str,
+    lines: &mut Vec<String>,
+    inner: &str,
+    comma: &str,
+) {
     lines.push(format!("{inner}  {}", super::markdown::NARRATIVE_MD_START));
     for sub in value.split('\n') {
         lines.push(format!("{inner}  {sub}"));
@@ -2241,6 +2261,11 @@ fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, d
                                 last.push_str(comma);
                             }
                         }
+                    }
+                    serde_json::Value::String(s)
+                        if should_render_payload_as_narrative("", s) =>
+                    {
+                        push_narrative_array_elem(s, lines, &inner, comma);
                     }
                     serde_json::Value::String(s) if s.contains('\n') => {
                         for sub in s.split('\n') {
@@ -3847,6 +3872,89 @@ mod tests {
         assert!(
             joined.contains("**Temperature:**"),
             "should contain the summary markdown content"
+        );
+    }
+
+    // ── Markdown-coverage probes: these exercise the gaps that historically
+    // caused agent prose to render as raw text in the detail pane. Each
+    // payload below MUST produce @@NARRATIVE@@ markers so the TUI runs it
+    // through the markdown pipeline.
+
+    fn narrative_entries(payload: serde_json::Value) -> bool {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            payload,
+        );
+        format_detail(&e).join("\n").contains("@@NARRATIVE@@")
+    }
+
+    #[test]
+    fn narrative_unknown_key_single_line_bold() {
+        assert!(
+            narrative_entries(serde_json::json!({ "note": "**important** single line" })),
+            "single-line bold in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_unknown_key_single_line_heading() {
+        assert!(
+            narrative_entries(serde_json::json!({ "note": "## Heading only" })),
+            "single-line heading in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_unknown_key_single_line_underscore_bold() {
+        assert!(
+            narrative_entries(serde_json::json!({ "note": "__bold__ via underscores" })),
+            "__bold__ in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_unknown_key_multiline_code_block() {
+        let val = "Here is code:\n\ndef fib(n):\n    return n\n\nDone.";
+        assert!(
+            narrative_entries(serde_json::json!({ "note": val })),
+            "multiline python-ish block in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_known_key_summary_with_link() {
+        let val = "See [the docs](https://example.com) for details.";
+        assert!(
+            narrative_entries(serde_json::json!({ "summary": val })),
+            "markdown link in known key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_known_key_ascii_thematic_break() {
+        let val = "Intro paragraph.\n\n---\n\nAfter the break.";
+        assert!(
+            narrative_entries(serde_json::json!({ "summary": val })),
+            "ASCII --- thematic break should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_array_of_markdown_strings() {
+        assert!(
+            narrative_entries(serde_json::json!({ "findings": ["## Critical\n\nbad thing", "## Warning\n\nmeh"] })),
+            "markdown strings inside an array should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_nested_array_of_objects_with_prose() {
+        assert!(
+            narrative_entries(serde_json::json!({ "results": [{ "answer": "## Yes\n\nHere is why…" }] })),
+            "prose inside array-of-objects should render as markdown"
         );
     }
 }

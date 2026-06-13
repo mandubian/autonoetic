@@ -5788,4 +5788,45 @@ mod tests {
             Some("ar.xyz99999".to_string())
         );
     }
+
+    #[test]
+    fn diag_wrapped_table_repro() {
+        use autonoetic_types::principal::Principal;
+        use autonoetic_types::session_timeline::{SessionRole, TimelineRefs};
+        // A clean multi-column GFM table emitted by an agent in an
+        // agent.message payload. This used to be destroyed by the
+        // GLUED_TABLE_ROW normalizer (which split header/delimiter/data rows
+        // of any 3+ column table), causing the table to render as raw `|`
+        // fragments. It must now render as an aligned table.
+        let message = "Paris Weather — Next 12 Hours\n\nRight now (15:00 CEST): 26.7°C, mainly clear.\n\nHourly Forecast:\n\n| Time | Temp | Conditions | Precip | Wind |\n|------|------|------------|--------|------|\n| 15:00 | 26.7°C | Mainly clear | 0% | 13.3 km/h |\n| 16:00 | 26.4°C | Clear | 0% | 12.1 km/h |";
+        let payload = serde_json::json!({ "message": message });
+        let e = SessionTimelineEntry {
+            event_id: "ev".into(),
+            root_session_id: "r".into(),
+            source_session_id: "r".into(),
+            turn_id: None,
+            principal: Principal::agent("planner.collaborative"),
+            role: SessionRole::Planner,
+            event_type: "agent.message".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-06-13T13:02:42Z".into(),
+            payload: Some(payload.to_string()),
+            refs: TimelineRefs::default(),
+        };
+        let raw = render::format_detail(&e);
+        let rendered = render_detail_lines(&raw);
+        let text: Vec<String> = rendered.iter().map(|l| l.to_string()).collect();
+        let joined = text.join("\n");
+        // A rendered GFM table produces a separator line of box-drawing `─`.
+        assert!(
+            text.iter().any(|t| t.contains('─')),
+            "clean multi-column table should render as an aligned table with a \
+             separator line; got:\n{joined}"
+        );
+        // The raw delimiter fragment `|------|------|` must NOT leak through.
+        assert!(
+            !text.iter().any(|t| t.contains("|------")),
+            "raw delimiter should not appear; table should be rendered, got:\n{joined}"
+        );
+    }
 }
