@@ -19,3 +19,4 @@ under [`../archived/`](../archived/).
 | [`self-improvement-loop-validation.md`](self-improvement-loop-validation.md) | Pending 3-cycle validation | — |
 | [`constitutional-evolution-reflections.md`](constitutional-evolution-reflections.md) | Discussion draft (not a proposal) | — |
 | [`principal-model-and-symmetric-obligations.md`](principal-model-and-symmetric-obligations.md) | Draft RFC — unified Principal (AI/human/script) + decider obligations (§O) as near-term; authorship/attestation vs ratification; per-instance authority (cardinality + domains, judicial door reserved); democratic frame as explicit horizon | — |
+| [`operator-legibility.md`](operator-legibility.md) | Draft RFC — tiered timeline + plan inherit/diff + approve-the-envelope + t=0 workbench | — |
