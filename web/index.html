@@ -190,10 +190,10 @@
         <!-- Workbenches Panel -->
         <div class="h-1/3 border-t border-gray-800 flex flex-col overflow-hidden bg-gray-950 bg-opacity-40">
           <div class="px-6 py-2 border-b border-gray-800 bg-gray-950 bg-opacity-60">
-            <h2 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Active Workbenches</h2>
+            <h2 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Active Workbenches & Drafts</h2>
           </div>
           <div id="workbench-list" class="flex-1 overflow-y-auto p-4 space-y-2">
-            <div class="text-center text-gray-500 text-xs py-4">No active workbenches.</div>
+            <div class="text-center text-gray-500 text-xs py-4">No active workbenches or drafts.</div>
           </div>
         </div>
       </div>
@@ -313,6 +313,24 @@
     </div>
   </div>
 
+  <!-- Diff / File Inspector Modal -->
+  <div id="diff-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm hidden">
+    <div class="w-[800px] max-w-[95%] h-[80%] glass-panel glow-indigo rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
+      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+        <h3 id="diff-title" class="font-display font-bold text-base text-white flex items-center gap-2">
+          <span>📄</span> File Inspector
+        </h3>
+        <button onclick="closeDiffModal()" class="text-gray-500 hover:text-white transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+      
+      <div id="diff-content" class="flex-1 overflow-auto space-y-1 bg-gray-950 p-4 rounded-lg border border-gray-900 font-mono text-xs text-gray-300">
+        <!-- Filled dynamically -->
+      </div>
+    </div>
+  </div>
+
   <!-- JS Logic -->
   <script>
     let sseSource = null;
@@ -411,6 +429,9 @@
 
       // 3. Fetch initial operator activity history page-by-page
       await fetchActivityHistory(baseURL, sid, secret);
+
+      // 3b. Fetch live content drafts
+      await fetchContentList(baseURL, sid, secret);
 
       // Verify if still in connecting state
       if (statusText.innerText !== 'Connecting...') return;
@@ -668,6 +689,66 @@
       }
     }
 
+    async function fetchContentList(baseURL, sid, secret) {
+      console.log("Fetching live content list for session:", sid);
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'fetch-content-list',
+            method: 'content.list',
+            params: { session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        if (json && json.result && json.result.files) {
+          renderContentList(json.result.files, sid);
+        }
+      } catch (e) {
+        console.error("Failed to fetch content list", e);
+      }
+    }
+
+    function renderContentList(files, sid) {
+      const listDiv = document.getElementById('workbench-list');
+      if (!files || files.length === 0) {
+        listDiv.innerHTML = '<div class="text-center text-gray-500 text-xs py-4">No active workbenches or drafts.</div>';
+        return;
+      }
+
+      listDiv.innerHTML = '';
+      files.forEach(file => {
+        let badgeColor = 'bg-gray-800 text-gray-400';
+        let badgeGlyph = '🔒 private';
+        if (file.visibility === 'global') {
+          badgeColor = 'bg-accentIndigo/10 text-accentIndigo border border-accentIndigo/20';
+          badgeGlyph = '🌐 global';
+        } else if (file.visibility === 'session') {
+          badgeColor = 'bg-accentViolet/10 text-accentViolet border border-accentViolet/20';
+          badgeGlyph = '📦 session';
+        }
+
+        const item = document.createElement('div');
+        item.className = 'p-2 rounded border border-gray-800 bg-gray-900 bg-opacity-20 flex items-center justify-between gap-2 text-xs hover:bg-opacity-40 hover:border-gray-700 transition-all duration-100';
+        item.innerHTML = `
+          <div class="flex-1 min-w-0">
+            <span class="font-mono text-gray-250 font-semibold block truncate" title="${file.name}">📄 ${file.name}</span>
+            <div class="flex gap-2 items-center mt-1">
+              <span class="text-[9px] font-mono text-gray-500">alias: ${file.alias}</span>
+              <span class="text-[9px] px-1 rounded ${badgeColor}">${badgeGlyph}</span>
+              <span class="text-[9px] font-semibold text-accentRed bg-accentRed/10 border border-accentRed/20 px-1 rounded">draft</span>
+            </div>
+          </div>
+          <button onclick="inspectFile('${file.name}', '${sid}')" class="text-accentIndigo hover:underline font-semibold font-mono text-[10px] uppercase shrink-0">Inspect</button>
+        `;
+        listDiv.appendChild(item);
+      });
+    }
 
     function renderPlanFrame(plan) {
       const planStepsDiv = document.getElementById('plan-steps');
@@ -728,6 +809,16 @@
         const port = document.getElementById('port-input').value.trim();
         const baseURL = `http://127.0.0.1:${port}`;
         fetchPlanFrame(baseURL, sid, secret);
+      }
+
+      // Refresh content list when there's a new content write event
+      const hasContentWrite = fresh.some(e => e.event_type === 'content_write');
+      if (hasContentWrite && isConnected) {
+        const sid = document.getElementById('session-input').value.trim();
+        const secret = document.getElementById('secret-input').value.trim();
+        const port = document.getElementById('port-input').value.trim();
+        const baseURL = `http://127.0.0.1:${port}`;
+        fetchContentList(baseURL, sid, secret);
       }
     }
 
@@ -1473,8 +1564,24 @@
       if (type === 'user.ask.resolved') return 'Interaction resolved';
 
       // Plans
-      if (type === 'plan.pending') return payload?.title || 'Plan proposed';
-      if (type === 'plan.approved') return 'Plan approved';
+      if (type === 'plan.pending') {
+        let text = payload?.title || 'Plan proposed';
+        if (payload?.diff_summary) {
+          text += ` (Envelope diff: ${payload.diff_summary})`;
+        }
+        return text;
+      }
+      if (type === 'plan.approved') {
+        const grants = payload?.grants_materialized || 0;
+        let text = 'Plan approved';
+        if (payload?.inherited) {
+          text = `Plan approval inherited from version ${payload.inherited_from || ''}`;
+        }
+        if (grants > 0) {
+          text += ` (Materialized ${grants} capability grant${grants > 1 ? 's' : ''})`;
+        }
+        return text;
+      }
 
       // Promotions
       if (type === 'promotion.pending') return payload?.title || 'Promotion pending';

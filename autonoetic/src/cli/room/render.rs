@@ -839,6 +839,12 @@ fn interaction_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String
         .and_then(|v| v.get("allow_freeform"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    if let Some(ctx) = field("context").filter(|c| !c.is_empty()) {
+        lines.push("  context:".to_string());
+        for line in wrap_display_lines(&ctx, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
     if freeform {
         lines.push("  (or type your own answer)".to_string());
     }
@@ -2963,6 +2969,35 @@ mod tests {
         // Pre-digested choices rendered inline and numbered.
         assert!(line.contains("[1] US equities"));
         assert!(line.contains("[2] Crypto"));
+    }
+
+    #[test]
+    fn user_ask_detail_shows_context_for_divergence_sentinel() {
+        let e = entry(
+            SessionRole::Specialist {
+                kind: "researcher".to_string(),
+            },
+            Principal::agent("researcher.default"),
+            "user.ask.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "interaction_id": "ui-abc123",
+                "kind": "divergence_sentinel",
+                "question": "Critical divergence in 'researcher.default' turn 1: 10 consecutive cycles without meaningful progress (limit 10)",
+                "context": "Signals:\n- loop_pressure (critical): 10 consecutive cycles without meaningful progress (limit 10)",
+                "options": [
+                    {"id": "ack", "label": "Acknowledge"},
+                    {"id": "continue", "label": "Continue"},
+                    {"id": "stop", "label": "Stop"},
+                ],
+                "allow_freeform": true,
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("10 consecutive cycles"));
+        let detail = spec.detail.expect("should have detail");
+        assert!(detail.contains("context:"));
+        assert!(detail.contains("loop_pressure"));
     }
 
     #[test]

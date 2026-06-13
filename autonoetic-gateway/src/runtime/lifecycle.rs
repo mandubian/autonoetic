@@ -110,10 +110,40 @@ fn build_critical_divergence_interaction(
     root_session_id: String,
     agent_id: &str,
     turn_counter: u64,
-    signals_summary: &str,
+    signals: &[crate::runtime::trajectory_health::DivergenceSignal],
     workflow_id: Option<String>,
     task_id: Option<String>,
 ) -> autonoetic_types::background::UserInteraction {
+    use crate::runtime::trajectory_health::SignalSeverity;
+
+    let signals_summary = signals
+        .iter()
+        .map(|s| {
+            let kind = s.kind.as_str();
+            match &s.evidence {
+                Some(e) => format!("- {} ({}): {}", kind, s.severity.as_str(), e),
+                None => format!("- {} ({})", kind, s.severity.as_str()),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let primary = signals
+        .iter()
+        .find(|s| s.severity == SignalSeverity::Critical)
+        .or_else(|| signals.first());
+
+    let question = match primary.and_then(|s| s.evidence.as_deref()) {
+        Some(evidence) => format!(
+            "Critical divergence in '{}' turn {}: {}",
+            agent_id, turn_counter, evidence
+        ),
+        None => format!(
+            "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge, continue, stop, or enter a note.",
+            agent_id, turn_counter
+        ),
+    };
+
     autonoetic_types::background::UserInteraction {
         interaction_id: format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]),
         session_id: session_id.to_string(),
@@ -121,10 +151,7 @@ fn build_critical_divergence_interaction(
         agent_id: agent_id.to_string(),
         turn_id: crate::runtime::checkpoint::turn_id_for(turn_counter),
         kind: autonoetic_types::background::UserInteractionKind::DivergenceSentinel,
-        question: format!(
-            "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge, continue, stop, or enter a note.",
-            agent_id, turn_counter
-        ),
+        question,
         context: Some(if signals_summary.is_empty() {
             "See divergence.* events in the causal chain for details.".to_string()
         } else {
@@ -2942,25 +2969,12 @@ impl AgentExecutor {
 
                                             if let Some(store) = self.gateway_store.as_ref() {
                                                 let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
-                                                let signals_summary = result
-                                                    .health
-                                                    .signals()
-                                                    .iter()
-                                                    .map(|s| {
-                                                        let kind = s.kind.as_str();
-                                                        match &s.evidence {
-                                                            Some(e) => format!("- {} ({}): {}", kind, s.severity.as_str(), e),
-                                                            None => format!("- {} ({})", kind, s.severity.as_str()),
-                                                        }
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .join("\n");
                                                 let interaction = build_critical_divergence_interaction(
                                                     &session_id,
                                                     root_sid,
                                                     &self.manifest.agent.id,
                                                     self.turn_counter,
-                                                    &signals_summary,
+                                                    result.health.signals(),
                                                     self.workflow_id.clone(),
                                                     self.task_id.clone(),
                                                 );
@@ -3395,19 +3409,36 @@ mod tests {
 
     #[test]
     fn critical_divergence_interaction_offers_options_and_freeform() {
+        use crate::runtime::trajectory_health::{
+            DivergenceSignal, DivergenceSignalKind, SignalSeverity,
+        };
+
         let interaction = build_critical_divergence_interaction(
             "session-1",
             "root-1".to_string(),
             "planner.default",
             5,
-            "- child_failure_pressure (critical): 3 child agent tasks have failed (limit 3)",
+            &[DivergenceSignal::new(
+                DivergenceSignalKind::ChildFailurePressure,
+                SignalSeverity::Critical,
+                1.0,
+                0.95,
+            )
+            .with_evidence("3 child agent tasks have failed (limit 3)")],
             Some("wf-1".to_string()),
             Some("task-1".to_string()),
         );
 
         assert_eq!(
             interaction.question,
-            "Critical trajectory divergence in agent 'planner.default' at turn 5. Choose acknowledge, continue, stop, or enter a note."
+            "Critical divergence in 'planner.default' turn 5: 3 child agent tasks have failed (limit 3)"
+        );
+        assert!(
+            interaction
+                .context
+                .as_deref()
+                .unwrap_or("")
+                .contains("child_failure_pressure")
         );
         assert!(interaction.allow_freeform);
         assert_eq!(interaction.options.len(), 3);

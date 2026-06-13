@@ -229,7 +229,7 @@ pub fn emit_user_ask_pending_timeline_event(
             })
         })
         .collect();
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "interaction_id": interaction.interaction_id,
         "question": crate::log_redaction::redact_text_for_logs(&interaction.question),
         "kind": interaction.kind.as_str(),
@@ -237,6 +237,9 @@ pub fn emit_user_ask_pending_timeline_event(
         "options": options_for_event,
         "allow_freeform": interaction.allow_freeform,
     });
+    if let Some(ctx) = interaction.context.as_deref().filter(|c| !c.trim().is_empty()) {
+        payload["context"] = serde_json::json!(crate::log_redaction::redact_text_for_logs(ctx));
+    }
     let event = build_timeline_event(
         root,
         interaction.session_id.clone(),
@@ -765,7 +768,7 @@ mod tests {
             turn_id: "turn-000002".to_string(),
             kind: UserInteractionKind::Clarification,
             question: "Which API should I use?".to_string(),
-            context: None,
+            context: Some("Signals:\n- loop_pressure (critical): 10 cycles without progress".to_string()),
             options: vec![],
             allow_freeform: true,
             status: UserInteractionStatus::Pending,
@@ -787,6 +790,13 @@ mod tests {
             page.entries[0].refs.interaction_id.as_deref(),
             Some("ui-test01")
         );
+        let payload: serde_json::Value =
+            serde_json::from_str(page.entries[0].payload.as_deref().unwrap_or("{}")).unwrap();
+        assert!(payload.get("context").is_some());
+        assert!(payload["context"]
+            .as_str()
+            .unwrap_or("")
+            .contains("loop_pressure"));
     }
 
     #[test]
