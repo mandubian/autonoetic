@@ -382,13 +382,31 @@ impl SessionTracer {
     }
 
     fn append_live_digest_event(&self, event_type: &str, payload: Option<serde_json::Value>) {
+        self.append_live_digest_event_at(event_type, payload, None)
+    }
+
+    /// Like [`append_live_digest_event`] but lets the caller *raise* the
+    /// altitude for this one event (e.g. a `tool.completed` whose result is
+    /// `ok:false` is bumped to `Attention` so failures aren't hidden at
+    /// `Detail`). The override only ever raises: `max(override, derived)` is
+    /// used, so a caller cannot accidentally lower an event below its policy
+    /// floor.
+    fn append_live_digest_event_at(
+        &self,
+        event_type: &str,
+        payload: Option<serde_json::Value>,
+        altitude_override: Option<autonoetic_types::session_timeline::Altitude>,
+    ) {
         let Some(store) = &self.gateway_store else {
             return;
         };
         // Session Room attribution (#363 P1): seat derived from the agent id,
         // principal = this autonoetic agent, altitude = max(base, role_floor).
         let role = crate::runtime::session_timeline::derive_role(&self.agent_id);
-        let altitude = crate::runtime::session_timeline::altitude_for(event_type, &role);
+        let mut altitude = crate::runtime::session_timeline::altitude_for(event_type, &role);
+        if let Some(override_alt) = altitude_override {
+            altitude = altitude.max(override_alt);
+        }
         let principal = autonoetic_types::principal::Principal::agent(self.agent_id.clone());
         let row = crate::scheduler::gateway_store::LiveDigestEventRecord {
             event_id: uuid::Uuid::new_v4().to_string(),
@@ -1042,7 +1060,21 @@ impl SessionTracer {
         if let Some(preview) = args_preview {
             timeline_payload["args_preview"] = serde_json::json!(preview);
         }
-        self.append_live_digest_event("tool.completed", Some(timeline_payload));
+        // `tool.completed` is Detail by default (success = plumbing). A result
+        // with `ok:false` is a failure the operator should see without dialing
+        // the floor down, so bump it to Attention. The override only raises.
+        let failed = parsed_result
+            .as_ref()
+            .and_then(|r| r.get("ok"))
+            .and_then(|v| v.as_bool())
+            .map(|ok| !ok)
+            .unwrap_or(false);
+        let alt_override = if failed {
+            Some(autonoetic_types::session_timeline::Altitude::Attention)
+        } else {
+            None
+        };
+        self.append_live_digest_event_at("tool.completed", Some(timeline_payload), alt_override);
         Ok(event_id)
     }
 
@@ -1398,6 +1430,60 @@ mod tests {
             payload.get("args_preview").and_then(|v| v.as_str()),
             Some("coder.default")
         );
+    }
+
+    #[test]
+    fn tool_completed_failure_is_bumped_to_attention() {
+        // tool.completed is Detail for success, but a result with ok:false is a
+        // failure the operator should see without dialing the floor down — so
+        // the emit site bumps it to Attention. Verify both halves.
+        use autonoetic_types::session_timeline::Altitude;
+        let temp = tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        let agent_dir = agents_dir.join("planner.default");
+        let gateway_dir = agents_dir.join(".gateway");
+        fs::create_dir_all(agent_dir.join("history")).unwrap();
+        fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+        let mut tracer = SessionTracer::test_tracer_with_store(&agent_dir, store.clone());
+        tracer.set_turn_id("turn-000001");
+
+        // Success — Detail (folds as routine plumbing).
+        tracer
+            .log_tool_completed("resolve", r#"{"ok":true,"value":"answer"}"#)
+            .unwrap();
+        // Failure — bumped to Attention.
+        tracer
+            .log_tool_completed("sandbox_exec", r#"{"ok":false,"exit_code":1,"stderr":"boom"}"#)
+            .unwrap();
+
+        let result = store
+            .list_session_timeline("test-session", None, 10, None, None)
+            .unwrap();
+        let mut seen_success = false;
+        let mut seen_failure = false;
+        for e in &result.entries {
+            if e.event_type != "tool.completed" {
+                continue;
+            }
+            let payload: serde_json::Value =
+                serde_json::from_str(e.payload.as_deref().unwrap()).unwrap();
+            let ok = payload.get("result")
+                .and_then(|r| serde_json::from_str::<serde_json::Value>(r.as_str().unwrap_or("")).ok())
+                .and_then(|r| r.get("ok").and_then(|v| v.as_bool()))
+                .unwrap_or(true);
+            if ok {
+                assert_eq!(e.altitude, Altitude::Detail, "success should stay Detail");
+                seen_success = true;
+            } else {
+                assert_eq!(e.altitude, Altitude::Attention, "failure should bump to Attention");
+                seen_failure = true;
+            }
+        }
+        assert!(seen_success, "expected a successful tool.completed");
+        assert!(seen_failure, "expected a failed tool.completed");
     }
 
     #[test]

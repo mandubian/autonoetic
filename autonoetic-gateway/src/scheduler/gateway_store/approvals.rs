@@ -237,15 +237,20 @@ impl GatewayStore {
         decided_by: &str,
         ctx: Option<(Option<String>, String, String)>,
     ) {
-        use autonoetic_types::session_timeline::{Altitude, TimelineRefs};
+        use autonoetic_types::session_timeline::TimelineRefs;
 
         let Some((root, session, _agent)) = ctx else {
             return;
         };
-        let (event_type, altitude) = match status {
-            "approved" => ("approval.approved", Altitude::Normal),
-            "rejected" | "denied" => ("approval.rejected", Altitude::Attention),
-            "cancelled" => ("approval.cancelled", Altitude::Detail),
+        // The event type selects the gate-lifecycle arm; the altitude comes
+        // from `base_altitude` (the single source of truth for gate altitudes:
+        // approved/rejected = Attention, cancelled = Normal). Passing `None`
+        // lets `altitude_for` apply `max(base, role_floor)` so a Sentinel
+        // decider's resolution stays at least Attention.
+        let event_type = match status {
+            "approved" => "approval.approved",
+            "rejected" | "denied" => "approval.rejected",
+            "cancelled" => "approval.cancelled",
             _ => return,
         };
         // Author = the decider: Operator seat (human), the agent's seat (stripping
@@ -262,7 +267,7 @@ impl GatewayStore {
             &principal,
             &role,
             event_type,
-            Some(altitude),
+            None,
             Some(serde_json::json!({ "request_id": request_id, "decided_by": decided_by })),
             refs,
         );
@@ -1103,6 +1108,6 @@ mod decided_by_kind_tests {
 
         let mech_ev = tl.entries.iter().find(|e| e.event_type == "approval.cancelled").unwrap();
         assert_eq!(mech_ev.role, SessionRole::Runtime);
-        assert_eq!(mech_ev.altitude, Altitude::Detail); // hidable
+        assert_eq!(mech_ev.altitude, Altitude::Normal); // abandonment: visible, not a checkpoint
     }
 }
