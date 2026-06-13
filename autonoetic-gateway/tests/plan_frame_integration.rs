@@ -615,6 +615,160 @@ fn planframe_amend_preserves_original_revision() {
     assert_eq!(v2.reason.as_deref(), Some("Scope change"));
 }
 
+/// Propose → approve → amend with a cosmetic-only change (objective rewording
+/// + progress reason). The amendment must INHERIT the prior approval: status
+/// stays `approved`, `inherited == true`, and no `plan.pending` checkpoint is
+/// emitted (a `plan.approved` with `inherited: true` is emitted instead).
+#[test]
+fn planframe_amend_inherits_approval_on_cosmetic_change() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-inherit/planner";
+
+    let propose = json!({
+        "title": "Weather Agent",
+        "objective": "Build a weather agent",
+        "steps": [{ "step_id": "s1", "title": "Implement" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    // Approve v1.
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    // Cosmetic amend: objective rewording + progress reason, same step set.
+    let amend = json!({
+        "plan_id": plan_id,
+        "objective": "Build a reusable weather agent (refined)",
+        "reason": "Steps s1 completed; clarifying objective for the record."
+    });
+    let result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["version"], 2, "new revision created");
+    assert_eq!(parsed["status"], "approved", "cosmetic amend inherits approval");
+    assert_eq!(parsed["inherited"], true);
+    assert_eq!(parsed["diff_summary"], "no envelope change");
+    assert_eq!(parsed["requires_regate"], false);
+
+    let latest = store.load_plan_frame(&plan_id).unwrap().unwrap();
+    assert_eq!(latest.status, PlanStatus::Approved);
+    assert_eq!(latest.parent_version, Some(1));
+    assert!(latest.approved_at.is_some(), "inherited approval re-stamped");
+
+    // The timeline must NOT carry a plan.pending for the inherited amend; it
+    // carries plan.approved with inherited:true instead.
+    let tl = store.list_session_timeline("root-session-inherit", None, 50, None, None).unwrap();
+    let v2_events: Vec<_> = tl.entries.iter().filter(|e| {
+        let p = e.payload.as_deref().unwrap_or("");
+        p.contains("\"version\":2")
+    }).collect();
+    assert!(!v2_events.is_empty(), "v2 should be on the timeline");
+    assert!(
+        v2_events.iter().all(|e| e.event_type != "plan.pending"),
+        "inherited amend must not emit plan.pending"
+    );
+    assert!(
+        v2_events.iter().any(|e| e.event_type == "plan.approved"),
+        "inherited amend should emit plan.approved"
+    );
+}
+
+/// Propose → approve → amend that ADDS a step (envelope expansion). The
+/// amendment must RE-OPEN the gate: status `awaiting_approval`, `inherited
+/// == false`, `requires_regate == true`, and the diff_summary calls out the
+/// added step so the operator sees what they are approving.
+#[test]
+fn planframe_amend_regates_on_envelope_expansion() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-regate/planner";
+
+    let propose = json!({
+        "title": "Weather Agent",
+        "objective": "Build a weather agent",
+        "steps": [{ "step_id": "s1", "title": "Implement" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    // Envelope-expanding amend: add step s2.
+    let amend = json!({
+        "plan_id": plan_id,
+        "steps": [
+            { "step_id": "s1", "title": "Implement" },
+            { "step_id": "s2", "title": "Package" }
+        ],
+        "reason": "Added packaging step"
+    });
+    let result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["status"], "awaiting_approval", "envelope change re-gates");
+    assert_eq!(parsed["inherited"], false);
+    assert_eq!(parsed["requires_regate"], true);
+    assert!(
+        parsed["diff_summary"].as_str().unwrap().contains("+step s2"),
+        "diff_summary should call out the added step: {}",
+        parsed["diff_summary"]
+    );
+
+    let latest = store.load_plan_frame(&plan_id).unwrap().unwrap();
+    assert_eq!(latest.status, PlanStatus::AwaitingApproval);
+    assert!(latest.approved_at.is_none(), "re-gated revision is not approved");
+
+    // The timeline must carry plan.pending for the re-gated amend.
+    let tl = store.list_session_timeline("root-session-regate", None, 50, None, None).unwrap();
+    assert!(
+        tl.entries.iter().any(|e| e.event_type == "plan.pending"
+            && e.payload.as_deref().unwrap_or("").contains("\"version\":2")),
+        "envelope-expanding amend should emit plan.pending for v2"
+    );
+}
+
 #[test]
 fn planframe_history_returns_full_revision_chain() {
     let dir = tempdir().unwrap();
