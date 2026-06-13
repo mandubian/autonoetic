@@ -656,8 +656,10 @@ struct ContentEntry {
 }
 
 /// Live session content tree: every `content_write`/`content_patch` name the
-/// session has registered, listed from t=0. Toggle with `c`; `o`/`Enter` opens
-/// a markdown-aware viewer for the selected entry.
+/// session has registered, listed from t=0. Toggle with `c`, `j`/`k` to
+/// navigate, `o` to open a markdown-aware viewer for the selected entry.
+/// (Mirrors the `ArtifactViewer` keymap; `Enter` is intentionally not bound
+/// to opening the viewer because it is reserved for other dispatch in this TUI.)
 struct ContentTree {
     entries: Vec<ContentEntry>,
     selected: usize,
@@ -1867,6 +1869,8 @@ pub fn run(
                             } else if content_tree.is_some() {
                                 content_tree = None;
                             } else if artifact_file_view.is_some() {
+                                // no-op: 'o' is ignored while the artifact file view
+                                // is open; the operator closes it with Esc first.
                                 artifact_file_view = None;
                             } else if artifact_viewer.is_some() {
                                 artifact_viewer = None;
@@ -2244,7 +2248,6 @@ pub fn run(
                         }
                         KeyCode::Char('o') => {
                             // Content tree open → open a markdown-aware viewer
-                            // Content tree open → open a markdown-aware viewer
                             // for the selected entry (before the artifact branch).
                             if content_view.is_some() {
                                 // already viewing content; ignore
@@ -2266,6 +2269,8 @@ pub fn run(
                                                     content: content.to_string(),
                                                     scroll: 0,
                                                 });
+                                            } else {
+                                                status = Some("content.read: no content field in response".to_string());
                                             }
                                         }
                                         Err(e) => status = Some(format!("content read failed: {e}")),
