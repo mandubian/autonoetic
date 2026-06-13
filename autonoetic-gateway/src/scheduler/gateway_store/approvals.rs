@@ -801,6 +801,32 @@ impl GatewayStore {
         Ok(count)
     }
 
+    /// Soft-revoke (set `revoked_at`) every ACTIVE grant whose
+    /// `source_approval_id` matches `source`, scoped to `root_session_id`.
+    /// Used by plan-as-capability-grant (Pillar C): when a plan's envelope
+    /// expands, the grants materialized from the prior approved revision are
+    /// withdrawn so the operator's re-approval re-materializes a clean
+    /// envelope. Grants from other sources (explicit operator grants, other
+    /// plans) are untouched. Returns the number revoked.
+    pub fn revoke_session_grants_by_source(
+        &self,
+        root_session_id: &str,
+        source: &str,
+        reason: &str,
+    ) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE session_approval_grants
+             SET revoked_at = ?1, revoked_reason = ?2
+             WHERE root_session_id = ?3
+               AND source_approval_id = ?4
+               AND revoked_at IS NULL",
+            params![&now, reason, root_session_id, source],
+        )?;
+        Ok(count)
+    }
+
     pub fn prune_expired_grants(&self) -> Result<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();

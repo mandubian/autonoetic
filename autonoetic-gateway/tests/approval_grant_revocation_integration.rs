@@ -170,3 +170,99 @@ fn test_revoke_then_reapprove_restores_coverage() {
     );
     assert!(store.session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
 }
+
+/// Pillar C: surgical revoke of every active grant whose
+/// `source_approval_id` matches. Used when a plan's envelope expands and the
+/// grants materialized from the prior approved revision must be withdrawn so
+/// the new approval re-materializes a clean envelope. Grants from other
+/// sources (explicit operator grants, other plans) must be untouched.
+#[test]
+fn test_revoke_session_grants_by_source_is_surgical() {
+    let tmp = tempdir().unwrap();
+    let gw = make_gateway_dir(&tmp);
+    let store = GatewayStore::open(&gw).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let scope = autonoetic_types::background::GrantScope::RootSession;
+
+    // Plan A grants (source = plan-A) + a sibling plan B grant (source = plan-B)
+    // + an explicit operator grant (source = None). The revoke of plan-A must
+    // touch only plan-A's grants.
+    for (agent, host) in [("a", "alpha.com"), ("a", "beta.com"), ("a", "gamma.com")] {
+        store
+            .insert_session_grant(
+                "root-surg",
+                "root-surg",
+                agent,
+                &scope,
+                &[autonoetic_types::background::GrantTarget::ExactHost(
+                    host.to_string(),
+                )],
+                "plan-A",
+                &now,
+                Some("plan-A"),
+                None,
+            )
+            .unwrap();
+    }
+    store
+        .insert_session_grant(
+            "root-surg",
+            "root-surg",
+            "b",
+            &scope,
+            &[autonoetic_types::background::GrantTarget::ExactHost(
+                "delta.com".to_string(),
+            )],
+            "plan-B",
+            &now,
+            Some("plan-B"),
+            None,
+        )
+        .unwrap();
+    store
+        .insert_session_grant(
+            "root-surg",
+            "root-surg",
+            "op",
+            &scope,
+            &[autonoetic_types::background::GrantTarget::ExactHost(
+                "epsilon.com".to_string(),
+            )],
+            "operator",
+            &now,
+            None,
+            None,
+        )
+        .unwrap();
+
+    // Before revoke: coverage holds for all 5 hosts.
+    for h in ["alpha.com", "beta.com", "gamma.com", "delta.com", "epsilon.com"] {
+        assert!(store.session_grants_cover_targets("root-surg", &[h.to_string()]));
+    }
+
+    // Revoke plan-A's grants only.
+    let n = store
+        .revoke_session_grants_by_source("root-surg", "plan-A", "plan-amended")
+        .unwrap();
+    assert_eq!(n, 3, "exactly plan-A's 3 grants should be revoked");
+
+    // Coverage: plan-A hosts no longer covered; plan-B + operator still covered.
+    for h in ["alpha.com", "beta.com", "gamma.com"] {
+        assert!(
+            !store.session_grants_cover_targets("root-surg", &[h.to_string()]),
+            "plan-A host {h} should be uncovered after revoke"
+        );
+    }
+    for h in ["delta.com", "epsilon.com"] {
+        assert!(
+            store.session_grants_cover_targets("root-surg", &[h.to_string()]),
+            "non-plan-A host {h} must remain covered"
+        );
+    }
+
+    // Revoking an unknown source is a no-op.
+    let n = store
+        .revoke_session_grants_by_source("root-surg", "plan-NONEXISTENT", "x")
+        .unwrap();
+    assert_eq!(n, 0);
+}

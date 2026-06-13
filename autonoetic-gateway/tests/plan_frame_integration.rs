@@ -1137,3 +1137,93 @@ fn planframe_get_with_version_returns_specific_revision() {
     let parsed_latest: serde_json::Value = serde_json::from_str(&result_latest).unwrap();
     assert_eq!(parsed_latest["plan"]["version"], 2);
 }
+
+/// Pillar C wiring: approving a plan must surface `grants_materialized` in
+/// the response (and the workflow event payload), and an envelope-expanding
+/// amend must surface `grants_revoked`. With the real installed agents
+/// (planner.default has no NetworkAccess) both counts are 0, but the fields
+/// and code paths are exercised end-to-end. The store-level revoke round-trip
+/// is tested separately in `approval_grant_revocation_integration`.
+#[test]
+fn plan_approval_reports_grants_materialized_and_amend_reports_revoke() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-grant-wiring/planner";
+
+    // Propose + approve a minimal plan.
+    let propose = json!({
+        "title": "Grant Wiring",
+        "objective": "verify the materialize + revoke fields are wired",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    let approve_result = registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
+    assert_eq!(parsed["status"], "approved");
+    // planner.default declares no NetworkAccess → no hosts materialized.
+    // The field must exist and be 0 (proves the materialization path ran
+    // and correctly found no concrete hosts).
+    assert!(parsed["grants_materialized"].is_u64());
+    assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 0);
+
+    // Cosmetic amend on the approved v1 → inherit (no envelope change),
+    // status stays approved, grants_revoked stays 0. The cosmetic branch
+    // MUST run first so the parent is Approved; an amend on an
+    // AwaitingApproval plan never inherits regardless of diff.
+    let cosmetic = json!({
+        "plan_id": plan_id,
+        "objective": "refined wording (no envelope change)",
+        "reason": "cosmetic only"
+    });
+    let cosmetic_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&cosmetic).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed_cos: serde_json::Value = serde_json::from_str(&cosmetic_result).unwrap();
+    assert_eq!(parsed_cos["inherited"], true);
+    assert!(parsed_cos["grants_revoked"].is_u64());
+    assert_eq!(parsed_cos["grants_revoked"].as_u64().unwrap(), 0);
+
+    // Envelope-expanding amend (add a step) on the inherited-approved v2 →
+    // re-gate branch revokes the plan's prior grants by source. With 0 prior
+    // grants (planner has no NetworkAccess), 0 are revoked; the field must
+    // exist and the code path must execute.
+    let amend = json!({
+        "plan_id": plan_id,
+        "steps": [
+            { "step_id": "s1", "title": "Step 1" },
+            { "step_id": "s2", "title": "Step 2 (new)" }
+        ],
+        "reason": "envelope expansion to exercise the revoke branch"
+    });
+    let amend_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t4"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed_amend: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(parsed_amend["requires_regate"], true);
+    assert_eq!(parsed_amend["inherited"], false);
+    assert!(parsed_amend["grants_revoked"].is_u64());
+    assert_eq!(parsed_amend["grants_revoked"].as_u64().unwrap(), 0);
+}
