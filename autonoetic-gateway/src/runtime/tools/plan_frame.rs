@@ -6,7 +6,7 @@ use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::{
-    PlanFrame, PlanFrameSummary, PlanRef, PlanStatus, PlanStep, StepOwner,
+    plan_envelope_diff, PlanFrame, PlanFrameSummary, PlanRef, PlanStatus, PlanStep, StepOwner,
     ValidationEntry, ValidationPolicy,
 };
 use serde::Deserialize;
@@ -670,7 +670,7 @@ impl NativeTool for PlanFrameAmendTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the plan was approved, the new revision requires re-approval.".to_string(),
+            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the prior revision was approved, the new revision INHERITS that approval unless the amendment expands the safety envelope (adds/removes a step, changes a step owner or agent, or weakens/removes a validation gate). Cosmetic changes (rewording objective/title, recording a progress reason) inherit automatically. Envelope-expanding changes re-open the operator gate. The response carries `diff_summary`, `inherited`, and `requires_regate` so the caller — and the operator — can see exactly what changed.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -881,6 +881,30 @@ impl NativeTool for PlanFrameAmendTool {
 
         let now = now_rfc3339();
 
+        // Decide whether the amendment inherits the prior approval or
+        // re-opens the operator gate. An envelope expansion (new/removed step,
+        // owner/agent change, weakened/removed validation) re-gates; everything
+        // else (objective rewording, title, progress reason) inherits. This is
+        // a mechanical, gateway-computed classification — never LLM-judged —
+        // and is more faithful to the constitution: the operator consents to
+        // risky/irreversible change, not to progress bookkeeping.
+        let envelope_diff = plan_envelope_diff(&current, &{
+            // Build a transient child view to diff against, mirroring the
+            // field resolution below (args override parent).
+            let mut probe = current.clone();
+            if let Some(t) = &args.title {
+                probe.title = t.clone();
+            }
+            if let Some(o) = &args.objective {
+                probe.objective = o.clone();
+            }
+            probe.steps = steps.clone();
+            probe.validation_policy = validation_policy.clone();
+            probe
+        });
+        let inherit = current.status == PlanStatus::Approved
+            && envelope_diff.is_cosmetic_only();
+
         let new_revision = PlanFrame {
             plan_id: current.plan_id.clone(),
             version: new_version,
@@ -889,11 +913,19 @@ impl NativeTool for PlanFrameAmendTool {
             root_session_id: current.root_session_id.clone(),
             title: args.title.unwrap_or(current.title.clone()),
             objective: args.objective.unwrap_or(current.objective.clone()),
-            status: PlanStatus::AwaitingApproval,
+            status: if inherit {
+                PlanStatus::Approved
+            } else {
+                PlanStatus::AwaitingApproval
+            },
             steps,
             validation_policy,
-            approved_by: None,
-            approved_at: None,
+            approved_by: if inherit {
+                current.approved_by.clone()
+            } else {
+                None
+            },
+            approved_at: if inherit { Some(now.clone()) } else { None },
             created_by_agent_id: manifest.agent.id.clone(),
             reason: args.reason,
             created_at: now,
@@ -901,7 +933,11 @@ impl NativeTool for PlanFrameAmendTool {
 
         store.save_plan_frame(&new_revision)?;
 
-        // Canonical timeline: an amended revision re-opens the operator gate.
+        // Canonical timeline. An envelope-expanding amendment re-opens the
+        // operator gate (plan.pending with the diff so the operator sees what
+        // they are approving). A cosmetic amendment inherits and emits
+        // plan.approved with `inherited: true` + the (empty) diff so the
+        // checkpoint still surfaces and shows why the operator wasn't asked.
         {
             let root_session_id = new_revision.root_session_id.clone();
             let session_id = _session_id
@@ -916,25 +952,49 @@ impl NativeTool for PlanFrameAmendTool {
                 plan_id: Some(new_revision.plan_id.clone()),
                 ..Default::default()
             };
+            let (event_type, extra) = if inherit {
+                (
+                    "plan.approved",
+                    serde_json::json!({
+                        "inherited": true,
+                        "inherited_from": old_version,
+                        "diff_summary": envelope_diff.summary(),
+                    }),
+                )
+            } else {
+                (
+                    "plan.pending",
+                    serde_json::json!({
+                        "diff_summary": envelope_diff.summary(),
+                        "requires_regate": envelope_diff.requires_regate(),
+                    }),
+                )
+            };
+            let mut payload = serde_json::json!({
+                "plan_id": new_revision.plan_id,
+                "version": new_revision.version,
+                "parent_version": new_revision.parent_version,
+                "title": new_revision.title,
+                "reason": new_revision.reason,
+            });
+            if let serde_json::Value::Object(map) = extra {
+                for (k, v) in map {
+                    payload[k] = v;
+                }
+            }
             let event = crate::runtime::session_timeline::build_timeline_event(
                 root_session_id,
                 session_id,
                 _turn_id.map(str::to_string),
                 &principal,
                 &role,
-                "plan.pending",
+                event_type,
                 None,
-                Some(serde_json::json!({
-                    "plan_id": new_revision.plan_id,
-                    "version": new_revision.version,
-                    "parent_version": new_revision.parent_version,
-                    "title": new_revision.title,
-                    "reason": new_revision.reason,
-                })),
+                Some(payload),
                 refs,
             );
             if let Err(e) = store.create_live_digest_event(&event) {
-                tracing::debug!(target: "session_timeline", error = %e, "plan.pending timeline emit failed (amend)");
+                tracing::debug!(target: "session_timeline", error = %e, "plan timeline emit failed (amend)");
             }
         }
 
@@ -983,9 +1043,16 @@ impl NativeTool for PlanFrameAmendTool {
             "ok": true,
             "plan_id": current.plan_id,
             "version": new_version,
-            "status": "awaiting_approval",
+            "status": if inherit { "approved" } else { "awaiting_approval" },
             "parent_version": old_version,
-            "message": "Plan amended (new immutable revision). Operator re-approval is required.",
+            "inherited": inherit,
+            "diff_summary": envelope_diff.summary(),
+            "requires_regate": envelope_diff.requires_regate(),
+            "message": if inherit {
+                "Plan amended (no envelope change) — operator approval inherited from the prior revision."
+            } else {
+                "Plan amended (envelope changed) — operator re-approval is required."
+            },
         }))?)
     }
 
