@@ -29,7 +29,7 @@ mod scheduled_jobs;
 pub mod security_findings;
 pub mod sentinel_disagreements;
 pub mod session_envelopes;
-mod session_inference;
+pub mod session_inference;
 mod session_outcomes;
 mod user_interactions;
 mod user_profiles;

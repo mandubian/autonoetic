@@ -225,7 +225,14 @@ fn hosts_from_trace_arguments(tool_name: &str, arguments_json: &str) -> Vec<Stri
     };
 
     let mut hosts = Vec::new();
-    for key in ["command", "cmd", "url", "engine_url"] {
+    for key in [
+        "command",
+        "cmd",
+        "url",
+        "engine_url",
+        "duckduckgo_engine_url",
+        "google_engine_url",
+    ] {
         if let Some(text) = args.get(key).and_then(|v| v.as_str()) {
             hosts.extend(hosts_from_text(text));
         }
@@ -249,9 +256,8 @@ fn hosts_from_text(text: &str) -> Vec<String> {
 }
 
 fn extract_url_hosts_from_text(text: &str) -> Vec<String> {
-    let Ok(re) = regex::Regex::new(r#"(?i)https?://([^/\s:"'`]+)"#) else {
-        return Vec::new();
-    };
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r#"(?i)https?://([^/\s:"'`]+)"#).unwrap());
     let mut hosts: Vec<String> = re
         .captures_iter(text)
         .filter_map(|cap| cap.get(1))
@@ -379,6 +385,61 @@ mod tests {
 
         let hosts = store.discover_observed_hosts(root)?;
         assert_eq!(hosts, vec!["archive.example.org".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn discover_observed_hosts_dedups_across_traces_and_approvals() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-root-dedup";
+        let host = "api.open-meteo.com";
+
+        store.create_execution_trace(&curl_trace(
+            root,
+            "curl -s https://api.open-meteo.com/v1/forecast",
+        ))?;
+
+        let mut approval = ApprovalRequest {
+            request_id: "apr-dedup".to_string(),
+            agent_id: "researcher.default".to_string(),
+            session_id: root.to_string(),
+            action: ScheduledAction::WebFetch {
+                url: format!("https://{host}/v1/forecast"),
+                timeout_secs: None,
+                max_chars: None,
+                detected_hosts: Some(vec![host.to_string()]),
+                payload: None,
+            },
+            approval_level: ApprovalLevel::Operator,
+            created_at: "2026-06-14T12:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some(root.to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            similar_to_request_id: None,
+            similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+        };
+        store.create_approval(&mut approval)?;
+        store.record_decision(
+            "apr-dedup",
+            "approved",
+            "operator",
+            "2026-06-14T12:01:00Z",
+            None,
+        )?;
+
+        let hosts = store.discover_observed_hosts(root)?;
+        assert_eq!(hosts, vec![host.to_string()]);
         Ok(())
     }
 
