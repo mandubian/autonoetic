@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 49;
+const SCHEMA_VERSION_LATEST: i64 = 50;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -534,7 +534,45 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_decided_by_kind_v47(conn)?;
     apply_operator_channel_bindings_v48(conn)?;
     apply_session_inference_bindings_v49(conn)?;
+    apply_session_envelopes_v50(conn)?;
 
+    Ok(())
+}
+
+fn apply_session_envelopes_v50(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 50 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_envelopes (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_session_id TEXT NOT NULL,
+            capability_json TEXT NOT NULL,
+            source          TEXT NOT NULL,
+            observed_at     TEXT,
+            locked_at       TEXT,
+            locked_by       TEXT,
+            plan_id         TEXT,
+            created_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_envelopes_root
+            ON session_envelopes(root_session_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            50_i64,
+            "session_envelopes",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 
