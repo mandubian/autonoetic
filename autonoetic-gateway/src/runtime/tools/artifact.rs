@@ -368,6 +368,25 @@ impl NativeTool for ArtifactBuildTool {
                 obj.insert("artifact_ref_scope".to_string(), scope);
             }
         }
+
+        if let Some(gs) = gateway_store.as_ref() {
+            let root = crate::runtime::content_store::root_session_id(sid);
+            if let Err(e) = crate::runtime::session_envelope::propose_discovered_envelope(
+                gs,
+                root,
+                "discovered",
+                None,
+                &_manifest.agent.id,
+            ) {
+                tracing::debug!(
+                    target: "session_envelope",
+                    error = %e,
+                    root_session_id = root,
+                    "envelope proposal after artifact_build failed"
+                );
+            }
+        }
+
         serde_json::to_string(&out).map_err(Into::into)
     }
 

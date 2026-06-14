@@ -18,7 +18,7 @@ const NETWORK_TRACE_TOOLS: &[&str] = &[
     "web_search",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionEnvelopeRecord {
     pub id: i64,
     pub root_session_id: String,
@@ -134,6 +134,19 @@ impl GatewayStore {
              ORDER BY created_at ASC",
             params![root_session_id],
         )
+    }
+
+    pub fn get_envelope_by_id(&self, envelope_id: i64) -> Result<Option<SessionEnvelopeRecord>> {
+        let conn = self.conn.lock().unwrap();
+        load_envelopes(
+            &conn,
+            "SELECT id, root_session_id, capability_json, source, observed_at,
+                    locked_at, locked_by, plan_id, created_at
+             FROM session_envelopes
+             WHERE id = ?1",
+            params![envelope_id],
+        )
+        .map(|mut v| v.pop())
     }
 }
 

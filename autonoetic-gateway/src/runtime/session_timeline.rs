@@ -179,6 +179,17 @@ pub fn emit_approval_pending_timeline_event(
             obj.insert("confirm_phrase".into(), serde_json::Value::String(phrase.clone()));
         }
     }
+    if let Some(root) = approval.root_session_id.as_deref() {
+        if let Some(targets) = approval.action.detected_hosts() {
+            if let Some(hint) =
+                crate::runtime::session_envelope::envelope_expansion_hint(store, root, &targets)
+            {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("envelope_expansion_hint".into(), hint);
+                }
+            }
+        }
+    }
     let event = build_timeline_event(
         root,
         approval.session_id.clone(),
@@ -481,6 +492,7 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // paired with its resolution. Abandonments (cancelled/withdrawn) are
         // NOT decisions → Normal below.
         "plan.pending" | "plan.approved"
+        | "envelope.proposed" | "envelope.locked"
         | "approval.pending" | "approval.approved" | "approval.rejected"
         | "escalation.pending"
         | "user.ask.pending"
