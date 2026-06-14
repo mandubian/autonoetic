@@ -254,18 +254,35 @@ pub fn propose_envelope_from_capabilities(
         }));
     }
     let now = chrono::Utc::now().to_rfc3339();
-    let primary = capabilities
-        .first()
-        .cloned()
-        .unwrap_or_else(|| capabilities_from_hosts(&hosts).into_iter().next().expect("hosts non-empty"));
+    let network_capability = capabilities_from_hosts(&hosts);
     let envelope_id = store.insert_envelope_proposal(
         root_session_id,
-        &primary,
+        &network_capability[0],
         source,
         Some(&now),
         plan_id,
         &now,
     )?;
+    for cap in capabilities {
+        if matches!(cap, Capability::NetworkAccess { .. }) {
+            continue;
+        }
+        if let Err(e) = store.insert_envelope_proposal(
+            root_session_id,
+            cap,
+            source,
+            Some(&now),
+            plan_id,
+            &now,
+        ) {
+            tracing::warn!(
+                target: "session_envelope",
+                error = %e,
+                root_session_id,
+                "non-network envelope proposal insert failed"
+            );
+        }
+    }
     emit_envelope_proposed_timeline(store, root_session_id, envelope_id, &hosts, source, actor_id, plan_id);
     Ok(Some(EnvelopeProposalResult {
         envelope_id,
@@ -488,6 +505,40 @@ mod tests {
         assert!(second.skipped);
         assert_eq!(second.envelope_id, first.envelope_id);
         assert_eq!(store.get_proposed_envelopes(root)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn propose_from_capabilities_stores_merged_network_access() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-504-cap-order";
+
+        let caps = vec![
+            Capability::SandboxFunctions {
+                allowed: vec!["web.".to_string()],
+            },
+            Capability::NetworkAccess {
+                hosts: vec!["api.example.com".to_string()],
+            },
+        ];
+        let proposal = propose_envelope_from_capabilities(
+            &store,
+            root,
+            &caps,
+            "plan:test",
+            None,
+            "operator",
+        )?
+        .expect("proposal");
+        let record = store
+            .get_envelope_by_id(proposal.envelope_id)?
+            .expect("network proposal row");
+        assert!(matches!(
+            &record.capability,
+            Capability::NetworkAccess { hosts } if hosts == &vec!["api.example.com".to_string()]
+        ));
+        assert_eq!(store.get_proposed_envelopes(root)?.len(), 2);
         Ok(())
     }
 

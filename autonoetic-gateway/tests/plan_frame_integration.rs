@@ -1407,3 +1407,57 @@ fn planframe_amend_regates_on_capability_envelope_broadening() {
         .unwrap()
         .contains("+capability"));
 }
+
+#[test]
+fn planframe_amend_inherits_when_capability_envelope_unchanged() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-cap-inherit/planner";
+
+    let envelope = json!([
+        { "type": "NetworkAccess", "hosts": ["api.example.com"] }
+    ]);
+    let propose = json!({
+        "title": "Cap inherit",
+        "objective": "unchanged capability_envelope should inherit",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }],
+        "capability_envelope": envelope
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    let amend = json!({
+        "plan_id": plan_id,
+        "objective": "progress note only",
+        "capability_envelope": envelope,
+        "reason": "same network scope"
+    });
+    let amend_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(parsed["inherited"], true);
+    assert_eq!(parsed["requires_regate"], false);
+    assert_eq!(parsed["diff_summary"], "no envelope change");
+}
