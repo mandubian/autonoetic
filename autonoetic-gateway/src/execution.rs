@@ -1427,6 +1427,14 @@ impl GatewayExecutionService {
                 "Failed to delete session grants during emergency stop"
             );
         }
+        if let Err(e) = store.revoke_session_envelopes_for_root(root_session_id) {
+            tracing::warn!(
+                target: "emergency_stop",
+                root_session_id = %root_session_id,
+                error = %e,
+                "Failed to revoke session envelopes during emergency stop"
+            );
+        }
         if let Err(e) = store.delete_session_inference_binding(root_session_id) {
             tracing::warn!(
                 target: "emergency_stop",
