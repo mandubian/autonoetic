@@ -117,11 +117,12 @@ agents/                  Agent bundles (SKILL.md manifests)
 4. Update `LoopGuardState` if the checkpoint format changes
 
 ### Approval system
-Four layers of approval dedup (checked in order):
+Five layers of approval dedup (checked in order):
 1. **Exec cache** (fingerprint-level, cross-session) — only when all patterns are concrete (url_literal/ip_address)
-2. **Session approval grants** (target-level, scope-aware, within root session) — `session_approval_grants` + `session_approval_grant_targets` tables; supports `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`; scoped `RootSession` or `Session`; optional expiry (`expires_at`)
-3. **Existing approved/pending approvals** (domain-level matching)
-4. **Approval flood cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`
+2. **Plan grants** — operator-approved plan envelope materialized as a session grant; see `docs/plan-capability-grants.md`
+3. **Session approval grants** (target-level, scope-aware, within root session) — `session_approval_grants` + `session_approval_grant_targets` tables; supports `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`; scoped `RootSession` or `Session`; optional expiry (`expires_at`)
+4. **Existing approved/pending approvals** (domain-level matching)
+5. **Approval flood cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`
 
 Additional approval features:
 - **Similarity scoring**: on creation, Jaccard similarity over command tokens (70%) + hosts (30%) against recent same-agent approvals. Stored as `similar_to_request_id` + `similarity_score`.
@@ -158,6 +159,7 @@ Notable test suites:
 - `continuation_cleanup_integration.rs` — delete on reject/cancel/withdraw, startup reaper, emergency stop
 - `approval_scope_targets_integration.rs` — session-scoped grants, pattern-based targets, expiry
 - `approval_grant_revocation_integration.rs` — revoke all/specific host, causal event
+- `plan_frame_integration.rs` — plan approval grant materialization, amend revoke, inherit
 - `constitution_abuse_approval_flood.rs` — flood cap enforcement, cap=0 bypass
 
 ## SDKs
@@ -170,6 +172,7 @@ SDKs live outside the Rust workspace:
 
 - `docs/ARCHITECTURE.md` — System design, security model, data flow, emergency stop
 - `docs/approval-system.md` — Full approval lifecycle, session grants, promotion gating
+- `docs/plan-capability-grants.md` — Plan-as-capability-grant: materialization, revocation, dedup layer
 - `docs/remote-access-approval.md` — Static analysis detection, approval flow diagram
 - `docs/credential-management.md` — Credential vault, `credential_env` injection, CLI credential commands
 - `docs/AGENTS.md` — Agent roles, SKILL.md format, capabilities (user-facing, not dev instructions)

@@ -8,11 +8,13 @@ When an agent requests a privileged action (network access, file system writes, 
 
 1. **Exec Cache** (fingerprint-level, cross-session) — only when all patterns are concrete (url_literal/ip_address). If the exact command+targets fingerprint was previously approved, reuse it automatically.
 
-2. **Session Approval Grants** (target-level, scope-aware, within root session) — stored in `session_approval_grants` + `session_approval_grant_targets` tables. Supports pattern types: `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`. Scoped `RootSession` or `Session`. Optional expiry (`expires_at`).
+2. **Plan Grants** — when the operator approves a plan, the declared network envelope is materialized as a session approval grant. Subsequent tool calls targeting hosts within the plan's envelope skip straight to execution. Revoked on envelope-expanding amend. See [`docs/plan-capability-grants.md`](../plan-capability-grants.md).
 
-3. **Existing Approved/Pending Approvals** (domain-level matching) — checks if a similar approval already exists.
+3. **Session Approval Grants** (target-level, scope-aware, within root session) — stored in `session_approval_grants` + `session_approval_grant_targets` tables. Supports pattern types: `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`. Scoped `RootSession` or `Session`. Optional expiry (`expires_at`).
 
-4. **Approval Flood Cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`.
+4. **Existing Approved/Pending Approvals** (domain-level matching) — checks if a similar approval already exists.
+
+5. **Approval Flood Cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`.
 
 ## Gate Types
 

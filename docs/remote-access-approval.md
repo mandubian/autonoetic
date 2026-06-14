@@ -98,9 +98,11 @@ When there is remote-access risk but **no** extractable literal host (`function_
 │    └─ Target undeclared → fail-shut deny                     │
 │ 4. Approval resolution checks (in order):                    │
 │    a. Exec cache hit (identical code fingerprint) → EXECUTE │
-│    b. Root-session grant covers targets → EXECUTE           │
-│    c. Existing approved/pending approval → REUSE            │
-│    d. None of the above → BLOCK + require approval           │
+│    b. Plan grant covers targets → EXECUTE (see               │
+│       docs/plan-capability-grants.md)                        │
+│    c. Session grant covers targets → EXECUTE                 │
+│    d. Existing approved/pending approval → REUSE             │
+│    e. None of the above → BLOCK + require approval           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
