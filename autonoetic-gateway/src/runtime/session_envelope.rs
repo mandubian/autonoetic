@@ -254,10 +254,13 @@ pub fn propose_envelope_from_capabilities(
         }));
     }
     let now = chrono::Utc::now().to_rfc3339();
-    let network_capability = capabilities_from_hosts(&hosts);
+    // Every declared NetworkAccess is merged into one proposal row (union of hosts).
+    let network_capability = Capability::NetworkAccess {
+        hosts: hosts.clone(),
+    };
     let envelope_id = store.insert_envelope_proposal(
         root_session_id,
-        &network_capability[0],
+        &network_capability,
         source,
         Some(&now),
         plan_id,
