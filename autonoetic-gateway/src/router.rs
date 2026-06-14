@@ -1902,6 +1902,158 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.envelope.propose" => {
+                #[derive(Deserialize)]
+                struct EnvelopeProposeParams {
+                    root_session_id: String,
+                    #[serde(default = "default_envelope_source")]
+                    source: String,
+                    #[serde(default)]
+                    plan_id: Option<String>,
+                    #[serde(default = "default_envelope_proposed_by")]
+                    proposed_by: String,
+                }
+                fn default_envelope_source() -> String {
+                    "operator".to_string()
+                }
+                fn default_envelope_proposed_by() -> String {
+                    "operator".to_string()
+                }
+                let params: EnvelopeProposeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.propose: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::propose_session_envelope(
+                    store.as_ref(),
+                    &params.root_session_id,
+                    &params.source,
+                    params.plan_id.as_deref(),
+                    &params.proposed_by,
+                ) {
+                    Ok(proposal) => match store.discover_observed_hosts(&params.root_session_id) {
+                        Ok(observed_hosts) => JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "proposal": proposal,
+                                "observed_hosts": observed_hosts,
+                            }),
+                        ),
+                        Err(e) => JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("discover_observed_hosts failed: {}", e),
+                        ),
+                    },
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.propose failed: {}", e),
+                    ),
+                }
+            }
+
+            "session.envelope.lock" => {
+                #[derive(Deserialize)]
+                struct EnvelopeLockParams {
+                    envelope_id: i64,
+                    #[serde(default = "default_envelope_locked_by")]
+                    locked_by: String,
+                }
+                fn default_envelope_locked_by() -> String {
+                    "operator".to_string()
+                }
+                let params: EnvelopeLockParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.lock: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::lock_session_envelope_operator(
+                    store.as_ref(),
+                    params.envelope_id,
+                    &params.locked_by,
+                ) {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.lock failed: {}", e),
+                    ),
+                }
+            }
+
+            "session.envelope.list" => {
+                #[derive(Deserialize)]
+                struct EnvelopeListParams {
+                    root_session_id: String,
+                }
+                let params: EnvelopeListParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.list: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::list_session_envelopes(store.as_ref(), &params.root_session_id)
+                {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.list failed: {}", e),
+                    ),
+                }
+            }
+
             // Session fork - fork a session from a snapshot
             "session.fork" => {
                 #[derive(Deserialize)]

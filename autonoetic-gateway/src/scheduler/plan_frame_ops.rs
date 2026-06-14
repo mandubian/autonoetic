@@ -97,6 +97,21 @@ pub fn approve_plan_frame_operator(
         },
     )?;
 
+    if let Err(e) = crate::runtime::session_envelope::propose_discovered_envelope(
+        store,
+        &plan.root_session_id,
+        &format!("plan:{plan_id}"),
+        Some(plan_id),
+        approved_by,
+    ) {
+        tracing::debug!(
+            target: "session_envelope",
+            error = %e,
+            plan_id,
+            "envelope proposal after operator plan approve failed"
+        );
+    }
+
     store
         .load_plan_frame(plan_id)?
         .ok_or_else(|| anyhow!("Plan disappeared after approval: {plan_id}"))

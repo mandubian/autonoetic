@@ -50,21 +50,19 @@ fn materialize_plan_grants(
     config: Option<&autonoetic_types::config::GatewayConfig>,
     plan: &PlanFrame,
     approver: &str,
-    now: &str,
+    _now: &str,
 ) -> usize {
     let Some(config) = config else { return 0 };
     let repo = crate::AgentRepository::from_config(config);
     let mut hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for step in &plan.steps {
-        // Empty / whitespace agent_id is treated as unset, matching the
-        // amend step-merging logic (the LLM may emit a placeholder).
         let raw = step.agent_id.as_deref().unwrap_or("").trim();
         if raw.is_empty() {
             continue;
         }
         let loaded = match repo.get_sync(raw) {
             Ok(l) => l,
-            Err(_) => continue, // not-yet-installed agent — its tool calls go through normal approval
+            Err(_) => continue,
         };
         for cap in &loaded.manifest.capabilities {
             if let autonoetic_types::capability::Capability::NetworkAccess { hosts: decl } = cap {
@@ -78,25 +76,15 @@ fn materialize_plan_grants(
     if hosts.is_empty() {
         return 0;
     }
-    let targets: Vec<autonoetic_types::background::GrantTarget> = hosts
-        .iter()
-        .map(|h| autonoetic_types::background::GrantTarget::ExactHost(h.clone()))
-        .collect();
-    if let Err(e) = store.insert_session_grant(
+    let hosts_vec: Vec<String> = hosts.into_iter().collect();
+    crate::runtime::session_envelope::materialize_network_grant(
+        store,
         &plan.root_session_id,
-        &plan.root_session_id,
-        &plan.created_by_agent_id,
-        &autonoetic_types::background::GrantScope::RootSession,
-        &targets,
+        &hosts_vec,
         approver,
-        now,
-        Some(&plan.plan_id),
-        None,
-    ) {
-        tracing::warn!(target: "plan_frame", error = %e, plan_id = %plan.plan_id, "plan grant materialization failed");
-        return 0;
-    }
-    1
+        &plan.plan_id,
+        Some(&plan.created_by_agent_id),
+    )
 }
 
 fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
@@ -706,6 +694,17 @@ impl NativeTool for PlanFrameApproveTool {
         // Pillar C: materialize the plan's declared network envelope as a
         // session approval grant. Best-effort — never blocks the approval.
         let grants_materialized = materialize_plan_grants(&store, config, &plan, &approver, &now);
+
+        // Discovery-based envelope proposal (best-effort; operator locks via session.envelope.lock).
+        if let Err(e) = crate::runtime::session_envelope::propose_discovered_envelope(
+            &store,
+            &plan.root_session_id,
+            &format!("plan:{}", plan.plan_id),
+            Some(&plan.plan_id),
+            &approver,
+        ) {
+            tracing::debug!(target: "session_envelope", error = %e, plan_id = %plan.plan_id, "envelope proposal after plan approve failed");
+        }
 
         if let Some(config) = config {
             crate::scheduler::workflow_store::append_workflow_event(
