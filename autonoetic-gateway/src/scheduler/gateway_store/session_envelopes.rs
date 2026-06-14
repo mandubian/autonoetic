@@ -148,6 +148,18 @@ impl GatewayStore {
         )
         .map(|mut v| v.pop())
     }
+
+    /// Delete all session envelope rows (proposed and locked) for a root session.
+    /// Called by emergency stop (P-7.2/P-2.27) to prevent stale pre-authorizations
+    /// from surviving a circuit-breaker event.
+    pub fn revoke_session_envelopes_for_root(&self, root_session_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM session_envelopes WHERE root_session_id = ?1",
+            params![root_session_id],
+        )?;
+        Ok(count)
+    }
 }
 
 fn load_envelopes<P>(
