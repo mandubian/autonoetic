@@ -139,14 +139,21 @@ pub fn hosts_pending_proposal(store: &GatewayStore, root_session_id: &str) -> Re
         .collect())
 }
 
-fn proposal_already_pending(store: &GatewayStore, root_session_id: &str, hosts: &[String]) -> Result<bool> {
+fn find_matching_pending_envelope_id(
+    store: &GatewayStore,
+    root_session_id: &str,
+    hosts: &[String],
+) -> Result<Option<i64>> {
     let proposed = store.get_proposed_envelopes(root_session_id)?;
-    Ok(proposed.iter().any(|p| {
-        matches!(
-            &p.capability,
-            Capability::NetworkAccess { hosts: pending } if pending == hosts
-        )
-    }))
+    Ok(proposed
+        .into_iter()
+        .find(|p| {
+            matches!(
+                &p.capability,
+                Capability::NetworkAccess { hosts: pending } if pending == hosts
+            )
+        })
+        .map(|p| p.id))
 }
 
 /// Propose locking observed-but-unlocked hosts for a root session.
@@ -161,17 +168,15 @@ pub fn propose_discovered_envelope(
     if hosts.is_empty() {
         return Ok(None);
     }
-    if proposal_already_pending(store, root_session_id, &hosts)? {
-        let capabilities = capabilities_from_hosts(&hosts);
+    let capabilities = capabilities_from_hosts(&hosts);
+    if let Some(envelope_id) = find_matching_pending_envelope_id(store, root_session_id, &hosts)? {
         return Ok(Some(EnvelopeProposalResult {
-            envelope_id: 0,
+            envelope_id,
             hosts,
             capabilities,
             skipped: true,
         }));
     }
-
-    let capabilities = capabilities_from_hosts(&hosts);
     let now = chrono::Utc::now().to_rfc3339();
     let envelope_id = store.insert_envelope_proposal(
         root_session_id,
@@ -212,9 +217,9 @@ pub fn propose_envelope_from_capabilities(
     if hosts.is_empty() {
         return propose_discovered_envelope(store, root_session_id, source, plan_id, actor_id);
     }
-    if proposal_already_pending(store, root_session_id, &hosts)? {
+    if let Some(envelope_id) = find_matching_pending_envelope_id(store, root_session_id, &hosts)? {
         return Ok(Some(EnvelopeProposalResult {
-            envelope_id: 0,
+            envelope_id,
             hosts,
             capabilities: capabilities.to_vec(),
             skipped: true,
@@ -432,6 +437,29 @@ mod tests {
         let lock = lock_session_envelope(&store, proposal.envelope_id, "operator")?;
         assert_eq!(lock.grants_materialized, 1);
         assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+        Ok(())
+    }
+
+    #[test]
+    fn propose_skipped_returns_existing_pending_envelope_id() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-505-dedup-proposal";
+
+        store.create_execution_trace(&curl_trace(
+            root,
+            "curl -s https://api.open-meteo.com/v1/forecast",
+        ))?;
+
+        let first = propose_discovered_envelope(&store, root, "discovered", None, "operator")?
+            .expect("first proposal");
+        assert!(!first.skipped);
+
+        let second = propose_discovered_envelope(&store, root, "discovered", None, "operator")?
+            .expect("second proposal");
+        assert!(second.skipped);
+        assert_eq!(second.envelope_id, first.envelope_id);
+        assert_eq!(store.get_proposed_envelopes(root)?.len(), 1);
         Ok(())
     }
 

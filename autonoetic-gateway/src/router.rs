@@ -1917,7 +1917,7 @@ impl JsonRpcRouter {
                     "operator".to_string()
                 }
                 fn default_envelope_proposed_by() -> String {
-                    "operator:rpc".to_string()
+                    "operator".to_string()
                 }
                 let params: EnvelopeProposeParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
@@ -1946,13 +1946,20 @@ impl JsonRpcRouter {
                     params.plan_id.as_deref(),
                     &params.proposed_by,
                 ) {
-                    Ok(proposal) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::json!({
-                            "proposal": proposal,
-                            "observed_hosts": store.discover_observed_hosts(&params.root_session_id).unwrap_or_default(),
-                        }),
-                    ),
+                    Ok(proposal) => match store.discover_observed_hosts(&params.root_session_id) {
+                        Ok(observed_hosts) => JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "proposal": proposal,
+                                "observed_hosts": observed_hosts,
+                            }),
+                        ),
+                        Err(e) => JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("discover_observed_hosts failed: {}", e),
+                        ),
+                    },
                     Err(e) => JsonRpcResponse::error(
                         req.id,
                         -32000,
@@ -1969,7 +1976,7 @@ impl JsonRpcRouter {
                     locked_by: String,
                 }
                 fn default_envelope_locked_by() -> String {
-                    "operator:rpc".to_string()
+                    "operator".to_string()
                 }
                 let params: EnvelopeLockParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
