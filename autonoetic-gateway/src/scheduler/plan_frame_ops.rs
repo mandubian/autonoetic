@@ -97,11 +97,9 @@ pub fn approve_plan_frame_operator(
         },
     )?;
 
-    if let Err(e) = crate::runtime::session_envelope::propose_discovered_envelope(
+    if let Err(e) = crate::runtime::session_envelope::propose_plan_envelope_on_approval(
         store,
-        &plan.root_session_id,
-        &format!("plan:{plan_id}"),
-        Some(plan_id),
+        &plan,
         approved_by,
     ) {
         tracing::debug!(

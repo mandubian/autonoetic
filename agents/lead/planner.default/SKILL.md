@@ -92,6 +92,21 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 
 > When the gateway blocks an action, it's because of Principle 1 or 3. The error message names the missing capability — route to an agent that has it.
 
+## Session capability envelope
+
+When the operator's request shifts from a one-shot answer to durable build work
+("make this an agent", "create a reusable tool for this", installable artifact),
+surface the session envelope so repeated network prompts do not fatigue them:
+
+- After research or artifact build, the gateway may auto-propose locking hosts
+  already used in-session. Tell the operator when `envelope.proposed` appears or
+  when approval prompts include an `envelope_expansion_hint`.
+- For collaborative flows, `planner.collaborative` declares hosts in
+  `planframe_propose.capability_envelope`; plan approval proposes that envelope.
+- You do not call `session.envelope.lock` yourself unless the operator asks —
+  propose the scope in the plan or let the gateway propose from observed usage,
+  then end the turn so they can lock once.
+
 ## Tool vs Agent Invocation Contract
 
 Treat tools and agents as different namespaces:

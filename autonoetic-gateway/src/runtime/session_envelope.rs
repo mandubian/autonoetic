@@ -156,6 +156,34 @@ fn find_matching_pending_envelope_id(
         .map(|p| p.id))
 }
 
+/// Propose a session envelope after plan approval: declared envelope when present,
+/// otherwise discovery from observed hosts.
+pub fn propose_plan_envelope_on_approval(
+    store: &GatewayStore,
+    plan: &autonoetic_types::plan_frame::PlanFrame,
+    approver: &str,
+) -> Result<Option<EnvelopeProposalResult>> {
+    let source = format!("plan:{}", plan.plan_id);
+    if !plan.capability_envelope.is_empty() {
+        propose_envelope_from_capabilities(
+            store,
+            &plan.root_session_id,
+            &plan.capability_envelope,
+            &source,
+            Some(&plan.plan_id),
+            approver,
+        )
+    } else {
+        propose_discovered_envelope(
+            store,
+            &plan.root_session_id,
+            &source,
+            Some(&plan.plan_id),
+            approver,
+        )
+    }
+}
+
 /// Propose locking observed-but-unlocked hosts for a root session.
 pub fn propose_discovered_envelope(
     store: &GatewayStore,

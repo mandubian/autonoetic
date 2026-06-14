@@ -1227,3 +1227,183 @@ fn plan_approval_reports_grants_materialized_and_amend_reports_revoke() {
     assert!(parsed_amend["grants_revoked"].is_u64());
     assert_eq!(parsed_amend["grants_revoked"].as_u64().unwrap(), 0);
 }
+
+fn curl_trace(session_id: &str, command: &str) -> autonoetic_types::causal_chain::ExecutionTraceRecord {
+    autonoetic_types::causal_chain::ExecutionTraceRecord {
+        trace_id: format!("trace-{}", uuid::Uuid::new_v4()),
+        event_id: None,
+        agent_id: "researcher.default".to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        timestamp: "2026-06-14T12:00:00Z".to_string(),
+        tool_name: "sandbox_exec".to_string(),
+        command: Some(command.to_string()),
+        exit_code: Some(0),
+        stdout: None,
+        stderr: None,
+        duration_ms: 10,
+        success: 1,
+        error_type: None,
+        error_summary: None,
+        approval_required: None,
+        approval_request_id: None,
+        arguments: Some(format!(r#"{{"command":"{command}"}}"#)),
+        result: None,
+    }
+}
+
+#[test]
+fn plan_approval_materializes_declared_capability_envelope() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let root = "root-cap-envelope";
+    let session_id = format!("{root}/planner");
+
+    let propose = json!({
+        "title": "Declared envelope",
+        "objective": "verify capability_envelope grants",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }],
+        "capability_envelope": [
+            { "type": "NetworkAccess", "hosts": ["api.example.com"] }
+        ]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(&session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    let approve_result = registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(&session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
+    assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 1);
+    assert!(store.session_grants_cover_targets(root, &["api.example.com".to_string()]));
+
+    let proposed = store.get_proposed_envelopes(root).unwrap();
+    assert_eq!(proposed.len(), 1);
+    assert!(matches!(
+        &proposed[0].capability,
+        Capability::NetworkAccess { hosts } if hosts == &vec!["api.example.com".to_string()]
+    ));
+}
+
+#[test]
+fn plan_approval_proposes_discovered_hosts_when_envelope_empty() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let root = "root-discover-envelope";
+    let session_id = format!("{root}/planner");
+
+    store
+        .create_execution_trace(&curl_trace(
+            root,
+            "curl -s https://api.open-meteo.com/v1/forecast",
+        ))
+        .unwrap();
+
+    let propose = json!({
+        "title": "Discovery envelope",
+        "objective": "verify discovery fallback",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(&session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    let approve_result = registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(&session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
+    assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 0);
+
+    let proposed = store.get_proposed_envelopes(root).unwrap();
+    assert_eq!(proposed.len(), 1);
+    assert!(matches!(
+        &proposed[0].capability,
+        Capability::NetworkAccess { hosts } if hosts == &vec!["api.open-meteo.com".to_string()]
+    ));
+}
+
+#[test]
+fn planframe_amend_regates_on_capability_envelope_broadening() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-cap-regate/planner";
+
+    let propose = json!({
+        "title": "Cap regate",
+        "objective": "test capability delta regate",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }],
+        "capability_envelope": [
+            { "type": "NetworkAccess", "hosts": ["api.example.com"] }
+        ]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    let amend = json!({
+        "plan_id": plan_id,
+        "capability_envelope": [
+            { "type": "NetworkAccess", "hosts": ["api.example.com", "cdn.example.com"] }
+        ],
+        "reason": "add CDN host discovered during research"
+    });
+    let amend_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(parsed["requires_regate"], true);
+    assert_eq!(parsed["inherited"], false);
+    assert!(parsed["diff_summary"]
+        .as_str()
+        .unwrap()
+        .contains("+capability"));
+}

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
+use autonoetic_types::capability::Capability;
 use autonoetic_types::plan_frame::{
     PlanFrame, PlanStatus, PlanStep, StepOwner, ValidationClass, ValidationEntry,
     ValidationPolicy, ValidationRequirement,
@@ -9,18 +10,19 @@ use autonoetic_types::plan_frame::{
 const SELECT_COLS: &str = "\
     plan_id, version, parent_version, workflow_id, root_session_id, \
     title, objective, status, steps_json, validation_policy_json, \
-    approved_by, approved_at, created_by_agent_id, reason, created_at";
+    capability_envelope_json, approved_by, approved_at, created_by_agent_id, reason, created_at";
 
 pub(crate) fn save_plan_frame(conn: &Connection, plan: &PlanFrame) -> Result<()> {
     let steps_json = serde_json::to_string(&plan.steps)?;
     let validation_policy_json = serde_json::to_string(&plan.validation_policy)?;
+    let capability_envelope_json = serde_json::to_string(&plan.capability_envelope)?;
 
     conn.execute(
         "INSERT INTO plan_frames
             (plan_id, version, parent_version, workflow_id, root_session_id,
              title, objective, status, steps_json, validation_policy_json,
-             approved_by, approved_at, created_by_agent_id, reason, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             capability_envelope_json, approved_by, approved_at, created_by_agent_id, reason, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             plan.plan_id,
             plan.version as i64,
@@ -32,6 +34,7 @@ pub(crate) fn save_plan_frame(conn: &Connection, plan: &PlanFrame) -> Result<()>
             plan.status.as_str(),
             steps_json,
             validation_policy_json,
+            capability_envelope_json,
             plan.approved_by,
             plan.approved_at,
             plan.created_by_agent_id,
@@ -192,11 +195,14 @@ fn row_to_plan_frame(row: &rusqlite::Row<'_>) -> Result<PlanFrame, rusqlite::Err
     let status_str: String = row.get(7)?;
     let steps_json: String = row.get(8)?;
     let vp_json: String = row.get(9)?;
+    let capability_envelope_json: String = row.get(10)?;
 
     let steps: Vec<PlanStep> =
         serde_json::from_str(&steps_json).unwrap_or_default();
     let validation_policy: ValidationPolicy =
         serde_json::from_str(&vp_json).unwrap_or_default();
+    let capability_envelope: Vec<Capability> =
+        serde_json::from_str(&capability_envelope_json).unwrap_or_default();
 
     Ok(PlanFrame {
         plan_id: row.get(0)?,
@@ -209,11 +215,12 @@ fn row_to_plan_frame(row: &rusqlite::Row<'_>) -> Result<PlanFrame, rusqlite::Err
         status: parse_plan_status(&status_str),
         steps,
         validation_policy,
-        approved_by: row.get(10)?,
-        approved_at: row.get(11)?,
-        created_by_agent_id: row.get(12)?,
-        reason: row.get(13)?,
-        created_at: row.get(14)?,
+        capability_envelope,
+        approved_by: row.get(11)?,
+        approved_at: row.get(12)?,
+        created_by_agent_id: row.get(13)?,
+        reason: row.get(14)?,
+        created_at: row.get(15)?,
     })
 }
 

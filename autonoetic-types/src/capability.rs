@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A typed capability that an Agent may request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum Capability {
     /// MCP tool access by prefix.
@@ -198,7 +198,7 @@ fn default_sources_all() -> Vec<String> {
     vec!["*".to_string()]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CapabilityDelta {
     pub added: Vec<String>,
     pub broadened: Vec<CapabilityBroadening>,

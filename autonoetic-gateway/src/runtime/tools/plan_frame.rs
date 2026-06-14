@@ -28,8 +28,9 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// the existing `session_approval_grants` coverage check — the operator
 /// approves the envelope once, not each tool call.
 ///
-/// The envelope is derived MECHANICALLY from each plan step's `agent_id` →
-/// declared `Capability::NetworkAccess.hosts` (never LLM-judged). Wildcards
+/// The envelope is derived MECHANICALLY from `plan.capability_envelope` when
+/// non-empty, otherwise from each plan step's `agent_id` → declared
+/// `Capability::NetworkAccess.hosts` (never LLM-judged). Wildcards
 /// (`"*"`) are skipped because they don't materialize to a concrete,
 /// matchable grant and would defeat the dedup's concreteness rule (the exec
 /// cache only auto-approves when all patterns are `url_literal`/`ip_address`).
@@ -53,6 +54,30 @@ fn materialize_plan_grants(
     _now: &str,
 ) -> usize {
     let Some(config) = config else { return 0 };
+
+    let mut declared_hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for cap in &plan.capability_envelope {
+        if let Capability::NetworkAccess { hosts } = cap {
+            for h in hosts {
+                if h == "*" || h.is_empty() {
+                    continue;
+                }
+                declared_hosts.insert(h.clone());
+            }
+        }
+    }
+    if !declared_hosts.is_empty() {
+        let hosts_vec: Vec<String> = declared_hosts.into_iter().collect();
+        return crate::runtime::session_envelope::materialize_network_grant(
+            store,
+            &plan.root_session_id,
+            &hosts_vec,
+            approver,
+            &plan.plan_id,
+            Some(&plan.created_by_agent_id),
+        );
+    }
+
     let repo = crate::AgentRepository::from_config(config);
     let mut hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for step in &plan.steps {
@@ -113,6 +138,22 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn parse_capability_envelope_input(
+    items: Option<Vec<serde_json::Value>>,
+) -> anyhow::Result<Vec<Capability>> {
+    let Some(items) = items else {
+        return Ok(Vec::new());
+    };
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            crate::runtime::tools::agent_revision::normalize_capability_from_llm(v)
+                .map_err(|e| anyhow::anyhow!("capability_envelope[{i}]: {e}"))
+        })
+        .collect()
+}
+
 pub struct PlanFrameProposeTool;
 
 impl NativeTool for PlanFrameProposeTool {
@@ -169,6 +210,11 @@ impl NativeTool for PlanFrameProposeTool {
                                 }
                             }
                         }
+                    },
+                    "capability_envelope": {
+                        "type": "array",
+                        "description": "Optional session capability envelope to propose at plan approval (e.g. NetworkAccess hosts discovered during research)",
+                        "items": { "type": "object" }
                     }
                 },
                 "required": ["title", "objective"],
@@ -223,6 +269,7 @@ impl NativeTool for PlanFrameProposeTool {
             objective: String,
             steps: Option<Vec<StepInput>>,
             validation_policy: Option<ValidationPolicyInput>,
+            capability_envelope: Option<Vec<serde_json::Value>>,
         }
 
         let args: Args = serde_json::from_str(arguments_json)
@@ -301,6 +348,8 @@ impl NativeTool for PlanFrameProposeTool {
             None => ValidationPolicy::default(),
         };
 
+        let capability_envelope = parse_capability_envelope_input(args.capability_envelope)?;
+
         let plan = PlanFrame {
             plan_id: plan_id.clone(),
             version: 1,
@@ -312,6 +361,7 @@ impl NativeTool for PlanFrameProposeTool {
             status: PlanStatus::AwaitingApproval,
             steps,
             validation_policy,
+            capability_envelope,
             approved_by: None,
             approved_at: None,
             created_by_agent_id: manifest.agent.id.clone(),
@@ -695,12 +745,10 @@ impl NativeTool for PlanFrameApproveTool {
         // session approval grant. Best-effort — never blocks the approval.
         let grants_materialized = materialize_plan_grants(&store, config, &plan, &approver, &now);
 
-        // Discovery-based envelope proposal (best-effort; operator locks via session.envelope.lock).
-        if let Err(e) = crate::runtime::session_envelope::propose_discovered_envelope(
+        // Session envelope proposal (best-effort; operator locks via session.envelope.lock).
+        if let Err(e) = crate::runtime::session_envelope::propose_plan_envelope_on_approval(
             &store,
-            &plan.root_session_id,
-            &format!("plan:{}", plan.plan_id),
-            Some(&plan.plan_id),
+            &plan,
             &approver,
         ) {
             tracing::debug!(target: "session_envelope", error = %e, plan_id = %plan.plan_id, "envelope proposal after plan approve failed");
@@ -753,7 +801,7 @@ impl NativeTool for PlanFrameAmendTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the prior revision was approved, the new revision INHERITS that approval unless the amendment expands the safety envelope (adds/removes a step, changes a step owner or agent, or weakens/removes a validation gate). Cosmetic changes (rewording objective/title, recording a progress reason) inherit automatically. Envelope-expanding changes re-open the operator gate. The response carries `diff_summary`, `inherited`, and `requires_regate` so the caller — and the operator — can see exactly what changed.".to_string(),
+            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the prior revision was approved, the new revision INHERITS that approval unless the amendment expands the safety envelope (adds/removes a step, changes a step owner or agent, weakens/removes a validation gate, or broadens capability_envelope). Cosmetic changes (rewording objective/title, recording a progress reason) inherit automatically. Envelope-expanding changes re-open the operator gate. The response carries `diff_summary`, `inherited`, and `requires_regate` so the caller — and the operator — can see exactly what changed.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -803,6 +851,11 @@ impl NativeTool for PlanFrameAmendTool {
                                 }
                             }
                         }
+                    },
+                    "capability_envelope": {
+                        "type": "array",
+                        "description": "Updated session capability envelope (optional, defaults to current)",
+                        "items": { "type": "object" }
                     },
                     "reason": {
                         "type": "string",
@@ -862,6 +915,7 @@ impl NativeTool for PlanFrameAmendTool {
             objective: Option<String>,
             steps: Option<Vec<StepInput>>,
             validation_policy: Option<ValidationPolicyInput>,
+            capability_envelope: Option<Vec<serde_json::Value>>,
             reason: Option<String>,
         }
 
@@ -962,6 +1016,12 @@ impl NativeTool for PlanFrameAmendTool {
             None => current.validation_policy.clone(),
         };
 
+        let capability_envelope = if let Some(items) = args.capability_envelope {
+            parse_capability_envelope_input(Some(items))?
+        } else {
+            current.capability_envelope.clone()
+        };
+
         let now = now_rfc3339();
 
         // Decide whether the amendment inherits the prior approval or
@@ -983,6 +1043,7 @@ impl NativeTool for PlanFrameAmendTool {
             }
             probe.steps = steps.clone();
             probe.validation_policy = validation_policy.clone();
+            probe.capability_envelope = capability_envelope.clone();
             probe
         });
         let inherit = current.status == PlanStatus::Approved
@@ -1003,6 +1064,7 @@ impl NativeTool for PlanFrameAmendTool {
             },
             steps,
             validation_policy,
+            capability_envelope,
             approved_by: if inherit {
                 current.approved_by.clone()
             } else {
