@@ -101,6 +101,7 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 },
             ],
         },
+        capability_envelope: Vec::new(),
         approved_by: Some("operator".to_string()),
         approved_at: Some("2026-06-01T00:00:00Z".to_string()),
         created_by_agent_id: "planner.collaborative".to_string(),

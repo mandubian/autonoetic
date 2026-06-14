@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 50;
+const SCHEMA_VERSION_LATEST: i64 = 51;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -535,7 +535,33 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_operator_channel_bindings_v48(conn)?;
     apply_session_inference_bindings_v49(conn)?;
     apply_session_envelopes_v50(conn)?;
+    apply_plan_frame_capability_envelope_v51(conn)?;
 
+    Ok(())
+}
+
+fn apply_plan_frame_capability_envelope_v51(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 51 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE plan_frames ADD COLUMN capability_envelope_json TEXT NOT NULL DEFAULT '[]';",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            51_i64,
+            "plan_frame_capability_envelope",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

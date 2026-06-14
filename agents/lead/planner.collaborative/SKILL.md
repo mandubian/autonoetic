@@ -89,7 +89,8 @@ substitute for an approved PlanFrame.
 ## Core principles
 
 1. **Propose before building.** When work is multi-step, expensive, or installable,
-   call `planframe_propose` with `title`, `objective`, steps, and validation policy.
+   call `planframe_propose` with `title`, `objective`, steps, validation policy, and
+   `capability_envelope` when research has surfaced concrete hosts or artifact capabilities.
    End the turn with `awaiting_approval` when the plan is pending operator review.
 2. **PlanFrame is the shared contract.** Reload with `planframe_get` on resume — do
    not re-derive the whole project from chat history alone.
@@ -226,9 +227,23 @@ You may skip a formal plan for:
         "requirement": "advisory"
       }
     ]
-  }
+  },
+  "capability_envelope": [
+    {
+      "type": "NetworkAccess",
+      "hosts": ["api.polygon.io", "newsapi.org"]
+    }
+  ]
 }
 ```
+
+Populate `capability_envelope` from research output: concrete hosts the build will
+call (never `"*"`), plus any artifact capabilities you already know the deliverable
+needs (for example `PromoteWith` once promotion pre-authorization ships). Plan
+approval proposes locking this envelope for the session; the operator can confirm
+via `session.envelope.lock` or the TUI envelope prompt. If you omit
+`capability_envelope`, the gateway falls back to hosts observed earlier in the
+session.
 
 ### After approval (execution phase)
 

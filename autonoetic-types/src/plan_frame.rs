@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::capability::{compute_capability_delta, Capability, CapabilityDelta};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanRef {
     pub plan_id: String,
@@ -163,6 +165,11 @@ pub struct PlanFrame {
     pub steps: Vec<PlanStep>,
     #[serde(default)]
     pub validation_policy: ValidationPolicy,
+    /// Optional capability envelope for this plan. If present and non-empty,
+    /// plan approval proposes locking this envelope for the session.
+    /// If empty, the session-level discovery mechanism drives.
+    #[serde(default)]
+    pub capability_envelope: Vec<Capability>,
     #[serde(default)]
     pub approved_by: Option<String>,
     #[serde(default)]
@@ -376,6 +383,8 @@ pub struct PlanEnvelopeDiff {
     /// requirement is weaker (Required → Advisory/Waived). Weakening a gate
     /// ⇒ re-gate. Strengthening does NOT (more safety is fine).
     pub validation_weakened: Vec<(String, ValidationRequirement, ValidationRequirement)>,
+    /// Broadening/narrowing of the declared `capability_envelope` between revisions.
+    pub capability_delta: CapabilityDelta,
 }
 
 impl PlanEnvelopeDiff {
@@ -388,6 +397,7 @@ impl PlanEnvelopeDiff {
             || !self.agents_changed.is_empty()
             || !self.validation_removed.is_empty()
             || !self.validation_weakened.is_empty()
+            || self.capability_delta.has_broadening()
     }
 
     /// True when the only changes are cosmetic/progress (objective rewording,
@@ -423,6 +433,14 @@ impl PlanEnvelopeDiff {
         }
         for (vid, old, new) in &self.validation_weakened {
             parts.push(format!("weaken {vid}:{}→{}", old.as_str(), new.as_str()));
+        }
+        if self.capability_delta.has_broadening() {
+            let mut cap_parts: Vec<String> = self.capability_delta.added.clone();
+            for b in &self.capability_delta.broadened {
+                cap_parts.push(b.capability_type.clone());
+            }
+            cap_parts.sort();
+            parts.push(format!("+capability {}", cap_parts.join(",")));
         }
         if parts.is_empty() {
             "no envelope change".to_string()
@@ -515,6 +533,9 @@ pub fn plan_envelope_diff(parent: &PlanFrame, child: &PlanFrame) -> PlanEnvelope
     validation_removed.sort();
     validation_weakened.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let capability_delta =
+        compute_capability_delta(&parent.capability_envelope, &child.capability_envelope);
+
     PlanEnvelopeDiff {
         steps_added,
         steps_removed,
@@ -522,6 +543,7 @@ pub fn plan_envelope_diff(parent: &PlanFrame, child: &PlanFrame) -> PlanEnvelope
         agents_changed,
         validation_removed,
         validation_weakened,
+        capability_delta,
     }
 }
 
@@ -571,6 +593,7 @@ mod tests {
                 notes: None,
             }],
             validation_policy: ValidationPolicy::default(),
+            capability_envelope: Vec::new(),
             approved_by: None,
             approved_at: None,
             created_by_agent_id: "planner".into(),
@@ -597,6 +620,7 @@ mod tests {
             status: PlanStatus::Approved,
             steps,
             validation_policy: ValidationPolicy { entries: val },
+            capability_envelope: Vec::new(),
             approved_by: None,
             approved_at: None,
             created_by_agent_id: "planner".into(),
@@ -748,5 +772,32 @@ mod tests {
     // helper alias used above
     fn ent(id: &str, req: ValidationRequirement) -> ValidationEntry {
         vent(id, req)
+    }
+
+    #[test]
+    fn diff_capability_broadening_requires_regate() {
+        let parent = plan_with(vec![], vec![]);
+        let mut child = parent.clone();
+        child.capability_envelope = vec![Capability::NetworkAccess {
+            hosts: vec!["api.example.com".to_string()],
+        }];
+        let diff = plan_envelope_diff(&parent, &child);
+        assert!(diff.requires_regate());
+        assert!(diff.capability_delta.has_broadening());
+    }
+
+    #[test]
+    fn diff_capability_narrowing_does_not_require_regate() {
+        let mut parent = plan_with(vec![], vec![]);
+        parent.capability_envelope = vec![Capability::NetworkAccess {
+            hosts: vec!["api.example.com".to_string(), "cdn.example.com".to_string()],
+        }];
+        let mut child = parent.clone();
+        child.capability_envelope = vec![Capability::NetworkAccess {
+            hosts: vec!["api.example.com".to_string()],
+        }];
+        let diff = plan_envelope_diff(&parent, &child);
+        assert!(!diff.requires_regate());
+        assert!(!diff.capability_delta.narrowed.is_empty());
     }
 }
