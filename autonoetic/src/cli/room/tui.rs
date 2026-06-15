@@ -1161,6 +1161,72 @@ fn plan_id_for(entry: &SessionTimelineEntry) -> Option<String> {
         .or_else(|| payload_field_str(entry, "plan_id"))
 }
 
+fn plan_version_for(entry: &SessionTimelineEntry) -> Option<u64> {
+    fn version_in_value(v: &serde_json::Value) -> Option<u64> {
+        v.get("version")
+            .and_then(|n| n.as_u64())
+            .or_else(|| {
+                v.get("result")
+                    .and_then(|r| r.get("plan_version"))
+                    .and_then(|n| n.as_u64())
+            })
+    }
+    let payload = entry.payload.as_deref()?;
+    let v = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    version_in_value(&v).or_else(|| {
+        v.get("message")
+            .and_then(version_in_value)
+    })
+}
+
+/// Versioned gate key — amendments reuse `plan_id` but bump `version`.
+fn plan_gate_key(entry: &SessionTimelineEntry) -> Option<String> {
+    let id = plan_id_for(entry).or_else(|| render::extract_plan_proposal_id(entry))?;
+    let version = plan_version_for(entry).unwrap_or(1);
+    Some(format!("{id}:v{version}"))
+}
+
+fn plan_gate_unresolved(
+    entry: &SessionTimelineEntry,
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> bool {
+    plan_gate_key(entry).is_some_and(|key| !resolved.contains(&key) && !acted.contains(&key))
+}
+
+fn unresolved_plan_gate_key(
+    entries: &[SessionTimelineEntry],
+    plan_id: &str,
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Option<String> {
+    for e in entries.iter().rev() {
+        if e.event_type != "plan.pending" {
+            continue;
+        }
+        if plan_id_for(e).as_deref() != Some(plan_id) {
+            continue;
+        }
+        let key = plan_gate_key(e)?;
+        if !resolved.contains(&key) && !acted.contains(&key) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn mark_plan_version_resolved(
+    entries: &[SessionTimelineEntry],
+    plan_id: &str,
+    resolved: &mut HashSet<String>,
+    acted: &mut HashSet<String>,
+) {
+    if let Some(key) = unresolved_plan_gate_key(entries, plan_id, resolved, acted) {
+        acted.insert(key.clone());
+        resolved.insert(key);
+    }
+}
+
 /// Unresolved pending plan ids still visible in the timeline (newest first).
 fn unresolved_pending_plan_ids(
     entries: &[SessionTimelineEntry],
@@ -1171,12 +1237,20 @@ fn unresolved_pending_plan_ids(
     let mut seen = HashSet::new();
     for e in entries.iter().rev() {
         let id = if e.event_type == "plan.pending" {
+            if !plan_gate_unresolved(e, resolved, acted) {
+                continue;
+            }
             plan_id_for(e)
         } else {
             render::extract_plan_proposal_id(e)
         };
         if let Some(id) = id {
-            if !resolved.contains(&id) && !acted.contains(&id) && seen.insert(id.clone()) {
+            let unresolved = if e.event_type == "plan.pending" {
+                true
+            } else {
+                unresolved_plan_gate_key(entries, &id, resolved, acted).is_some()
+            };
+            if unresolved && seen.insert(id.clone()) {
                 ids.push(id);
             }
         }
@@ -1209,7 +1283,7 @@ fn newest_pending_plan_event(
             render::extract_plan_proposal_id(e)
         };
         let Some(id) = id else { continue };
-        if resolved.contains(&id) || acted.contains(&id) {
+        if !plan_gate_unresolved(e, resolved, acted) {
             continue;
         }
         let row_idx = row_index_for_visible(indexed, vis_idx)?;
@@ -1599,8 +1673,12 @@ pub fn run(
                                             target_agent_id.as_deref(),
                                         ) {
                                             Ok(msg) => {
-                                                acted.insert(target.clone());
-                                                resolved.insert(target.clone());
+                                            mark_plan_version_resolved(
+                                                &entries,
+                                                &target,
+                                                &mut resolved,
+                                                &mut acted,
+                                            );
                                                 if detail
                                                     .as_ref()
                                                     .is_some_and(|d| d.plan_id.as_deref() == Some(target.as_str()))
@@ -2020,8 +2098,12 @@ pub fn run(
                                         target_agent_id.as_deref(),
                                     ) {
                                         Ok(msg) => {
-                                            acted.insert(plan_id.clone());
-                                            resolved.insert(plan_id);
+                                            mark_plan_version_resolved(
+                                                &entries,
+                                                &plan_id,
+                                                &mut resolved,
+                                                &mut acted,
+                                            );
                                             status = Some(msg);
                                             follow = true;
                                             force_timeline_refresh = true;
@@ -2728,8 +2810,8 @@ pub fn run(
                             }
                         }
                         if e.event_type == "plan.approved" {
-                            if let Some(id) = plan_id_for(e) {
-                                resolved.insert(id);
+                            if let Some(key) = plan_gate_key(e) {
+                                resolved.insert(key);
                             }
                         }
                     }
@@ -3179,7 +3261,7 @@ fn gate_for_entry(
         }
         "plan.pending" => {
             let id = plan_id_for(e)?;
-            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
+            plan_gate_unresolved(e, resolved, acted).then_some(GateRef {
                 kind: GateKind::Plan,
                 id,
             })
@@ -3199,7 +3281,7 @@ fn gate_for_entry(
             })
         }
         "agent.message" => render::extract_plan_proposal_id(e).and_then(|id| {
-            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
+            plan_gate_unresolved(e, resolved, acted).then_some(GateRef {
                 kind: GateKind::Plan,
                 id,
             })
@@ -5606,6 +5688,91 @@ mod tests {
         // A non-gate event is not resolvable.
         let other = vec![gate_entry("tool.completed")];
         assert!(selectable_gate(&other, Some(&single), &empty, &empty).is_none());
+    }
+
+    #[test]
+    fn plan_amend_reopens_gate_after_prior_version_approved() {
+        let mut v1_pending = gate_entry("plan.pending");
+        v1_pending.refs.plan_id = Some("plan-1".into());
+        v1_pending.payload =
+            Some(r#"{"plan_id":"plan-1","version":1}"#.into());
+
+        let mut v1_approved = gate_entry("plan.approved");
+        v1_approved.refs.plan_id = Some("plan-1".into());
+        v1_approved.payload =
+            Some(r#"{"plan_id":"plan-1","version":1,"approved_by":"operator"}"#.into());
+
+        let mut v2_pending = gate_entry("plan.pending");
+        v2_pending.refs.plan_id = Some("plan-1".into());
+        v2_pending.payload =
+            Some(r#"{"plan_id":"plan-1","version":2,"requires_regate":true}"#.into());
+
+        let entries = vec![v1_pending, v1_approved, v2_pending];
+        let mut resolved = HashSet::new();
+        resolved.insert("plan-1:v1".to_string());
+
+        let gate = find_active_gate(&entries, &resolved, &HashSet::new());
+        assert_eq!(gate.as_ref().map(|g| g.id.as_str()), Some("plan-1"));
+        assert_eq!(gate.map(|g| g.kind), Some(GateKind::Plan));
+    }
+
+    #[test]
+    fn plan_v1_pending_hidden_after_same_version_approved() {
+        let mut v1_pending = gate_entry("plan.pending");
+        v1_pending.refs.plan_id = Some("plan-1".into());
+        v1_pending.payload = Some(r#"{"plan_id":"plan-1","version":1}"#.into());
+
+        let entries = vec![v1_pending];
+        let mut resolved = HashSet::from(["plan-1:v1".to_string()]);
+        assert!(find_active_gate(&entries, &resolved, &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn plan_pending_without_version_defaults_to_v1() {
+        let mut pending = gate_entry("plan.pending");
+        pending.refs.plan_id = Some("plan-549".into());
+        let entries = vec![pending];
+        let gate = find_active_gate(&entries, &HashSet::new(), &HashSet::new()).unwrap();
+        assert_eq!(gate.id, "plan-549");
+    }
+
+    #[test]
+    fn agent_message_v2_proposal_visible_after_v1_approved() {
+        let mut msg = gate_entry("agent.message");
+        msg.payload = Some(
+            serde_json::json!({
+                "message": {
+                    "status": "awaiting_approval",
+                    "plan_id": "plan-1",
+                    "result": { "plan_version": 2 }
+                }
+            })
+            .to_string(),
+        );
+        let entries = vec![msg];
+        let mut resolved = HashSet::from(["plan-1:v1".to_string()]);
+        let gate = find_active_gate(&entries, &resolved, &HashSet::new()).unwrap();
+        assert_eq!(gate.id, "plan-1");
+        assert_eq!(gate.kind, GateKind::Plan);
+    }
+
+    #[test]
+    fn mark_plan_version_resolved_targets_newest_pending_revision() {
+        let mut v1_pending = gate_entry("plan.pending");
+        v1_pending.refs.plan_id = Some("plan-1".into());
+        v1_pending.payload = Some(r#"{"plan_id":"plan-1","version":1}"#.into());
+        let mut v2_pending = gate_entry("plan.pending");
+        v2_pending.refs.plan_id = Some("plan-1".into());
+        v2_pending.payload = Some(r#"{"plan_id":"plan-1","version":2}"#.into());
+        let entries = vec![v1_pending, v2_pending];
+
+        let mut resolved = HashSet::from(["plan-1:v1".to_string()]);
+        let mut acted = HashSet::new();
+        mark_plan_version_resolved(&entries, "plan-1", &mut resolved, &mut acted);
+
+        assert!(resolved.contains("plan-1:v2"));
+        assert!(acted.contains("plan-1:v2"));
+        assert!(find_active_gate(&entries, &resolved, &acted).is_none());
     }
 
     #[test]
