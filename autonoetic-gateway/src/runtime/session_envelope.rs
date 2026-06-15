@@ -351,7 +351,12 @@ pub fn propose_plan_envelope_on_approval(
     }
 }
 
-/// Propose locking observed-but-unlocked hosts for a root session.
+/// Propose and auto-lock observed-but-unlocked hosts for a root session.
+///
+/// Discovered hosts are always concrete (wildcards are filtered by
+/// `is_concrete_host`), so the proposal is immediately locked and grants
+/// are materialized. This eliminates the need for a manual
+/// `session.envelope.lock` step after discovery.
 pub fn propose_discovered_envelope(
     store: &GatewayStore,
     root_session_id: &str,
@@ -364,31 +369,59 @@ pub fn propose_discovered_envelope(
         return Ok(None);
     }
     let capabilities = capabilities_from_hosts(&hosts);
-    if let Some(envelope_id) = find_matching_pending_envelope_id(store, root_session_id, &hosts)? {
-        return Ok(Some(EnvelopeProposalResult {
+    let (envelope_id, skipped) = if let Some(envelope_id) =
+        find_matching_pending_envelope_id(store, root_session_id, &hosts)?
+    {
+        (envelope_id, true)
+    } else {
+        let now = chrono::Utc::now().to_rfc3339();
+        let envelope_id = store.insert_envelope_proposal(
+            root_session_id,
+            &capabilities[0],
+            source,
+            Some(&now),
+            plan_id,
+            &now,
+        )?;
+        emit_envelope_proposed_timeline(
+            store,
+            root_session_id,
             envelope_id,
-            hosts,
-            capabilities,
-            skipped: true,
-        }));
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    let envelope_id = store.insert_envelope_proposal(
-        root_session_id,
-        &capabilities[0],
-        source,
-        Some(&now),
-        plan_id,
-        &now,
-    )?;
+            &hosts,
+            source,
+            actor_id,
+            plan_id,
+            Some(&capabilities[0]),
+        );
+        (envelope_id, false)
+    };
 
-    emit_envelope_proposed_timeline(store, root_session_id, envelope_id, &hosts, source, actor_id, plan_id, Some(&capabilities[0]));
+    // Auto-lock: discovered hosts are always concrete, safe to lock immediately.
+    match lock_session_envelope(store, envelope_id, actor_id) {
+        Ok(result) => {
+            tracing::info!(
+                target: "session_envelope",
+                envelope_id = result.envelope_id,
+                grants_materialized = result.grants_materialized,
+                hosts = ?result.hosts,
+                "auto-locked discovered envelope after proposal"
+            );
+        }
+        Err(e) => {
+            tracing::debug!(
+                target: "session_envelope",
+                error = %e,
+                envelope_id,
+                "auto-lock of discovered envelope failed — leaving as proposed"
+            );
+        }
+    }
 
     Ok(Some(EnvelopeProposalResult {
         envelope_id,
         hosts,
         capabilities,
-        skipped: false,
+        skipped,
     }))
 }
 

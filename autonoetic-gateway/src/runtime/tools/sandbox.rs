@@ -2724,6 +2724,28 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             }
         }
 
+        // Post-exec envelope discovery: propose and auto-lock any newly
+        // observed remote hosts so subsequent tool calls are covered by
+        // grants without manual operator intervention.
+        if let (Some(gs), Some(root)) = (gateway_store.as_ref(), root_session_id.as_deref()) {
+            if let Err(e) =
+                crate::runtime::session_envelope::propose_discovered_envelope(
+                    gs,
+                    root,
+                    "sandbox_exec",
+                    None,
+                    &manifest.agent.id,
+                )
+            {
+                tracing::debug!(
+                    target: "session_envelope",
+                    error = %e,
+                    root_session_id = root,
+                    "envelope proposal after sandbox_exec failed"
+                );
+            }
+        }
+
         serde_json::to_string(&body).map_err(Into::into)
     }
 }

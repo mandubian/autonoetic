@@ -1343,10 +1343,14 @@ fn plan_approval_proposes_discovered_hosts_when_envelope_empty() {
     let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
     assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 0);
 
+    // With auto-lock, the discovered envelope is immediately locked and
+    // grants are materialized — no pending proposal remains.
     let proposed = store.get_proposed_envelopes(root).unwrap();
-    assert_eq!(proposed.len(), 1);
+    assert_eq!(proposed.len(), 0);
+    let active = store.get_active_envelopes(root).unwrap();
+    assert_eq!(active.len(), 1);
     assert!(matches!(
-        &proposed[0].capability,
+        &active[0].capability,
         Capability::NetworkAccess { hosts } if hosts == &vec!["api.open-meteo.com".to_string()]
     ));
 }
