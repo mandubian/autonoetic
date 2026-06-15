@@ -216,7 +216,7 @@ from the TUI viewer.
 ## Test plan
 
 - `content.comment` resolves `name`, anchors to viewed `handle`, computes `drifted`,
-  rejects empty body / inverted line range, 404s an unknown name.
+  rejects empty body / inverted line range, and errors (`-32000`) on an unknown name.
 - An `operator.comment` row appears on the timeline at `Attention` with Operator
   attribution.
 - The comment is delivered into the owning agent's next-turn context, with the drift note
