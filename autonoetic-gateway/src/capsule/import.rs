@@ -575,6 +575,9 @@ fn bind_alias(
         updated_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
         updated_by_id: "capsule.import".to_string(),
         reason: Some("capsule import --activate".to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias)?;
     Ok(())

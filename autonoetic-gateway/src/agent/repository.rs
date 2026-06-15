@@ -338,6 +338,17 @@ impl AgentRepository {
                     ),
                 };
 
+                // Check if the agent is suspended — block dispatch.
+                if let Some(ref suspended_at) = alias.suspended_at {
+                    let reason = alias.suspended_reason.as_deref().unwrap_or("no reason given");
+                    let by = alias.suspended_by.as_deref().unwrap_or("unknown");
+                    anyhow::bail!(
+                        "Agent '{}' is suspended (since {}) by {}: {}. \
+                         Unsuspend or re-promote the agent before dispatching.",
+                        alias_id, suspended_at, by, reason,
+                    );
+                }
+
                 let rev = match gateway_store.get_agent_revision(&alias.revision_id)? {
                     Some(r) => r,
                     None => anyhow::bail!(

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 51;
+const SCHEMA_VERSION_LATEST: i64 = 53;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -536,6 +536,8 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_inference_bindings_v49(conn)?;
     apply_session_envelopes_v50(conn)?;
     apply_plan_frame_capability_envelope_v51(conn)?;
+    apply_promotion_pre_authorization_v52(conn)?;
+    apply_agent_suspension_v53(conn)?;
 
     Ok(())
 }
@@ -561,6 +563,40 @@ fn apply_plan_frame_capability_envelope_v51(conn: &mut Connection) -> Result<()>
             "plan_frame_capability_envelope",
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    Ok(())
+}
+
+fn apply_promotion_pre_authorization_v52(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 52 { return Ok(()); }
+    conn.execute_batch("ALTER TABLE promotion_history ADD COLUMN pre_authorization TEXT;")?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![52_i64, "promotion_pre_authorization", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_agent_suspension_v53(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 53 { return Ok(()); }
+    conn.execute_batch(
+        "ALTER TABLE agent_aliases ADD COLUMN suspended_at TEXT;
+         ALTER TABLE agent_aliases ADD COLUMN suspended_reason TEXT;
+         ALTER TABLE agent_aliases ADD COLUMN suspended_by TEXT;",
+    )?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![53_i64, "agent_suspension", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

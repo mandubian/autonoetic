@@ -153,6 +153,9 @@ fn setup_promote_harness(outgoing_caps_yaml: &str, incoming_caps_yaml: &str) -> 
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 
@@ -589,6 +592,9 @@ fn approval_ref_bypass_is_invalidated_when_alias_moves() {
             updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "test".to_string(),
             reason: None,
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
         })
         .unwrap();
 

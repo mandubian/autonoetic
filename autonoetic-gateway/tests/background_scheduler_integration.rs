@@ -132,6 +132,9 @@ fn register_revision_mirror(
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "background_scheduler_integration".to_string(),
         reason: Some("integration test seed".to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias)?;
     Ok(())

@@ -122,6 +122,9 @@ fn seed_present_test_agents(
             updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "turn_continuation_approval_integration".to_string(),
             reason: Some("seed test alias".to_string()),
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
         })?;
     }
     Ok(())

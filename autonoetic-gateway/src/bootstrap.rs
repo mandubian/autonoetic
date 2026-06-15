@@ -385,6 +385,7 @@ fn bootstrap_agent_inner(
         "cli",
         Some("Auto-promoted during agent bootstrap"),
         None,
+        None,
     )?;
 
     update_latest_symlink(gateway_dir, agent_id, &revision_id);

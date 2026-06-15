@@ -165,6 +165,16 @@ pub fn promotion_preauthorized_by_envelope(
     agent_id: &str,
     artifact_capabilities: &[Capability],
 ) -> Result<bool> {
+    Ok(find_promote_with_envelope_id(store, root_session_id, agent_id, artifact_capabilities)?.is_some())
+}
+
+/// Find the envelope ID of a locked `PromoteWith` that covers `artifact_capabilities`.
+pub fn find_promote_with_envelope_id(
+    store: &GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+    artifact_capabilities: &[Capability],
+) -> Result<Option<i64>> {
     for record in store.get_active_envelopes(root_session_id)? {
         if let Capability::PromoteWith {
             agent_id: pw_agent,
@@ -177,11 +187,11 @@ pub fn promotion_preauthorized_by_envelope(
                     artifact_capabilities,
                 )
             {
-                return Ok(true);
+                return Ok(Some(record.id));
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn promote_with_sets_equivalent(a: &[Capability], b: &[Capability]) -> bool {

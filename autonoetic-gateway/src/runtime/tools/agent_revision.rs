@@ -2216,6 +2216,10 @@ impl NativeTool for AgentRevisionPromoteTool {
                 false
             };
 
+        // pre_auth_envelope_id is set inside the gate bypass block,
+        // but referenced in the response — declared here for scope.
+        let mut pre_auth_envelope_id: Option<i64> = None;
+
         if !gate_bypassed_by_approval {
             let gate_new_agents = config
                 .map(|c| c.require_operator_approval_for_new_agents)
@@ -2236,22 +2240,24 @@ impl NativeTool for AgentRevisionPromoteTool {
             )?;
             if capability_delta.is_some() {
                 if let Some(ref root) = root_sid {
-                    match crate::runtime::session_envelope::promotion_preauthorized_by_envelope(
+                    match crate::runtime::session_envelope::find_promote_with_envelope_id(
                         &gateway_store,
                         root,
                         &args.agent_id,
                         &current_capabilities,
                     ) {
-                        Ok(true) => {
+                        Ok(Some(eid)) => {
                             tracing::info!(
                                 target: "promotion",
                                 agent_id = %args.agent_id,
                                 root_session_id = %root,
-                                "pre-authorized by session envelope PromoteWith"
+                                envelope_id = eid,
+                                "pre-authorized by session envelope PromoteWith (P-2.27)"
                             );
+                            pre_auth_envelope_id = Some(eid);
                             capability_delta = None;
                         }
-                        Ok(false) => {}
+                        Ok(None) => {}
                         Err(e) => {
                             tracing::debug!(
                                 target: "promotion",
@@ -2898,6 +2904,13 @@ impl NativeTool for AgentRevisionPromoteTool {
             ),
         );
 
+        let pre_authorization = pre_auth_envelope_id.map(|eid| {
+            serde_json::json!({
+                "method": "envelope",
+                "envelope_id": eid,
+                "rule": "P-2.27",
+            }).to_string()
+        });
         let previous_revision_id = gateway_store.atomic_promote(
             &args.agent_id,
             &args.revision_id,
@@ -2906,6 +2919,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             &manifest.agent.id,
             args.reason.as_deref(),
             args.required_eval_run_id.as_deref(),
+            pre_authorization.as_deref(),
         )?;
 
         crate::bootstrap::update_latest_symlink(gateway_dir, &args.agent_id, &args.revision_id);
@@ -2921,7 +2935,7 @@ impl NativeTool for AgentRevisionPromoteTool {
         }
 
         let short_ref = format!("{}@rev_{}", args.agent_id, rev.short_id);
-        Ok(serde_json::json!({
+        let mut response = serde_json::json!({
             "ok": true,
             "status": "promoted",
             "agent_id": args.agent_id,
@@ -2929,8 +2943,12 @@ impl NativeTool for AgentRevisionPromoteTool {
             "short_ref": short_ref,
             "previous_revision_id": previous_revision_id,
             "promotion_id": promotion_id,
-        })
-        .to_string())
+        });
+        if let Some(eid) = pre_auth_envelope_id {
+            response["pre_authorized_by_envelope"] = serde_json::json!(eid);
+            response["pre_auth_rule"] = serde_json::json!("P-2.27");
+        }
+        Ok(response.to_string())
     }
 }
 

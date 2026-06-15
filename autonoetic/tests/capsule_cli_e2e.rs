@@ -75,6 +75,9 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 }
