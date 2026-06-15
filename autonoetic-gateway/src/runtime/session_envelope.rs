@@ -58,9 +58,17 @@ pub fn materialize_network_grant(
     if concrete.is_empty() {
         return 0;
     }
+    // A declared `*.example.com` is a subdomain wildcard, not a literal host:
+    // materialize it as `HostSuffix` so it actually matches subdomains rather
+    // than becoming a dead `ExactHost("*.example.com")` that never fires.
+    // `HostSuffix` stores the canonical bare suffix (the CLI prepends `*.` on
+    // display and `matches()` trims it), so strip the leading `*.` here.
     let targets: Vec<GrantTarget> = concrete
         .iter()
-        .map(|h| GrantTarget::ExactHost(h.clone()))
+        .map(|h| match h.strip_prefix("*.") {
+            Some(suffix) => GrantTarget::HostSuffix(suffix.to_string()),
+            None => GrantTarget::ExactHost(h.clone()),
+        })
         .collect();
     let grant_agent = agent_id.unwrap_or(root_session_id);
     if let Err(e) = store.insert_session_grant(
@@ -227,6 +235,14 @@ pub fn propose_promote_with_envelope(
     if capabilities.is_empty() {
         return Ok(None);
     }
+    // An empty agent_id is the wildcard ("any agent") form, which is reserved
+    // for deliberate operator action — the automated proposal path must always
+    // bind the proposal to a concrete agent.
+    if agent_id.is_empty() {
+        return Err(anyhow!(
+            "PromoteWith proposal requires a non-empty agent_id"
+        ));
+    }
     if capabilities.iter().any(|c| matches!(c, Capability::PromoteWith { .. })) {
         return Err(anyhow!(
             "PromoteWith capabilities cannot contain nested PromoteWith"
@@ -259,6 +275,7 @@ pub fn propose_promote_with_envelope(
         source,
         actor_id,
         None,
+        Some(&promote_with),
     );
     Ok(Some(envelope_id))
 }
@@ -365,7 +382,7 @@ pub fn propose_discovered_envelope(
         &now,
     )?;
 
-    emit_envelope_proposed_timeline(store, root_session_id, envelope_id, &hosts, source, actor_id, plan_id);
+    emit_envelope_proposed_timeline(store, root_session_id, envelope_id, &hosts, source, actor_id, plan_id, Some(&capabilities[0]));
 
     Ok(Some(EnvelopeProposalResult {
         envelope_id,
@@ -436,7 +453,7 @@ pub fn propose_envelope_from_capabilities(
             );
         }
     }
-    emit_envelope_proposed_timeline(store, root_session_id, envelope_id, &hosts, source, actor_id, plan_id);
+    emit_envelope_proposed_timeline(store, root_session_id, envelope_id, &hosts, source, actor_id, plan_id, Some(&network_capability));
     Ok(Some(EnvelopeProposalResult {
         envelope_id,
         hosts,
@@ -587,12 +604,15 @@ fn emit_envelope_proposed_timeline(
     source: &str,
     actor_id: &str,
     plan_id: Option<&str>,
+    capability: Option<&Capability>,
 ) {
     let (principal, role) = crate::runtime::session_timeline::decider_seat(actor_id);
     let refs = TimelineRefs {
         plan_id: plan_id.map(str::to_string),
         ..Default::default()
     };
+    // Surface the proposed capability (esp. PromoteWith, whose `hosts` is empty)
+    // so the operator deciding the lock sees exactly what they would bless.
     let event = crate::runtime::session_timeline::build_timeline_event(
         root_session_id.to_string(),
         root_session_id.to_string(),
@@ -605,6 +625,7 @@ fn emit_envelope_proposed_timeline(
             "envelope_id": envelope_id,
             "hosts": hosts,
             "source": source,
+            "capability": capability,
         })),
         refs,
     );
@@ -637,6 +658,7 @@ fn emit_envelope_locked_timeline(
             "envelope_id": record.id,
             "hosts": hosts,
             "source": record.source,
+            "capability": record.capability,
             "grants_materialized": grants_materialized,
             "locked_by": locked_by,
         })),
@@ -696,6 +718,63 @@ mod tests {
         let lock = lock_session_envelope(&store, proposal.envelope_id, "operator")?;
         assert_eq!(lock.grants_materialized, 1);
         assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+        Ok(())
+    }
+
+    #[test]
+    fn wildcard_host_materializes_as_host_suffix_grant() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-wildcard-host";
+
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["*.example.com".to_string()],
+        }];
+        let proposal =
+            propose_envelope_from_capabilities(&store, root, &caps, "plan:test", None, "operator")?
+                .expect("proposal");
+        let lock = lock_session_envelope(&store, proposal.envelope_id, "operator")?;
+        assert_eq!(lock.grants_materialized, 1);
+        // A subdomain wildcard must actually cover concrete subdomains, not be
+        // dropped as a dead ExactHost("*.example.com").
+        assert!(
+            store.session_grants_cover_targets(root, &["api.example.com".to_string()]),
+            "subdomain wildcard grant should cover a concrete subdomain"
+        );
+        // Stored as the canonical bare suffix (CLI prepends `*.` on display).
+        let grants = store.get_session_grants_structured(root)?;
+        assert!(
+            grants.iter().flat_map(|g| &g.targets).any(|t| matches!(
+                t,
+                GrantTarget::HostSuffix(s) if s == "example.com"
+            )),
+            "wildcard host should be stored as HostSuffix(\"example.com\"), got: {:?}",
+            grants.iter().map(|g| &g.targets).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn propose_promote_with_rejects_empty_agent_id() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-empty-agent";
+
+        let err = propose_promote_with_envelope(
+            &store,
+            root,
+            "",
+            &[Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            }],
+            "test",
+            "operator",
+        )
+        .expect_err("empty agent_id should be rejected");
+        assert!(
+            err.to_string().contains("non-empty agent_id"),
+            "unexpected error: {err}"
+        );
         Ok(())
     }
 

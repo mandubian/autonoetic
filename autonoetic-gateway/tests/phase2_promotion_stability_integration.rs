@@ -365,3 +365,71 @@ fn test_promotion_fails_for_mismatched_alias_and_agent() {
         "unexpected error: {err}"
     );
 }
+
+/// An envelope-pre-authorized promotion is automatic (no fresh operator
+/// decision), so it must not silently un-suspend a suspended agent. A normal
+/// operator re-promotion (no pre-authorization) still clears suspension.
+#[test]
+fn envelope_preauthorized_promotion_preserves_suspension() {
+    let (_tmp, store, _repo) = setup_store_and_repo();
+    let agent_id = "planner.default";
+    let rev1 = make_revision(
+        agent_id,
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    );
+    let rev2 = make_revision(
+        agent_id,
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    let rev3 = make_revision(
+        agent_id,
+        "3333333333333333333333333333333333333333333333333333333333333333",
+    );
+    store.insert_agent_revision(&rev1).unwrap();
+    store.insert_agent_revision(&rev2).unwrap();
+    store.insert_agent_revision(&rev3).unwrap();
+    upsert_alias(store.as_ref(), agent_id, &rev1.revision_id, "initial");
+
+    // Operator suspends the agent.
+    assert!(store
+        .suspend_agent(agent_id, "operator", Some("under review"))
+        .unwrap());
+
+    // Envelope pre-authorized promotion (pre_authorization = Some) preserves it.
+    store
+        .atomic_promote(
+            agent_id,
+            &rev2.revision_id,
+            "prom-preauth",
+            "gateway",
+            "gateway",
+            Some("envelope pre-auth"),
+            None,
+            Some(r#"{"method":"envelope","envelope_id":7,"rule":"P-2.27"}"#),
+        )
+        .unwrap();
+    let alias = store.resolve_alias(agent_id).unwrap().expect("alias");
+    assert!(
+        alias.suspended_at.is_some(),
+        "envelope-pre-authorized promotion must NOT clear suspension"
+    );
+
+    // Plain operator re-promotion (pre_authorization = None) clears it.
+    store
+        .atomic_promote(
+            agent_id,
+            &rev3.revision_id,
+            "prom-operator",
+            "human",
+            "operator",
+            Some("operator re-promote"),
+            None,
+            None,
+        )
+        .unwrap();
+    let alias = store.resolve_alias(agent_id).unwrap().expect("alias");
+    assert!(
+        alias.suspended_at.is_none(),
+        "operator re-promotion (no pre-auth) clears suspension"
+    );
+}
