@@ -2050,15 +2050,30 @@ impl JsonRpcRouter {
                     params.envelope_id,
                     &params.revoked_by,
                 ) {
-                    Ok(Some(record)) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::json!({
-                            "ok": true,
-                            "envelope_id": params.envelope_id,
-                            "was_locked": record.locked_at.is_some(),
-                            "root_session_id": record.root_session_id,
-                        }),
-                    ),
+                    Ok(Some(record)) => {
+                        let promoted_agents = store
+                            .find_promotions_by_envelope(params.envelope_id)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(agent_id, promotion_id, created_at)| {
+                                serde_json::json!({
+                                    "agent_id": agent_id,
+                                    "promotion_id": promotion_id,
+                                    "created_at": created_at,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "ok": true,
+                                "envelope_id": params.envelope_id,
+                                "was_locked": record.locked_at.is_some(),
+                                "root_session_id": record.root_session_id,
+                                "agents_promoted_under_envelope": promoted_agents,
+                            }),
+                        )
+                    },
                     Ok(None) => JsonRpcResponse::error(
                         req.id,
                         -32000,

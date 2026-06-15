@@ -793,6 +793,31 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// Find agent IDs that were promoted under a given session envelope
+    /// (by matching `pre_authorization` JSON containing the envelope_id).
+    /// Returns `(agent_id, promotion_id, created_at)` tuples.
+    pub fn find_promotions_by_envelope(
+        &self,
+        envelope_id: i64,
+    ) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%\"envelope_id\":{envelope_id}%");
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, promotion_id, created_at
+             FROM promotion_history
+             WHERE pre_authorization LIKE ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![pattern], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
     pub fn register_short_id(&self, revision_id: &str, short_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
