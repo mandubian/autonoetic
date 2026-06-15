@@ -58,8 +58,8 @@ lighter-weight oversight loop, not a co-editing surface.
 ## UX flow
 
 1. Operator opens the content tree (`c`), selects a file, opens it (`o`) in the viewer
-   (`ContentView`, which already holds `{ name, content }` and — see below — the resolved
-   `handle`).
+   (`ContentView`, today `{ name, content, scroll }`; this design adds the resolved
+   `handle`, which `content.read` already returns — see the TUI section).
 2. Operator presses **`m`** (comment) → a compose panel opens (reusing `ComposeInput`).
 3. Optional: operator types a line hint (e.g. `12` or `12-14`) in a small field; default
    is whole-file.
@@ -79,8 +79,8 @@ existing keys (`name` + content `handle`, the SHA-256 the operator was viewing).
   "comment_id": "cmt_<short>",
   "name": "config.yaml",            // session content name
   "handle": "sha256:abc…",          // the VERSION the operator commented on (anchor)
-  "current_handle": "sha256:def…",  // handle at delivery time
-  "drifted": true,                  // current_handle != handle → file changed since
+  "current_handle": "sha256:def…",  // the name's current version at comment time
+  "drifted": true,                  // current_handle != handle → file already moved on
   "line_start": 12,                 // optional, 1-based, best-effort
   "line_end": 14,                   // optional
   "body": "you hardcoded a secret here"
@@ -90,9 +90,13 @@ existing keys (`name` + content `handle`, the SHA-256 the operator was viewing).
 - **Anchor = (`name`, `handle`).** The `handle` is captured from the `content.read`
   response the operator was viewing, so the comment binds to a concrete immutable version
   even though the *name* is a moving pointer.
-- **Drift.** At delivery the gateway resolves `name` → `current_handle`. If it differs
-  from the anchored `handle`, `drifted: true` and both handles are included so the agent
-  re-reads the current version. We do **not** attempt to re-map line numbers.
+- **Drift.** Drift is computed **once, at comment time**: the handler resolves `name` →
+  `current_handle` and sets `drifted = (handle != current_handle)`. Both handles and the
+  flag are stored in the single `operator.comment` event and reused verbatim in the
+  next-turn framing — there is no second, delivery-time event. (Because comment and
+  delivery are effectively back-to-back in a live session, comment-time drift is the
+  relevant signal; a file that changes again between emit and the agent's turn is the
+  agent's own write, which it already knows about.) We do **not** re-map line numbers.
 
 ## Gateway: new RPC `content.comment`
 
@@ -118,7 +122,9 @@ and the comment is unambiguously typed.
 Handler behavior (mirrors `content.read` resolution + `event.ingest` delivery):
 
 1. Open `ContentStore`; resolve `name` → `current_handle`
-   (`resolve_name_or_handle_to_handle`). 404 (`-32000`) if the name doesn't resolve.
+   (`resolve_name_or_handle_to_handle`). If the name doesn't resolve, return a JSON-RPC
+   server error (`-32000`, `content.comment resolve failed: …`) — same not-found
+   convention as `content.read`.
 2. Anchor `handle` = the provided handle, else `current_handle`.
    `drifted = (handle != current_handle)`.
 3. Validate `body` non-empty; `line_end >= line_start` when both present.
@@ -144,9 +150,10 @@ A new event type alongside `operator.message`
 
 - **Attribution:** `principal = Principal::human(commented_by)` (default "operator"),
   `role = SessionRole::Operator` — same model as `operator_message_event`.
-- **Altitude:** base **`Attention`**. An anchored comment is the operator flagging
-  something they want addressed; it should clear the default (`Normal`) floor so it is
-  not filtered out of a channel showing normal-and-above. (A future `severity` field could
+- **Altitude:** base **`Attention`** (above the `Normal` default). An anchored comment is
+  the operator flagging something they want addressed, so it ranks with operator gates
+  rather than ordinary narrative — it stays visible even in stricter, attention-and-above
+  views, and sorts as something the agent must act on. (A future `severity` field could
   modulate this; out of scope here.)
 - **Payload:** the data-model object above (redacted body, like `operator.message`).
 - Written to `live_digest_events` only (presentation timeline), consistent with how
