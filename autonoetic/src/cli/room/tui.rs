@@ -670,6 +670,9 @@ struct ContentTree {
 /// `ArtifactFileView` but rendered through the markdown pipeline).
 struct ContentView {
     name: String,
+    /// Content version (SHA-256 handle) being viewed — the anchor for any
+    /// operator comment composed against this file.
+    handle: String,
     content: String,
     scroll: u16,
 }
@@ -1327,6 +1330,9 @@ pub fn run(
     let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
     let mut input: Option<GateInput> = None; // in-flight gate decision
     let mut compose: Option<ComposeInput> = None; // in-flight free-form message to the session
+    // When Some, the active compose targets a file comment (name, version handle)
+    // and submits via `content.comment` instead of a freeform session message.
+    let mut compose_comment: Option<(String, String)> = None;
     let mut clipboard =
         std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None);
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
@@ -1389,14 +1395,27 @@ pub fn run(
                     if let Some(c) = compose.as_mut() {
                         match handle_compose_key(c, &key, &mut clipboard) {
                             ComposeKeyResult::Continue => {}
-                            ComposeKeyResult::Cancel => compose = None,
+                            ComposeKeyResult::Cancel => {
+                                compose = None;
+                                compose_comment = None;
+                            }
                             ComposeKeyResult::Send(text) => {
-                                status = Some(send_message(
-                                    client,
-                                    root_session_id,
-                                    &text,
-                                    target_agent_id.as_deref(),
-                                ));
+                                status = Some(if let Some((name, handle)) = compose_comment.take() {
+                                    send_comment(
+                                        client,
+                                        root_session_id,
+                                        &name,
+                                        &handle,
+                                        &text,
+                                    )
+                                } else {
+                                    send_message(
+                                        client,
+                                        root_session_id,
+                                        &text,
+                                        target_agent_id.as_deref(),
+                                    )
+                                });
                                 compose = None;
                                 follow = true;
                                 force_timeline_refresh = true;
@@ -2264,8 +2283,14 @@ pub fn run(
                                     ) {
                                         Ok(v) => {
                                             if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                                let handle = v
+                                                    .get("handle")
+                                                    .and_then(|h| h.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string();
                                                 content_view = Some(ContentView {
                                                     name,
+                                                    handle,
                                                     content: content.to_string(),
                                                     scroll: 0,
                                                 });
@@ -2358,6 +2383,22 @@ pub fn run(
                                         status = Some(format!("no artifact on this row (type={} tool={})", entry.event_type, tool_name));
                                     }
                                 }
+                            }
+                        }
+                        // m: comment on the file currently open in the content
+                        // viewer. Opens the composer in comment mode; the comment
+                        // anchors to the viewed version and is delivered to the
+                        // agent at its next turn. Prefix the body with `L12:` or
+                        // `L12-14:` to attach an optional line hint.
+                        KeyCode::Char('m') if content_view.is_some() => {
+                            if let Some(view) = content_view.as_ref() {
+                                compose_comment =
+                                    Some((view.name.clone(), view.handle.clone()));
+                                compose = Some(ComposeInput::new());
+                                status = Some(format!(
+                                    "comment on `{}` · prefix `L12:` or `L12-14:` for a line hint · Enter send · Esc cancel",
+                                    view.name
+                                ));
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
@@ -3189,6 +3230,78 @@ fn send_message(
     }
     match rpc(client, "event.ingest", params) {
         Ok(_) => "✓ sent".to_string(),
+        Err(e) => format!("✗ {e}"),
+    }
+}
+
+/// Parse an optional leading line hint (`L12:` or `L12-14:`) from a comment
+/// body. Returns `(line_start, line_end, remaining_body)`. The hint is best
+/// effort — anything that doesn't parse is left as part of the body.
+fn parse_line_hint(text: &str) -> (Option<u32>, Option<u32>, String) {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix(['L', 'l']) else {
+        return (None, None, text.to_string());
+    };
+    let Some(colon) = rest.find(':') else {
+        return (None, None, text.to_string());
+    };
+    let (spec, body) = rest.split_at(colon);
+    let body = body[1..].trim_start().to_string();
+    let parse_u32 = |s: &str| s.trim().parse::<u32>().ok();
+    match spec.split_once('-') {
+        // A reversed range (`L14-12:`) is a typo, not a valid hint — the gateway
+        // would reject it and block the comment. Treat it as malformed and leave
+        // the body intact so the comment still sends (just without a line hint).
+        Some((a, b)) => match (parse_u32(a), parse_u32(b)) {
+            (Some(s), Some(e)) if e >= s => (Some(s), Some(e), body),
+            _ => (None, None, text.to_string()),
+        },
+        None => match parse_u32(spec) {
+            Some(s) => (Some(s), None, body),
+            None => (None, None, text.to_string()),
+        },
+    }
+}
+
+/// Attach an operator comment to a live content file (`content.comment`). The
+/// comment anchors to the version handle the operator was viewing and is
+/// delivered to the owning agent at its next turn. An optional `L12:`/`L12-14:`
+/// prefix on the body becomes the line hint.
+fn send_comment(
+    client: &RoomClient,
+    root_session_id: &str,
+    name: &str,
+    handle: &str,
+    text: &str,
+) -> String {
+    let (line_start, line_end, body) = parse_line_hint(text);
+    if body.trim().is_empty() {
+        return "✗ empty comment".to_string();
+    }
+    let mut params = serde_json::json!({
+        "session_id": root_session_id,
+        "name": name,
+        "body": body,
+    });
+    if let Some(map) = params.as_object_mut() {
+        if !handle.is_empty() {
+            map.insert("handle".to_string(), serde_json::json!(handle));
+        }
+        if let Some(s) = line_start {
+            map.insert("line_start".to_string(), serde_json::json!(s));
+        }
+        if let Some(e) = line_end {
+            map.insert("line_end".to_string(), serde_json::json!(e));
+        }
+    }
+    match rpc(client, "content.comment", params) {
+        Ok(v) => {
+            if v.get("drifted").and_then(|d| d.as_bool()) == Some(true) {
+                "✓ commented (file changed since — agent will re-read)".to_string()
+            } else {
+                "✓ commented".to_string()
+            }
+        }
         Err(e) => format!("✗ {e}"),
     }
 }
@@ -4704,7 +4817,7 @@ fn draw(
         let max_scroll = total.saturating_sub(inner_height) as u16;
         let scroll = view.scroll.min(max_scroll);
         let title = format!(
-            " 📝 {} [draft · not a vetted artifact] [Esc back] ",
+            " 📝 {} [draft · not a vetted artifact] [m comment · Esc back] ",
             view.name
         );
         f.render_widget(
@@ -6086,6 +6199,48 @@ mod tests {
         assert!(
             !text.iter().any(|t| t.contains("|------")),
             "raw delimiter should not appear; table should be rendered, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn parse_line_hint_extracts_single_and_range() {
+        assert_eq!(
+            parse_line_hint("L12: secret here"),
+            (Some(12), None, "secret here".to_string())
+        );
+        assert_eq!(
+            parse_line_hint("L12-14: range"),
+            (Some(12), Some(14), "range".to_string())
+        );
+        // Case-insensitive prefix.
+        assert_eq!(
+            parse_line_hint("l3: lower"),
+            (Some(3), None, "lower".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_line_hint_leaves_plain_and_malformed_bodies_intact() {
+        // No prefix.
+        assert_eq!(
+            parse_line_hint("just a comment"),
+            (None, None, "just a comment".to_string())
+        );
+        // Looks like a hint but isn't a number → treat whole thing as body.
+        assert_eq!(
+            parse_line_hint("Login: broken"),
+            (None, None, "Login: broken".to_string())
+        );
+        // Prefix without colon → body untouched.
+        assert_eq!(
+            parse_line_hint("L12 no colon"),
+            (None, None, "L12 no colon".to_string())
+        );
+        // Reversed range is a typo, not a valid hint → leave the body intact so
+        // the comment still sends (the gateway would otherwise reject it).
+        assert_eq!(
+            parse_line_hint("L14-12: oops"),
+            (None, None, "L14-12: oops".to_string())
         );
     }
 }
