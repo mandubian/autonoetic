@@ -2015,6 +2015,63 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.envelope.revoke" => {
+                #[derive(Deserialize)]
+                struct EnvelopeRevokeParams {
+                    envelope_id: i64,
+                    #[serde(default = "default_envelope_revoked_by")]
+                    revoked_by: String,
+                }
+                fn default_envelope_revoked_by() -> String {
+                    "operator".to_string()
+                }
+                let params: EnvelopeRevokeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.revoke: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::runtime::session_envelope::revoke_session_envelope(
+                    store.as_ref(),
+                    params.envelope_id,
+                    &params.revoked_by,
+                ) {
+                    Ok(Some(record)) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "envelope_id": params.envelope_id,
+                            "was_locked": record.locked_at.is_some(),
+                            "root_session_id": record.root_session_id,
+                        }),
+                    ),
+                    Ok(None) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session envelope {} not found", params.envelope_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.revoke failed: {}", e),
+                    ),
+                }
+            }
+
             "session.envelope.list" => {
                 #[derive(Deserialize)]
                 struct EnvelopeListParams {

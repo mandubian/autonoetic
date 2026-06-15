@@ -2215,6 +2215,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             } else {
                 false
             };
+        let mut pre_auth_envelope_id: Option<i64> = None;
 
         if !gate_bypassed_by_approval {
             let gate_new_agents = config
@@ -2243,12 +2244,20 @@ impl NativeTool for AgentRevisionPromoteTool {
                         &current_capabilities,
                     ) {
                         Ok(true) => {
+                            let envelope_id = crate::runtime::session_envelope::find_promote_with_envelope_id(
+                                &gateway_store,
+                                root,
+                                &args.agent_id,
+                                &current_capabilities,
+                            ).unwrap_or(None);
                             tracing::info!(
                                 target: "promotion",
                                 agent_id = %args.agent_id,
                                 root_session_id = %root,
-                                "pre-authorized by session envelope PromoteWith"
+                                envelope_id = ?envelope_id,
+                                "pre-authorized by session envelope PromoteWith (P-2.27)"
                             );
+                            pre_auth_envelope_id = envelope_id;
                             capability_delta = None;
                         }
                         Ok(false) => {}
@@ -2921,7 +2930,7 @@ impl NativeTool for AgentRevisionPromoteTool {
         }
 
         let short_ref = format!("{}@rev_{}", args.agent_id, rev.short_id);
-        Ok(serde_json::json!({
+        let mut response = serde_json::json!({
             "ok": true,
             "status": "promoted",
             "agent_id": args.agent_id,
@@ -2929,8 +2938,12 @@ impl NativeTool for AgentRevisionPromoteTool {
             "short_ref": short_ref,
             "previous_revision_id": previous_revision_id,
             "promotion_id": promotion_id,
-        })
-        .to_string())
+        });
+        if let Some(eid) = pre_auth_envelope_id {
+            response["pre_authorized_by_envelope"] = serde_json::json!(eid);
+            response["pre_auth_rule"] = serde_json::json!("P-2.27");
+        }
+        Ok(response.to_string())
     }
 }
 

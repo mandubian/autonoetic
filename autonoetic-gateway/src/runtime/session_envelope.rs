@@ -165,6 +165,18 @@ pub fn promotion_preauthorized_by_envelope(
     agent_id: &str,
     artifact_capabilities: &[Capability],
 ) -> Result<bool> {
+    Ok(find_promote_with_envelope_id(store, root_session_id, agent_id, artifact_capabilities)?.is_some())
+}
+
+/// Find the envelope ID of a locked `PromoteWith` that covers `artifact_capabilities`.
+/// Checks ALL matching entries (wildcard `agent_id: ""` + specific), returns the first
+/// that covers. Used for causal chain cross-referencing (P-2.27 traceability).
+pub fn find_promote_with_envelope_id(
+    store: &GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+    artifact_capabilities: &[Capability],
+) -> Result<Option<i64>> {
     for record in store.get_active_envelopes(root_session_id)? {
         if let Capability::PromoteWith {
             agent_id: pw_agent,
@@ -177,11 +189,11 @@ pub fn promotion_preauthorized_by_envelope(
                     artifact_capabilities,
                 )
             {
-                return Ok(true);
+                return Ok(Some(record.id));
             }
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn promote_with_sets_equivalent(a: &[Capability], b: &[Capability]) -> bool {
@@ -214,6 +226,11 @@ pub fn propose_promote_with_envelope(
 ) -> Result<Option<i64>> {
     if capabilities.is_empty() {
         return Ok(None);
+    }
+    if capabilities.iter().any(|c| matches!(c, Capability::PromoteWith { .. })) {
+        return Err(anyhow!(
+            "PromoteWith capabilities cannot contain nested PromoteWith"
+        ));
     }
     if promotion_preauthorized_by_envelope(store, root_session_id, agent_id, capabilities)? {
         return Ok(None);
@@ -473,6 +490,67 @@ pub fn lock_session_envelope(
         locked_at: now,
         hosts,
     })
+}
+
+/// Revoke a single envelope by ID. If it was locked and materialized as network
+/// grants, those grants are surgically revoked too (by source). Emits an
+/// `envelope.revoked` timeline event. Returns the envelope record that was
+/// revoked (for the response payload), or None if not found.
+pub fn revoke_session_envelope(
+    store: &GatewayStore,
+    envelope_id: i64,
+    revoked_by: &str,
+) -> Result<Option<SessionEnvelopeRecord>> {
+    let Some(record) = store.get_envelope_by_id(envelope_id)? else {
+        return Ok(None);
+    };
+
+    let was_locked = record.locked_at.is_some();
+    let hosts = match &record.capability {
+        Capability::NetworkAccess { hosts } => concrete_hosts(hosts),
+        _ => Vec::new(),
+    };
+
+    if !store.revoke_session_envelope_by_id(envelope_id)? {
+        return Ok(None);
+    }
+
+    if was_locked {
+        let source = format!("session-envelope:{envelope_id}");
+        let _ = store.revoke_session_grants_by_source(
+            &record.root_session_id,
+            &source,
+            &format!("envelope revoked by {revoked_by}"),
+        );
+    }
+
+    let (principal, role) = crate::runtime::session_timeline::decider_seat(revoked_by);
+    let refs = autonoetic_types::session_timeline::TimelineRefs {
+        plan_id: record.plan_id.clone(),
+        ..Default::default()
+    };
+    let event = crate::runtime::session_timeline::build_timeline_event(
+        record.root_session_id.clone(),
+        record.root_session_id.clone(),
+        None,
+        &principal,
+        &role,
+        "envelope.revoked",
+        None,
+        Some(serde_json::json!({
+            "envelope_id": envelope_id,
+            "hosts": hosts,
+            "source": record.source,
+            "was_locked": was_locked,
+            "revoked_by": revoked_by,
+        })),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(target: "session_timeline", error = %e, "envelope.revoked timeline emit failed");
+    }
+
+    Ok(Some(record))
 }
 
 /// Hosts previously observed in-session but not yet covered by a locked envelope.

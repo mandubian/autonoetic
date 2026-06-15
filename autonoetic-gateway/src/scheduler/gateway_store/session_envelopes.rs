@@ -160,6 +160,17 @@ impl GatewayStore {
         )?;
         Ok(count)
     }
+
+    /// Delete a single envelope row by ID. Returns true if a row was deleted.
+    /// Called by surgical revocation (`session.envelope.revoke` RPC).
+    pub fn revoke_session_envelope_by_id(&self, envelope_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM session_envelopes WHERE id = ?1",
+            params![envelope_id],
+        )?;
+        Ok(count > 0)
+    }
 }
 
 fn load_envelopes<P>(
