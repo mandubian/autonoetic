@@ -902,6 +902,7 @@ pub fn handle_agent_seed(
         "cli.seed",
         reason,
         None,
+        None,
     )?;
     let payload = serde_json::json!({
         "ok": true,
@@ -2805,6 +2806,9 @@ Use tools when needed.
                 updated_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
                 updated_by_id: "operator".to_string(),
                 reason: Some("initial seed".to_string()),
+                suspended_at: None,
+                suspended_reason: None,
+                suspended_by: None,
             })
             .expect("alias should upsert");
         store
@@ -2821,6 +2825,7 @@ Use tools when needed.
                 created_by_type: "human".to_string(),
                 created_by_id: "operator".to_string(),
                 origin_node_id: "gateway".to_string(),
+                pre_authorization: None,
             })
             .expect("promotion history should insert");
 
@@ -2893,6 +2898,9 @@ Use tools when needed.
                 updated_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
                 updated_by_id: "operator".to_string(),
                 reason: Some("seed".to_string()),
+                suspended_at: None,
+                suspended_reason: None,
+                suspended_by: None,
             })
             .expect("alias insert should succeed");
 

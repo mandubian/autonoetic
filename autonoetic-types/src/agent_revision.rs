@@ -208,6 +208,41 @@ pub struct AgentAliasRecord {
     pub updated_by_id: String,
     /// Optional free-text reason for the update.
     pub reason: Option<String>,
+    /// RFC3339 timestamp when the agent was suspended (None = active).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<String>,
+    /// Reason for suspension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_reason: Option<String>,
+    /// Actor that suspended the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_by: Option<String>,
+}
+
+impl AgentAliasRecord {
+    /// Create a basic alias record with no suspension.
+    pub fn new(
+        alias_id: String,
+        agent_id: String,
+        revision_id: String,
+        updated_at: String,
+        updated_by_type: String,
+        updated_by_id: String,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            alias_id,
+            agent_id,
+            revision_id,
+            updated_at,
+            updated_by_type,
+            updated_by_id,
+            reason,
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
+        }
+    }
 }
 
 /// Session-to-agent-revision binding, pinned at session start.
@@ -271,6 +306,13 @@ pub struct PromotionRecord {
     pub created_by_id: String,
     /// Origin node for provenance.
     pub origin_node_id: String,
+    /// JSON-encoded pre-authorization metadata when the capability gate was
+    /// bypassed. Examples:
+    /// `{"method":"envelope","envelope_id":42,"rule":"P-2.27"}`
+    /// `{"method":"escalation","escalation_id":"fed-xxx"}`
+    /// `{"method":"approval","approval_id":"appr-yyy"}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_authorization: Option<String>,
 }
 
 /// Crockford Base32 alphabet for human-friendly short IDs.

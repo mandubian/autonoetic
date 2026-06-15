@@ -49,6 +49,9 @@ fn seed_alias(store: &GatewayStore, agent_id: &str, revision_id: &str) {
             updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "test".to_string(),
             reason: Some("test".to_string()),
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
         })
         .unwrap();
 }

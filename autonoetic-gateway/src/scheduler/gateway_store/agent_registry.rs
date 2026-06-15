@@ -244,8 +244,9 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO agent_aliases (
-                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
+                suspended_at, suspended_reason, suspended_by
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 &alias.alias_id,
                 &alias.agent_id,
@@ -254,6 +255,9 @@ impl GatewayStore {
                 &alias.updated_by_type,
                 &alias.updated_by_id,
                 alias.reason,
+                alias.suspended_at,
+                alias.suspended_reason,
+                alias.suspended_by,
             ],
         )?;
         Ok(())
@@ -266,7 +270,8 @@ impl GatewayStore {
     pub fn resolve_alias(&self, alias_id: &str) -> Result<Option<AgentAliasRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
+            "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
+                    suspended_at, suspended_reason, suspended_by
              FROM agent_aliases WHERE alias_id = ?1",
         )?;
         let rows = stmt.query_map(params![alias_id], |row| {
@@ -278,6 +283,9 @@ impl GatewayStore {
                 updated_by_type: row.get(4)?,
                 updated_by_id: row.get(5)?,
                 reason: row.get(6)?,
+                suspended_at: row.get(7)?,
+                suspended_reason: row.get(8)?,
+                suspended_by: row.get(9)?,
             })
         })?;
         let mut results = Vec::new();
@@ -291,7 +299,8 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         if let Some(value) = filter {
             let mut stmt = conn.prepare(
-                "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
+                "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
+                        suspended_at, suspended_reason, suspended_by
                  FROM agent_aliases
                  WHERE agent_id = ?1 OR alias_id = ?1
                  ORDER BY agent_id ASC, alias_id ASC",
@@ -305,6 +314,9 @@ impl GatewayStore {
                     updated_by_type: row.get(4)?,
                     updated_by_id: row.get(5)?,
                     reason: row.get(6)?,
+                    suspended_at: row.get(7)?,
+                    suspended_reason: row.get(8)?,
+                    suspended_by: row.get(9)?,
                 })
             })?;
             let mut results = Vec::new();
@@ -314,7 +326,8 @@ impl GatewayStore {
             return Ok(results);
         } else {
             let mut stmt = conn.prepare(
-                "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
+                "SELECT alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
+                        suspended_at, suspended_reason, suspended_by
                  FROM agent_aliases
                  ORDER BY agent_id ASC, alias_id ASC",
             )?;
@@ -327,6 +340,9 @@ impl GatewayStore {
                     updated_by_type: row.get(4)?,
                     updated_by_id: row.get(5)?,
                     reason: row.get(6)?,
+                    suspended_at: row.get(7)?,
+                    suspended_reason: row.get(8)?,
+                    suspended_by: row.get(9)?,
                 })
             })?;
             let mut results = Vec::new();
@@ -407,8 +423,8 @@ impl GatewayStore {
             "INSERT INTO promotion_history (
                 promotion_id, kind, alias_id, agent_id, previous_revision_id,
                 new_revision_id, source_eval_run_id, reason, created_at,
-                created_by_type, created_by_id, origin_node_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                created_by_type, created_by_id, origin_node_id, pre_authorization
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 &record.promotion_id,
                 &format!("{:?}", record.kind),
@@ -422,6 +438,7 @@ impl GatewayStore {
                 &record.created_by_type,
                 &record.created_by_id,
                 &record.origin_node_id,
+                record.pre_authorization,
             ],
         )?;
         Ok(())
@@ -436,6 +453,7 @@ impl GatewayStore {
         created_by_id: &str,
         reason: Option<&str>,
         source_eval_run_id: Option<&str>,
+        pre_authorization: Option<&str>,
     ) -> Result<Option<String>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -468,10 +486,13 @@ impl GatewayStore {
         );
 
         let now = chrono::Utc::now().to_rfc3339();
+
+        // Clear any suspension when promoting — re-promotion = implicit unsuspend.
         tx.execute(
             "INSERT OR REPLACE INTO agent_aliases (
-                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
+                suspended_at, suspended_reason, suspended_by
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 agent_id,
                 agent_id,
@@ -479,7 +500,10 @@ impl GatewayStore {
                 now,
                 created_by_type,
                 created_by_id,
-                reason
+                reason,
+                None::<&str>, // suspended_at — cleared
+                None::<&str>, // suspended_reason — cleared
+                None::<&str>, // suspended_by — cleared
             ],
         )?;
 
@@ -501,8 +525,8 @@ impl GatewayStore {
             "INSERT INTO promotion_history (
                 promotion_id, kind, alias_id, agent_id, previous_revision_id,
                 new_revision_id, source_eval_run_id, reason, created_at,
-                created_by_type, created_by_id, origin_node_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                created_by_type, created_by_id, origin_node_id, pre_authorization
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 promotion_id,
                 "Promote",
@@ -516,6 +540,7 @@ impl GatewayStore {
                 created_by_type,
                 created_by_id,
                 "gateway",
+                pre_authorization,
             ],
         )?;
 
@@ -557,10 +582,20 @@ impl GatewayStore {
         );
 
         let now = chrono::Utc::now().to_rfc3339();
+        // Preserve existing suspension state during rollback — do not auto-unsuspend.
+        let (suspended_at, suspended_reason, suspended_by): (Option<String>, Option<String>, Option<String>) = tx
+            .query_row(
+                "SELECT suspended_at, suspended_reason, suspended_by FROM agent_aliases WHERE alias_id = ?1",
+                params![agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None, None));
         tx.execute(
             "INSERT OR REPLACE INTO agent_aliases (
-                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
+                suspended_at, suspended_reason, suspended_by
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 agent_id,
                 agent_id,
@@ -568,7 +603,10 @@ impl GatewayStore {
                 now,
                 created_by_type,
                 created_by_id,
-                reason
+                reason,
+                suspended_at,
+                suspended_reason,
+                suspended_by,
             ],
         )?;
 
@@ -596,8 +634,8 @@ impl GatewayStore {
             "INSERT INTO promotion_history (
                 promotion_id, kind, alias_id, agent_id, previous_revision_id,
                 new_revision_id, source_eval_run_id, reason, created_at,
-                created_by_type, created_by_id, origin_node_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                created_by_type, created_by_id, origin_node_id, pre_authorization
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 promotion_id,
                 "Rollback",
@@ -611,11 +649,46 @@ impl GatewayStore {
                 created_by_type,
                 created_by_id,
                 "gateway",
+                None::<&str>, // pre_authorization — rollbacks don't use this
             ],
         )?;
 
         tx.commit()?;
         Ok(current_revision_id)
+    }
+
+    /// Suspend an agent by setting its suspension fields. Use `agent.suspend` RPC.
+    pub fn suspend_agent(
+        &self,
+        agent_id: &str,
+        suspended_by: &str,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let updated = conn.execute(
+            "UPDATE agent_aliases SET
+                suspended_at = ?1,
+                suspended_reason = ?2,
+                suspended_by = ?3
+             WHERE alias_id = ?4 AND suspended_at IS NULL",
+            params![now, reason, suspended_by, agent_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Clear suspension fields on an agent. Use `agent.unsuspend` RPC.
+    pub fn unsuspend_agent(&self, agent_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE agent_aliases SET
+                suspended_at = NULL,
+                suspended_reason = NULL,
+                suspended_by = NULL
+             WHERE alias_id = ?1 AND suspended_at IS NOT NULL",
+            params![agent_id],
+        )?;
+        Ok(updated > 0)
     }
 
     /// Count `Promote` (not `Rollback`) entries for an alias whose
@@ -648,7 +721,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT promotion_id, kind, alias_id, agent_id, previous_revision_id,
                     new_revision_id, source_eval_run_id, reason, created_at,
-                    created_by_type, created_by_id, origin_node_id
+                    created_by_type, created_by_id, origin_node_id, pre_authorization
              FROM promotion_history WHERE agent_id = ?1 ORDER BY created_at DESC
              LIMIT ?2",
         )?;
@@ -672,6 +745,7 @@ impl GatewayStore {
                 created_by_type: row.get(9)?,
                 created_by_id: row.get(10)?,
                 origin_node_id: row.get(11)?,
+                pre_authorization: row.get(12)?,
             })
         })?;
         let mut results = Vec::new();
@@ -686,7 +760,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT promotion_id, kind, alias_id, agent_id, previous_revision_id,
                     new_revision_id, source_eval_run_id, reason, created_at,
-                    created_by_type, created_by_id, origin_node_id
+                    created_by_type, created_by_id, origin_node_id, pre_authorization
              FROM promotion_history WHERE agent_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![agent_id], |row| {
@@ -709,6 +783,7 @@ impl GatewayStore {
                 created_by_type: row.get(9)?,
                 created_by_id: row.get(10)?,
                 origin_node_id: row.get(11)?,
+                pre_authorization: row.get(12)?,
             })
         })?;
         let mut results = Vec::new();

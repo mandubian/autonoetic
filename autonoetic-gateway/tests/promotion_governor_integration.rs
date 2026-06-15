@@ -58,6 +58,7 @@ fn seed_promotion(
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "promotion_governor_integration".to_string(),
         origin_node_id: "gateway".to_string(),
+        pre_authorization: None,
     };
     store.insert_promotion_record(&rec).unwrap();
 }

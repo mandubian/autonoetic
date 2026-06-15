@@ -358,6 +358,9 @@ pub fn seed_agent_revision(
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "support".to_string(),
         reason: Some("test seed".to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias)?;
     Ok(revision_id)

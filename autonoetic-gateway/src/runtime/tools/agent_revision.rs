@@ -2217,6 +2217,10 @@ impl NativeTool for AgentRevisionPromoteTool {
             };
         let mut pre_auth_envelope_id: Option<i64> = None;
 
+        // pre_auth_envelope_id is set inside the gate bypass block,
+        // but referenced in the response — declared here for scope.
+        let mut pre_auth_envelope_id: Option<i64> = None;
+
         if !gate_bypassed_by_approval {
             let gate_new_agents = config
                 .map(|c| c.require_operator_approval_for_new_agents)
@@ -2901,6 +2905,13 @@ impl NativeTool for AgentRevisionPromoteTool {
             ),
         );
 
+        let pre_authorization = pre_auth_envelope_id.map(|eid| {
+            serde_json::json!({
+                "method": "envelope",
+                "envelope_id": eid,
+                "rule": "P-2.27",
+            }).to_string()
+        });
         let previous_revision_id = gateway_store.atomic_promote(
             &args.agent_id,
             &args.revision_id,
@@ -2909,6 +2920,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             &manifest.agent.id,
             args.reason.as_deref(),
             args.required_eval_run_id.as_deref(),
+            pre_authorization.as_deref(),
         )?;
 
         crate::bootstrap::update_latest_symlink(gateway_dir, &args.agent_id, &args.revision_id);

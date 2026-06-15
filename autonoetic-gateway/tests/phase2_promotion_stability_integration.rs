@@ -85,6 +85,9 @@ fn upsert_alias(store: &GatewayStore, agent_id: &str, revision_id: &str, reason:
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: Some(reason.to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 }
@@ -151,6 +154,7 @@ fn test_promote_changes_only_future_alias_resolution_and_running_session_stays_p
             "test-promoter",
             Some("promote for test"),
             None,
+            None,
         )
         .unwrap();
 
@@ -216,6 +220,7 @@ fn test_explicit_agent_ref_sessions_are_unaffected_by_later_promotion() {
             "agent",
             "test-promoter",
             Some("promote for explicit test"),
+            None,
             None,
         )
         .unwrap();
