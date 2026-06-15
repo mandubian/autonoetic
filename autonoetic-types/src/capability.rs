@@ -309,6 +309,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "SecurityRedTeam",
         "CapsuleExport",
         "PlanFrameAccess",
+        "WikiContribute",
         "PromoteWith",
     ]
 }
@@ -732,6 +733,7 @@ mod tests {
             Capability::SecurityRedTeam,
             Capability::CapsuleExport,
             Capability::PlanFrameAccess { patterns: vec![] },
+            Capability::WikiContribute,
             Capability::PromoteWith {
                 agent_id: "agent.test".into(),
                 capabilities: vec![Capability::ReadAccess {

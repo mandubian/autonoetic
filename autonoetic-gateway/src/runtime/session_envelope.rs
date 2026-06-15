@@ -158,30 +158,6 @@ fn find_matching_pending_envelope_id(
         .map(|p| p.id))
 }
 
-/// Locked `PromoteWith` capabilities for `agent_id` (empty `agent_id` matches any).
-pub fn promote_with_capabilities(
-    store: &GatewayStore,
-    root_session_id: &str,
-    agent_id: &str,
-) -> Result<Option<Vec<Capability>>> {
-    Ok(store
-        .get_active_envelopes(root_session_id)?
-        .into_iter()
-        .rev()
-        .find_map(|record| {
-            if let Capability::PromoteWith {
-                agent_id: pw_agent,
-                capabilities,
-            } = record.capability
-            {
-                if pw_agent.is_empty() || pw_agent == agent_id {
-                    return Some(capabilities);
-                }
-            }
-            None
-        }))
-}
-
 /// True when a locked session envelope `PromoteWith` covers `artifact_capabilities`.
 pub fn promotion_preauthorized_by_envelope(
     store: &GatewayStore,
@@ -189,13 +165,23 @@ pub fn promotion_preauthorized_by_envelope(
     agent_id: &str,
     artifact_capabilities: &[Capability],
 ) -> Result<bool> {
-    let Some(declared) = promote_with_capabilities(store, root_session_id, agent_id)? else {
-        return Ok(false);
-    };
-    Ok(autonoetic_types::capability::capability_set_covers(
-        &declared,
-        artifact_capabilities,
-    ))
+    for record in store.get_active_envelopes(root_session_id)? {
+        if let Capability::PromoteWith {
+            agent_id: pw_agent,
+            capabilities,
+        } = &record.capability
+        {
+            if (pw_agent.is_empty() || pw_agent == agent_id)
+                && autonoetic_types::capability::capability_set_covers(
+                    capabilities,
+                    artifact_capabilities,
+                )
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn promote_with_sets_equivalent(a: &[Capability], b: &[Capability]) -> bool {

@@ -142,6 +142,24 @@ fn lock_promote_with(
     envelope_id
 }
 
+fn lock_promote_with_at(
+    store: &GatewayStore,
+    root_session: &str,
+    agent_id: &str,
+    capabilities: Vec<Capability>,
+    created_at: &str,
+) -> i64 {
+    let promote_with = Capability::PromoteWith {
+        agent_id: agent_id.to_string(),
+        capabilities,
+    };
+    let envelope_id = store
+        .insert_envelope_proposal(root_session, &promote_with, "test", Some(created_at), None, created_at)
+        .unwrap();
+    lock_session_envelope(store, envelope_id, "operator").unwrap();
+    envelope_id
+}
+
 fn invoke_promote(h: &PromoteHarness, args_json: &str) -> serde_json::Value {
     let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
         patterns: vec!["*".to_string()],
@@ -267,6 +285,49 @@ fn promote_with_agent_id_mismatch_does_not_apply() {
     );
     assert_eq!(resp["error"], "capability_delta_requires_approval");
     assert_eq!(revision_promote_approvals(&h.store), 1);
+}
+
+#[test]
+fn any_matching_locked_promote_with_preauthorizes() {
+    let incoming_caps = "capabilities:\n  - type: NetworkAccess\n    hosts: [\"api.open-meteo.com\"]\n  - type: ReadAccess\n    scopes: [\"self.*\"]";
+    let h = setup_new_agent_harness(incoming_caps);
+
+    // Newer agent-specific entry is too narrow (network only).
+    lock_promote_with_at(
+        &h.store,
+        &h.root_session,
+        AGENT_ID,
+        vec![Capability::NetworkAccess {
+            hosts: vec!["api.open-meteo.com".to_string()],
+        }],
+        "2026-06-15T10:00:00Z",
+    );
+    // Older wildcard entry covers the full artifact capability set.
+    lock_promote_with_at(
+        &h.store,
+        &h.root_session,
+        "",
+        vec![
+            Capability::NetworkAccess {
+                hosts: vec!["api.open-meteo.com".to_string()],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            },
+        ],
+        "2026-06-15T09:00:00Z",
+    );
+
+    let resp = invoke_promote(
+        &h,
+        &format!(r#"{{"agent_id":"{AGENT_ID}","revision_id":"{INCOMING_REVISION}"}}"#),
+    );
+    assert_ne!(
+        resp["error"].as_str(),
+        Some("capability_delta_requires_approval"),
+        "any matching PromoteWith should pre-authorize: {resp}"
+    );
+    assert_eq!(revision_promote_approvals(&h.store), 0);
 }
 
 #[test]
