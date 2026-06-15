@@ -6,10 +6,7 @@
 //! 3. Emergency stop revokes all session envelopes for the root session.
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_gateway::runtime::session_envelope::{
-    lock_session_envelope, propose_discovered_envelope,
-};
-use autonoetic_types::capability::Capability;
+use autonoetic_gateway::runtime::session_envelope::propose_discovered_envelope;
 use autonoetic_types::causal_chain::ExecutionTraceRecord;
 use tempfile::tempdir;
 
@@ -56,13 +53,11 @@ fn envelope_grants_cover_observed_hosts() {
             .expect("proposal");
     assert!(!proposal.skipped);
 
-    let lock = lock_session_envelope(&store, proposal.envelope_id, "operator").unwrap();
-    assert_eq!(lock.grants_materialized, 1);
-
     assert!(
         store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]),
-        "locked envelope must cover observed host"
+        "auto-locked discovered envelope must cover observed host"
     );
+    assert_eq!(store.get_active_envelopes(root).unwrap().len(), 1);
 }
 
 #[test]
@@ -112,7 +107,7 @@ fn emergency_stop_revokes_session_envelopes() {
         propose_discovered_envelope(&store, root, "discovered", None, "operator")
             .unwrap()
             .expect("proposal");
-    lock_session_envelope(&store, proposal.envelope_id, "operator").unwrap();
+    let _ = proposal;
 
     assert_eq!(store.get_active_envelopes(root).unwrap().len(), 1);
 

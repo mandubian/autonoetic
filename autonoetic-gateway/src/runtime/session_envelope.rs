@@ -748,9 +748,8 @@ mod tests {
         assert!(!proposal.skipped);
         assert_eq!(proposal.hosts, vec!["api.open-meteo.com".to_string()]);
 
-        let lock = lock_session_envelope(&store, proposal.envelope_id, "operator")?;
-        assert_eq!(lock.grants_materialized, 1);
         assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+        assert_eq!(store.get_active_envelopes(root)?.len(), 1);
         Ok(())
     }
 
