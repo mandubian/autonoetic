@@ -3249,8 +3249,11 @@ fn parse_line_hint(text: &str) -> (Option<u32>, Option<u32>, String) {
     let body = body[1..].trim_start().to_string();
     let parse_u32 = |s: &str| s.trim().parse::<u32>().ok();
     match spec.split_once('-') {
+        // A reversed range (`L14-12:`) is a typo, not a valid hint — the gateway
+        // would reject it and block the comment. Treat it as malformed and leave
+        // the body intact so the comment still sends (just without a line hint).
         Some((a, b)) => match (parse_u32(a), parse_u32(b)) {
-            (Some(s), Some(e)) => (Some(s), Some(e), body),
+            (Some(s), Some(e)) if e >= s => (Some(s), Some(e), body),
             _ => (None, None, text.to_string()),
         },
         None => match parse_u32(spec) {
@@ -6232,6 +6235,12 @@ mod tests {
         assert_eq!(
             parse_line_hint("L12 no colon"),
             (None, None, "L12 no colon".to_string())
+        );
+        // Reversed range is a typo, not a valid hint → leave the body intact so
+        // the comment still sends (the gateway would otherwise reject it).
+        assert_eq!(
+            parse_line_hint("L14-12: oops"),
+            (None, None, "L14-12: oops".to_string())
         );
     }
 }
