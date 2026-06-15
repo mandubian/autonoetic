@@ -2660,6 +2660,56 @@ impl JsonRpcRouter {
                 )
             }
 
+            // Materialize the session's live content drafts into a real
+            // directory the operator can open in an external editor. Read-only
+            // snapshot, rebuilt on each call; never feeds back into the store
+            // (the agent's working state is untouched). Tier 1 of the live
+            // workbench (#524).
+            "content.project_live" => {
+                #[derive(Deserialize)]
+                struct ContentProjectLiveParams {
+                    session_id: String,
+                }
+                let params: ContentProjectLiveParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.project_live: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                match store.project_live(&params.session_id) {
+                    Ok((dir, files)) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "session_id": params.session_id,
+                            "path": dir.to_string_lossy(),
+                            "files": files,
+                            "count": files.len(),
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("content.project_live failed: {}", e),
+                    ),
+                }
+            }
+
             "content.read" => {
                 // Read a content-store entry's bytes by name or handle. Mirrors
                 // `artifact.read_file` but over the live content store.
