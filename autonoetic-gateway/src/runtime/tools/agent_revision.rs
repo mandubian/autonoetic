@@ -2237,30 +2237,24 @@ impl NativeTool for AgentRevisionPromoteTool {
             )?;
             if capability_delta.is_some() {
                 if let Some(ref root) = root_sid {
-                    match crate::runtime::session_envelope::promotion_preauthorized_by_envelope(
+                    match crate::runtime::session_envelope::find_promote_with_envelope_id(
                         &gateway_store,
                         root,
                         &args.agent_id,
                         &current_capabilities,
                     ) {
-                        Ok(true) => {
-                            let envelope_id = crate::runtime::session_envelope::find_promote_with_envelope_id(
-                                &gateway_store,
-                                root,
-                                &args.agent_id,
-                                &current_capabilities,
-                            ).unwrap_or(None);
+                        Ok(Some(envelope_id)) => {
                             tracing::info!(
                                 target: "promotion",
                                 agent_id = %args.agent_id,
                                 root_session_id = %root,
-                                envelope_id = ?envelope_id,
+                                envelope_id,
                                 "pre-authorized by session envelope PromoteWith (P-2.27)"
                             );
-                            pre_auth_envelope_id = envelope_id;
+                            pre_auth_envelope_id = Some(envelope_id);
                             capability_delta = None;
                         }
-                        Ok(false) => {}
+                        Ok(None) => {}
                         Err(e) => {
                             tracing::debug!(
                                 target: "promotion",

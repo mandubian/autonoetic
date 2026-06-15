@@ -511,17 +511,17 @@ pub fn revoke_session_envelope(
         _ => Vec::new(),
     };
 
-    if !store.revoke_session_envelope_by_id(envelope_id)? {
-        return Ok(None);
-    }
-
     if was_locked {
         let source = format!("session-envelope:{envelope_id}");
-        let _ = store.revoke_session_grants_by_source(
+        store.revoke_session_grants_by_source(
             &record.root_session_id,
             &source,
             &format!("envelope revoked by {revoked_by}"),
-        );
+        )?;
+    }
+
+    if !store.revoke_session_envelope_by_id(envelope_id)? {
+        return Ok(None);
     }
 
     let (principal, role) = crate::runtime::session_timeline::decider_seat(revoked_by);
@@ -753,6 +753,35 @@ mod tests {
             Capability::NetworkAccess { hosts } if hosts == &vec!["api.example.com".to_string()]
         ));
         assert_eq!(store.get_proposed_envelopes(root)?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn propose_promote_with_rejects_nested_promote_with() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-511-nested";
+
+        let err = propose_promote_with_envelope(
+            &store,
+            root,
+            "agent.test",
+            &[Capability::PromoteWith {
+                agent_id: "nested".to_string(),
+                capabilities: vec![Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                }],
+            }],
+            "test",
+            "operator",
+        )
+        .expect_err("nested PromoteWith should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("PromoteWith capabilities cannot contain nested PromoteWith"),
+            "unexpected error: {err}"
+        );
         Ok(())
     }
 

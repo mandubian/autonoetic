@@ -519,4 +519,21 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn revoke_session_envelope_by_id_deletes_exactly_one_row() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-511-store-revoke";
+        let now = "2026-06-14T12:00:00Z";
+        let cap = Capability::NetworkAccess {
+            hosts: vec!["api.example.com".to_string()],
+        };
+        let id = store.insert_envelope_proposal(root, &cap, "test", Some(now), None, now)?;
+        assert!(store.revoke_session_envelope_by_id(id)?);
+        assert!(!store.revoke_session_envelope_by_id(id)?);
+        assert!(!store.revoke_session_envelope_by_id(999_999)?);
+        assert!(store.get_envelope_by_id(id)?.is_none());
+        Ok(())
+    }
 }

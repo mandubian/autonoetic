@@ -207,7 +207,7 @@ fn locked_promote_with_skips_capability_ack_approval() {
     let incoming_caps = "capabilities:\n  - type: NetworkAccess\n    hosts: [\"api.open-meteo.com\"]\n  - type: ReadAccess\n    scopes: [\"self.*\"]";
     let h = setup_new_agent_harness(incoming_caps);
 
-    lock_promote_with(
+    let envelope_id = lock_promote_with(
         &h.store,
         &h.root_session,
         AGENT_ID,
@@ -234,6 +234,24 @@ fn locked_promote_with_skips_capability_ack_approval() {
         revision_promote_approvals(&h.store),
         0,
         "no RevisionPromote approval should be created when pre-authorized"
+    );
+    assert_eq!(
+        autonoetic_gateway::runtime::session_envelope::find_promote_with_envelope_id(
+            &h.store,
+            &h.root_session,
+            AGENT_ID,
+            &[
+                Capability::NetworkAccess {
+                    hosts: vec!["api.open-meteo.com".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+            ],
+        )
+        .expect("envelope lookup"),
+        Some(envelope_id),
+        "locked PromoteWith should be traceable to envelope ID"
     );
 }
 
