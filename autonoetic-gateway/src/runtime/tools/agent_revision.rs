@@ -2215,10 +2215,8 @@ impl NativeTool for AgentRevisionPromoteTool {
             } else {
                 false
             };
-        let mut pre_auth_envelope_id: Option<i64> = None;
-
-        // pre_auth_envelope_id is set inside the gate bypass block,
-        // but referenced in the response — declared here for scope.
+        // Set inside the gate bypass block below, but referenced in the
+        // response — declared here for scope.
         let mut pre_auth_envelope_id: Option<i64> = None;
 
         if !gate_bypassed_by_approval {

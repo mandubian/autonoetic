@@ -801,7 +801,10 @@ impl GatewayStore {
         envelope_id: i64,
     ) -> Result<Vec<(String, String, String)>> {
         let conn = self.conn.lock().unwrap();
-        let pattern = format!("%\"envelope_id\":{envelope_id}%");
+        // Trailing comma anchors the numeric value: the stored JSON is always
+        // `{"method":"envelope","envelope_id":<n>,"rule":...}`, so without it
+        // envelope 42 would also match 421, 423, 4242, … (substring).
+        let pattern = format!("%\"envelope_id\":{envelope_id},%");
         let mut stmt = conn.prepare(
             "SELECT agent_id, promotion_id, created_at
              FROM promotion_history
