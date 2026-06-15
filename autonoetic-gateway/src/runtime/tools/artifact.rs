@@ -371,11 +371,12 @@ impl NativeTool for ArtifactBuildTool {
 
         if let Some(gs) = gateway_store.as_ref() {
             let root = crate::runtime::content_store::root_session_id(sid);
-            if let Err(e) = crate::runtime::session_envelope::propose_discovered_envelope(
+            if let Err(e) = crate::runtime::session_envelope::propose_envelopes_after_artifact_build(
                 gs,
+                gw_dir,
                 root,
-                "discovered",
-                None,
+                &bundle.artifact_id,
+                &bundle.kind,
                 &_manifest.agent.id,
             ) {
                 tracing::debug!(

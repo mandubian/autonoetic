@@ -2220,7 +2220,12 @@ impl NativeTool for AgentRevisionPromoteTool {
             let gate_new_agents = config
                 .map(|c| c.require_operator_approval_for_new_agents)
                 .unwrap_or(true);
-            if let Some(delta) = check_capability_delta(
+            let root_sid = run_context
+                .and_then(|rc| Some(rc.root_session_id.clone()).filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    session_id.map(|s| crate::runtime::content_store::root_session_id(s).to_string())
+                });
+            let mut capability_delta = check_capability_delta(
                 &gateway_store,
                 gateway_dir,
                 &args.agent_id,
@@ -2228,7 +2233,36 @@ impl NativeTool for AgentRevisionPromoteTool {
                 &current_capabilities,
                 delta_mode,
                 gate_new_agents,
-            )? {
+            )?;
+            if capability_delta.is_some() {
+                if let Some(ref root) = root_sid {
+                    match crate::runtime::session_envelope::promotion_preauthorized_by_envelope(
+                        &gateway_store,
+                        root,
+                        &args.agent_id,
+                        &current_capabilities,
+                    ) {
+                        Ok(true) => {
+                            tracing::info!(
+                                target: "promotion",
+                                agent_id = %args.agent_id,
+                                root_session_id = %root,
+                                "pre-authorized by session envelope PromoteWith"
+                            );
+                            capability_delta = None;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::debug!(
+                                target: "promotion",
+                                error = %e,
+                                "session envelope pre-auth check failed; falling through to capability gate"
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(delta) = capability_delta {
                 let outgoing_revision_id = gateway_store
                     .resolve_alias(&args.agent_id)?
                     .map(|alias| alias.revision_id)

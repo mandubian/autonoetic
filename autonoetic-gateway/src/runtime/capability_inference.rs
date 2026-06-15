@@ -273,6 +273,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::CapsuleExport => "CapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
         Capability::WikiContribute => "WikiContribute",
+        Capability::PromoteWith { .. } => "PromoteWith",
     }
 }
 

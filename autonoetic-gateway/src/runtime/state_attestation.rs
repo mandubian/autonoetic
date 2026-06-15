@@ -250,6 +250,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::CapsuleExport => "CapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
         Capability::WikiContribute => "WikiContribute",
+        Capability::PromoteWith { .. } => "PromoteWith",
     }
     .to_string()
 }
