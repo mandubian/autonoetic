@@ -124,7 +124,8 @@ are visible from the first turn — before any artifact is built.
 | Key | Available when | Action |
 |---|---|---|
 | `c` | any time | Toggle the **live content tree** — every draft name the session has produced |
-| `o` | the content tree is open | **Open** the selected draft in a read-only viewer |
+| `o` | the content tree is open | **Open** the selected draft in the in-room read-only viewer |
+| `O` | the content pane is up | **Open in your editor** — project the live drafts to a real folder and launch it (see [Reading live code in your editor](#reading-live-code-in-your-editor)) |
 | `m` | a draft is open in the viewer | **Comment** on this file (see [Commenting on live files](#commenting-on-live-files)) |
 
 ### Input prompts (approve / reject / reply / message)
@@ -158,6 +159,28 @@ in. Sending is asynchronous — the UI never freezes while the agent works.
 
 > v1 attaches to an **existing** session. Start a brand-new session with
 > `autonoetic chat` or `autonoetic run`, then open the room on it.
+
+## Reading live code in your editor
+
+The in-room viewer (`o`) is markdown-oriented and fine for prose, but for code or
+multi-file drafts you'll want a real editor. Press **`O`** (from the content tree
+or a draft) to **project the session's current drafts to a real folder** and open
+it:
+
+- The gateway writes the live drafts to `…/.gateway/sessions/<id>/live/` — a
+  **read-only snapshot**, rebuilt each time you press `O` so it reflects the
+  current versions (renamed/deleted drafts drop out).
+- The room then best-effort launches a GUI editor (`$VISUAL`, else `code` /
+  `codium`). Either way the status line shows the folder path, so you can open it
+  manually if no launcher is found.
+- The folder lives **on the gateway host**. When the room runs on that same
+  machine (the usual local-dev setup) the editor opens directly; against a remote
+  gateway, use the printed path over your own mount/SSH.
+
+This is **read-only** — editing these files does not change what the agent is
+doing. To make changes the agent picks up, use the workbench flow
+(`artifact_project` → edit → `workbench_reconcile`); to flag an issue without
+editing, leave a comment (below).
 
 ## Commenting on live files
 

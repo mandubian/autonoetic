@@ -191,6 +191,10 @@ agents and the gateway, applied to presentation surfaces.
 - **`content.list`** / **`content.read`** — list the live session content drafts
   (name → handle + visibility) and read one version's bytes (the content tree
   pane).
+- **`content.project_live`** — materialize the session's current drafts into a
+  real directory (`sessions/<id>/live/`) the operator can open in an external
+  editor. Read-only snapshot, rebuilt on each call; never feeds back into the
+  store (the live workbench, Tier 1).
 - **`content.comment`** — attach an operator comment to a live content file
   (anchored to the viewed version handle, optional line hint); writes an
   `operator.comment` timeline row and delivers the framed comment to the owning
