@@ -425,6 +425,33 @@ Inspect one alias and its active revision details.
 autonoetic agent alias inspect <alias_id> [--json]
 ```
 
+### `autonoetic agent alias suspend`
+
+Suspend an agent: block new sessions while leaving in-flight sessions running.
+Read-only resolution (evaluation/diff) stays available, so an operator can keep
+inspecting a suspended agent to decide whether to lift it. Use when an already
+promoted agent is found to hold too much capability — pair with
+`session.envelope.revoke` to also strip its auto-approved grants.
+
+```bash
+autonoetic agent alias suspend <alias_id> [--reason <TEXT>] [--by <WHO>] [--json]
+```
+
+- Idempotent: suspending an already-suspended agent reports no change.
+- Re-promotion lifts the suspension automatically — unless the promotion was
+  pre-authorized by a locked session envelope.
+
+### `autonoetic agent alias unsuspend`
+
+Lift a suspension so the agent can start new sessions again.
+
+```bash
+autonoetic agent alias unsuspend <alias_id> [--json]
+```
+
+> Over the gateway API these map to the `agent.suspend` / `agent.unsuspend`
+> JSON-RPC methods.
+
 ### `autonoetic agent promotion-history`
 
 Inspect durable promote/rollback history.

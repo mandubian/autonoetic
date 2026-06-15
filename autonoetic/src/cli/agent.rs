@@ -807,6 +807,53 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
                 }
             }
         }
+        AgentAliasCommands::Suspend {
+            alias_id,
+            reason,
+            by,
+            json,
+        } => {
+            // Confirm the alias exists for a clearer error than a silent no-op.
+            if store.resolve_alias(alias_id)?.is_none() {
+                anyhow::bail!("Alias '{}' not found. Promote a revision first.", alias_id);
+            }
+            let changed = store.suspend_agent(alias_id, by, reason.as_deref())?;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "alias_id": alias_id,
+                        "suspended": changed,
+                    }))?
+                );
+            } else if changed {
+                println!(
+                    "Agent '{}' suspended. In-flight sessions keep running; no new session can start until unsuspended or re-promoted.",
+                    alias_id
+                );
+            } else {
+                println!("Agent '{}' was already suspended; no change.", alias_id);
+            }
+        }
+        AgentAliasCommands::Unsuspend { alias_id, json } => {
+            if store.resolve_alias(alias_id)?.is_none() {
+                anyhow::bail!("Alias '{}' not found. Promote a revision first.", alias_id);
+            }
+            let changed = store.unsuspend_agent(alias_id)?;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "alias_id": alias_id,
+                        "unsuspended": changed,
+                    }))?
+                );
+            } else if changed {
+                println!("Agent '{}' unsuspended; it can start new sessions again.", alias_id);
+            } else {
+                println!("Agent '{}' was not suspended; no change.", alias_id);
+            }
+        }
     }
     Ok(())
 }
