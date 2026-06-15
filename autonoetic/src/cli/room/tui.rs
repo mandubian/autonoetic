@@ -415,7 +415,8 @@ fn copy_clipboard(compose: &ComposeInput, clipboard: &mut Option<arboard::Clipbo
 
 /// Drill-down pane: raw event metadata or a structured plan review.
 struct DetailPane {
-    lines: Vec<String>,
+    /// Pre-rendered lines (markdown expanded once at open — not every frame).
+    rendered: Vec<Line<'static>>,
     /// When set, the pane is a plan review (not event metadata).
     plan_id: Option<String>,
     /// When set, the pane title names the `agent_spawn` target.
@@ -425,7 +426,7 @@ struct DetailPane {
 impl DetailPane {
     fn event(lines: Vec<String>, spawn_agent_id: Option<String>) -> Self {
         Self {
-            lines,
+            rendered: render_detail_lines(&lines),
             plan_id: None,
             spawn_agent_id,
         }
@@ -433,7 +434,7 @@ impl DetailPane {
 
     fn plan_review(plan_id: String, lines: Vec<String>) -> Self {
         Self {
-            lines,
+            rendered: render_detail_lines(&lines),
             plan_id: Some(plan_id),
             spawn_agent_id: None,
         }
@@ -539,6 +540,8 @@ fn build_info_panel(
             lines.push(a);
         }
     }
+    lines.push(String::new());
+    lines.push("  Help       /help  (all keys & commands)".to_string());
     if let Some(s) = status {
         lines.push(String::new());
         lines.push(format!("  Status     {s}"));
@@ -657,9 +660,7 @@ struct ContentEntry {
 
 /// Live session content tree: every `content_write`/`content_patch` name the
 /// session has registered, listed from t=0. Toggle with `c`, `j`/`k` to
-/// navigate, `o` to open a markdown-aware viewer for the selected entry.
-/// (Mirrors the `ArtifactViewer` keymap; `Enter` is intentionally not bound
-/// to opening the viewer because it is reserved for other dispatch in this TUI.)
+/// navigate, `Enter` or `o` to open a markdown-aware viewer for the selection.
 struct ContentTree {
     entries: Vec<ContentEntry>,
     selected: usize,
@@ -675,6 +676,48 @@ struct ContentView {
     handle: String,
     content: String,
     scroll: u16,
+}
+
+/// `content.read` for the tree's selected entry; surfaces RPC errors via `status`.
+fn open_selected_content(
+    client: &RoomClient,
+    root_session_id: &str,
+    tree: &ContentTree,
+    status: &mut Option<String>,
+) -> Option<ContentView> {
+    let entry = tree.entries.get(tree.selected)?;
+    let name = entry.name.clone();
+    match rpc(
+        client,
+        "content.read",
+        serde_json::json!({
+            "session_id": root_session_id,
+            "name": name,
+        }),
+    ) {
+        Ok(v) => {
+            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                let handle = v
+                    .get("handle")
+                    .and_then(|h| h.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(ContentView {
+                    name,
+                    handle,
+                    content: content.to_string(),
+                    scroll: 0,
+                })
+            } else {
+                *status = Some("content.read: no content field in response".to_string());
+                None
+            }
+        }
+        Err(e) => {
+            *status = Some(format!("content read failed: {e}"));
+            None
+        }
+    }
 }
 
 /// Extract artifact_ref from a timeline entry, if it has one.
@@ -1376,14 +1419,17 @@ pub fn run(
     'room: loop {
         // Drain pending input before any blocking gateway work so arrows / wheel
         // stay responsive even when timeline RPCs are slow.
+        let mut repaint_after_input = false;
         while event::poll(Duration::from_millis(0))? {
             match event::read()? {
                 Event::Paste(text) => {
                     if let Some(c) = compose.as_mut() {
                         c.insert_str(&text);
+                        repaint_after_input = true;
                     } else if let Some(gi) = input.as_mut() {
                         if gi.allow_freeform {
                             gi.buffer.push_str(&text.replace('\r', ""));
+                            repaint_after_input = true;
                         }
                     }
                 }
@@ -1391,6 +1437,7 @@ pub fn run(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    repaint_after_input = true;
                     // Compose mode: multi-line editor with cursor + clipboard (#405).
                     if let Some(c) = compose.as_mut() {
                         match handle_compose_key(c, &key, &mut clipboard) {
@@ -2051,6 +2098,13 @@ pub fn run(
                         KeyCode::Enter => {
                             if detail.is_some() {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
+                            } else if content_tree.is_some() && content_view.is_none() {
+                                if let Some(tree) = content_tree.as_ref() {
+                                    content_view =
+                                        open_selected_content(client, root_session_id, tree, &mut status);
+                                }
+                            } else if content_view.is_some() {
+                                // Content viewer overlay — don't drill timeline behind it.
                             } else if let Some(g) =
                                 view_gate.as_ref().filter(|g| g.kind == GateKind::Plan)
                             {
@@ -2271,36 +2325,8 @@ pub fn run(
                             if content_view.is_some() {
                                 // already viewing content; ignore
                             } else if let Some(tree) = content_tree.as_ref() {
-                                if let Some(entry) = tree.entries.get(tree.selected) {
-                                    let name = entry.name.clone();
-                                    match rpc(
-                                        client,
-                                        "content.read",
-                                        serde_json::json!({
-                                            "session_id": root_session_id.clone(),
-                                            "name": name,
-                                        }),
-                                    ) {
-                                        Ok(v) => {
-                                            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                                                let handle = v
-                                                    .get("handle")
-                                                    .and_then(|h| h.as_str())
-                                                    .unwrap_or("")
-                                                    .to_string();
-                                                content_view = Some(ContentView {
-                                                    name,
-                                                    handle,
-                                                    content: content.to_string(),
-                                                    scroll: 0,
-                                                });
-                                            } else {
-                                                status = Some("content.read: no content field in response".to_string());
-                                            }
-                                        }
-                                        Err(e) => status = Some(format!("content read failed: {e}")),
-                                    }
-                                }
+                                content_view =
+                                    open_selected_content(client, root_session_id, tree, &mut status);
                             } else if artifact_file_view.is_some() {
                             } else if let Some(ref viewer) = artifact_viewer {
                                 if let Some(file) = viewer.files.get(viewer.selected) {
@@ -2507,6 +2533,7 @@ pub fn run(
                     }
                 }
                 Event::Mouse(mouse) => {
+                    repaint_after_input = true;
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
                             if detail.is_some() {
@@ -2585,6 +2612,83 @@ pub fn run(
                 }
                 _ => {}
             }
+        }
+
+        // Paint immediately after input so detail panes and scroll don't wait on
+        // a blocking timeline RPC or a full row-height pass over the list.
+        if repaint_after_input {
+            spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
+            let early_spinner = SPINNER_FRAMES[spinner_frame];
+            let early_stats = compute_session_stats(&entries);
+            let early_gate_count = count_active_gates(&entries, &resolved);
+            let early_pending_plans =
+                unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
+            let early_safe_selected = selected.min(view_rows.len().saturating_sub(1));
+            let early_spawn = view_indexed
+                .get(early_safe_selected)
+                .and_then(|(_, src)| spawn_agent_for_row_source(&view_visible, *src));
+            let early_gate = active_gate(
+                &entries,
+                &view_visible,
+                view_indexed.get(early_safe_selected),
+                &resolved,
+                &acted,
+            );
+            let early_info = if info_panel_open {
+                Some(build_info_panel(
+                    root_session_id,
+                    TuiChannel.kind(),
+                    &early_stats,
+                    floor,
+                    squash,
+                    follow,
+                    show_reasoning,
+                    view_row_count,
+                    checkpoint_rows.len(),
+                    early_gate.as_ref(),
+                    early_pending_plans,
+                    status.as_deref(),
+                    early_spawn.as_deref(),
+                ))
+            } else {
+                None
+            };
+            terminal.draw(|f| {
+                draw(
+                    f,
+                    root_session_id,
+                    floor,
+                    squash,
+                    follow,
+                    &view_rows,
+                    selected,
+                    detail.as_ref(),
+                    detail_scroll,
+                    detail_h_scroll,
+                    input.as_ref(),
+                    compose.as_ref(),
+                    slash.as_deref(),
+                    status.as_deref(),
+                    early_gate.as_ref(),
+                    early_spinner,
+                    &HashMap::new(),
+                    show_reasoning,
+                    &early_stats,
+                    early_pending_plans,
+                    early_spawn.as_deref(),
+                    early_info.as_ref(),
+                    info_scroll,
+                    early_gate_count,
+                    artifact_viewer.as_ref(),
+                    artifact_file_view.as_ref(),
+                    content_tree.as_ref(),
+                    content_view.as_ref(),
+                    gate_modal.as_ref(),
+                    gate_modal
+                        .as_ref()
+                        .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
+                )
+            })?;
         }
 
         if force_timeline_refresh
@@ -2816,18 +2920,22 @@ pub fn run(
         let glyph_w = 3usize;
         let label_w = 12usize.min(width / 4);
         let content_w = width.saturating_sub(rail_w + glyph_w + label_w + 2);
-        let row_heights: Vec<usize> = (0..rows.len())
-            .map(|i| match &rows[i] {
-                RenderedRow::Line(spec) => {
-                    build_rich_row_lines(
-                        spec, i, &turn_boundaries, content_w, glyph_w, rail_w, label_w,
-                        spinner_glyph, show_reasoning,
-                    )
-                    .len()
-                }
-                RenderedRow::Collapsed { .. } => 1,
-            })
-            .collect();
+        let row_heights: Vec<usize> = if detail.is_some() && input.is_none() {
+            vec![1; rows.len()]
+        } else {
+            (0..rows.len())
+                .map(|i| match &rows[i] {
+                    RenderedRow::Line(spec) => {
+                        build_rich_row_lines(
+                            spec, i, &turn_boundaries, content_w, glyph_w, rail_w, label_w,
+                            spinner_glyph, show_reasoning,
+                        )
+                        .len()
+                    }
+                    RenderedRow::Collapsed { .. } => 1,
+                })
+                .collect()
+        };
         let row_count = rows.len();
         let safe_selected = selected.min(row_count.saturating_sub(1));
         let selected_spawn_agent = indexed
@@ -3392,7 +3500,7 @@ fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
             let Some(e) = entries.get(i) else {
                 return vec![];
             };
-            if let Some(turn_lines) = render::turn_summary(e, entries) {
+            if let Some(turn_lines) = render::turn_summary(e, entries, i) {
                 let mut base = render::format_detail(e);
                 base.push(String::new());
                 base.push("── turn summary ──".to_string());
@@ -3403,13 +3511,21 @@ fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
             }
         }
         RowSource::Run { start, len } => {
+            const MAX_RUN_DETAIL_LINES: usize = 64;
+            let show = len.min(MAX_RUN_DETAIL_LINES);
             let mut lines = vec![
                 format!("collapsed run — {len} routine events"),
                 "(press 's' to unsquash and inspect individually)".to_string(),
                 String::new(),
             ];
-            for e in entries.iter().skip(start).take(len) {
+            for e in entries.iter().skip(start).take(show) {
                 lines.push(format!("  · {}", render::render_line(e)));
+            }
+            if len > show {
+                lines.push(format!(
+                    "  … (+{} more — press 's' to unsquash)",
+                    len - show
+                ));
             }
             lines
         }
@@ -4539,14 +4655,13 @@ fn draw(
         if let Some(pane) = detail {
             let inner_width = chunks[list_idx].width.saturating_sub(2);
             let inner_height = chunks[list_idx].height.saturating_sub(2) as usize;
-            let text = render_detail_lines(&pane.lines);
-            let total_lines = detail_wrap_line_count(&text, inner_width);
+            let total_lines = detail_wrap_line_count(&pane.rendered, inner_width);
             let max_scroll = total_lines.saturating_sub(inner_height) as u16;
             let scroll = detail_scroll.min(max_scroll);
             let h = detail_h_scroll;
             let block_title = pane.block_title();
             f.render_widget(
-                Paragraph::new(text)
+                Paragraph::new(pane.rendered.clone())
                     .block(Block::default().borders(Borders::ALL).title(block_title))
                     .wrap(Wrap { trim: false })
                     .scroll((scroll, h)),
@@ -4725,11 +4840,11 @@ fn draw(
             _ => None,
         });
         let footer_w = chunks[footer_idx].width as usize;
-        let nav = "q quit · j↓ k↑ · Enter detail · o artifact · ? info";
+        let nav = "q quit · j↓ k↑ · /help · c content · o artifact · ? info";
         let nav_display = if footer_w < 50 {
-            "j↓ k↑ · o · ?"
+            "j↓ k↑ · /help · ?"
         } else if footer_w < 70 {
-            "q quit · j↓ k↑ · o · ?"
+            "q · j↓ k↑ · /help · o · ?"
         } else {
             nav
         };

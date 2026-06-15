@@ -14,10 +14,9 @@
 //! - `/cron` / `/cron list` — list scheduled jobs for the current session
 //! - `/plan` / `/plan approve [id]` — list or approve pending PlanFrames
 //! - `/quit` / `/q` — exit the TUI
-//! - `/help` / `/?` — show a one-line help summary
+//! - `/help` / `/?` — full command reference in the detail pane
 //!
-//! Anything else returns [`SlashCommand::Unknown`]; the caller surfaces a
-//! `✗ unknown command` status rather than executing.
+//! See [`help_lines()`] for the complete key map and slash-command list.
 
 /// Parsed slash-command. Variants carry their arguments so the dispatcher
 /// doesn't re-parse strings.
@@ -55,7 +54,8 @@ pub enum SlashCommand {
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
-pub const HELP_TEXT: &str = "/help for commands · /session · /fork · /plan · /cron · /wiki · /test · /quit";
+pub const HELP_TEXT: &str =
+    "/help all keys · /session · /fork · /plan · /cron · /wiki · /test · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -65,12 +65,16 @@ pub fn help_lines() -> Vec<String> {
         "Navigation".to_string(),
         "  j / ↓        scroll down".to_string(),
         "  k / ↑        scroll up".to_string(),
+        "  PgDn / PgUp  page down / up (timeline or detail pane)".to_string(),
         "  g / Home     jump to oldest row".to_string(),
-        "  G / End      jump to newest row".to_string(),
+        "  G / End      jump to newest row (enable follow)".to_string(),
+        "  [ / ]        jump to previous / next checkpoint row".to_string(),
         "  f / Space    toggle follow (pin to newest)".to_string(),
         "  Enter        event detail · plan review on plan row · answer pending question".to_string(),
-        "  Esc          close detail pane · cancel quit prompt".to_string(),
+        "  Esc          close detail / overlay · cancel quit · peek timeline from gate modal"
+            .to_string(),
         "  h / l        horizontal scroll in detail pane".to_string(),
+        "  ?            session info panel (stats, toggles, active gates)".to_string(),
         String::new(),
         "View".to_string(),
         "  a            cycle altitude floor (detail → normal → attention → error)".to_string(),
@@ -78,11 +82,19 @@ pub fn help_lines() -> Vec<String> {
         "  R            toggle 💭 reasoning prefix on agent rows".to_string(),
         "  F            fork from selected row's turn & switch to the branch".to_string(),
         String::new(),
-        "Gates".to_string(),
-        "  y / n        approve/reject approval · approve/request plan changes".to_string(),
+        "Content & artifacts".to_string(),
+        "  c            toggle live content tree (content.list)".to_string(),
+        "  Enter/o      open selected content · artifact file list · view file".to_string(),
+        "  m            comment on open content (prefix L12: or L12-14: for line hint)".to_string(),
+        String::new(),
+        "Gates (approval · wiki · escalation · plan · user.ask)".to_string(),
+        "  y / n        approve/reject approval · wiki · escalation · plan (n = revision request)"
+            .to_string(),
         "  p            open plan review for selected plan.pending row".to_string(),
         "  Enter/i/r    answer a pending user.ask (any row; newest ask wins)".to_string(),
-        "  1–9          pick a numbered option while answering".to_string(),
+        "  1–9          pick numbered option (interaction) · session from list · wiki proposal"
+            .to_string(),
+        "  g (modal)    leave timeline peek · return to gate resolve overlay".to_string(),
         String::new(),
         "Messaging".to_string(),
         "  i            compose operator message (multi-line editor)".to_string(),
@@ -90,18 +102,19 @@ pub fn help_lines() -> Vec<String> {
         "               ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy"
             .to_string(),
         String::new(),
-        "Slash commands  (press / then type, Enter to run)".to_string(),
+        "Slash commands  (press / or : then type, Enter to run)".to_string(),
         "  /help  /?    this guide".to_string(),
         "  /quit  /q    exit (press q twice to confirm)".to_string(),
-        "  /session <id>           switch to a root session".to_string(),
-        "  /session list [agent]   list recent sessions (1–9 to pick)".to_string(),
-        "  /session resume [agent] jump to most recent session".to_string(),
+        "  /session <id>              switch to a root session".to_string(),
+        "  /session list|ls [agent]   list recent sessions (1–9 to pick)".to_string(),
+        "  /session resume|latest|last [agent]  jump to most recent session".to_string(),
         "  /fork [--at-turn N] [msg]  branch this session and switch to it".to_string(),
-        "  /cron  /cron list       scheduled jobs for this session".to_string(),
-        "  /plan  /plan approve [id]  list or approve pending PlanFrames".to_string(),
-        "  /wiki proposals         list pending wiki proposals".to_string(),
-        "  /test <scenario>        inject synthetic events (dev)".to_string(),
-        "  /test help              list test scenarios".to_string(),
+        "  /cron  /cron list|ls       scheduled jobs for this session".to_string(),
+        "  /plan  /plan list          list pending PlanFrames".to_string(),
+        "  /plan approve|a|ok [id]    approve a plan frame".to_string(),
+        "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
+        "  /test <scenario>           inject synthetic events (dev)".to_string(),
+        "  /test help                 list test scenarios".to_string(),
         String::new(),
         "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
@@ -283,11 +296,25 @@ mod tests {
     #[test]
     fn help_lines_covers_slash_commands_and_navigation() {
         let text = help_lines().join("\n");
-        assert!(text.contains("/session list"));
-        assert!(text.contains("/cron"));
-        assert!(text.contains("user.ask"));
-        assert!(text.contains("i            compose"));
-        assert!(text.contains("j / ↓"));
+        for needle in [
+            "/session list",
+            "/session resume|latest|last",
+            "/cron",
+            "/wiki",
+            "/plan approve",
+            "user.ask",
+            "i            compose",
+            "j / ↓",
+            "PgDn / PgUp",
+            "[ / ]",
+            "?            session info",
+            "c            toggle",
+            "Enter/o      open",
+            "g (modal)",
+            "press / or :",
+        ] {
+            assert!(text.contains(needle), "help_lines missing {needle:?}");
+        }
     }
 
     #[test]

@@ -2094,18 +2094,30 @@ fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
 /// Multi-line detail view of a single event for the drill-down pane: metadata,
 /// refs, and the pretty-printed payload. Pure (no I/O) and channel-neutral.
 /// Render a `turn.end` detail by aggregating `llm.round` events from the same
-/// turn. Returns `None` if the entry is not `turn.end` or no rounds were found.
-pub fn turn_summary(entry: &SessionTimelineEntry, all: &[SessionTimelineEntry]) -> Option<Vec<String>> {
+/// turn. `end_index` is the entry's index in `all` — only events from the
+/// matching `turn.start` through `end_index` are scanned (not the full session).
+pub fn turn_summary(
+    entry: &SessionTimelineEntry,
+    all: &[SessionTimelineEntry],
+    end_index: usize,
+) -> Option<Vec<String>> {
     if entry.event_type != "turn.end" {
         return None;
     }
     let turn_id = entry.turn_id.as_deref()?;
+    let mut start_index = end_index;
+    for j in (0..=end_index).rev() {
+        if all[j].turn_id.as_deref() == Some(turn_id) && all[j].event_type == "turn.start" {
+            start_index = j;
+            break;
+        }
+    }
     let mut total_in: u64 = 0;
     let mut total_out: u64 = 0;
     let mut calls: u64 = 0;
     let mut models: Vec<String> = Vec::new();
     let mut in_turn = false;
-    for e in all {
+    for e in &all[start_index..=end_index] {
         if e.turn_id.as_deref() != Some(turn_id) {
             continue;
         }
