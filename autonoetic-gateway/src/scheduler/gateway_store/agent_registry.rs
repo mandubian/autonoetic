@@ -487,7 +487,25 @@ impl GatewayStore {
 
         let now = chrono::Utc::now().to_rfc3339();
 
-        // Clear any suspension when promoting — re-promotion = implicit unsuspend.
+        // Operator re-promotion clears suspension — re-promotion = implicit
+        // unsuspend. But an envelope-pre-authorized promotion is automatic (no
+        // fresh operator decision), so it must NOT silently reactivate a
+        // suspended agent: preserve the suspension in that case.
+        let (suspended_at, suspended_reason, suspended_by): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = if pre_authorization.is_some() {
+            tx.query_row(
+                "SELECT suspended_at, suspended_reason, suspended_by FROM agent_aliases WHERE alias_id = ?1",
+                params![agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None, None))
+        } else {
+            (None, None, None)
+        };
         tx.execute(
             "INSERT OR REPLACE INTO agent_aliases (
                 alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
@@ -501,9 +519,9 @@ impl GatewayStore {
                 created_by_type,
                 created_by_id,
                 reason,
-                None::<&str>, // suspended_at — cleared
-                None::<&str>, // suspended_reason — cleared
-                None::<&str>, // suspended_by — cleared
+                suspended_at,
+                suspended_reason,
+                suspended_by,
             ],
         )?;
 
