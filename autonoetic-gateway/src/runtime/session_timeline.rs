@@ -402,6 +402,38 @@ pub fn operator_message_event(
     )
 }
 
+/// Build the `operator.comment` timeline event — an operator comment anchored to
+/// a live content file (file-level + optional line hint). Attention altitude:
+/// the operator is flagging something they want addressed, so it must clear the
+/// default (Normal) floor. The `payload` carries the anchor + redacted body
+/// (built by the caller, which has the content handles). See
+/// `docs/design/operator-live-comments.md`.
+pub fn operator_comment_event(
+    session_id: &str,
+    commented_by: &str,
+    payload: serde_json::Value,
+) -> LiveDigestEventRecord {
+    let by = if commented_by.is_empty() {
+        "operator"
+    } else {
+        commented_by
+    };
+    let principal = Principal::human(by);
+    let role = SessionRole::Operator;
+    let root = crate::runtime::content_store::root_session_id(session_id);
+    build_timeline_event(
+        root.to_string(),
+        session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        "operator.comment",
+        None, // derive: max(base=Attention, role_floor(Operator))
+        Some(payload),
+        TimelineRefs::default(),
+    )
+}
+
 /// Base importance of a digest event type, before any role refinement.
 /// Base importance for a timeline event type. The effective altitude written
 /// to a row is normally `max(base_altitude(et), role_floor(role))` (see
@@ -466,6 +498,7 @@ pub fn operator_message_event(
 /// | `approval.cancelled` | Normal | abandonment, not a decision |
 /// | `escalation.pending` | Attention | escalation gate request |
 /// | `user.ask.pending` | Attention | conversational clarification gate |
+/// | `operator.comment` | Attention | operator comment anchored to a live file — an issue the agent should address |
 /// | `wiki.proposed` / `wiki.promoted` / `wiki.rejected` | Attention | wiki-contribution gate lifecycle |
 /// | `wiki.withdrawn` | Normal | abandonment, not a decision |
 /// | `divergence.intervention` | Attention | sentinel intervention (emit site raises to Error when critical) |
@@ -496,6 +529,7 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "approval.pending" | "approval.approved" | "approval.rejected"
         | "escalation.pending"
         | "user.ask.pending"
+        | "operator.comment"
         | "wiki.proposed" | "wiki.promoted" | "wiki.rejected"
         | "divergence.intervention"
         | "runtime.lock_drift"
@@ -897,6 +931,23 @@ mod tests {
         ] {
             assert_eq!(base_altitude(et), Altitude::Normal, "{et}");
         }
+    }
+
+    #[test]
+    fn operator_comment_is_attention_and_attributed() {
+        // An anchored operator comment flags an issue the agent should address;
+        // it must clear the Normal floor so a channel showing normal-and-above
+        // does not hide it.
+        assert_eq!(base_altitude("operator.comment"), Altitude::Attention);
+
+        let event = operator_comment_event(
+            "root-x/agent.coder",
+            "operator",
+            serde_json::json!({ "name": "config.yaml", "body": "secret here" }),
+        );
+        assert_eq!(event.event_type, "operator.comment");
+        assert_eq!(event.role.as_deref(), Some("operator"));
+        assert_eq!(event.altitude.as_deref(), Some("attention"));
     }
 
     #[test]

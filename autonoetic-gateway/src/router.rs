@@ -2730,6 +2730,199 @@ impl JsonRpcRouter {
                 }
             }
 
+            // Attach an operator comment to a live content file (file-level +
+            // optional line hint), record it on the timeline, and deliver it to
+            // the owning agent at its next turn. Comment-only — never mutates
+            // agent state. See `docs/design/operator-live-comments.md`.
+            "content.comment" => {
+                #[derive(Deserialize)]
+                struct ContentCommentParams {
+                    session_id: String,
+                    name: String,
+                    /// The content version the operator was viewing (anchor).
+                    /// Omitted → anchor to the current version.
+                    #[serde(default)]
+                    handle: Option<String>,
+                    #[serde(default)]
+                    line_start: Option<u32>,
+                    #[serde(default)]
+                    line_end: Option<u32>,
+                    body: String,
+                    #[serde(default = "default_commented_by")]
+                    commented_by: String,
+                }
+                fn default_commented_by() -> String {
+                    "operator".to_string()
+                }
+
+                let id = req.id.clone();
+                let auth_token = req.auth_token.clone();
+                let params: ContentCommentParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32602,
+                            format!("Invalid params for content.comment: {}", e),
+                        );
+                    }
+                };
+
+                if params.body.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "content.comment requires a non-empty body".to_string(),
+                    );
+                }
+                if let (Some(s), Some(e)) = (params.line_start, params.line_end) {
+                    if e < s {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32602,
+                            format!(
+                                "content.comment line_end ({e}) precedes line_start ({s})"
+                            ),
+                        );
+                    }
+                }
+
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                // Resolve the current version. A comment must reference a name
+                // that actually exists in the session.
+                let current_handle = match store
+                    .resolve_name_or_handle_to_handle(&params.session_id, &params.name)
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!("content.comment resolve failed: {}", e),
+                        );
+                    }
+                };
+                // Anchor to the viewed version; flag drift when the file has
+                // moved on since then.
+                let anchor_handle =
+                    params.handle.clone().unwrap_or_else(|| current_handle.clone());
+                let drifted = anchor_handle != current_handle;
+
+                let comment_id = format!(
+                    "cmt_{}",
+                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
+                );
+                let redacted_body =
+                    crate::log_redaction::redact_text_for_logs(&params.body);
+
+                let line_hint = match (params.line_start, params.line_end) {
+                    (Some(s), Some(e)) if e != s => format!(", lines {s}–{e}"),
+                    (Some(s), _) => format!(", line {s}"),
+                    _ => String::new(),
+                };
+
+                // Presentation: operator.comment row on the canonical timeline
+                // (Attention) so every channel surfaces it.
+                if let Some(ts) = self.execution.gateway_store() {
+                    let payload = serde_json::json!({
+                        "comment_id": comment_id,
+                        "name": params.name,
+                        "handle": anchor_handle,
+                        "current_handle": current_handle,
+                        "drifted": drifted,
+                        "line_start": params.line_start,
+                        "line_end": params.line_end,
+                        "body": redacted_body,
+                    });
+                    let event = crate::runtime::session_timeline::operator_comment_event(
+                        &params.session_id,
+                        &params.commented_by,
+                        payload,
+                    );
+                    if let Err(e) = ts.create_live_digest_event(&event) {
+                        tracing::debug!(
+                            target: "session_timeline",
+                            error = %e,
+                            "operator.comment timeline emit failed"
+                        );
+                    }
+                }
+
+                // Delivery: frame the comment and hand it to the owning agent at
+                // its next turn via the existing event.ingest path. A distinct
+                // event_type ("operator_comment", not "chat") avoids emitting a
+                // duplicate operator.message row.
+                let mut framed = format!(
+                    "Operator comment on file `{}` (version {}{}):\n> {}",
+                    params.name,
+                    anchor_handle,
+                    line_hint,
+                    params.body.trim()
+                );
+                if drifted {
+                    framed.push_str(&format!(
+                        "\n[note: this file has changed since the commented version \
+                         (current {current_handle}); re-read the current version \
+                         before acting on the line numbers.]"
+                    ));
+                }
+                framed.push_str(
+                    "\nAcknowledge this operator comment, then either address it \
+                     (say how) or explain why not.",
+                );
+
+                let ingest_req = JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method: "event.ingest".to_string(),
+                    params: serde_json::json!({
+                        "event_type": "operator_comment",
+                        "message": framed,
+                        "session_id": params.session_id,
+                        "async_mode": true,
+                        "metadata": {
+                            "source": "session_room",
+                            "kind": "operator_comment",
+                            "comment_id": comment_id,
+                            "name": params.name,
+                            "handle": anchor_handle,
+                            "current_handle": current_handle,
+                            "drifted": drifted,
+                        },
+                    }),
+                    auth_token,
+                };
+                let ingest_resp = Box::pin(self.dispatch(ingest_req)).await;
+                if let Some(err) = ingest_resp.error {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("content.comment delivery failed: {}", err.message),
+                    );
+                }
+
+                JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "ok": true,
+                        "comment_id": comment_id,
+                        "name": params.name,
+                        "handle": anchor_handle,
+                        "drifted": drifted,
+                    }),
+                )
+            }
+
             "gate.get_messages" => {
                 #[derive(Deserialize)]
                 struct GetMessagesParams {
