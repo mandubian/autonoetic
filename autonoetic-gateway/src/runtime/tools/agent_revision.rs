@@ -2298,13 +2298,15 @@ impl NativeTool for AgentRevisionPromoteTool {
                 let approval_level = config
                     .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
                     .unwrap_or(autonoetic_types::background::ApprovalLevel::Operator);
+                let (root_session_id, workflow_id, task_id) =
+                    approval_execution_context(run_context, session_id);
                 let mut req = autonoetic_types::background::ApprovalRequest {
                     request_id: request_id.clone(),
                     agent_id: manifest.agent.id.clone(),
                     session_id: session_id.unwrap_or("").to_string(),
-                    root_session_id: None,
-                    workflow_id: None,
-                    task_id: None,
+                    root_session_id,
+                    workflow_id,
+                    task_id,
                     action,
                     created_at: chrono::Utc::now().to_rfc3339(),
                     status: None,
@@ -2333,12 +2335,6 @@ impl NativeTool for AgentRevisionPromoteTool {
             code_excerpts: None,
             risk_summary: None,
                 };
-                // Resolve root_session_id so the approval is visible on the
-                // canonical timeline (human_gate does this via resolve_execution_context).
-                let root_sid = run_context
-                    .and_then(|rc| Some(rc.root_session_id.clone()).filter(|s| !s.is_empty()))
-                    .or_else(|| session_id.map(|s| crate::runtime::content_store::root_session_id(s).to_string()));
-                req.root_session_id = root_sid.clone();
 
                 gateway_store.create_approval(&mut req)?;
                 if let (Some(config), Some((workflow_id, spec))) = (config, single_flight_scope.as_ref()) {
@@ -3353,6 +3349,31 @@ impl NativeTool for AgentRevisionDiffTool {
     }
 }
 
+/// Resolve `(root_session_id, workflow_id, task_id)` for approval rows created
+/// from native tools. Mirrors `human_gate::resolve_execution_context` so
+/// workflow-bound promote gates unblock via `unblock_task_on_approval`.
+fn approval_execution_context(
+    run_context: Option<&NativeToolRunContext>,
+    session_id: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    if let Some(rc) = run_context {
+        let root_session_id = if rc.root_session_id.is_empty() {
+            None
+        } else {
+            Some(rc.root_session_id.clone())
+        };
+        (root_session_id, rc.workflow_id.clone(), rc.task_id.clone())
+    } else if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        (
+            Some(crate::runtime::content_store::root_session_id(sid).to_string()),
+            None,
+            None,
+        )
+    } else {
+        (None, None, None)
+    }
+}
+
 /// Look up an existing approval by ID and decide whether the R++2 gate may be
 /// bypassed for this retry. All four conditions must hold:
 ///   (a) the action is `RevisionPromote` for exactly this `(agent_id, revision_id)`,
@@ -3555,6 +3576,46 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod approval_execution_context_tests {
+    use super::*;
+    use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
+
+    #[test]
+    fn run_context_supplies_workflow_task_and_root() {
+        let rc = NativeToolRunContext {
+            registry: ActiveExecutionRegistry::new(),
+            root_session_id: "session-root".to_string(),
+            workflow_id: Some("wf-abc".to_string()),
+            task_id: Some("task-xyz".to_string()),
+            session_id: "session-root/specialized_builder.default-child".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            live_digest: None,
+            live_report: None,
+            user_id: None,
+            artifact_id: None,
+            sentinel_suppress_target: None,
+            discovered_tools: None,
+            wake_hints_map: None,
+            wake_hint: None,
+        };
+        let (root, wf, task) =
+            approval_execution_context(Some(&rc), Some(rc.session_id.as_str()));
+        assert_eq!(root.as_deref(), Some("session-root"));
+        assert_eq!(wf.as_deref(), Some("wf-abc"));
+        assert_eq!(task.as_deref(), Some("task-xyz"));
+    }
+
+    #[test]
+    fn session_only_falls_back_to_root_without_workflow_task() {
+        let sid = "session-root/specialized_builder.default-child";
+        let (root, wf, task) = approval_execution_context(None, Some(sid));
+        assert_eq!(root.as_deref(), Some("session-root"));
+        assert!(wf.is_none());
+        assert!(task.is_none());
+    }
 }
 
 #[cfg(test)]

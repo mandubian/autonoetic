@@ -1557,11 +1557,17 @@ fn decide_request_with_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{should_notify_parent_session, should_resume_waiting_session};
-    use crate::scheduler::workflow_store::{ensure_workflow_for_root_session, save_task_run};
+    use super::{
+        should_notify_parent_session, should_resume_waiting_session, ApproveOptions,
+        approve_request_with_options,
+    };
+    use crate::scheduler::workflow_store::{
+        ensure_workflow_for_root_session, load_task_run, save_task_run,
+    };
     use autonoetic_types::background::{
         ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
     };
+    use autonoetic_types::notification::NotificationType;
     use autonoetic_types::config::GatewayConfig;
     use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
     use tempfile::tempdir;
@@ -2062,9 +2068,112 @@ mod tests {
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(
-            pending.is_empty(),
+            !pending
+                .iter()
+                .any(|n| n.notification_type == NotificationType::ApprovalResolved),
             "workflow-bound approvals should continue through workflow re-queue only"
         );
+    }
+
+    #[test]
+    fn revision_promote_workflow_bound_approval_unblocks_task_without_direct_notify() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        let agent_dir = agents_dir.join("specialized_builder.default");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "demo-session", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-promote".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: "demo-session/specialized_builder.default-abc".to_string(),
+            parent_session_id: "demo-session".to_string(),
+            status: TaskRunStatus::AwaitingApproval,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: Some("Promote after approval".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        let mut request = ApprovalRequest {
+            request_id: "apr-promote-wf".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: task.session_id.clone(),
+            action: ScheduledAction::RevisionPromote {
+                agent_id: "weather-lookup".to_string(),
+                revision_id: "rev_sha256:test".to_string(),
+                outgoing_revision_id: String::new(),
+                added_capabilities: vec!["NetworkAccess".to_string()],
+                broadened_capabilities: vec![],
+                payload: None,
+            },
+            created_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: Some(wf.workflow_id.clone()),
+            task_id: Some(task.task_id.clone()),
+            root_session_id: Some("demo-session".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+        };
+        store.create_approval(&mut request).unwrap();
+
+        super::approve_request_with_options(
+            &cfg,
+            Some(&store),
+            &request.request_id,
+            "operator",
+            Some("operator approved for test".to_string()),
+            None,
+            None,
+            None,
+            ApproveOptions {
+                confirm_phrase: Some("promote weather-lookup rev_sha256:test".to_string()),
+                acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let pending = store.list_pending_notifications().unwrap();
+        assert!(
+            !pending
+                .iter()
+                .any(|n| n.notification_type == NotificationType::ApprovalResolved),
+            "revision_promote workflow-bound approvals should not direct-notify the waiting session"
+        );
+
+        let loaded = load_task_run(&cfg, Some(&store), &wf.workflow_id, &task.task_id)
+            .unwrap()
+            .expect("task run should exist after approval");
+        assert_eq!(loaded.status, TaskRunStatus::Runnable);
     }
 
     #[test]

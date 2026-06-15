@@ -1489,6 +1489,7 @@ pub fn run(
     let mut view_row_heights: Vec<usize> = Vec::new();
     let mut view_viewport_offset = 0usize;
     let mut view_list_height = 0usize;
+    let mut view_turn_boundaries: HashMap<usize, bool> = HashMap::new();
 
     'room: loop {
         // Drain pending input before any blocking gateway work so arrows / wheel
@@ -2217,15 +2218,18 @@ pub fn run(
                                     acknowledged_capabilities: Vec::new(),
                                 });
                                 status = None;
-                            } else {
-                                detail = view_indexed.get(selected).map(|(_, src)| {
-                                    DetailPane::event(
-                                        detail_for(&view_visible, *src),
-                                        spawn_agent_for_row_source(&view_visible, *src),
-                                    )
-                                });
-                                detail_scroll = 0;
-                                detail_h_scroll = 0;
+                            } else if let Some((_, src)) = view_indexed.get(selected) {
+                                if let Some(msg) = open_row_detail_or_plan_review(
+                                    client,
+                                    root_session_id,
+                                    &view_visible,
+                                    *src,
+                                    &mut detail,
+                                    &mut detail_scroll,
+                                    &mut detail_h_scroll,
+                                ) {
+                                    status = Some(msg);
+                                }
                             }
                         }
                         KeyCode::Char('a') => {
@@ -2666,32 +2670,16 @@ pub fn run(
                                     mouse.column,
                                     mouse.row,
                                 ) {
-                                    let gate_at_row = selectable_gate(
-                                        &view_visible,
-                                        view_indexed.get(idx),
-                                        &resolved,
-                                        &acted,
-                                    );
-                                    if let Some(g) = gate_at_row
-                                        .filter(|g| g.kind == GateKind::Plan)
-                                    {
-                                        let _ = open_plan_review(
+                                    if let Some((_, src)) = view_indexed.get(idx) {
+                                        let _ = open_row_detail_or_plan_review(
                                             client,
                                             root_session_id,
-                                            &g.id,
+                                            &view_visible,
+                                            *src,
                                             &mut detail,
                                             &mut detail_scroll,
                                             &mut detail_h_scroll,
                                         );
-                                    } else {
-                                        detail = view_indexed.get(idx).map(|(_, src)| {
-                                            DetailPane::event(
-                                                detail_for(&view_visible, *src),
-                                                spawn_agent_for_row_source(&view_visible, *src),
-                                            )
-                                        });
-                                        detail_scroll = 0;
-                                        detail_h_scroll = 0;
                                     }
                                 }
                             }
@@ -2705,8 +2693,10 @@ pub fn run(
 
         // Paint immediately after input so detail panes and scroll don't wait on
         // a blocking timeline RPC or a full row-height pass over the list.
+        // Use cached turn_boundaries and spinner to avoid visual jumps vs the
+        // next full refresh (empty boundaries change row layout; spinner advances
+        // skip frames in double-draw).
         if repaint_after_input {
-            spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
             let early_spinner = SPINNER_FRAMES[spinner_frame];
             let early_stats = compute_session_stats(&entries);
             let early_gate_count = count_active_gates(&entries, &resolved);
@@ -2760,7 +2750,7 @@ pub fn run(
                     status.as_deref(),
                     early_gate.as_ref(),
                     early_spinner,
-                    &HashMap::new(),
+                    &view_turn_boundaries,
                     show_reasoning,
                     &early_stats,
                     early_pending_plans,
@@ -2915,6 +2905,24 @@ pub fn run(
                 _ => None,
             })
             .collect();
+
+        // Keep an open plan-review pane aligned with the latest pending revision
+        // (e.g. v2 amend while v1 review was still on screen).
+        if input.is_none() && compose.is_none() {
+            if let Some(plan_id) = detail
+                .as_ref()
+                .and_then(|d| d.plan_id.clone())
+            {
+                let _ = open_plan_review(
+                    client,
+                    root_session_id,
+                    &plan_id,
+                    &mut detail,
+                    &mut detail_scroll,
+                    &mut detail_h_scroll,
+                );
+            }
+        }
 
         let new_plan = if input.is_none() && compose.is_none() {
             newest_pending_plan_event(&visible, &indexed, &resolved, &acted)
@@ -3101,6 +3109,7 @@ pub fn run(
         view_row_heights = row_heights;
         view_viewport_offset = viewport_offset;
         view_list_height = list_height;
+        view_turn_boundaries = turn_boundaries;
 
         let _ = event::poll(Duration::from_millis(FRAME_MS))?;
     }
@@ -4316,6 +4325,58 @@ fn format_plan_frame_lines(plan: &autonoetic_types::plan_frame::PlanFrame, for_r
         lines.push("→ y approve · n request changes (opens message compose)".to_string());
     }
     lines
+}
+
+fn plan_id_from_entry(entry: &SessionTimelineEntry) -> Option<String> {
+    plan_id_for(entry).or_else(|| render::extract_plan_proposal_id(entry))
+}
+
+/// Plan id referenced by a rendered row (including resolved `plan.pending` rows).
+fn plan_id_for_row_source(
+    visible: &[SessionTimelineEntry],
+    src: RowSource,
+) -> Option<String> {
+    match src {
+        RowSource::Single(i) => visible.get(i).and_then(plan_id_from_entry),
+        RowSource::Run { start, len } => visible
+            .iter()
+            .skip(start)
+            .take(len)
+            .rev()
+            .find_map(plan_id_from_entry),
+    }
+}
+
+/// Drill-down for a timeline row: prefer the live pending PlanFrame revision
+/// from the gateway over the row's frozen event payload.
+fn open_row_detail_or_plan_review(
+    client: &RoomClient,
+    root_session_id: &str,
+    visible: &[SessionTimelineEntry],
+    src: RowSource,
+    detail: &mut Option<DetailPane>,
+    scroll: &mut u16,
+    h_scroll: &mut u16,
+) -> Option<String> {
+    if let Some(plan_id) = plan_id_for_row_source(visible, src) {
+        if open_plan_review(
+            client,
+            root_session_id,
+            &plan_id,
+            detail,
+            scroll,
+            h_scroll,
+        ) {
+            return Some(format!("plan review: {plan_id} (latest pending revision)"));
+        }
+    }
+    *detail = Some(DetailPane::event(
+        detail_for(visible, src),
+        spawn_agent_for_row_source(visible, src),
+    ));
+    *scroll = 0;
+    *h_scroll = 0;
+    None
 }
 
 fn fetch_pending_plan(
@@ -5717,6 +5778,18 @@ mod tests {
         // A non-gate event is not resolvable.
         let other = vec![gate_entry("tool.completed")];
         assert!(selectable_gate(&other, Some(&single), &empty, &empty).is_none());
+    }
+
+    #[test]
+    fn plan_id_for_row_source_reads_resolved_plan_pending_row() {
+        let mut v1 = gate_entry("plan.pending");
+        v1.refs.plan_id = Some("plan-1".into());
+        v1.payload = Some(r#"{"plan_id":"plan-1","version":1}"#.into());
+        let visible = vec![v1];
+        assert_eq!(
+            plan_id_for_row_source(&visible, RowSource::Single(0)).as_deref(),
+            Some("plan-1")
+        );
     }
 
     #[test]
