@@ -184,6 +184,14 @@ pub enum Capability {
         #[serde(default = "default_patterns_all")]
         patterns: Vec<String>,
     },
+
+    /// Pre-authorizes promotion of an agent whose declared capabilities fall
+    /// within this set. Checked at promotion time against locked session envelopes.
+    PromoteWith {
+        #[serde(default)]
+        agent_id: String,
+        capabilities: Vec<Capability>,
+    },
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -301,6 +309,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "SecurityRedTeam",
         "CapsuleExport",
         "PlanFrameAccess",
+        "PromoteWith",
     ]
 }
 
@@ -331,7 +340,21 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::CapsuleExport => "CapsuleExport".to_string(),
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
         Capability::WikiContribute => "WikiContribute".to_string(),
+        Capability::PromoteWith { .. } => "PromoteWith".to_string(),
     }
+}
+
+/// True when every capability in `artifact_caps` is equal to or narrower than
+/// some capability in `declared`.
+pub fn capability_set_covers(declared: &[Capability], artifact_caps: &[Capability]) -> bool {
+    let declared_map = capability_map(declared);
+    artifact_caps.iter().all(|ac| {
+        let name = capability_type_name(ac);
+        match declared_map.get(&name) {
+            None => false,
+            Some(dc) => capability_broadening(&name, dc, ac).is_none(),
+        }
+    })
 }
 
 fn capability_broadening(
@@ -709,6 +732,12 @@ mod tests {
             Capability::SecurityRedTeam,
             Capability::CapsuleExport,
             Capability::PlanFrameAccess { patterns: vec![] },
+            Capability::PromoteWith {
+                agent_id: "agent.test".into(),
+                capabilities: vec![Capability::ReadAccess {
+                    scopes: vec!["self.*".into()],
+                }],
+            },
         ];
         for cap in &samples {
             let name = capability_type_name(cap);
@@ -719,5 +748,27 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn capability_set_covers_equal_and_narrower() {
+        let declared = vec![
+            Capability::NetworkAccess {
+                hosts: vec!["api.example.com".into(), "cdn.example.com".into()],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".into()],
+            },
+        ];
+        let artifact = vec![
+            Capability::NetworkAccess {
+                hosts: vec!["api.example.com".into()],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".into()],
+            },
+        ];
+        assert!(capability_set_covers(&declared, &artifact));
+        assert!(!capability_set_covers(&artifact, &declared));
     }
 }

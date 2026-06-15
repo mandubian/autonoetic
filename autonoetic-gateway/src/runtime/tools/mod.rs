@@ -640,6 +640,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::CapsuleExport => "CapsuleExport".to_string(),
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
         Capability::WikiContribute => "WikiContribute".to_string(),
+        Capability::PromoteWith { .. } => "PromoteWith".to_string(),
     }
 }
 

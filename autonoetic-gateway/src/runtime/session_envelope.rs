@@ -106,7 +106,9 @@ pub fn materialize_envelope(
                     None,
                 );
             }
-            // PromoteWith and future variants are stored in session_envelopes only.
+            Capability::PromoteWith { .. } => {
+                // Stored in session_envelopes only; checked at promotion time (P-2.27).
+            }
             _ => {}
         }
     }
@@ -154,6 +156,151 @@ fn find_matching_pending_envelope_id(
             )
         })
         .map(|p| p.id))
+}
+
+/// Locked `PromoteWith` capabilities for `agent_id` (empty `agent_id` matches any).
+pub fn promote_with_capabilities(
+    store: &GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+) -> Result<Option<Vec<Capability>>> {
+    Ok(store
+        .get_active_envelopes(root_session_id)?
+        .into_iter()
+        .rev()
+        .find_map(|record| {
+            if let Capability::PromoteWith {
+                agent_id: pw_agent,
+                capabilities,
+            } = record.capability
+            {
+                if pw_agent.is_empty() || pw_agent == agent_id {
+                    return Some(capabilities);
+                }
+            }
+            None
+        }))
+}
+
+/// True when a locked session envelope `PromoteWith` covers `artifact_capabilities`.
+pub fn promotion_preauthorized_by_envelope(
+    store: &GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+    artifact_capabilities: &[Capability],
+) -> Result<bool> {
+    let Some(declared) = promote_with_capabilities(store, root_session_id, agent_id)? else {
+        return Ok(false);
+    };
+    Ok(autonoetic_types::capability::capability_set_covers(
+        &declared,
+        artifact_capabilities,
+    ))
+}
+
+fn promote_with_sets_equivalent(a: &[Capability], b: &[Capability]) -> bool {
+    autonoetic_types::capability::capability_set_covers(a, b)
+        && autonoetic_types::capability::capability_set_covers(b, a)
+}
+
+fn has_matching_pending_promote_with(
+    store: &GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+    capabilities: &[Capability],
+) -> Result<bool> {
+    Ok(store.get_proposed_envelopes(root_session_id)?.into_iter().any(|record| {
+        matches!(
+            &record.capability,
+            Capability::PromoteWith { agent_id: pw, capabilities: pending }
+                if pw == agent_id && promote_with_sets_equivalent(pending, capabilities)
+        )
+    }))
+}
+
+pub fn propose_promote_with_envelope(
+    store: &GatewayStore,
+    root_session_id: &str,
+    agent_id: &str,
+    capabilities: &[Capability],
+    source: &str,
+    actor_id: &str,
+) -> Result<Option<i64>> {
+    if capabilities.is_empty() {
+        return Ok(None);
+    }
+    if promotion_preauthorized_by_envelope(store, root_session_id, agent_id, capabilities)? {
+        return Ok(None);
+    }
+    if has_matching_pending_promote_with(store, root_session_id, agent_id, capabilities)? {
+        return Ok(None);
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let promote_with = Capability::PromoteWith {
+        agent_id: agent_id.to_string(),
+        capabilities: capabilities.to_vec(),
+    };
+    let envelope_id = store.insert_envelope_proposal(
+        root_session_id,
+        &promote_with,
+        source,
+        Some(&now),
+        None,
+        &now,
+    )?;
+    emit_envelope_proposed_timeline(
+        store,
+        root_session_id,
+        envelope_id,
+        &[],
+        source,
+        actor_id,
+        None,
+    );
+    Ok(Some(envelope_id))
+}
+
+/// After `artifact_build`: propose observed network hosts and promotion pre-auth.
+pub fn propose_envelopes_after_artifact_build(
+    store: &GatewayStore,
+    gateway_dir: &std::path::Path,
+    root_session_id: &str,
+    artifact_id: &str,
+    kind: &autonoetic_types::artifact::ArtifactKind,
+    actor_id: &str,
+) -> Result<()> {
+    let _ = propose_discovered_envelope(store, root_session_id, "discovered", None, actor_id)?;
+
+    use autonoetic_types::artifact::ArtifactKind;
+    if *kind != ArtifactKind::AgentBundle {
+        return Ok(());
+    }
+
+    let artifact = crate::ArtifactStore::new(gateway_dir)?;
+    let files = artifact.resolve_files(artifact_id)?;
+    let Some(skill_bytes) = files
+        .into_iter()
+        .find(|(path, _)| path == "SKILL.md")
+        .map(|(_, bytes)| bytes)
+    else {
+        return Ok(());
+    };
+    let skill_text = String::from_utf8_lossy(&skill_bytes);
+    let (manifest, _) = crate::runtime::parser::SkillParser::parse(&skill_text)
+        .map_err(|e| anyhow::anyhow!("artifact SKILL.md parse: {e}"))?;
+    if manifest.capabilities.is_empty() {
+        return Ok(());
+    }
+
+    let _ = propose_promote_with_envelope(
+        store,
+        root_session_id,
+        &manifest.agent.id,
+        &manifest.capabilities,
+        &format!("artifact:{artifact_id}"),
+        actor_id,
+    )?;
+    Ok(())
 }
 
 /// Propose a session envelope after plan approval: declared envelope when present,
