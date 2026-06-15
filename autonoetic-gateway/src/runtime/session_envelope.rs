@@ -61,14 +61,13 @@ pub fn materialize_network_grant(
     // A declared `*.example.com` is a subdomain wildcard, not a literal host:
     // materialize it as `HostSuffix` so it actually matches subdomains rather
     // than becoming a dead `ExactHost("*.example.com")` that never fires.
+    // `HostSuffix` stores the canonical bare suffix (the CLI prepends `*.` on
+    // display and `matches()` trims it), so strip the leading `*.` here.
     let targets: Vec<GrantTarget> = concrete
         .iter()
-        .map(|h| {
-            if h.starts_with("*.") {
-                GrantTarget::HostSuffix(h.clone())
-            } else {
-                GrantTarget::ExactHost(h.clone())
-            }
+        .map(|h| match h.strip_prefix("*.") {
+            Some(suffix) => GrantTarget::HostSuffix(suffix.to_string()),
+            None => GrantTarget::ExactHost(h.clone()),
         })
         .collect();
     let grant_agent = agent_id.unwrap_or(root_session_id);
@@ -741,6 +740,16 @@ mod tests {
         assert!(
             store.session_grants_cover_targets(root, &["api.example.com".to_string()]),
             "subdomain wildcard grant should cover a concrete subdomain"
+        );
+        // Stored as the canonical bare suffix (CLI prepends `*.` on display).
+        let grants = store.get_session_grants_structured(root)?;
+        assert!(
+            grants.iter().flat_map(|g| &g.targets).any(|t| matches!(
+                t,
+                GrantTarget::HostSuffix(s) if s == "example.com"
+            )),
+            "wildcard host should be stored as HostSuffix(\"example.com\"), got: {:?}",
+            grants.iter().map(|g| &g.targets).collect::<Vec<_>>()
         );
         Ok(())
     }
