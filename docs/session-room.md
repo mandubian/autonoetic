@@ -80,7 +80,7 @@ Each line is one event: `‹glyph› [‹actor›] ‹summary›`.
 |---|---|---|
 | `·` | detail | turn start/end, LLM rounds, tool requests, workbench bookkeeping |
 | `▸` | normal | tool completed, session start, **your messages** |
-| `⚠` | attention | approval requested, a clarification (`user.ask`), plan proposed, a sentinel divergence |
+| `⚠` | attention | approval requested, a clarification (`user.ask`), plan proposed, a sentinel divergence, an operator file comment |
 | `✗` | error | LLM/tool failures |
 
 The `--min-altitude` floor (and the `a` key in the TUI) hides anything below the
@@ -117,6 +117,16 @@ normal autonoetic agent:
 | `r` | a **clarification** is selected (`⚠ asks: …`) | Reply to the question |
 | `i` | any time | **Compose a message** to send into the session |
 
+### Watching & commenting on live content
+The agent's in-progress files (drafts written via `content_write`/`content_patch`)
+are visible from the first turn — before any artifact is built.
+
+| Key | Available when | Action |
+|---|---|---|
+| `c` | any time | Toggle the **live content tree** — every draft name the session has produced |
+| `o` | the content tree is open | **Open** the selected draft in a read-only viewer |
+| `m` | a draft is open in the viewer | **Comment** on this file (see [Commenting on live files](#commenting-on-live-files)) |
+
 ### Input prompts (approve / reject / reply / message)
 When a prompt is open at the bottom of the screen:
 
@@ -148,6 +158,28 @@ in. Sending is asynchronous — the UI never freezes while the agent works.
 
 > v1 attaches to an **existing** session. Start a brand-new session with
 > `autonoetic chat` or `autonoetic run`, then open the room on it.
+
+## Commenting on live files
+
+When you're reviewing a draft and spot an issue, you can attach a comment to
+**that file** instead of describing it in a free-form message:
+
+1. Press `c` to open the content tree, select the file, and `o` to open it.
+2. Press `m` to comment. Type your remark and press `Enter`.
+3. Optionally prefix the body with a **line hint** — `L12: …` for a single line or
+   `L12-14: …` for a range. (A malformed or reversed hint is ignored and the whole
+   text is kept as the comment.)
+
+The comment is **anchored to the exact version** you were viewing, appears on the
+timeline as `⚠ [🧑 operator] commented on ‹file›`, and is delivered to the agent
+**at its next turn** — it does not interrupt the current one. If the agent has
+already written a newer version of that file, the room confirms with
+`✓ commented (file changed since — agent will re-read)` and the agent is told to
+re-read before acting on the line numbers.
+
+Comments are **observations, not edits**: they never change the agent's files —
+the agent decides how to respond. To make changes yourself, use the workbench
+flow (`artifact_project` → edit → `workbench_reconcile`) instead.
 
 ## How it relates to `chat` and `trace`
 
