@@ -2382,8 +2382,15 @@ pub fn run(
                                             .and_then(|f| f.as_array())
                                             .map(|arr| {
                                                 arr.iter().filter_map(|f| {
+                                                    let name = f.get("name")?.as_str()?;
+                                                    // Skip implicit task artifacts (impl_*);
+                                                    // they are JSON metadata for parent agents,
+                                                    // not operator-readable content.
+                                                    if name.starts_with("impl_") {
+                                                        return None;
+                                                    }
                                                     Some(ContentEntry {
-                                                        name: f.get("name")?.as_str()?.to_string(),
+                                                        name: name.to_string(),
                                                         alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
                                                         visibility: f.get("visibility").and_then(|v| v.as_str()).unwrap_or("session").to_string(),
                                                     })
@@ -5064,9 +5071,31 @@ fn draw(
     if let Some(ref view) = content_view {
         let area = centered_rect(80, 85, f.area());
         f.render_widget(Clear, area);
-        let lines = super::markdown::render_markdown(
-            &super::markdown::normalize_narrative_prose(&view.content),
-        );
+        // Detect file extension to choose rendering mode.
+        // Markdown files go through the full pipeline; code files are wrapped
+        // in a language-tagged code fence for syntax-styled display.
+        let ext = std::path::Path::new(&view.name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let display_text = match ext.as_str() {
+            "md" | "markdown" | "" => {
+                super::markdown::normalize_narrative_prose(&view.content)
+            }
+            _ => {
+                // Wrap in a code fence with the language tag so the markdown
+                // renderer applies code-block styling (dimmed, language header).
+                if view.content.contains("```") {
+                    super::markdown::normalize_narrative_prose(&view.content)
+                } else {
+                    super::markdown::normalize_narrative_prose(
+                        &format!("```{}\n{}\n```", ext, view.content),
+                    )
+                }
+            }
+        };
+        let lines = super::markdown::render_markdown(&display_text);
         let inner_height = area.height.saturating_sub(2) as usize;
         // Wrap-aware scroll: count wrapped lines, not raw Lines, so the scroll
         // offset tracks what the operator sees (mirrors detail-pane wrap).

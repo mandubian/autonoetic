@@ -315,7 +315,7 @@
 
   <!-- Diff / File Inspector Modal -->
   <div id="diff-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm hidden">
-    <div class="w-[800px] max-w-[95%] h-[80%] glass-panel glow-indigo rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
+    <div class="w-[900px] max-w-[95%] h-[80%] glass-panel glow-indigo rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
       <div class="flex items-center justify-between border-b border-gray-800 pb-3">
         <h3 id="diff-title" class="font-display font-bold text-base text-white flex items-center gap-2">
           <span>📄</span> File Inspector
@@ -325,8 +325,36 @@
         </button>
       </div>
       
-      <div id="diff-content" class="flex-1 overflow-auto space-y-1 bg-gray-950 p-4 rounded-lg border border-gray-900 font-mono text-xs text-gray-300">
-        <!-- Filled dynamically -->
+      <div class="flex-1 flex gap-4 overflow-hidden">
+        <!-- Code Content -->
+        <div id="diff-content" class="flex-1 overflow-auto space-y-1 bg-gray-950 p-4 rounded-lg border border-gray-900 font-mono text-xs text-gray-355">
+          <!-- Filled dynamically -->
+        </div>
+
+        <!-- Live Comment Sidebar -->
+        <div class="w-72 flex flex-col bg-gray-900/60 p-4 rounded-lg border border-gray-800 space-y-3 shrink-0">
+          <h4 class="font-display font-bold text-xs text-gray-300 border-b border-gray-800 pb-1.5 flex items-center gap-1.5">
+            <span>💬</span> Attach Live Comment
+          </h4>
+          
+          <div class="space-y-1">
+            <label class="text-[9px] text-gray-400 font-semibold uppercase tracking-wider block">Line Range (Optional)</label>
+            <div class="flex gap-2">
+              <input id="comment-line-start" type="number" placeholder="Start (e.g. 12)" class="w-1/2 bg-gray-950 border border-gray-800 rounded px-2.5 py-1 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-accentIndigo">
+              <input id="comment-line-end" type="number" placeholder="End (e.g. 14)" class="w-1/2 bg-gray-950 border border-gray-800 rounded px-2.5 py-1 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-accentIndigo">
+            </div>
+          </div>
+
+          <div class="flex-1 flex flex-col space-y-1">
+            <label class="text-[9px] text-gray-400 font-semibold uppercase tracking-wider block">Comment Description</label>
+            <textarea id="comment-body" placeholder="Describe the issue or suggestions..." class="flex-1 bg-gray-950 border border-gray-800 rounded p-2.5 text-xs text-white placeholder-gray-655 resize-none focus:outline-none focus:border-accentIndigo"></textarea>
+          </div>
+
+          <button onclick="submitFileComment()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs py-2 px-3 rounded shadow transition-all duration-150 flex items-center justify-center gap-1.5 w-full">
+            <span>Send Comment</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-message-square"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -957,6 +985,30 @@
                     `<button onclick="openGateModalById('${askId}')" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-bold text-[10px] px-3.5 py-1.5 rounded uppercase">Provide Answer</button>`
                   }
                 </div>
+              </div>
+            `;
+          } else if (e.event_type === 'operator.comment') {
+            let lineHint = '';
+            if (payload.line_start) {
+              if (payload.line_end && payload.line_end !== payload.line_start) {
+                lineHint = ` · lines ${payload.line_start}–${payload.line_end}`;
+              } else {
+                lineHint = ` · line ${payload.line_start}`;
+              }
+            }
+            cardContent = `
+              <div class="mt-2.5 p-3 rounded-lg border border-accentAmber/30 bg-accentAmber/5 flex flex-col space-y-1.5">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs text-accentAmber font-semibold tracking-wide uppercase flex items-center gap-1">
+                    <span>💬</span> Operator File Comment
+                  </span>
+                  <span class="text-[9px] font-mono text-gray-500">${payload.comment_id || 'comment'}</span>
+                </div>
+                <div class="text-xs text-gray-300 font-mono">
+                  File: <span class="text-white font-semibold">${payload.name || ''}</span>${lineHint}
+                  ${payload.drifted ? `<span class="ml-2 bg-accentRed/10 text-accentRed border border-accentRed/20 px-1 rounded text-[9px] font-semibold">drifted</span>` : ''}
+                </div>
+                <p class="text-xs text-gray-250 mt-1 italic border-l-2 border-accentAmber/40 pl-2 bg-gray-950/40 py-1.5 rounded-r font-sans leading-relaxed">${escapeHTML(payload.body || '')}</p>
               </div>
             `;
           }
@@ -1592,6 +1644,32 @@
       if (type === 'delegate.start') return `Delegated to ${payload?.agent_id || 'specialist'}`;
       if (type === 'delegate.end') return 'Delegate completed';
 
+      // Operator comments
+      if (type === 'operator.comment') {
+        let lineHint = '';
+        if (payload?.line_start) {
+          if (payload?.line_end && payload?.line_end !== payload?.line_start) {
+            lineHint = ` (lines ${payload.line_start}–${payload.line_end})`;
+          } else {
+            lineHint = ` (line ${payload.line_start})`;
+          }
+        }
+        return `Commented on \`${payload?.name || ''}\`${lineHint}${payload?.drifted ? ' [drifted]' : ''}: "${payload?.body || ''}"`;
+      }
+
+      // Session envelope/lock lifecycle
+      if (type === 'envelope.proposed') {
+        const hosts = payload?.hosts || [];
+        return `Proposed network envelope for hosts: ${hosts.join(', ')}`;
+      }
+      if (type === 'envelope.locked') {
+        const hosts = payload?.hosts || [];
+        return `Locked network envelope & materialized grants for hosts: ${hosts.join(', ')}`;
+      }
+      if (type === 'envelope.revoked') {
+        return `Revoked session network envelope/grants: ${payload?.reason || ''}`;
+      }
+
       // Fallback: humanize event_type
       return type.replace(/\./g, ' ').replace(/_/g, ' ');
     }
@@ -1761,7 +1839,7 @@
         if (json.content) {
           // Decode content
           const codeText = atob(json.content);
-          openDiffModal(fileName, codeText);
+          openDiffModal(fileName, codeText, json.handle, sessionId);
         } else {
           alert(`File content not found: ${json.error || 'Unknown error'}`);
         }
@@ -1770,10 +1848,23 @@
       }
     }
 
-    function openDiffModal(fileName, codeText) {
+    let currentViewedFileName = null;
+    let currentViewedFileHandle = null;
+    let currentViewedFileSessionId = null;
+
+    function openDiffModal(fileName, codeText, handle, sessionId) {
+      currentViewedFileName = fileName;
+      currentViewedFileHandle = handle;
+      currentViewedFileSessionId = sessionId;
+
       const modal = document.getElementById('diff-modal');
-      document.getElementById('diff-title').innerHTML = `<span>📄</span> ${fileName}`;
+      document.getElementById('diff-title').innerHTML = `<span>📄</span> ${fileName} <span class="text-[10px] text-gray-500 font-mono ml-2 font-normal">${handle ? `(${handle.substring(0, 12)}...)` : ''}</span>`;
       
+      // Clear comment inputs
+      document.getElementById('comment-line-start').value = '';
+      document.getElementById('comment-line-end').value = '';
+      document.getElementById('comment-body').value = '';
+
       const contentDiv = document.getElementById('diff-content');
       contentDiv.innerHTML = '';
       
@@ -1799,8 +1890,79 @@
       modal.classList.remove('hidden');
     }
 
+    async function submitFileComment() {
+      const lineStartVal = document.getElementById('comment-line-start').value.trim();
+      const lineEndVal = document.getElementById('comment-line-end').value.trim();
+      const body = document.getElementById('comment-body').value.trim();
+
+      if (!body) {
+        alert("Please enter comment text.");
+        return;
+      }
+
+      if (!currentViewedFileName || !currentViewedFileSessionId) {
+        alert("No active file context found.");
+        return;
+      }
+
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+
+      const params = {
+        session_id: currentViewedFileSessionId,
+        name: currentViewedFileName,
+        handle: currentViewedFileHandle || undefined,
+        body: body,
+        commented_by: "operator"
+      };
+
+      if (lineStartVal) {
+        params.line_start = parseInt(lineStartVal, 10);
+      }
+      if (lineEndVal) {
+        params.line_end = parseInt(lineEndVal, 10);
+      }
+
+      if (params.line_start && params.line_end && params.line_end < params.line_start) {
+        alert("Line End cannot precede Line Start.");
+        return;
+      }
+
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'file-comment-submit',
+            method: 'content.comment',
+            params: params
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Failed to add comment: ${json.error.message}`);
+        } else {
+          document.getElementById('comment-line-start').value = '';
+          document.getElementById('comment-line-end').value = '';
+          document.getElementById('comment-body').value = '';
+          alert("Operator comment successfully attached to draft!");
+          fetchTimelineSnapshot(baseURL, currentViewedFileSessionId, secret);
+        }
+      } catch (e) {
+        alert(`Connection error: ${e.message}`);
+      }
+    }
+
     function closeDiffModal() {
       document.getElementById('diff-modal').classList.add('hidden');
+      currentViewedFileName = null;
+      currentViewedFileHandle = null;
+      currentViewedFileSessionId = null;
     }
 
     function escapeHTML(str) {
