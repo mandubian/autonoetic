@@ -2126,6 +2126,109 @@ impl JsonRpcRouter {
                 }
             }
 
+            // Suspend an agent: block new sessions while leaving in-flight
+            // sessions running. An operator decision, decoupled from envelope
+            // revocation. Read-only resolution stays open.
+            "agent.suspend" => {
+                #[derive(Deserialize)]
+                struct SuspendParams {
+                    agent_id: String,
+                    #[serde(default)]
+                    reason: Option<String>,
+                    #[serde(default = "default_suspended_by")]
+                    suspended_by: String,
+                }
+                fn default_suspended_by() -> String {
+                    "operator".to_string()
+                }
+                let params: SuspendParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for agent.suspend: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match store.suspend_agent(
+                    &params.agent_id,
+                    &params.suspended_by,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(changed) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "agent_id": params.agent_id,
+                            // false when the agent was already suspended or has
+                            // no promoted alias to suspend.
+                            "suspended": changed,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("agent.suspend failed: {}", e),
+                    ),
+                }
+            }
+
+            // Lift a suspension. Re-promotion also clears it (unless the
+            // promotion was envelope-pre-authorized); this is the explicit lever.
+            "agent.unsuspend" => {
+                #[derive(Deserialize)]
+                struct UnsuspendParams {
+                    agent_id: String,
+                }
+                let params: UnsuspendParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for agent.unsuspend: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match store.unsuspend_agent(&params.agent_id) {
+                    Ok(changed) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "agent_id": params.agent_id,
+                            // false when the agent was not suspended.
+                            "unsuspended": changed,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("agent.unsuspend failed: {}", e),
+                    ),
+                }
+            }
+
             // Session fork - fork a session from a snapshot
             "session.fork" => {
                 #[derive(Deserialize)]

@@ -338,16 +338,11 @@ impl AgentRepository {
                     ),
                 };
 
-                // Check if the agent is suspended — block dispatch.
-                if let Some(ref suspended_at) = alias.suspended_at {
-                    let reason = alias.suspended_reason.as_deref().unwrap_or("no reason given");
-                    let by = alias.suspended_by.as_deref().unwrap_or("unknown");
-                    anyhow::bail!(
-                        "Agent '{}' is suspended (since {}) by {}: {}. \
-                         Unsuspend or re-promote the agent before dispatching.",
-                        alias_id, suspended_at, by, reason,
-                    );
-                }
+                // NOTE: suspension is intentionally NOT checked here. Resolving
+                // an agent is read-only (evaluation/diff of a suspended agent
+                // must remain possible so an operator can decide whether to
+                // lift the suspension). The "no new session" gate lives at the
+                // session-start boundary in `resolve_and_pin_session`.
 
                 let rev = match gateway_store.get_agent_revision(&alias.revision_id)? {
                     Some(r) => r,
@@ -398,6 +393,27 @@ impl AgentRepository {
         }
 
         let (agent_ref, rev) = self.resolve_agent(target, gateway_store)?;
+
+        // No-new-session gate: a suspended agent must not start a *new* session,
+        // regardless of how it was addressed (alias OR explicit `agent@rev_…`
+        // ref). Already-running sessions are unaffected — they returned above
+        // via the existing-binding grace period. Keyed on the resolved
+        // agent_id's alias, so suspending the agent blocks spawning any of its
+        // revisions. (Read-only resolution in `resolve_agent` stays open.)
+        if let Some(gs) = gateway_store {
+            if let Some(alias) = gs.resolve_alias(&agent_ref.agent_id)? {
+                if let Some(ref suspended_at) = alias.suspended_at {
+                    let reason = alias.suspended_reason.as_deref().unwrap_or("no reason given");
+                    let by = alias.suspended_by.as_deref().unwrap_or("unknown");
+                    anyhow::bail!(
+                        "Agent '{}' is suspended (since {}) by {}: {}. \
+                         No new session can be started; unsuspend or re-promote \
+                         the agent first.",
+                        agent_ref.agent_id, suspended_at, by, reason,
+                    );
+                }
+            }
+        }
 
         // Determine alias_id from shared target parsing: explicit refs bypass aliases.
         let alias_id = match parse_agent_target(target) {

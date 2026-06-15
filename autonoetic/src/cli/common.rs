@@ -988,6 +988,29 @@ pub enum AgentAliasCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Suspend an agent: block new sessions while leaving in-flight sessions
+    /// running. Read-only resolution (evaluation/diff) stays available.
+    Suspend {
+        /// Alias ID to suspend (MVP default alias is agent_id)
+        alias_id: String,
+        /// Why the agent is being suspended (recorded on the alias)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Who is suspending (recorded on the alias)
+        #[arg(long, default_value = "operator")]
+        by: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lift a suspension so the agent can start new sessions again.
+    Unsuspend {
+        /// Alias ID to unsuspend (MVP default alias is agent_id)
+        alias_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
