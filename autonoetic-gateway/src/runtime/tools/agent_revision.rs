@@ -2215,6 +2215,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             } else {
                 false
             };
+        let mut pre_auth_envelope_id: Option<i64> = None;
 
         // pre_auth_envelope_id is set inside the gate bypass block,
         // but referenced in the response — declared here for scope.
@@ -2246,15 +2247,15 @@ impl NativeTool for AgentRevisionPromoteTool {
                         &args.agent_id,
                         &current_capabilities,
                     ) {
-                        Ok(Some(eid)) => {
+                        Ok(Some(envelope_id)) => {
                             tracing::info!(
                                 target: "promotion",
                                 agent_id = %args.agent_id,
                                 root_session_id = %root,
-                                envelope_id = eid,
+                                envelope_id,
                                 "pre-authorized by session envelope PromoteWith (P-2.27)"
                             );
-                            pre_auth_envelope_id = Some(eid);
+                            pre_auth_envelope_id = Some(envelope_id);
                             capability_delta = None;
                         }
                         Ok(None) => {}

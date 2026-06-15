@@ -2,6 +2,7 @@
 
 use autonoetic_gateway::runtime::session_envelope::{
     envelope_expansion_hint, lock_session_envelope, propose_discovered_envelope,
+    revoke_session_envelope,
 };
 use autonoetic_gateway::scheduler::{
     list_session_envelopes, lock_session_envelope_operator, propose_session_envelope,
@@ -162,5 +163,39 @@ fn approval_timeline_gets_expansion_hint_for_observed_host() -> anyhow::Result<(
         .expect("approval.pending event");
     let payload: serde_json::Value = serde_json::from_str(pending.payload.as_deref().unwrap_or("{}"))?;
     assert!(payload.get("envelope_expansion_hint").is_some());
+    Ok(())
+}
+
+#[test]
+fn revoke_locked_envelope_revokes_grants_and_removes_row() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let store = GatewayStore::open(dir.path())?;
+    let root = "session-511-revoke";
+
+    store.create_execution_trace(&curl_trace(
+        root,
+        "curl -s https://api.open-meteo.com/v1/forecast",
+    ))?;
+
+    let proposal = propose_discovered_envelope(&store, root, "discovered", None, "operator")?
+        .expect("proposal");
+    lock_session_envelope(&store, proposal.envelope_id, "operator")?;
+    assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+
+    let revoked = revoke_session_envelope(&store, proposal.envelope_id, "operator")?
+        .expect("revoked record");
+    assert_eq!(revoked.root_session_id, root);
+    assert!(revoked.locked_at.is_some());
+    assert!(store.get_envelope_by_id(proposal.envelope_id)?.is_none());
+    assert!(!store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+    Ok(())
+}
+
+#[test]
+fn revoke_missing_envelope_returns_none() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let store = GatewayStore::open(dir.path())?;
+    assert!(revoke_session_envelope(&store, 999_999, "operator")?.is_none());
+    assert!(!store.revoke_session_envelope_by_id(999_999)?);
     Ok(())
 }

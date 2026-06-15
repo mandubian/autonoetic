@@ -160,6 +160,17 @@ impl GatewayStore {
         )?;
         Ok(count)
     }
+
+    /// Delete a single envelope row by ID. Returns true if a row was deleted.
+    /// Called by surgical revocation (`session.envelope.revoke` RPC).
+    pub fn revoke_session_envelope_by_id(&self, envelope_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM session_envelopes WHERE id = ?1",
+            params![envelope_id],
+        )?;
+        Ok(count > 0)
+    }
 }
 
 fn load_envelopes<P>(
@@ -506,6 +517,23 @@ mod tests {
             active[0].locked_at.as_deref(),
             Some("2026-06-14T12:05:00Z")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn revoke_session_envelope_by_id_deletes_exactly_one_row() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-511-store-revoke";
+        let now = "2026-06-14T12:00:00Z";
+        let cap = Capability::NetworkAccess {
+            hosts: vec!["api.example.com".to_string()],
+        };
+        let id = store.insert_envelope_proposal(root, &cap, "test", Some(now), None, now)?;
+        assert!(store.revoke_session_envelope_by_id(id)?);
+        assert!(!store.revoke_session_envelope_by_id(id)?);
+        assert!(!store.revoke_session_envelope_by_id(999_999)?);
+        assert!(store.get_envelope_by_id(id)?.is_none());
         Ok(())
     }
 }
