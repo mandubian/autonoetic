@@ -2258,7 +2258,7 @@ pub fn run(
                                             status = Some("no content entries yet (session has not written any drafts)".to_string());
                                         } else {
                                             content_tree = Some(ContentTree { entries, selected: 0, scroll: 0 });
-                                            status = Some(format!("content: {} entries · j/k navigate · o view · Esc close", content_tree.as_ref().unwrap().entries.len()));
+                                            status = Some(format!("content: {} entries · j/k navigate · o view · O open in editor · Esc close", content_tree.as_ref().unwrap().entries.len()));
                                         }
                                     }
                                     Err(e) => status = Some(format!("content list failed: {e}")),
@@ -2400,6 +2400,14 @@ pub fn run(
                                     view.name
                                 ));
                             }
+                        }
+                        // O: project the live session drafts to a real directory
+                        // and open it in an external editor (read-only snapshot).
+                        // Available whenever the content pane is up.
+                        KeyCode::Char('O')
+                            if content_view.is_some() || content_tree.is_some() =>
+                        {
+                            status = Some(project_live_and_open(client, root_session_id));
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             if let Some(view) = content_view.as_mut() {
@@ -3300,6 +3308,59 @@ fn send_comment(
                 "✓ commented (file changed since — agent will re-read)".to_string()
             } else {
                 "✓ commented".to_string()
+            }
+        }
+        Err(e) => format!("✗ {e}"),
+    }
+}
+
+/// Best-effort: launch a GUI editor on `dir`. `code`/`$VISUAL` are GUI launchers
+/// that fork and return immediately, so spawning them from inside the TUI does
+/// not hijack the terminal. Terminal editors (vim, …) would, so we only try
+/// known GUI openers. Returns true if a launch was spawned.
+fn try_open_in_editor(dir: &str) -> bool {
+    // `$VISUAL` is the conventional GUI editor; otherwise try VS Code by name.
+    let candidates: Vec<String> = std::env::var("VISUAL")
+        .ok()
+        .into_iter()
+        .chain(["code".to_string(), "codium".to_string()])
+        .collect();
+    for cmd in candidates {
+        if std::process::Command::new(&cmd)
+            .arg(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Project the session's live content drafts to a real directory
+/// (`content.project_live`) and open it in an external editor. The directory is
+/// a read-only snapshot on the **gateway host**; the launch is best-effort and
+/// only succeeds when the room runs on that same host. Either way the path is
+/// surfaced so the operator can open it manually (or over a remote mount).
+fn project_live_and_open(client: &RoomClient, root_session_id: &str) -> String {
+    match rpc(
+        client,
+        "content.project_live",
+        serde_json::json!({ "session_id": root_session_id }),
+    ) {
+        Ok(v) => {
+            let path = v.get("path").and_then(|p| p.as_str()).unwrap_or_default();
+            let count = v.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
+            if path.is_empty() {
+                return "✗ project_live: no path in response".to_string();
+            }
+            if try_open_in_editor(path) {
+                format!("✓ opened {count} live file(s) in editor → {path}")
+            } else {
+                format!("live dir ({count} file(s)) → {path}  (open it in your editor)")
             }
         }
         Err(e) => format!("✗ {e}"),
@@ -4817,7 +4878,7 @@ fn draw(
         let max_scroll = total.saturating_sub(inner_height) as u16;
         let scroll = view.scroll.min(max_scroll);
         let title = format!(
-            " 📝 {} [draft · not a vetted artifact] [m comment · Esc back] ",
+            " 📝 {} [draft · not a vetted artifact] [m comment · O open in editor · Esc back] ",
             view.name
         );
         f.render_widget(
@@ -4865,7 +4926,7 @@ fn draw(
             .saturating_sub(inner_height / 2)
             .min(max_scroll) as u16;
         let title = format!(
-            " 📝 session content (drafts · t=0) — {} entries [o view · Esc close] ",
+            " 📝 session content (drafts · t=0) — {} entries [o view · O open in editor · Esc close] ",
             tree.entries.len()
         );
         f.render_widget(

@@ -590,6 +590,56 @@ impl ContentStore {
         Ok(entries)
     }
 
+    /// Materialize the session's current content drafts into a real directory
+    /// the operator can open in an external editor (`sessions/<id>/live/`).
+    ///
+    /// Read-only **snapshot**: the directory is rebuilt from the content store
+    /// on every call, so it always reflects the current name→version mapping
+    /// (and drops files whose names disappeared). Copying bytes out for viewing
+    /// never feeds back into the store — immutability of the underlying blobs is
+    /// untouched. Returns the directory and the names written.
+    pub fn project_live(&self, session_id: &str) -> anyhow::Result<(PathBuf, Vec<String>)> {
+        let live_dir = self.sessions_dir.join(session_id).join("live");
+        // Refresh from scratch so renames/deletions since the last call are
+        // reflected rather than leaving stale files behind.
+        if live_dir.exists() {
+            std::fs::remove_dir_all(&live_dir)?;
+        }
+        std::fs::create_dir_all(&live_dir)?;
+
+        let mut written = Vec::new();
+        for (name, handle) in self.list_names_with_handles(session_id)? {
+            // A content name is operator/agent-supplied; never let it escape the
+            // live directory (absolute paths, `..`, drive prefixes).
+            let rel = Path::new(&name);
+            let unsafe_component = rel.is_absolute()
+                || rel.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                });
+            if unsafe_component {
+                tracing::warn!(
+                    target: "content_store",
+                    %name,
+                    "skipping unsafe content name in live projection"
+                );
+                continue;
+            }
+            let out = live_dir.join(rel);
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let bytes = self.read_by_name_or_handle(session_id, &handle)?;
+            std::fs::write(&out, bytes)?;
+            written.push(name);
+        }
+        Ok((live_dir, written))
+    }
+
     /// Clears a session manifest.
     pub fn cleanup_session(&self, session_id: &str) -> anyhow::Result<usize> {
         let manifest = self.load_manifest(session_id)?;
@@ -709,6 +759,43 @@ mod tests {
 
         assert!(handle.starts_with("sha256:"));
         assert_eq!(store.read(&handle).unwrap(), content);
+    }
+
+    #[test]
+    fn project_live_materializes_drafts_refreshes_and_skips_unsafe_names() {
+        let temp = tempdir().unwrap();
+        let store = ContentStore::new(temp.path()).unwrap();
+        let session = "root-proj";
+
+        let h1 = store.write(b"port: 8080\n").unwrap();
+        let h2 = store.write(b"fn main() {}\n").unwrap();
+        store.register_name(session, "config.yaml", &h1).unwrap();
+        store.register_name(session, "src/main.rs", &h2).unwrap(); // nested
+        // A malicious/odd name must never escape the live directory.
+        store
+            .register_name(session, "../escape.txt", &h1)
+            .unwrap();
+
+        let (dir, written) = store.project_live(session).unwrap();
+        assert!(dir.ends_with("live"));
+        assert!(written.contains(&"config.yaml".to_string()));
+        assert!(written.contains(&"src/main.rs".to_string()));
+        assert!(
+            !written.iter().any(|n| n.contains("..")),
+            "unsafe name must be skipped: {written:?}"
+        );
+        assert_eq!(std::fs::read(dir.join("config.yaml")).unwrap(), b"port: 8080\n");
+        assert_eq!(std::fs::read(dir.join("src/main.rs")).unwrap(), b"fn main() {}\n");
+        // The traversal name must not have written outside `live/`.
+        assert!(!dir.parent().unwrap().join("escape.txt").exists());
+
+        // Refresh: drop config.yaml from the manifest, reproject → stale file gone.
+        store.cleanup_session(session).unwrap();
+        store.register_name(session, "only.txt", &h2).unwrap();
+        let (dir2, written2) = store.project_live(session).unwrap();
+        assert_eq!(written2, vec!["only.txt".to_string()]);
+        assert!(!dir2.join("config.yaml").exists(), "stale file should be cleared");
+        assert!(dir2.join("only.txt").exists());
     }
 
     #[test]
