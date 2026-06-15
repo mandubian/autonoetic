@@ -82,6 +82,28 @@ pub struct ContentStore {
     manifests: Arc<Mutex<HashMap<String, SessionManifest>>>,
 }
 
+/// True when `s` is safe to join under a base directory: relative, with no
+/// escaping/absolute components, and at least one real path segment. Rejects
+/// `""`, `.`, `..`, `/abs`, `C:\…`, and anything containing a `..` — so it can't
+/// resolve to the base dir itself or escape it. Used by `project_live` for both
+/// the `session_id` (which feeds `remove_dir_all`) and each content name.
+fn safe_relative_path(s: &str) -> bool {
+    let path = Path::new(s);
+    if path.is_absolute() {
+        return false;
+    }
+    let mut has_normal = false;
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => has_normal = true,
+            std::path::Component::CurDir => {}
+            // ParentDir, RootDir, Prefix — any of these can escape the base.
+            _ => return false,
+        }
+    }
+    has_normal
+}
+
 impl ContentStore {
     /// Creates a new ContentStore.
     pub fn new(gateway_dir: &Path) -> anyhow::Result<Self> {
@@ -599,6 +621,14 @@ impl ContentStore {
     /// never feeds back into the store — immutability of the underlying blobs is
     /// untouched. Returns the directory and the names written.
     pub fn project_live(&self, session_id: &str) -> anyhow::Result<(PathBuf, Vec<String>)> {
+        // `session_id` flows into a filesystem path AND a `remove_dir_all`, so a
+        // traversal value ("../..", "/etc", "") could delete outside the sessions
+        // tree. Reject anything that isn't a safe relative path before touching
+        // the filesystem.
+        anyhow::ensure!(
+            safe_relative_path(session_id),
+            "unsafe session_id for live projection: {session_id:?}"
+        );
         let live_dir = self.sessions_dir.join(session_id).join("live");
         // Refresh from scratch so renames/deletions since the last call are
         // reflected rather than leaving stale files behind.
@@ -610,18 +640,9 @@ impl ContentStore {
         let mut written = Vec::new();
         for (name, handle) in self.list_names_with_handles(session_id)? {
             // A content name is operator/agent-supplied; never let it escape the
-            // live directory (absolute paths, `..`, drive prefixes).
-            let rel = Path::new(&name);
-            let unsafe_component = rel.is_absolute()
-                || rel.components().any(|c| {
-                    matches!(
-                        c,
-                        std::path::Component::ParentDir
-                            | std::path::Component::RootDir
-                            | std::path::Component::Prefix(_)
-                    )
-                });
-            if unsafe_component {
+            // live directory (absolute, `..`, drive prefixes) or resolve to the
+            // directory itself (empty / `.`-only), which would error the write.
+            if !safe_relative_path(&name) {
                 tracing::warn!(
                     target: "content_store",
                     %name,
@@ -629,7 +650,7 @@ impl ContentStore {
                 );
                 continue;
             }
-            let out = live_dir.join(rel);
+            let out = live_dir.join(&name);
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -775,6 +796,10 @@ mod tests {
         store
             .register_name(session, "../escape.txt", &h1)
             .unwrap();
+        // Empty and `.`-only names resolve to the dir itself — must be skipped,
+        // not error the whole projection.
+        store.register_name(session, "", &h1).unwrap();
+        store.register_name(session, ".", &h1).unwrap();
 
         let (dir, written) = store.project_live(session).unwrap();
         assert!(dir.ends_with("live"));
@@ -796,6 +821,31 @@ mod tests {
         assert_eq!(written2, vec!["only.txt".to_string()]);
         assert!(!dir2.join("config.yaml").exists(), "stale file should be cleared");
         assert!(dir2.join("only.txt").exists());
+    }
+
+    #[test]
+    fn project_live_rejects_unsafe_session_id() {
+        let temp = tempdir().unwrap();
+        let store = ContentStore::new(temp.path()).unwrap();
+        for bad in ["../escape", "/abs", "..", ""] {
+            assert!(
+                store.project_live(bad).is_err(),
+                "unsafe session_id {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_relative_path_classifies_correctly() {
+        assert!(safe_relative_path("config.yaml"));
+        assert!(safe_relative_path("src/main.rs"));
+        assert!(safe_relative_path("./a")); // CurDir + Normal is fine
+        assert!(safe_relative_path("root/agent.coder")); // nested session id
+        assert!(!safe_relative_path(""));
+        assert!(!safe_relative_path("."));
+        assert!(!safe_relative_path(".."));
+        assert!(!safe_relative_path("../x"));
+        assert!(!safe_relative_path("/abs"));
     }
 
     #[test]
