@@ -582,10 +582,20 @@ impl GatewayStore {
         );
 
         let now = chrono::Utc::now().to_rfc3339();
+        // Preserve existing suspension state during rollback — do not auto-unsuspend.
+        let (suspended_at, suspended_reason, suspended_by): (Option<String>, Option<String>, Option<String>) = tx
+            .query_row(
+                "SELECT suspended_at, suspended_reason, suspended_by FROM agent_aliases WHERE alias_id = ?1",
+                params![agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None, None));
         tx.execute(
             "INSERT OR REPLACE INTO agent_aliases (
-                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                alias_id, agent_id, revision_id, updated_at, updated_by_type, updated_by_id, reason,
+                suspended_at, suspended_reason, suspended_by
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 agent_id,
                 agent_id,
@@ -593,7 +603,10 @@ impl GatewayStore {
                 now,
                 created_by_type,
                 created_by_id,
-                reason
+                reason,
+                suspended_at,
+                suspended_reason,
+                suspended_by,
             ],
         )?;
 

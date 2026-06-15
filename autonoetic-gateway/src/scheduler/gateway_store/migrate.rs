@@ -589,15 +589,17 @@ fn apply_agent_suspension_v53(conn: &mut Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     if current >= 53 { return Ok(()); }
-    conn.execute_batch(
+    let tx = conn.transaction()?;
+    tx.execute_batch(
         "ALTER TABLE agent_aliases ADD COLUMN suspended_at TEXT;
          ALTER TABLE agent_aliases ADD COLUMN suspended_reason TEXT;
          ALTER TABLE agent_aliases ADD COLUMN suspended_by TEXT;",
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![53_i64, "agent_suspension", chrono::Utc::now().to_rfc3339()],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
