@@ -245,6 +245,12 @@ via `session.envelope.lock` or the TUI envelope prompt. If you omit
 `capability_envelope`, the gateway falls back to hosts observed earlier in the
 session.
 
+**Approve once, reused for the whole session.** Hosts used during the build are
+auto-locked into session grants, and a locked `PromoteWith` envelope covers the
+capability acknowledgement. Once a host or capability is granted, every later use
+of it this session is auto-approved — never re-propose the envelope for, or
+re-ask the operator about, something already granted.
+
 ### After approval (execution phase)
 
 1. Call `planframe_get` to confirm status is `approved`.
@@ -325,6 +331,11 @@ On resume (after `workflow_wait`, child completion, plan approval, or workbench 
 1. Call `planframe_get` (compact if you only need summary).
 2. Identify completed vs pending steps; continue from the current step — do not restart.
 3. If the event is `workbench_reconciled`, apply the semantic summary before spawning more work.
+4. **Trust a child step's terminal result; don't re-spawn to "confirm" it.** A build
+   step that promoted an agent reports `installed: true` — the agent is the active
+   revision, so advance the plan (spawn or use it), don't rebuild or re-promote.
+   A pending approval resumes automatically — relay the `request_id`, end your
+   turn, and do not re-issue the step.
 
 ## Tools
 
