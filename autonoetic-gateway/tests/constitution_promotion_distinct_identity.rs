@@ -251,6 +251,17 @@ fn try_promote(
     }
 }
 
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err(message)`
+/// so the `unwrap_err` failure assertions below read naturally.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
+    }
+}
+
 #[test]
 fn same_agent_identity_rejected_even_if_both_passed() {
     let agent_id = "rpp3.test.agent";
@@ -328,10 +339,10 @@ fn same_agent_identity_rejected_even_if_both_passed() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail when evaluator and auditor share identity"
     );
-    let err = result.unwrap_err();
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("P-2.17"),
         "error should reference P-2.17: {err}"
@@ -426,7 +437,7 @@ fn distinct_identities_allowed() {
     assert!(
         result.is_ok(),
         "promote should succeed with distinct identities, got err: {:?}",
-        result.unwrap_err()
+        as_outcome(result).unwrap_err()
     );
     let promoted = result.unwrap();
     assert_eq!(promoted["ok"], true);

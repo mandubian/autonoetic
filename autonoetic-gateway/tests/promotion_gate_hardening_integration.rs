@@ -371,6 +371,31 @@ fn try_promote(
     }
 }
 
+/// Extract the failure message from a `try_promote` result. Promotion-gate
+/// blocks are now structured `Ok(ok:false)` envelopes (P-5.11); only genuine
+/// infra failures surface as `Err`.
+fn gate_err(result: Result<serde_json::Value, String>) -> String {
+    match result {
+        Ok(v) => {
+            assert_eq!(v["ok"], false, "expected a failure envelope, got: {v}");
+            v["message"].as_str().unwrap_or_default().to_string()
+        }
+        Err(e) => e,
+    }
+}
+
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err` so the
+/// `.is_err()` "promote should fail" preconditions read naturally; a genuine
+/// success stays `Ok`.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
+    }
+}
+
 struct TestSetup {
     _temp: tempfile::TempDir,
     #[allow(dead_code)]
@@ -453,10 +478,10 @@ fn test_promote_rejects_high_risk_without_promotion_records() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail without promotion records"
     );
-    let err = result.unwrap_err();
+    let err = gate_err(result);
     assert!(
         err.contains("Promotion gate") && err.contains("no promotion.record"),
         "error should mention promotion gate: {err}"
@@ -567,8 +592,8 @@ fn test_promote_rejects_when_evaluator_fails() {
         &revision_id,
     );
 
-    assert!(result.is_err(), "promote should fail when evaluator fails");
-    let err = result.unwrap_err();
+    assert!(as_outcome(result.clone()).is_err(), "promote should fail when evaluator fails");
+    let err = gate_err(result);
     assert!(
         err.contains("no evaluator role passed"),
         "error should mention evaluator failure: {err}"
@@ -610,10 +635,10 @@ fn test_promote_rejects_when_auditor_missing() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail when auditor is missing"
     );
-    let err = result.unwrap_err();
+    let err = gate_err(result);
     assert!(
         err.contains("auditor did not pass"),
         "error should mention auditor failure: {err}"
@@ -756,10 +781,10 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail with unresolved dependencies"
     );
-    let err = result.unwrap_err();
+    let err = gate_err(result);
     assert!(
         err.contains("unresolved dependencies"),
         "error should mention unresolved dependencies: {err}"
@@ -892,10 +917,10 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &revision_id,
     );
     assert!(
-        fail_result.is_err(),
+        as_outcome(fail_result.clone()).is_err(),
         "Step 1: promote should fail without records"
     );
-    assert!(fail_result.unwrap_err().contains("no promotion.record"));
+    assert!(gate_err(fail_result).contains("no promotion.record"));
 
     // Step 2: Evaluator records pass
     let eval_manifest = evaluator_manifest();
@@ -925,10 +950,10 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &revision_id,
     );
     assert!(
-        partial_result.is_err(),
+        as_outcome(partial_result.clone()).is_err(),
         "Step 3: promote should fail with only evaluator"
     );
-    assert!(partial_result.unwrap_err().contains("auditor did not pass"));
+    assert!(gate_err(partial_result).contains("auditor did not pass"));
 
     // Step 4: Auditor records pass
     let audit_manifest = auditor_manifest();

@@ -343,6 +343,17 @@ fn try_promote(
     }
 }
 
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err(message)`
+/// so the `unwrap_err` FullJury failure assertions below read naturally.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
+    }
+}
+
 struct TestSetup {
     _temp: tempfile::TempDir,
     #[allow(dead_code)]
@@ -676,10 +687,10 @@ fn test_federation_blocks_without_approved_escalation() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail without approved escalation"
     );
-    let err = result.unwrap_err();
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("FullJury") && err.contains("no approved operator escalation"),
         "error should mention FullJury and missing escalation: {err}"
@@ -758,10 +769,10 @@ fn test_federation_blocks_with_pending_escalation() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail with only a pending (not approved) escalation"
     );
-    let err = result.unwrap_err();
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("FullJury") && err.contains("no approved operator escalation"),
         "error should mention FullJury: {err}"
@@ -832,10 +843,10 @@ fn test_federation_blocks_when_role_shares_proposer_identity() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail when federation role shares proposer identity"
     );
-    let err = result.unwrap_err();
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("FullJury") && err.contains("P-2.17"),
         "error should mention P-2.17 distinct identity: {err}"
@@ -912,10 +923,10 @@ fn test_federation_blocks_when_roles_share_identity() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail when federation roles share identity"
     );
-    let err = result.unwrap_err();
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("FullJury")
             && err.contains("P-2.17")
@@ -1064,10 +1075,10 @@ fn test_federation_escalation_rejected_does_not_allow_promotion() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail with rejected escalation"
     );
-    let err = result.unwrap_err();
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("FullJury") && err.contains("no approved operator escalation"),
         "error should mention FullJury: {err}"

@@ -251,6 +251,17 @@ fn try_promote(
     }
 }
 
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err(message)`
+/// so the failure assertions below read naturally; a genuine success stays `Ok`.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
+    }
+}
+
 #[test]
 fn promotion_blocked_when_unit_test_runner_failed() {
     let agent_id = "p226.test.agent";
@@ -345,8 +356,8 @@ fn promotion_blocked_when_unit_test_runner_failed() {
         &revision_id,
     );
 
-    assert!(result.is_err(), "promotion should be blocked when unit_test_runner failed");
-    let err = result.unwrap_err();
+    assert!(as_outcome(result.clone()).is_err(), "promotion should be blocked when unit_test_runner failed");
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("P-2.26") || err.contains("unit_test_runner"),
         "error message should mention P-2.26 or unit_test_runner, got: {err}"
