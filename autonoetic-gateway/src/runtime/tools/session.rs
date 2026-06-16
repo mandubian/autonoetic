@@ -226,10 +226,14 @@ impl NativeTool for SessionEscalateTool {
                 })
             }
             _ => {
-                serde_json::json!({
-                    "error": "Unknown escalation target",
-                    "valid_targets": ["reasoning_llm", "specialist", "human"]
-                })
+                // Invalid target: return the canonical envelope and do NOT log an
+                // escalation event (early return, before the event append below).
+                return Ok(ToolError::validation(
+                    "Unknown escalation target",
+                    Some("Use one of: reasoning_llm, specialist, human."),
+                )
+                .with_code("unknown_escalation_target")
+                .to_error_response());
             }
         };
 

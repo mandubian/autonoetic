@@ -83,6 +83,18 @@ fn assert_error_envelope_shape(payload: &serde_json::Value) {
             .unwrap_or(false),
         "message must be a non-empty string"
     );
+    // The optional stable `error` code (P-5.11) is a machine token, NOT prose:
+    // snake_case `[a-z0-9_]+`. Guards against regressing to the old
+    // `"error": "<free-text message>"` shape.
+    if let Some(code) = payload.get("error").and_then(|v| v.as_str()) {
+        assert!(
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "`error` must be a snake_case code, not prose: {code:?}"
+        );
+    }
 }
 
 #[test]
@@ -103,6 +115,25 @@ fn r_5_11_uniform_error_envelope_contract() -> anyhow::Result<()> {
             .unwrap_or(false),
         "expected repair_hint on user.ask secret rejection"
     );
+
+    // Migrated tools (PR #532/#533): every failure path is the canonical envelope.
+    // Invoked here without a gateway store / with minimal args, so each returns a
+    // structured precondition/validation error — proving none regress to a
+    // hand-built `{ "error": "<prose>" }`. (The snake_case `error` check in
+    // assert_error_envelope_shape catches the regression.)
+    for (tool, args) in [
+        ("validation_waive", r#"{"artifact_id":"not-canonical","validation_class":"correctness_check","reason":"x"}"#),
+        ("workbench_status", r#"{"workbench_id":"wb_missing"}"#),
+        ("planframe_approve", r#"{"plan_id":"plan_missing"}"#),
+        ("session_escalate", r#"{"target":"bogus_target","reason":"x","context":"y"}"#),
+        ("workflow_wait", r#"{"task_ids":[]}"#),
+    ] {
+        // Tolerate arg-parse / availability Errs (a separate boundary); only the
+        // tool's own returned envelope must be canonical.
+        if let Ok(payload) = invoke(tool, args) {
+            assert_error_envelope_shape(&payload);
+        }
+    }
 
     Ok(())
 }
