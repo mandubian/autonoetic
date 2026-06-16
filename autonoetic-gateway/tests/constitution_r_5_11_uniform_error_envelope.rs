@@ -85,14 +85,16 @@ fn assert_error_envelope_shape(payload: &serde_json::Value) {
     );
     // The optional stable `error` code (P-5.11) is a machine token, NOT prose:
     // snake_case `[a-z0-9_]+`. Guards against regressing to the old
-    // `"error": "<free-text message>"` shape.
-    if let Some(code) = payload.get("error").and_then(|v| v.as_str()) {
+    // `"error": "<free-text message>"` shape. When the key is present it must
+    // be a non-empty snake_case string — null/number/absent-key are all caught.
+    if let Some(error_val) = payload.get("error") {
+        let code = error_val.as_str().unwrap_or("");
         assert!(
             !code.is_empty()
                 && code
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
-            "`error` must be a snake_case code, not prose: {code:?}"
+            "`error` must be a non-empty snake_case string when present, got: {error_val:?}"
         );
     }
 }
@@ -129,9 +131,18 @@ fn r_5_11_uniform_error_envelope_contract() -> anyhow::Result<()> {
         ("workflow_wait", r#"{"task_ids":[]}"#),
     ] {
         // Tolerate arg-parse / availability Errs (a separate boundary); only the
-        // tool's own returned envelope must be canonical.
-        if let Ok(payload) = invoke(tool, args) {
-            assert_error_envelope_shape(&payload);
+        // tool's own returned envelope must be canonical.  But an "Unknown native
+        // tool" error means the tool has been renamed/removed — that is a
+        // regression we must not silently ignore.
+        match invoke(tool, args) {
+            Ok(payload) => assert_error_envelope_shape(&payload),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("Unknown native tool"),
+                    "tool {tool:?} should exist but was not found: {msg}"
+                );
+            }
         }
     }
 
