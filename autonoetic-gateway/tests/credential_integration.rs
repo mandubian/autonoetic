@@ -370,10 +370,7 @@ fn test_credential_request_denied_wrong_service() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("Credential access denied for service: stripe"));
+    assert!(parsed["message"].as_str().unwrap().contains("Credential access denied for service: stripe"));
 }
 
 #[test]
@@ -854,10 +851,7 @@ fn test_credential_request_denied_network_policy() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("Network access denied for host: evil.com"));
+    assert_eq!(parsed["approval_required"].as_bool(), Some(true), "network policy should block pending approval");
 }
 
 #[test]
@@ -969,10 +963,7 @@ fn test_credential_setup_denied_network_policy() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("Network access denied for host: evil.com"));
+    assert_eq!(parsed["approval_required"].as_bool(), Some(true), "network policy should block pending approval");
 }
 
 #[test]
