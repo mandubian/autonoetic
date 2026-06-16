@@ -2735,16 +2735,26 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 None,
                 &manifest.agent.id,
             ) {
-                // Surface the auto-locked grant so the agent KNOWS these hosts
-                // are now covered and never re-requests approval for them — the
-                // silent auto-lock was a prime cause of redundant approval loops.
+                // Surface the grant so the agent KNOWS whether these hosts are
+                // now covered and need no re-approval — the silent auto-lock was
+                // a prime cause of redundant approval loops. Report `locked` from
+                // the ACTUAL grant coverage, not optimistically: auto-lock can
+                // fail (it logs and leaves the envelope merely proposed), and a
+                // false `locked:true` would tell the agent not to seek approval
+                // it still needs.
                 Ok(Some(result)) if !result.hosts.is_empty() => {
+                    let covered = gs.session_grants_cover_targets(root, &result.hosts);
                     body["network_grant"] = serde_json::json!({
                         "hosts": result.hosts,
-                        "locked": true,
-                        "note": "These hosts are now covered by a session grant — \
-                                 subsequent calls to them this session are auto-approved; \
-                                 do not re-request approval for them.",
+                        "locked": covered,
+                        "note": if covered {
+                            "These hosts are now covered by a session grant — subsequent \
+                             calls to them this session are auto-approved; do not re-request \
+                             approval for them."
+                        } else {
+                            "These hosts were proposed but not yet locked — a later call may \
+                             still require operator approval."
+                        },
                     });
                 }
                 Ok(_) => {}

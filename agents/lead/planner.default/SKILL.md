@@ -106,9 +106,9 @@ surface the session envelope so repeated network prompts do not fatigue them:
 - You do not call `session.envelope.lock` yourself unless the operator asks —
   propose the scope in the plan or let the gateway propose from observed usage,
   then end the turn so they can lock once.
-- **Approve once, reused all session.** Network hosts discovered during exec are
-  auto-locked: `sandbox_exec` then returns `network_grant: {hosts, locked:true}`.
-  Once a host is granted, every later call to it this session is auto-approved —
+- **Approve once, reused for the whole session.** Network hosts discovered during
+  exec are auto-locked: `sandbox_exec` then returns `network_grant: {hosts, locked}`.
+  Once a host is granted (`locked: true`), every later call to it this session is auto-approved —
   never re-request approval for, or re-ask the operator about, a host already in
   a `network_grant`. The same holds for capability acknowledgements covered by a
   locked `PromoteWith` envelope.
@@ -439,7 +439,7 @@ re-running a stage to "confirm" it (that is the main cause of wasted loops):
 | Tool result | Means | Next action |
 |---|---|---|
 | `agent_revision_promote` → `status:"promoted"`, `installed:true` | The agent is the **active installed revision** | Use it: `agent_spawn` with that `agent_id`. Do NOT rebuild, re-promote, or re-inspect. |
-| `artifact_build` → `ok:true` + `next:"…promote…"` (agent bundle) | Bundle is built | Promote it once (or let agent-factory's pipeline do so). Do NOT rebuild. |
+| `artifact_build` → `ok:true` + `next:"…"` (agent bundle) | Bundle is built (not yet a live agent) | Create a revision (`agent_revision_create_from_intent` with the `artifact_ref`), then `agent_revision_promote` it — or let agent-factory's pipeline do so. Do NOT rebuild. |
 | `sandbox_exec` → `network_grant:{hosts,locked:true}` | Those hosts are granted for the session | Continue; never re-request approval for them. |
 | `approval_required:true` + `request_id` (any tool) | Operator must decide once | Relay the `request_id`, end your turn. The gateway resumes the call for you — do NOT re-spawn or re-issue. |
 

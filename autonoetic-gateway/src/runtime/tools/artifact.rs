@@ -368,15 +368,23 @@ impl NativeTool for ArtifactBuildTool {
                 obj.insert("artifact_ref_scope".to_string(), scope);
             }
         }
-        // Make the next step explicit so the orchestrator goes straight to
-        // promotion instead of rebuilding or re-inspecting.
-        if matches!(bundle.kind, autonoetic_types::artifact::ArtifactKind::AgentBundle) {
+        // Make the next step explicit so the orchestrator goes straight ahead
+        // instead of rebuilding or re-inspecting. Only when we actually have an
+        // artifact_ref to act on, and naming the REAL tool contract: a bundle
+        // becomes a live agent via create-revision (which takes the artifact_ref)
+        // then promote (which takes agent_id + revision_id, NOT artifact_ref).
+        if matches!(bundle.kind, autonoetic_types::artifact::ArtifactKind::AgentBundle)
+            && out.get("artifact_ref").is_some()
+        {
             if let Some(obj) = out.as_object_mut() {
                 obj.insert(
                     "next".to_string(),
                     serde_json::Value::String(
-                        "Agent bundle built. Next: promote it with agent_revision_promote \
-                         (pass this artifact_ref). Do not rebuild it."
+                        "Agent bundle built. To make it a live agent: create a revision with \
+                         agent_revision_create_from_intent (pass this artifact_ref), then \
+                         agent_revision_promote that revision_id. Do not rebuild the bundle. \
+                         (If agent-factory is driving this pipeline, it performs these steps — \
+                         do not duplicate them.)"
                             .to_string(),
                     ),
                 );
