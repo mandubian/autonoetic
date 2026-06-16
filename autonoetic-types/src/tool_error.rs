@@ -172,6 +172,13 @@ impl ToolError {
         self
     }
 
+    /// Override the `repair_hint` (the mechanical remedy). Useful with
+    /// constructors like `permission` that only take a message.
+    pub fn with_repair_hint(mut self, repair_hint: impl Into<String>) -> Self {
+        self.repair_hint = Some(repair_hint.into());
+        self
+    }
+
     /// Creates a new validation error.
     pub fn validation(message: impl Into<String>, repair_hint: Option<impl Into<String>>) -> Self {
         Self::new(
@@ -778,5 +785,15 @@ mod tests {
         let plain = ToolError::permission("denied");
         let v2: serde_json::Value = serde_json::from_str(&plain.to_json_string()).unwrap();
         assert!(v2.get("error").is_none(), "error code omitted when absent: {v2}");
+    }
+
+    #[test]
+    fn with_repair_hint_overrides_default() {
+        let err = ToolError::permission("auditor did not pass")
+            .with_code("auditor_pass_missing")
+            .with_repair_hint("Obtain an auditor pass record, then retry.");
+        let v: serde_json::Value = serde_json::from_str(&err.to_json_string()).unwrap();
+        assert_eq!(v["error"], "auditor_pass_missing");
+        assert_eq!(v["repair_hint"], "Obtain an auditor pass record, then retry.");
     }
 }
