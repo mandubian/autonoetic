@@ -4,6 +4,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -344,10 +345,7 @@ impl NativeTool for SessionSearchTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::json!({
-                "error": "Gateway store not available"
-            })
-            .to_string());
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let skill_path = agent_dir.join("SKILL.md");
@@ -356,10 +354,7 @@ impl NativeTool for SessionSearchTool {
             let (m, _) = crate::runtime::parser::SkillParser::parse(&content)?;
             m
         } else {
-            return Ok(serde_json::json!({
-                "error": "Agent manifest not found"
-            })
-            .to_string());
+            return Ok(ToolError::not_found("Agent manifest", Some("Ensure the agent is properly installed and the manifest file exists.")).with_code("agent_manifest_not_found").to_error_response());
         };
 
         let caller_id = &manifest.agent.id;
@@ -473,17 +468,11 @@ impl NativeTool for SessionSummarizeTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(gw_dir) = gateway_dir else {
-            return Ok(serde_json::json!({
-                "error": "Gateway directory not available"
-            })
-            .to_string());
+            return Ok(ToolError::execution("Gateway directory not available", Some("Ensure the gateway data directory is configured and accessible.")).with_code("gateway_dir_unavailable").to_error_response());
         };
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::json!({
-                "error": "Gateway store not available"
-            })
-            .to_string());
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let skill_path = agent_dir.join("SKILL.md");
@@ -492,10 +481,7 @@ impl NativeTool for SessionSummarizeTool {
             let (m, _) = crate::runtime::parser::SkillParser::parse(&content)?;
             m
         } else {
-            return Ok(serde_json::json!({
-                "error": "Agent manifest not found"
-            })
-            .to_string());
+            return Ok(ToolError::not_found("Agent manifest", Some("Ensure the agent is properly installed and the manifest file exists.")).with_code("agent_manifest_not_found").to_error_response());
         };
 
         let caller_id = &manifest.agent.id;

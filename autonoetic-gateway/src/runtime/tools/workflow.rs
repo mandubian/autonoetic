@@ -5,6 +5,7 @@ use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use serde::de;
 use std::collections::HashMap;
@@ -116,12 +117,13 @@ impl NativeTool for ApprovalStatusTool {
                 serde_json::to_string(&response).map_err(Into::into)
             }
             Err(e) => {
-                let response = serde_json::json!({
-                    "ok": false,
-                    "approval_id": args.approval_id,
-                    "error": e.to_string()
-                });
-                serde_json::to_string(&response).map_err(Into::into)
+                let response = ToolError::execution(
+                    e.to_string(),
+                    Some("Check the approval request and retry."),
+                )
+                .with_code("workflow_task_failed")
+                .to_json_string();
+                Ok(response)
             }
         }
     }
@@ -1025,13 +1027,12 @@ impl NativeTool for WorkflowCancelTaskTool {
                 | autonoetic_types::workflow::TaskRunStatus::Runnable
         );
         if !cancellable {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "task_id": task_id,
-                "status": format!("{:?}", task.status),
-                "error": format!("Task is {:?} and cannot be cancelled. Only AwaitingApproval, Pending, and Runnable tasks can be cancelled.", task.status)
-            })
-            .to_string());
+            return Ok(ToolError::conflict(
+                format!("Task is {:?} and cannot be cancelled. Only AwaitingApproval, Pending, and Runnable tasks can be cancelled.", task.status),
+                Some("Cancel is only allowed for tasks in AwaitingApproval, Pending, or Runnable status."),
+            )
+            .with_code("task_cannot_be_cancelled")
+            .to_error_response());
         }
 
         // Delete any saved continuation file.
@@ -1154,25 +1155,24 @@ impl NativeTool for WorkflowForceCompleteTool {
             })?;
 
         if task.status != autonoetic_types::workflow::TaskRunStatus::Running {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "task_id": task_id,
-                "current_status": format!("{:?}", task.status),
-                "error": "Task is not in Running state. Only stuck Running tasks can be force-completed."
-            })
-            .to_string());
+            return Ok(ToolError::conflict(
+                "Task is not in Running state. Only stuck Running tasks can be force-completed.",
+                Some("Ensure the task is in Running state before force-completing."),
+            )
+            .with_code("task_not_running")
+            .to_error_response());
         }
 
         let target_status = match target_status_str {
             "succeeded" => autonoetic_types::workflow::TaskRunStatus::Succeeded,
             "failed" => autonoetic_types::workflow::TaskRunStatus::Failed,
             other => {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "task_id": task_id,
-                    "error": format!("Invalid status '{}'. Must be 'succeeded' or 'failed'.", other)
-                })
-                .to_string());
+                return Ok(ToolError::validation(
+                    format!("Invalid status '{}'. Must be 'succeeded' or 'failed'.", other),
+                    Some("Use 'succeeded' or 'failed' as the status value."),
+                )
+                .with_code("invalid_force_complete_status")
+                .to_error_response());
             }
         };
 
@@ -1268,14 +1268,12 @@ impl NativeTool for WorkflowForceCompleteTool {
         if target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded
             && !session_completed
         {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "task_id": task_id,
-                "workflow_id": workflow_id,
-                "error": "Cannot force-complete as 'succeeded': no evidence of child session completion.",
-                "evidence_gathered": evidence,
-                "hint": "Use status 'failed' if the child session is stuck, or wait for it to produce a manifest/digest/implicit artifact."
-            }).to_string());
+            return Ok(ToolError::conflict(
+                "Cannot force-complete as 'succeeded': no evidence of child session completion.",
+                Some("Use status 'failed' if the child session is stuck, or wait for it to produce a manifest/digest/implicit artifact."),
+            )
+            .with_code("force_complete_no_evidence")
+            .to_error_response());
         }
 
         let result_summary = summary.unwrap_or_else(|| {

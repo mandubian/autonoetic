@@ -340,7 +340,11 @@ impl NativeTool for AgentInspectTool {
                             o.insert(
                                 "layers".to_string(),
                                 serde_json::json!({
-                                    "error": format!("Could not load artifact layers: {}", e),
+                                    "ok": false,
+                                    "error_type": "execution",
+                                    "error": "artifact_layers_load_failed",
+                                    "message": format!("Could not load artifact layers: {}", e),
+                                    "repair_hint": "Check that the artifact layers exist and are accessible."
                                 }),
                             );
                         });

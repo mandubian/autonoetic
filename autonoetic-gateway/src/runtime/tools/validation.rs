@@ -6,6 +6,7 @@ use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::{ValidationClass, ValidationWaiver};
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -113,48 +114,33 @@ impl NativeTool for ValidationWaiveTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(config) = config else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway config not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway config not available", Some("Ensure the gateway configuration is loaded and valid.")).with_code("gateway_config_unavailable").to_error_response());
         };
 
         let session_id_val = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
         let root_session_id = session_id_val.split('/').next().unwrap_or(session_id_val);
 
         if !args.artifact_id.starts_with("art_") {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("Invalid artifact_id '{}': must be a canonical artifact ID (art_*). Use artifact_inspect or resolve to look up art_* from a ref.", args.artifact_id)
-            }))?);
+            return Ok(ToolError::validation(format!("Invalid artifact_id '{}': must be a canonical artifact ID (art_*). Use artifact_inspect or resolve to look up art_* from a ref.", args.artifact_id), Some("Use a canonical art_* ID. Run artifact_inspect or resolve on your ref first.")).with_code("invalid_artifact_id").to_error_response());
         }
 
         let validation_class = match parse_class(&args.validation_class) {
             Some(c) => c,
             None => {
-                return Ok(serde_json::to_string(&serde_json::json!({
-                    "ok": false,
-                    "error": format!("Invalid validation_class '{}'. Waivable classes: correctness_check, quality_check, packaging_check", args.validation_class)
-                }))?);
+                return Ok(ToolError::validation(format!("Invalid validation_class '{}'. Waivable classes: correctness_check, quality_check, packaging_check", args.validation_class), Some("Use one of: correctness_check, quality_check, packaging_check")).with_code("invalid_validation_class").to_error_response());
             }
         };
 
         if !is_waivable(validation_class) {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("{} validations cannot be waived — they are mechanically enforced", args.validation_class)
-            }))?);
+            return Ok(ToolError::validation(format!("{} validations cannot be waived — they are mechanically enforced", args.validation_class), Some("Only waivable classes can be waived. Check the list of waivable classes.")).with_code("non_waivable_validation").to_error_response());
         }
 
         if args.reason.trim().is_empty() {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "A non-empty reason is required for all waivers"
-            }))?);
+            return Ok(ToolError::validation("A non-empty reason is required for all waivers", Some("Provide a non-empty reason string in the request.")).with_code("empty_waiver_reason").to_error_response());
         }
 
         let workflow_id = match crate::scheduler::workflow_store::ensure_workflow_for_root_session(
@@ -165,10 +151,7 @@ impl NativeTool for ValidationWaiveTool {
         ) {
             Ok(w) => w.workflow_id,
             Err(e) => {
-                return Ok(serde_json::to_string(&serde_json::json!({
-                    "ok": false,
-                    "error": format!("Failed to ensure workflow for root session: {}", e)
-                }))?);
+                return Ok(ToolError::execution(format!("Failed to ensure workflow for root session: {}", e), Some("Check the workflow subsystem and retry.")).with_code("workflow_ensure_failed").to_error_response());
             }
         };
 
@@ -256,9 +239,7 @@ impl NativeTool for ValidationWaiversTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let waivers = if let Some(artifact_id) = &args.artifact_id {
@@ -266,9 +247,7 @@ impl NativeTool for ValidationWaiversTool {
         } else if let Some(workflow_id) = &args.workflow_id {
             store.list_waivers_for_workflow(workflow_id)?
         } else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Provide artifact_id or workflow_id"
-            }))?);
+            return Ok(ToolError::validation("Provide artifact_id or workflow_id", Some("Include either artifact_id or workflow_id in the request.")).with_code("missing_artifact_or_workflow").to_error_response());
         };
 
         let summary: Vec<serde_json::Value> = waivers.iter().map(|w| {

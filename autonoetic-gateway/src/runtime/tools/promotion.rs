@@ -526,12 +526,9 @@ impl NativeTool for PromotionQueryTool {
                 serde_json::to_string(&response).map_err(Into::into)
             }
             None => {
-                serde_json::to_string(&serde_json::json!({
-                    "error": "No promotion record found for this artifact",
-                    "artifact_canonical_digest": artifact_canonical_digest,
-                    "artifact_ref": user_ref,
-                }))
-                .map_err(Into::into)
+                Ok(ToolError::not_found("Promotion record", Some("Ensure a promotion record exists for this artifact before querying."))
+                    .with_code("promotion_record_not_found")
+                    .to_error_response())
             }
         }
     }

@@ -228,11 +228,12 @@ impl NativeTool for ObservabilityReadReasoningTool {
             .ok_or_else(|| anyhow::anyhow!("Cannot resolve agents directory"))?;
         let target_agent_dir = agents_dir.join(&args.target_agent_id);
         if !target_agent_dir.exists() {
-            return serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("Target agent directory not found: {}", args.target_agent_id),
-            }))
-            .map_err(Into::into);
+            return Ok(ToolError::not_found(
+                format!("Target agent directory '{}'", args.target_agent_id),
+                Some("Ensure the agent is installed and the agent ID is correct."),
+            )
+            .with_code("target_agent_dir_not_found")
+            .to_error_response());
         }
 
         let evidence_dir = target_agent_dir
@@ -416,11 +417,12 @@ impl NativeTool for ObservabilityReadTool {
         let sub_path = parse_sub_path(&args.uri);
 
         let Some(report) = store.find_published_report(&root_session_id)? else {
-            return serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("No published report found for root session '{}'", root_session_id),
-            }))
-            .map_err(Into::into);
+            return Ok(ToolError::not_found(
+                format!("Published report for root session '{}'", root_session_id),
+                Some("Publish a report first or check the root session ID."),
+            )
+            .with_code("report_not_found")
+            .to_error_response());
         };
 
         match sub_path.as_deref() {
@@ -433,12 +435,12 @@ impl NativeTool for ObservabilityReadTool {
             Some("report/agents") | Some("report/agents/") => {
                 build_agents_list_response(&root_session_id, &report)
             }
-            _ => serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("Unknown observability sub-path: {}", args.uri),
-                "hint": "Available: /report, /report/overview, /report/agents",
-            }))
-            .map_err(Into::into),
+            _ => Ok(ToolError::validation(
+                format!("Unknown observability sub-path: {}", args.uri),
+                Some("Available: /report, /report/overview, /report/agents"),
+            )
+            .with_code("unknown_observability_path")
+            .to_error_response()),
         }
     }
 }
