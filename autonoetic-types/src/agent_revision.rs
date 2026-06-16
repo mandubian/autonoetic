@@ -562,6 +562,9 @@ mod tests {
             updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "admin".to_string(),
             reason: Some("initial promotion".to_string()),
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
         };
         let json = serde_json::to_string(&record).expect("should serialize");
         let parsed: AgentAliasRecord = serde_json::from_str(&json).expect("should deserialize");

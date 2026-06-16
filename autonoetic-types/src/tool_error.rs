@@ -133,6 +133,12 @@ pub struct ToolError {
     /// Stable dedupe key for durable operations when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    /// Stable, machine-readable failure code (snake_case), e.g.
+    /// `auditor_pass_missing`. Finer-grained than `error_type` so an
+    /// orchestrator branches on one field instead of parsing `message` prose.
+    /// Optional and additive (P-5.11); serialized as `error`.
+    #[serde(rename = "error", default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl ToolError {
@@ -156,7 +162,14 @@ impl ToolError {
             requires_human: None,
             side_effect_state: None,
             dedupe_key: None,
+            code: None,
         }
+    }
+
+    /// Attach the stable machine-readable failure `code` (P-5.11).
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
     }
 
     /// Creates a new validation error.
@@ -749,5 +762,21 @@ mod tests {
         assert_eq!(err.error_type, ToolErrorType::Validation);
         let hint = err.repair_hint.unwrap_or_default();
         assert!(hint.contains("allowed enum"));
+    }
+
+    #[test]
+    fn with_code_serializes_as_error_field_and_is_omitted_when_absent() {
+        // Present → serialized under the canonical `error` key (P-5.11 stable code).
+        let coded = ToolError::permission("auditor did not pass").with_code("auditor_pass_missing");
+        let v: serde_json::Value = serde_json::from_str(&coded.to_json_string()).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error_type"], "permission");
+        assert_eq!(v["error"], "auditor_pass_missing");
+
+        // Absent → field omitted, so the base envelope is unchanged for callers
+        // that do not set a code (additive, P-5.11).
+        let plain = ToolError::permission("denied");
+        let v2: serde_json::Value = serde_json::from_str(&plain.to_json_string()).unwrap();
+        assert!(v2.get("error").is_none(), "error code omitted when absent: {v2}");
     }
 }
