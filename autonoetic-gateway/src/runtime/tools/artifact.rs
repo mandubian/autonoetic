@@ -368,6 +368,20 @@ impl NativeTool for ArtifactBuildTool {
                 obj.insert("artifact_ref_scope".to_string(), scope);
             }
         }
+        // Make the next step explicit so the orchestrator goes straight to
+        // promotion instead of rebuilding or re-inspecting.
+        if matches!(bundle.kind, autonoetic_types::artifact::ArtifactKind::AgentBundle) {
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert(
+                    "next".to_string(),
+                    serde_json::Value::String(
+                        "Agent bundle built. Next: promote it with agent_revision_promote \
+                         (pass this artifact_ref). Do not rebuild it."
+                            .to_string(),
+                    ),
+                );
+            }
+        }
 
         if let Some(gs) = gateway_store.as_ref() {
             let root = crate::runtime::content_store::root_session_id(sid);

@@ -1990,6 +1990,25 @@ impl NativeTool for AgentRevisionPromoteTool {
             .any(|cap| matches!(cap, Capability::AgentRevision { .. }))
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        vec![GuidanceBlock {
+            id: "promote.approval_continuation",
+            when: GuidanceCondition::ToolPresent("agent_revision_promote"),
+            priority: 9,
+            prose: "**Promotion resumes automatically — don't loop.** If `agent_revision_promote` \
+returns `approval_required: true` (e.g. `capability_delta_requires_approval`), return the exact \
+`request_id`/`approval_ref` to your caller and end your turn. The gateway wakes you when the operator \
+decides and re-runs the promotion for you with the real result — do **not** re-spawn the builder, \
+re-run the gates, or re-issue the promote. A locked session capability envelope (PromoteWith) \
+pre-authorizes the capability acknowledgement, so a covered promotion needs no new approval at all. \
+On success the response is terminal: `status:\"promoted\"`, `installed:true`. That means the agent is \
+now the **active installed revision** — use it by calling `agent_spawn` with its `agent_id`; do not \
+rebuild, re-promote, or re-inspect to \"confirm\" it."
+                .to_string(),
+        }]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
@@ -2938,6 +2957,15 @@ impl NativeTool for AgentRevisionPromoteTool {
             "short_ref": short_ref,
             "previous_revision_id": previous_revision_id,
             "promotion_id": promotion_id,
+            // Terminal signal: promotion IS installation — the alias now points
+            // at this revision. Make the single next action explicit so the
+            // orchestrator spawns the agent instead of rebuilding/re-promoting.
+            "installed": true,
+            "next": format!(
+                "Agent '{}' is now the active (installed) revision. To use it, call \
+                 agent_spawn with agent_id '{}'. Do not rebuild or promote it again.",
+                args.agent_id, args.agent_id
+            ),
         });
         if let Some(eid) = pre_auth_envelope_id {
             response["pre_authorized_by_envelope"] = serde_json::json!(eid);

@@ -2728,21 +2728,34 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // observed remote hosts so subsequent tool calls are covered by
         // grants without manual operator intervention.
         if let (Some(gs), Some(root)) = (gateway_store.as_ref(), root_session_id.as_deref()) {
-            if let Err(e) =
-                crate::runtime::session_envelope::propose_discovered_envelope(
-                    gs,
-                    root,
-                    "sandbox_exec",
-                    None,
-                    &manifest.agent.id,
-                )
-            {
-                tracing::debug!(
-                    target: "session_envelope",
-                    error = %e,
-                    root_session_id = root,
-                    "envelope proposal after sandbox_exec failed"
-                );
+            match crate::runtime::session_envelope::propose_discovered_envelope(
+                gs,
+                root,
+                "sandbox_exec",
+                None,
+                &manifest.agent.id,
+            ) {
+                // Surface the auto-locked grant so the agent KNOWS these hosts
+                // are now covered and never re-requests approval for them — the
+                // silent auto-lock was a prime cause of redundant approval loops.
+                Ok(Some(result)) if !result.hosts.is_empty() => {
+                    body["network_grant"] = serde_json::json!({
+                        "hosts": result.hosts,
+                        "locked": true,
+                        "note": "These hosts are now covered by a session grant — \
+                                 subsequent calls to them this session are auto-approved; \
+                                 do not re-request approval for them.",
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        target: "session_envelope",
+                        error = %e,
+                        root_session_id = root,
+                        "envelope proposal after sandbox_exec failed"
+                    );
+                }
             }
         }
 
