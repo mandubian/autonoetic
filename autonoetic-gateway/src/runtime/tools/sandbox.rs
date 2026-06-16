@@ -2728,21 +2728,44 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // observed remote hosts so subsequent tool calls are covered by
         // grants without manual operator intervention.
         if let (Some(gs), Some(root)) = (gateway_store.as_ref(), root_session_id.as_deref()) {
-            if let Err(e) =
-                crate::runtime::session_envelope::propose_discovered_envelope(
-                    gs,
-                    root,
-                    "sandbox_exec",
-                    None,
-                    &manifest.agent.id,
-                )
-            {
-                tracing::debug!(
-                    target: "session_envelope",
-                    error = %e,
-                    root_session_id = root,
-                    "envelope proposal after sandbox_exec failed"
-                );
+            match crate::runtime::session_envelope::propose_discovered_envelope(
+                gs,
+                root,
+                "sandbox_exec",
+                None,
+                &manifest.agent.id,
+            ) {
+                // Surface the grant so the agent KNOWS whether these hosts are
+                // now covered and need no re-approval — the silent auto-lock was
+                // a prime cause of redundant approval loops. Report `locked` from
+                // the ACTUAL grant coverage, not optimistically: auto-lock can
+                // fail (it logs and leaves the envelope merely proposed), and a
+                // false `locked:true` would tell the agent not to seek approval
+                // it still needs.
+                Ok(Some(result)) if !result.hosts.is_empty() => {
+                    let covered = gs.session_grants_cover_targets(root, &result.hosts);
+                    body["network_grant"] = serde_json::json!({
+                        "hosts": result.hosts,
+                        "locked": covered,
+                        "note": if covered {
+                            "These hosts are now covered by a session grant — subsequent \
+                             calls to them this session are auto-approved; do not re-request \
+                             approval for them."
+                        } else {
+                            "These hosts were proposed but not yet locked — a later call may \
+                             still require operator approval."
+                        },
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        target: "session_envelope",
+                        error = %e,
+                        root_session_id = root,
+                        "envelope proposal after sandbox_exec failed"
+                    );
+                }
             }
         }
 

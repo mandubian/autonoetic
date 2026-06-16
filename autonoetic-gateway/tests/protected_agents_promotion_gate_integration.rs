@@ -276,6 +276,13 @@ fn protected_agent_with_passed_eval_run_proceeds() {
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
     assert_eq!(result["status"], "promoted");
+    // Terminal signals so the orchestrator goes straight to spawning the agent
+    // instead of looping to "confirm" the install.
+    assert_eq!(result["installed"], true, "promote success must signal installed: {result:?}");
+    assert!(
+        result["next"].as_str().is_some_and(|n| n.contains("agent_spawn")),
+        "promote success must tell the orchestrator to spawn the agent: {result:?}"
+    );
 }
 
 #[test]
