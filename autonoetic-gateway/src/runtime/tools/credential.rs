@@ -123,7 +123,7 @@ impl NativeTool for CredentialCheckTool {
                 "error_type": "permission",
                 "message": message,
                 "repair_hint": "Request CredentialAccess for this service or choose an authorized service.",
-                "error": message,
+                "error": "credential_access_requires_approval",
                 "approval_required": true,
                 "reason": format!("Access to {} credentials requires approval", args.service),
             })
@@ -299,7 +299,7 @@ impl NativeTool for CredentialRequestTool {
                 "error_type": "permission",
                 "message": message,
                 "repair_hint": "Request CredentialAccess for this service or choose an authorized service.",
-                "error": message,
+                "error": "credential_access_requires_approval",
                 "approval_required": true,
                 "reason": format!("Access to {} credentials requires approval", cred.service),
             })
@@ -452,13 +452,13 @@ impl NativeTool for CredentialRequestTool {
                     crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
                         return Ok(json!({
                             "ok": false,
-                            "error_type": violation.error_type,
+                            "error_type": "permission",
                             "message": format!(
                                 "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
                                 gate_id
                             ),
                             "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                            "error": violation.message,
+                            "error": "approval_required",
                             "approval_required": true,
                             "request_id": gate_id,
                             "suspended": true,
@@ -549,7 +549,7 @@ impl NativeTool for CredentialRequestTool {
                             gate_id
                         ),
                         "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                        "error": format!("Network access denied for host: {}", url_host),
+                        "error": "network_access_denied",
                         "approval_required": true,
                         "request_id": gate_id,
                         "suspended": true,

@@ -229,7 +229,7 @@ fn validation_waive_rejects_mechanical_safety() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("cannot be waived"));
+    assert!(v["message"].as_str().unwrap().contains("cannot be waived"));
 
     let waivers = store.list_waivers_for_artifact(&artifact_id).unwrap();
     assert_eq!(waivers.len(), 0, "mechanical_safety waiver must NOT be stored");
@@ -277,7 +277,7 @@ fn validation_waive_rejects_security_review() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("cannot be waived"));
+    assert!(v["message"].as_str().unwrap().contains("cannot be waived"));
 }
 
 #[test]
@@ -422,7 +422,7 @@ fn validation_waive_rejects_non_art_artifact_id() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], false);
-    let err = v["error"].as_str().unwrap();
+    let err = v["message"].as_str().unwrap();
     assert!(err.contains("art_*"), "error should mention art_*: {}", err);
 
     let waivers = store.list_waivers_for_workflow("").unwrap();

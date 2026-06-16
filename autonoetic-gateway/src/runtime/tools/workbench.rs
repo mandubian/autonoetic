@@ -6,6 +6,7 @@ use crate::runtime::content_store::ContentStore;
 use crate::runtime::semantic_diff::RuleBasedSemanticSummarizer;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::tool_error::ToolError;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::semantic_diff::{SemanticSummary, SemanticSummaryInputs, SemanticSummarizer};
@@ -297,21 +298,15 @@ impl NativeTool for ArtifactProjectTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(gateway_dir) = gateway_dir else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway directory not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway directory not available", Some("Ensure the gateway data directory is configured and accessible.")).with_code("gateway_dir_unavailable").to_error_response());
         };
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(config) = config else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway config not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway config not available", Some("Ensure the gateway configuration is loaded and valid.")).with_code("gateway_config_unavailable").to_error_response());
         };
 
         let session_id_val = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
@@ -488,15 +483,11 @@ impl NativeTool for WorkbenchStatusTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(wb) = store.load_workbench(&args.workbench_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench not found"
-            }))?);
+            return Ok(ToolError::not_found("Workbench", Some("Create a workbench first or check the workbench ID.")).with_code("workbench_not_found").to_error_response());
         };
 
         let source_dir = Path::new(&wb.workspace_path);
@@ -594,21 +585,15 @@ impl NativeTool for WorkbenchDiffTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(wb) = store.load_workbench(&args.workbench_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench not found"
-            }))?);
+            return Ok(ToolError::not_found("Workbench", Some("Create a workbench first or check the workbench ID.")).with_code("workbench_not_found").to_error_response());
         };
 
         if wb.status != WorkbenchStatus::Active {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": format!("Workbench is in '{}' status", wb.status.as_str())
-            }))?);
+            return Ok(ToolError::conflict(format!("Workbench is in '{}' status", wb.status.as_str()), Some("Ensure the workbench is in Active status before performing this operation.")).with_code("workbench_wrong_status").to_error_response());
         }
 
         let source_dir = Path::new(&wb.workspace_path);
@@ -699,30 +684,22 @@ impl NativeTool for WorkbenchCheckpointTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(wb) = store.load_workbench(&args.workbench_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench not found"
-            }))?);
+            return Ok(ToolError::not_found("Workbench", Some("Create a workbench first or check the workbench ID.")).with_code("workbench_not_found").to_error_response());
         };
 
         if wb.status != WorkbenchStatus::Active {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": format!("Cannot checkpoint a {} workbench", wb.status.as_str())
-            }))?);
+            return Ok(ToolError::conflict(format!("Cannot checkpoint a {} workbench", wb.status.as_str()), Some("Ensure the workbench is in Active status before checkpointing.")).with_code("workbench_wrong_status").to_error_response());
         }
 
         let label = args.label.as_deref().unwrap_or("manual");
         let cp_id = match create_auto_checkpoint(&store, &wb, label) {
             Ok(id) => id,
             Err(e) => {
-                return Ok(serde_json::to_string(&serde_json::json!({
-                    "ok": false, "error": format!("Checkpoint failed: {e}")
-                }))?);
+                return Ok(ToolError::execution(format!("Checkpoint failed: {e}"), Some("Check the underlying storage and retry.")).with_code("checkpoint_failed").to_error_response());
             }
         };
 
@@ -789,9 +766,7 @@ impl NativeTool for WorkbenchCheckpointsTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let checkpoints = store.list_checkpoints_for_workbench(&args.workbench_id)?;
@@ -859,27 +834,19 @@ impl NativeTool for WorkbenchCheckoutTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(cp) = store.load_checkpoint(&args.checkpoint_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Checkpoint not found"
-            }))?);
+            return Ok(ToolError::not_found("Checkpoint", Some("Create a checkpoint first or check the checkpoint ID.")).with_code("checkpoint_not_found").to_error_response());
         };
 
         let Some(wb) = store.load_workbench(&cp.workbench_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench not found"
-            }))?);
+            return Ok(ToolError::not_found("Workbench", Some("Create a workbench first or check the workbench ID.")).with_code("workbench_not_found").to_error_response());
         };
 
         if wb.status != WorkbenchStatus::Active {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": format!("Cannot checkout to a {} workbench", wb.status.as_str())
-            }))?);
+            return Ok(ToolError::conflict(format!("Cannot checkout to a {} workbench", wb.status.as_str()), Some("Ensure the workbench is in Active status before checkout.")).with_code("workbench_wrong_status").to_error_response());
         }
 
         let source_dir = Path::new(&wb.workspace_path);
@@ -891,9 +858,7 @@ impl NativeTool for WorkbenchCheckoutTool {
             .join(&cp.checkpoint_id);
 
         if !checkpoint_dir.exists() {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Checkpoint files not found on disk"
-            }))?);
+            return Ok(ToolError::resource("Checkpoint files not found on disk", Some("Ensure the checkpoint directory exists and the files have not been manually removed.")).with_code("checkpoint_files_missing").to_error_response());
         }
 
         let current_files = collect_workbench_files(source_dir)?;
@@ -982,44 +947,31 @@ impl NativeTool for WorkbenchReconcileTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(gateway_dir) = gateway_dir else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway directory not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway directory not available", Some("Ensure the gateway data directory is configured and accessible.")).with_code("gateway_dir_unavailable").to_error_response());
         };
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(config) = config else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway config not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway config not available", Some("Ensure the gateway configuration is loaded and valid.")).with_code("gateway_config_unavailable").to_error_response());
         };
 
         let session_id_val = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
         let root_session_id = session_id_val.split('/').next().unwrap_or(session_id_val);
 
         let Some(wb) = store.load_workbench(&args.workbench_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench not found"
-            }))?);
+            return Ok(ToolError::not_found("Workbench", Some("Create a workbench first or check the workbench ID.")).with_code("workbench_not_found").to_error_response());
         };
 
         if wb.status != WorkbenchStatus::Active {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("Cannot reconcile a {} workbench", wb.status.as_str())
-            }))?);
+            return Ok(ToolError::conflict(format!("Cannot reconcile a {} workbench", wb.status.as_str()), Some("Ensure the workbench is in Active status before reconciliation.")).with_code("workbench_wrong_status").to_error_response());
         }
 
         let source_dir = Path::new(&wb.workspace_path);
         if !source_dir.exists() {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench source directory does not exist"
-            }))?);
+            return Ok(ToolError::resource("Workbench source directory does not exist", Some("Ensure the workbench workspace path exists on disk.")).with_code("workbench_source_missing").to_error_response());
         }
 
         let meta_dir = source_dir.parent().unwrap().join(".autonoetic");
@@ -1034,9 +986,7 @@ impl NativeTool for WorkbenchReconcileTool {
 
         let current_files = collect_workbench_files(source_dir)?;
         if current_files.is_empty() {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "No files in workbench to reconcile"
-            }))?);
+            return Ok(ToolError::conflict("No files in workbench to reconcile", Some("Add files to the workbench source directory, then retry.")).with_code("workbench_empty").to_error_response());
         }
 
         let content_store = ContentStore::new(gateway_dir)?;
@@ -1284,22 +1234,15 @@ impl NativeTool for WorkbenchDiscardTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(wb) = store.load_workbench(&args.workbench_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench not found"
-            }))?);
+            return Ok(ToolError::not_found("Workbench", Some("Create a workbench first or check the workbench ID.")).with_code("workbench_not_found").to_error_response());
         };
 
         if wb.status != WorkbenchStatus::Active {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("Cannot discard a {} workbench", wb.status.as_str())
-            }))?);
+            return Ok(ToolError::conflict(format!("Cannot discard a {} workbench", wb.status.as_str()), Some("Ensure the workbench is in Active status before discarding.")).with_code("workbench_wrong_status").to_error_response());
         }
 
         let now = now_rfc3339();
@@ -1377,22 +1320,15 @@ impl NativeTool for WorkbenchCleanupTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(wb) = store.load_workbench(&args.workbench_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false, "error": "Workbench not found"
-            }))?);
+            return Ok(ToolError::not_found("Workbench", Some("Create a workbench first or check the workbench ID.")).with_code("workbench_not_found").to_error_response());
         };
 
         if wb.status == WorkbenchStatus::Active {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Cannot clean up an active workbench. Reconcile or discard first."
-            }))?);
+            return Ok(ToolError::conflict("Cannot clean up an active workbench. Reconcile or discard first.", Some("Reconcile or discard the workbench before cleanup.")).with_code("workbench_wrong_status").to_error_response());
         }
 
         let workspace_path = Path::new(&wb.workspace_path);

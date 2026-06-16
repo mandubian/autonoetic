@@ -9,6 +9,7 @@ use autonoetic_types::plan_frame::{
     plan_envelope_diff, PlanFrame, PlanFrameSummary, PlanRef, PlanStatus, PlanStep, StepOwner,
     ValidationEntry, ValidationPolicy,
 };
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -276,17 +277,11 @@ impl NativeTool for PlanFrameProposeTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(config) = config else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Gateway config not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway config not available", Some("Ensure the gateway configuration is loaded and valid.")).with_code("gateway_config_unavailable").to_error_response());
         };
 
         let session_id = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
@@ -507,10 +502,7 @@ impl NativeTool for PlanFrameGetTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let plan = if let Some(pid) = &args.plan_id {
@@ -597,10 +589,7 @@ impl NativeTool for PlanFrameListTool {
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
@@ -681,24 +670,15 @@ impl NativeTool for PlanFrameApproveTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(plan) = store.load_plan_frame(&args.plan_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Plan not found"
-            }))?);
+            return Ok(ToolError::not_found("Plan", Some("Create a plan first or check the plan ID.")).with_code("plan_not_found").to_error_response());
         };
 
         if plan.status != PlanStatus::AwaitingApproval {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("Plan is in '{}' status; only awaiting_approval plans can be approved", plan.status.as_str())
-            }))?);
+            return Ok(ToolError::conflict(format!("Plan is in '{}' status; only awaiting_approval plans can be approved", plan.status.as_str()), Some("Ensure the plan is in AwaitingApproval status before approving.")).with_code("plan_wrong_status").to_error_response());
         }
 
         let now = now_rfc3339();
@@ -923,24 +903,15 @@ impl NativeTool for PlanFrameAmendTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let Some(current) = store.load_plan_frame(&args.plan_id)? else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Plan not found"
-            }))?);
+            return Ok(ToolError::not_found("Plan", Some("Create a plan first or check the plan ID.")).with_code("plan_not_found").to_error_response());
         };
 
         if current.status == PlanStatus::Completed || current.status == PlanStatus::Cancelled {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": format!("Cannot amend a {} plan", current.status.as_str())
-            }))?);
+            return Ok(ToolError::conflict(format!("Cannot amend a {} plan", current.status.as_str()), Some("Only plans in mutable status (not Completed or Cancelled) can be amended.")).with_code("plan_wrong_status").to_error_response());
         }
 
         let old_version = current.version;
@@ -1287,10 +1258,7 @@ impl NativeTool for PlanFrameHistoryTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "error": "Gateway store not available"
-            }))?);
+            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
         };
 
         let revisions = store.list_plan_revisions(&args.plan_id)?;

@@ -12,6 +12,7 @@ use crate::runtime::tools::{
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
+use autonoetic_types::tool_error::ToolError;
 use gray_matter::Matter;
 use regex::Regex;
 use serde::Deserialize;
@@ -112,14 +113,7 @@ impl NativeTool for SkillInstallTool {
         // ── 2. Policy: SkillInstall capability must permit this URL host ──────
         let url_host = extract_host(&args.url)?;
         if !policy.can_install_skill(&url_host).is_allowed() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": format!(
-                    "SkillInstall capability does not permit fetching from host '{}'",
-                    url_host
-                ),
-            })
-            .to_string());
+            return Ok(ToolError::permission(format!("SkillInstall capability does not permit fetching from host '{}'", url_host)).with_code("skill_install_host_denied").to_error_response());
         }
 
         // ── 3. Resolve config and paths ───────────────────────────────────────
@@ -157,11 +151,7 @@ impl NativeTool for SkillInstallTool {
         };
 
         if !(200..300).contains(&(http_status as i32)) {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": format!("HTTP {} fetching SKILL.md from {}", http_status, args.url),
-            })
-            .to_string());
+            return Ok(ToolError::execution(format!("HTTP {} fetching SKILL.md from {}", http_status, args.url), Some("Ensure the URL is accessible and retry.")).with_code("skill_fetch_failed").to_error_response());
         }
 
         // ── 5. Parse the SKILL.md ─────────────────────────────────────────────
@@ -759,17 +749,7 @@ impl NativeTool for SkillNormalizeTool {
                     }
                 }
                 Err(msg) => {
-                    let error_type = if msg.contains("NetworkAccess") {
-                        "policy"
-                    } else {
-                        "fetch"
-                    };
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error_type": error_type,
-                        "error": msg,
-                    })
-                    .to_string());
+                    return Ok(ToolError::execution(msg, None::<String>).to_error_response());
                 }
             }
         }
@@ -780,15 +760,7 @@ impl NativeTool for SkillNormalizeTool {
             .unwrap_or_else(|| format!("skills/{slug}/SKILL.md"));
         validate_rel_store_path(&rel)?;
         if !policy.can_write_path(&rel).is_allowed() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "permission",
-                "error": format!(
-                    "WriteAccess denied for normalized skill path '{}' (policy P-1.4)",
-                    rel
-                ),
-            })
-            .to_string());
+            return Ok(ToolError::permission(format!("WriteAccess denied for normalized skill path '{}' (policy P-1.4)", rel)).with_code("skill_write_access_denied").to_error_response());
         }
 
         if autonoetic_onboarding_present(&markdown) {
@@ -846,13 +818,7 @@ impl NativeTool for SkillNormalizeTool {
 
         let (step_values, fragments) = extract_api_steps_from_markdown(&markdown);
         if step_values.is_empty() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "partial": true,
-                "error": "No HTTP API endpoints could be extracted from the markdown",
-                "fragments": fragments,
-            })
-            .to_string());
+            return Ok(ToolError::validation("No HTTP API endpoints could be extracted from the markdown", Some("Ensure the markdown contains valid HTTP API endpoint documentation.")).with_code("no_api_endpoints_found").to_error_response());
         }
 
         let steps_count = step_values.len();

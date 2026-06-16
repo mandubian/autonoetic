@@ -601,7 +601,13 @@ fn build_ab_stats(
     let config = crate::runtime::eval_stats::CompareConfig::default();
     match crate::runtime::eval_stats::compare(&a, &b, &config) {
         Ok(rec) => serde_json::to_value(rec).ok(),
-        Err(e) => Some(serde_json::json!({"error": e})),
+        Err(e) => Some(serde_json::json!({
+            "ok": false,
+            "error_type": "execution",
+            "error": "improvement_ab_comparison_failed",
+            "message": format!("{}", e),
+            "repair_hint": "Check the evaluation data and retry."
+        })),
     }
 }
 

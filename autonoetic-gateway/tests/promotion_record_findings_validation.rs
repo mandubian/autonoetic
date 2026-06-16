@@ -59,7 +59,7 @@ fn test_promotion_record_rejects_empty_finding_description() {
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
 
-    let err = registry
+    let out = registry
         .execute(
             "promotion_record",
             &manifest,
@@ -79,9 +79,12 @@ fn test_promotion_record_rejects_empty_finding_description() {
             None,
             None,
         )
-        .unwrap_err();
+        .expect("promotion_record returns a structured Ok(ok:false) envelope (P-5.11)");
 
-    let msg = err.to_string();
+    // Findings validation is now a structured block, not a bare Err.
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    let msg = v["message"].as_str().unwrap_or_default().to_string();
     assert!(
         msg.contains("findings[0]"),
         "Expected findings index, got: {msg}"

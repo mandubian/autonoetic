@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 
 use crate::llm::ToolDefinition;
@@ -75,17 +76,11 @@ impl NativeTool for ToolDiscoverTool {
         }
 
         let Some(ctx) = run_context else {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": "No run context available."
-            }).to_string());
+            return Ok(ToolError::execution("No run context available.", Some("Ensure the tool is invoked within an active session context.")).with_code("no_run_context").to_error_response());
         };
 
         let Some(writer) = &ctx.discovered_tools else {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": "Discovered-tools writer not available."
-            }).to_string());
+            return Ok(ToolError::execution("Discovered-tools writer not available.", Some("Ensure the discovery subsystem is initialized.")).with_code("discovery_writer_unavailable").to_error_response());
         };
 
         let mut accepted: Vec<String> = Vec::new();

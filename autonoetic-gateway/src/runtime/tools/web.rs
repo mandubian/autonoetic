@@ -942,7 +942,7 @@ impl NativeTool for WebSearchTool {
                             gate_id
                         ),
                         "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                        "error": format!("Network access denied for host: {}", engine_host),
+                        "error": "network_access_denied",
                         "approval_required": true,
                         "request_id": gate_id,
                         "suspended": true,
@@ -1340,7 +1340,7 @@ fn gate_web_fetch_host(
                         gate_id
                     ),
                     "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                    "error": format!("Network access denied for host: {}", host),
+                    "error": "network_access_denied",
                     "approval_required": true,
                     "request_id": gate_id,
                     "suspended": true,
@@ -1954,7 +1954,7 @@ impl NativeTool for WebCallTool {
                             gate_id
                         ),
                         "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                        "error": format!("Network access denied for host: {}", host),
+                        "error": "network_access_denied",
                         "approval_required": true,
                         "request_id": gate_id,
                         "suspended": true,

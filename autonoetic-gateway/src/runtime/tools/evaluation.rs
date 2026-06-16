@@ -795,9 +795,21 @@ impl NativeTool for EvalCompareTool {
             match eval_stats::compare(&baseline_samples, &candidate_samples, &config) {
                 Ok(rec) => match serde_json::to_value(rec) {
                     Ok(val) => Some(val),
-                    Err(e) => Some(serde_json::json!({"error": format!("serialization failure: {}", e)})),
+                    Err(e) => Some(serde_json::json!({
+                        "ok": false,
+                        "error_type": "execution",
+                        "error": "eval_serialization_failed",
+                        "message": format!("serialization failure: {}", e),
+                        "repair_hint": "Check the evaluation data and retry."
+                    })),
                 },
-                Err(e) => Some(serde_json::json!({"error": e})),
+                Err(e) => Some(serde_json::json!({
+                    "ok": false,
+                    "error_type": "execution",
+                    "error": "eval_comparison_failed",
+                    "message": format!("{}", e),
+                    "repair_hint": "Check the evaluation data and retry."
+                })),
             }
         });
 
