@@ -2433,81 +2433,136 @@ do not re-issue."
             FullJury,
         }
 
+        // Returns Ok(None) when the gate passes, Ok(Some(json)) carrying a
+        // structured P-5.11 failure envelope (ok:false + stable `error` code)
+        // when blocked, and Err only for genuine infrastructure failures.
+        // Messages are kept verbatim (callers/tests read them); the stable code
+        // lets an orchestrator branch on one field instead of parsing prose.
         let enforce_promotion_gate = |artifact_id: &str,
                                       mode: PromotionGateMode,
                                       missing_record_message: &str|
-         -> anyhow::Result<()> {
+         -> anyhow::Result<Option<String>> {
+            use autonoetic_types::tool_error::ToolError;
             let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
             let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
-            let record = promo_store
-                .get_promotion(artifact_id)
-                .ok_or_else(|| anyhow::anyhow!("{}", missing_record_message))?;
+            let Some(record) = promo_store.get_promotion(artifact_id) else {
+                return Ok(Some(
+                    ToolError::permission(missing_record_message.to_string())
+                        .with_code("promotion_record_missing")
+                        .with_repair_hint(
+                            "Obtain the required gate pass record(s) for this artifact, then retry agent_revision_promote.",
+                        )
+                        .to_error_response(),
+                ));
+            };
 
             let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
-            anyhow::ensure!(
-                    record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
-                    "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
-                     but revision requires '{}'. Re-run gate roles for this revision content.",
-                    artifact_id,
-                    record_content_digest,
-                    rev.content_digest
-                );
+            if record.content_digest.as_deref() != Some(rev.content_digest.as_str()) {
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
+                         but revision requires '{}'. Re-run gate roles for this revision content.",
+                        artifact_id, record_content_digest, rev.content_digest
+                    ))
+                    .with_code("promotion_gate_content_digest_mismatch")
+                    .with_repair_hint("Re-run the gate roles against this revision's content, then retry.")
+                    .to_error_response(),
+                ));
+            }
 
-            anyhow::ensure!(
-                record.auditor_pass,
-                "Promotion gate: auditor did not pass for artifact '{}'. \
+            if !record.auditor_pass {
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: auditor did not pass for artifact '{}'. \
                      Fix the audit findings and re-run auditor.default.",
-                artifact_id
-            );
-            let audit_id = record.auditor_id.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Promotion gate: auditor identity missing for artifact '{}' (P-2.17). \
+                        artifact_id
+                    ))
+                    .with_code("auditor_pass_missing")
+                    .with_repair_hint("Obtain a passing auditor record for this artifact, then retry.")
+                    .to_error_response(),
+                ));
+            }
+            let Some(audit_id) = record.auditor_id.as_deref() else {
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: auditor identity missing for artifact '{}' (P-2.17). \
                      Re-run auditor.default to record its identity.",
-                    artifact_id
-                )
-            })?;
+                        artifact_id
+                    ))
+                    .with_code("auditor_identity_missing")
+                    .with_repair_hint("Re-record the audit with an attributed identity, then retry.")
+                    .with_enforced_rules(vec!["P-2.17".to_string()])
+                    .to_error_response(),
+                ));
+            };
 
             match mode {
                 PromotionGateMode::Full => {
-                    anyhow::ensure!(
-                        record.evaluator_pass
-                            || record.sealed_evaluator_pass
-                            || record.static_evaluator_pass,
-                        "Promotion gate: no evaluator role passed for artifact '{}'. \
+                    if !(record.evaluator_pass
+                        || record.sealed_evaluator_pass
+                        || record.static_evaluator_pass)
+                    {
+                        return Ok(Some(
+                            ToolError::permission(format!(
+                                "Promotion gate: no evaluator role passed for artifact '{}'. \
                          Fix the evaluation findings and re-run sealed_evaluator.default or static_evaluator.default.",
-                        artifact_id
-                    );
-                    let eval_id = record
+                                artifact_id
+                            ))
+                            .with_code("evaluator_pass_missing")
+                            .with_repair_hint("Obtain a passing evaluator record (evaluator/sealed/static), then retry.")
+                            .to_error_response(),
+                        ));
+                    }
+                    let Some(eval_id) = record
                         .evaluator_id
                         .as_deref()
                         .or(record.sealed_evaluator_id.as_deref())
                         .or(record.static_evaluator_id.as_deref())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
+                    else {
+                        return Ok(Some(
+                            ToolError::permission(format!(
                                 "Promotion gate: evaluator identity missing for artifact '{}' (P-2.17). \
                                  Re-run an evaluator role to record its identity.",
                                 artifact_id
-                            )
-                        })?;
-                    anyhow::ensure!(
-                        eval_id != audit_id,
-                        "Promotion gate: evaluator and auditor are the same agent '{}' (P-2.17). \
+                            ))
+                            .with_code("evaluator_identity_missing")
+                            .with_repair_hint("Re-record the evaluation with an attributed identity, then retry.")
+                            .with_enforced_rules(vec!["P-2.17".to_string()])
+                            .to_error_response(),
+                        ));
+                    };
+                    if eval_id == audit_id {
+                        return Ok(Some(
+                            ToolError::permission(format!(
+                                "Promotion gate: evaluator and auditor are the same agent '{}' (P-2.17). \
                          A single agent cannot self-approve. Use distinct evaluator and auditor agents.",
-                        eval_id
-                    );
+                                eval_id
+                            ))
+                            .with_code("gate_identity_collision")
+                            .with_repair_hint("Use distinct evaluator and auditor identities, then retry.")
+                            .with_enforced_rules(vec!["P-2.17".to_string()])
+                            .to_error_response(),
+                        ));
+                    }
                 }
                 PromotionGateMode::AuditOnly => {
                     // P-2.17 reduced: auditor must be a distinct identity
                     // from the agent that proposed the install. With no
                     // evaluator in this mode, the proposer is the relevant
                     // counterparty for the self-approval ban.
-                    anyhow::ensure!(
-                        audit_id != rev.created_by_id,
-                        "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (P-2.17, audit-only). \
+                    if audit_id == rev.created_by_id {
+                        return Ok(Some(
+                            ToolError::permission(format!(
+                                "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (P-2.17, audit-only). \
                          A single agent cannot propose and audit. Use a distinct auditor identity.",
-                        audit_id,
-                        args.revision_id
-                    );
+                                audit_id, args.revision_id
+                            ))
+                            .with_code("gate_identity_collision")
+                            .with_repair_hint("Use an auditor identity distinct from the proposer, then retry.")
+                            .with_enforced_rules(vec!["P-2.17".to_string()])
+                            .to_error_response(),
+                        ));
+                    }
                 }
                 // FullJury enforcement is handled separately after the
                 // legacy gate; this variant is only used for event emission.
@@ -2515,13 +2570,18 @@ do not re-issue."
             }
 
             // P-2.26: All executed gate roles must pass.
-            if record.unit_test_runner_id.is_some() {
-                anyhow::ensure!(
-                    record.unit_test_runner_pass,
-                    "Promotion gate: unit_test_runner did not pass for artifact '{}' (P-2.26). \
+            if record.unit_test_runner_id.is_some() && !record.unit_test_runner_pass {
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: unit_test_runner did not pass for artifact '{}' (P-2.26). \
                      Fix the failing tests and re-run unit_test_runner.default.",
-                    artifact_id
-                );
+                        artifact_id
+                    ))
+                    .with_code("unit_test_runner_pass_missing")
+                    .with_repair_hint("Resolve the failing tests and re-record a unit_test_runner pass, then retry.")
+                    .with_enforced_rules(vec!["P-2.26".to_string()])
+                    .to_error_response(),
+                ));
             }
 
             let has_unresolved = rev
@@ -2529,13 +2589,20 @@ do not re-issue."
                 .get("has_unresolved_dependencies")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            anyhow::ensure!(
-                !has_unresolved,
-                "Promotion gate: revision has unresolved dependencies. \
+            if has_unresolved {
+                return Ok(Some(
+                    ToolError::permission(
+                        "Promotion gate: revision has unresolved dependencies. \
                      Run packager.default to install dependencies as layers, \
-                     then re-submit the revision.",
-            );
-            Ok(())
+                     then re-submit the revision."
+                            .to_string(),
+                    )
+                    .with_code("unresolved_dependencies")
+                    .with_repair_hint("Resolve the revision's dependencies (install as layers), then re-submit and retry.")
+                    .to_error_response(),
+                ));
+            }
+            Ok(None)
         };
 
         // Emit a causal event after each enforced promotion gate so forensics
@@ -2582,7 +2649,7 @@ do not re-issue."
                     args.revision_id
                 )
             })?;
-            enforce_promotion_gate(
+            if let Some(json) = enforce_promotion_gate(
                 artifact_id,
                 PromotionGateMode::Full,
                 &format!(
@@ -2591,13 +2658,15 @@ do not re-issue."
                      evaluator and auditor pass records before promotion.",
                     artifact_id
                 ),
-            )?;
+            )? {
+                return Ok(json);
+            }
             emit_gate_event(PromotionGateMode::Full, Some(artifact_id));
         } else if has_high_risk && rev.artifact_id.is_some() {
             // NetworkAccess without CodeExecution/AgentSpawn, but an artifact was provided.
             // Still apply the full eval+audit gate since code exists to review.
             let artifact_id = rev.artifact_id.as_deref().unwrap();
-            enforce_promotion_gate(
+            if let Some(json) = enforce_promotion_gate(
                 artifact_id,
                 PromotionGateMode::Full,
                 &format!(
@@ -2606,7 +2675,9 @@ do not re-issue."
                      evaluator and auditor pass records before promotion.",
                     artifact_id
                 ),
-            )?;
+            )? {
+                return Ok(json);
+            }
             emit_gate_event(PromotionGateMode::Full, Some(artifact_id));
         } else if rev.artifact_id.is_some() && !current_capabilities.is_empty() {
             // Pure-skill intent-only bundle (no CodeExecution/AgentSpawn, no
@@ -2622,7 +2693,7 @@ do not re-issue."
             // for such an agent is trivial. Runtime capability enforcement
             // on every tool call remains the security gate for that case.
             let artifact_id = rev.artifact_id.as_deref().unwrap();
-            enforce_promotion_gate(
+            if let Some(json) = enforce_promotion_gate(
                 artifact_id,
                 PromotionGateMode::AuditOnly,
                 &format!(
@@ -2632,7 +2703,9 @@ do not re-issue."
                      promotion.",
                     artifact_id
                 ),
-            )?;
+            )? {
+                return Ok(json);
+            }
             emit_gate_event(PromotionGateMode::AuditOnly, Some(artifact_id));
         } else {
             // Reaching here ⇒ either zero declared capabilities, or a
@@ -2700,26 +2773,34 @@ do not re-issue."
                 // revision proposer.
                 let proposer = rev.created_by_id.as_str();
                 for id in &fed_ids {
-                    anyhow::ensure!(
-                        id != proposer,
-                        "Promotion gate (FullJury): federation role '{}' is the same identity \
+                    if id == proposer {
+                        return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                            "Promotion gate (FullJury): federation role '{}' is the same identity \
                          that proposed revision '{}' (P-2.17). Each federation role must be \
                          a distinct agent from the proposer.",
-                        id,
-                        args.revision_id
-                    );
+                            id, args.revision_id
+                        ))
+                        .with_code("jury_identity_collision")
+                        .with_repair_hint("Use federation role identities distinct from the proposer, then retry.")
+                        .with_enforced_rules(vec!["P-2.17".to_string(), "P-2.22".to_string()])
+                        .to_error_response());
+                    }
                 }
                 if fed_ids.len() > 1 {
                     for i in 0..fed_ids.len() {
                         for j in (i + 1)..fed_ids.len() {
-                            anyhow::ensure!(
-                                fed_ids[i] != fed_ids[j],
-                                "Promotion gate (FullJury): federation roles '{}' and '{}' \
+                            if fed_ids[i] == fed_ids[j] {
+                                return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                                    "Promotion gate (FullJury): federation roles '{}' and '{}' \
                                  are the same agent (P-2.17). Each federation role must be \
                                  a distinct agent.",
-                                fed_ids[i],
-                                fed_ids[j]
-                            );
+                                    fed_ids[i], fed_ids[j]
+                                ))
+                                .with_code("jury_identity_collision")
+                                .with_repair_hint("Use distinct identities for each federation role, then retry.")
+                                .with_enforced_rules(vec!["P-2.17".to_string(), "P-2.22".to_string()])
+                                .to_error_response());
+                            }
                         }
                     }
                 }
@@ -2733,15 +2814,19 @@ do not re-issue."
                     Some(e) => Some(e),
                     None => gateway_store.find_approved_escalation_for_artifact(artifact_id)?,
                 };
-                anyhow::ensure!(
-                    escalation.is_some(),
-                    "Promotion gate (FullJury): revision '{}' has federation role verdicts \
+                if escalation.is_none() {
+                    return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                        "Promotion gate (FullJury): revision '{}' has federation role verdicts \
                      but no approved operator escalation. \
                      The planner must call federation.escalate with revision_id='{}' \
                      and the operator must approve before promotion.",
-                    args.revision_id,
-                    args.revision_id
-                );
+                        args.revision_id, args.revision_id
+                    ))
+                    .with_code("jury_escalation_required")
+                    .with_repair_hint("Obtain an approved operator escalation for this revision, then retry.")
+                    .with_enforced_rules(vec!["P-2.22".to_string()])
+                    .to_error_response());
+                }
 
                 emit_gate_event(PromotionGateMode::FullJury, Some(artifact_id));
             }

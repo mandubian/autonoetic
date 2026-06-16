@@ -364,6 +364,17 @@ fn try_promote(
     }
 }
 
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err(message)`
+/// so the failure match arms below read naturally; a genuine success stays `Ok`.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
+    }
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     gateway_dir: PathBuf,
@@ -462,7 +473,7 @@ fn audit_only_promote_fails_without_auditor_record() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => {
             assert!(
                 msg.contains("Promotion gate") && msg.contains("no auditor promotion.record"),
@@ -560,7 +571,7 @@ fn audit_only_promote_fails_with_auditor_record_pass_false() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => assert!(
             msg.contains("Promotion gate") && msg.contains("auditor did not pass"),
             "expected auditor-fail rejection, got: {}",
@@ -626,7 +637,7 @@ fn audit_only_promote_fails_when_auditor_is_proposer_self_approval() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => {
             assert!(
                 msg.contains("P-2.17") && msg.contains("same identity that proposed"),
@@ -679,7 +690,7 @@ fn high_risk_intent_only_artifact_still_requires_full_gate() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => {
             assert!(
                 msg.contains("no evaluator role passed") || msg.contains("no promotion.record"),
