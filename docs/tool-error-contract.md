@@ -34,7 +34,7 @@ law (**P-5.11**); there is no second wrapper and no per-tool ad-hoc error JSON.
 ## Err vs Ok — the rule
 
 - **Expected, agent-correctable outcomes** (validation, permission/policy denial,
-  gate/precondition unmet, not-found, conflict) → return `Ok(toolerror.to_json_string())`
+  gate/precondition unmet, not-found, conflict) → return `Ok(tool_error.to_error_response())`
   with `ok:false` + a stable `code`. The agent sees a normal tool result and reacts.
 - **Genuine infrastructure failure** (DB open, serialization, IO) → return `Err`.
   The boundary (`tool_call_processor`) still renders it through the same envelope.
@@ -44,15 +44,25 @@ law (**P-5.11**); there is no second wrapper and no per-tool ad-hoc error JSON.
 ```rust
 use autonoetic_types::tool_error::ToolError;
 
-// expected/blocked outcome — return as a tool result:
+// Expected/blocked outcome — return it as a tool result (ok:false), not an Err.
+// `permission` takes only a message; attach the stable code with `.with_code`:
 return Ok(ToolError::permission("Promotion gate: auditor did not pass for artifact 'x'.")
     .with_code("auditor_pass_missing")
-    .with_repair_hint("Obtain an auditor pass record for this artifact, then retry.") // if a builder exists
-    .to_json_string());
+    .to_error_response());
+
+// Constructors that accept an optional repair_hint (validation / execution /
+// conflict / resource / not_found) set it inline:
+return Ok(ToolError::validation(
+        "content_write requires both `name` and `content`",
+        Some("Provide both fields, then retry."),
+    )
+    .with_code("missing_required_field")
+    .to_error_response());
 ```
 
-(Use the `error_type` constructor that matches the class: `validation`,
-`permission`, `conflict`, `resource`, `not_found`, `execution`, `fatal`.)
+Use the constructor that matches the class: `validation`, `permission`,
+`conflict`, `resource`, `not_found`, `execution`, `fatal`. `to_error_response()`
+is the repo-wide convention for rendering the envelope to a tool-result string.
 
 ## Stable code conventions
 
