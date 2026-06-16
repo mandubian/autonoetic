@@ -22,4 +22,4 @@ jobs:
         run: cargo build --workspace --all-targets
 
       - name: Test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets -- --test-threads=1
