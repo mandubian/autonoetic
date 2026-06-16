@@ -2004,7 +2004,9 @@ re-run the gates, or re-issue the promote. A locked session capability envelope 
 pre-authorizes the capability acknowledgement, so a covered promotion needs no new approval at all. \
 On success the response is terminal: `status:\"promoted\"`, `installed:true`. That means the agent is \
 now the **active installed revision** — use it by calling `agent_spawn` with its `agent_id`; do not \
-rebuild, re-promote, or re-inspect to \"confirm\" it."
+rebuild, re-promote, or re-inspect to \"confirm\" it. If it returns `status:\"coalesced\"` with \
+`retry_advice:\"wait\"`, an equivalent promote is already running: end your turn and let it finish — \
+do not re-issue."
                 .to_string(),
         }]
     }
