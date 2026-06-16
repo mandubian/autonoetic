@@ -162,11 +162,14 @@ fn section_selector_section_zero_returns_rights_section() {
 }
 
 #[test]
-fn section_selector_pending_rule() {
-    let resp = invoke(r#"{"section":"R+++3"}"#);
+fn section_selector_single_rule_row() {
+    // Select one rule by its identifier (the `extract_rule_row` path). Uses a
+    // live, stable rule; the old "R+++N" pending-rule notation was promoted to
+    // numbered rule rows and no longer exists in the active constitution.
+    let resp = invoke(r#"{"section":"P-5.11"}"#);
     assert_eq!(resp["ok"], true);
     let text = resp["text"].as_str().expect("text");
-    assert!(text.contains("R+++3"));
+    assert!(text.contains("P-5.11"));
 }
 
 #[test]
