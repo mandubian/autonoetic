@@ -2782,7 +2782,7 @@ do not re-issue."
                         ))
                         .with_code("jury_identity_collision")
                         .with_repair_hint("Use federation role identities distinct from the proposer, then retry.")
-                        .with_enforced_rules(vec!["P-2.17".to_string()])
+                        .with_enforced_rules(vec!["P-2.17".to_string(), "P-2.22".to_string()])
                         .to_error_response());
                     }
                 }
@@ -2798,7 +2798,7 @@ do not re-issue."
                                 ))
                                 .with_code("jury_identity_collision")
                                 .with_repair_hint("Use distinct identities for each federation role, then retry.")
-                                .with_enforced_rules(vec!["P-2.17".to_string()])
+                                .with_enforced_rules(vec!["P-2.17".to_string(), "P-2.22".to_string()])
                                 .to_error_response());
                             }
                         }
@@ -2824,7 +2824,7 @@ do not re-issue."
                     ))
                     .with_code("jury_escalation_required")
                     .with_repair_hint("Obtain an approved operator escalation for this revision, then retry.")
-                    .with_enforced_rules(vec!["P-2.17".to_string()])
+                    .with_enforced_rules(vec!["P-2.22".to_string()])
                     .to_error_response());
                 }
 
