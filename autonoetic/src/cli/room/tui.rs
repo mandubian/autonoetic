@@ -3759,7 +3759,7 @@ fn build_rich_row_lines(
     let first_prefix = vec![
         Span::styled(rail_block.clone(), rail_style),
         Span::raw(" "),
-        Span::styled(format!("{glyph:<2}"), head_style),
+        Span::styled(format!("{glyph:<2}"), altitude_style(spec.altitude)),
         Span::styled(label_padded.clone(), label_style),
         Span::raw(" "),
     ];
@@ -4111,6 +4111,13 @@ fn truncate(s: &str, max: usize) -> String {
 /// Left-rail color: agent narrative keeps the seat hue; tool calls use a cool
 /// blue so they read as plumbing, not speech.
 fn row_rail_color(spec: &RowSpec) -> Color {
+    // Altitude takes visual precedence on the rail so severity is visible
+    // at a glance regardless of who is speaking.
+    match spec.altitude {
+        Altitude::Error => return Color::Red,
+        Altitude::Attention => return Color::Yellow,
+        _ => {}
+    }
     match spec.tone {
         RowTone::OperatorGate => Color::Yellow,
         RowTone::ToolCall => Color::Blue,
