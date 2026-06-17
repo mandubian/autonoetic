@@ -3,7 +3,7 @@
 //! Provides observability into what consumes the context window budget
 //! before each LLM call, and tool tiering for dynamic tool filtering.
 
-use crate::llm::{Message, ToolDefinition};
+use crate::llm::{Message, ToolCall, ToolDefinition};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -68,6 +68,7 @@ pub fn set_chars_per_token(value: f64) -> f64 {
 
 /// Estimated overhead tokens per tool definition (name + description + schema structure).
 const TOOL_OVERHEAD_TOKENS: usize = 30;
+const TOOL_CALL_OVERHEAD_TOKENS: usize = 15;
 
 /// Tool tier for progressive disclosure.
 pub type ToolTier = autonoetic_types::agent::ToolTier;
@@ -104,7 +105,7 @@ impl PromptBudgetBreakdown {
         let conversation_tokens: usize = messages
             .iter()
             .filter(|m| m.role != crate::llm::Role::System)
-            .map(|m| estimate_tokens(&m.content))
+            .map(|m| estimate_message_tokens(m))
             .sum();
 
         let tool_count = tools.len();
@@ -141,6 +142,26 @@ pub fn estimate_tokens(text: &str) -> usize {
         let ratio = chars_per_token();
         (text.chars().count() as f64 / ratio).ceil() as usize
     }
+}
+
+/// Estimate tokens for a single message, including `content`, `tool_calls`
+/// (name + JSON arguments), and `reasoning_content`. Prior versions only
+/// counted `content`, which made the governor systematically underestimate
+/// assistant turns that wrote large files via `content_write` (empty content,
+/// thousands of tokens in `tool_calls[].arguments`). That blind spot let
+/// oversized prompts through to providers, causing context-overflow 500s
+/// and parse failures in llama.cpp's tool-call renderer.
+pub fn estimate_message_tokens(msg: &Message) -> usize {
+    let mut tokens = estimate_tokens(&msg.content);
+    for tc in &msg.tool_calls {
+        tokens += estimate_tokens(&tc.name);
+        tokens += estimate_tokens(&tc.arguments);
+        tokens += TOOL_CALL_OVERHEAD_TOKENS;
+    }
+    if let Some(ref reasoning) = msg.reasoning_content {
+        tokens += estimate_tokens(reasoning);
+    }
+    tokens
 }
 
 /// Estimate tokens for a single tool definition.
@@ -336,7 +357,7 @@ impl BudgetEnforcementStrategy for TrimHistoryStrategy {
         let mut pending_tool_call_ids: HashSet<String> = HashSet::new();
 
         for msg in non_system {
-            let msg_tokens = estimate_tokens(&msg.content);
+            let msg_tokens = estimate_message_tokens(&msg);
 
             if msg.role == crate::llm::Role::Tool {
                 current_group.push(msg);
@@ -539,6 +560,64 @@ mod tests {
         // Restore the default so downstream tests that rely on it are
         // unaffected. Use a safe round-trip rather than reaching into the
         // atomic directly.
+        set_chars_per_token(DEFAULT_CHARS_PER_TOKEN);
+    }
+
+    #[test]
+    fn test_estimate_message_tokens_counts_tool_calls() {
+        set_chars_per_token(1.0);
+
+        // Plain message — same as content-only.
+        let plain = Message::assistant("hello");
+        assert_eq!(estimate_message_tokens(&plain), 5);
+
+        // Assistant with empty content but large tool_call arguments
+        // (the exact pattern that caused the governor blind spot:
+        // content_write with a big file body).
+        let big_args = "x".repeat(3000);
+        let with_tool_call = Message {
+            role: crate::llm::Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "content_write".to_string(),
+                arguments: format!(r#"{{"content":"{}"}}"#, big_args),
+            }],
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        };
+        let tool_call_tokens = estimate_message_tokens(&with_tool_call);
+        // Must be much larger than the empty-content estimate (0).
+        assert!(
+            tool_call_tokens > 1000,
+            "tool_call arguments must be counted, got {}",
+            tool_call_tokens
+        );
+
+        set_chars_per_token(DEFAULT_CHARS_PER_TOKEN);
+    }
+
+    #[test]
+    fn test_estimate_message_tokens_counts_reasoning_content() {
+        set_chars_per_token(1.0);
+
+        let with_reasoning = Message {
+            role: crate::llm::Role::Assistant,
+            content: "ok".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: Some("thinking ".repeat(100)),
+            reasoning_details: None,
+        };
+        let tokens = estimate_message_tokens(&with_reasoning);
+        // "ok" = 2 + "thinking " * 100 = 900 → total must exceed content-only.
+        assert!(
+            tokens > 100,
+            "reasoning_content must be counted, got {}",
+            tokens
+        );
+
         set_chars_per_token(DEFAULT_CHARS_PER_TOKEN);
     }
 

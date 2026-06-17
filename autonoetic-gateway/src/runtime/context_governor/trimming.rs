@@ -1,12 +1,12 @@
 use crate::llm::{Message, ToolDefinition};
 use crate::runtime::context_governor::strategies::{GovernorContext, ReductionOutcome};
-use crate::runtime::prompt_budget::{estimate_tokens, estimate_tool_definition, BudgetEnforcementStrategy};
+use crate::runtime::prompt_budget::{estimate_message_tokens, estimate_tool_definition, BudgetEnforcementStrategy};
 use async_trait::async_trait;
 
 fn recompute_total(system_tokens: usize, history: &[Message], tools: &[ToolDefinition]) -> usize {
     let conv: usize = history.iter()
         .filter(|m| !matches!(m.role, crate::llm::Role::System))
-        .map(|m| estimate_tokens(&m.content))
+        .map(|m| estimate_message_tokens(m))
         .sum();
     let tool_tokens: usize = tools.iter().map(estimate_tool_definition).sum();
     system_tokens + conv + tool_tokens
