@@ -599,6 +599,35 @@ pub fn reject_request(
         ApprovalStatus::Rejected,
     )?;
 
+    // Resolve the linked escalation on rejection — mirrors the approve path
+    // (approve_request_with_options). Without this, the approvals row flips
+    // to rejected but the escalations row stays pending, polluting
+    // pending_escalation_ids in attestation payloads and blocking future
+    // FullJury gate checks that scan for Pending escalations.
+    if let ScheduledAction::SessionEscalate { payload, .. } = &decision.action {
+        if let Some(payload) = payload {
+            if payload.get("type").and_then(|v| v.as_str()) == Some("promotion_review") {
+                if let Some(esc_id) = payload.get("escalation_id").and_then(|v| v.as_str()) {
+                    if let Some(store) = gateway_store {
+                        if let Err(e) = store.resolve_escalation(
+                            esc_id,
+                            autonoetic_types::escalation::EscalationStatus::Rejected,
+                            decided_by,
+                            decision.reason.as_deref(),
+                        ) {
+                            tracing::warn!(
+                                target: "approval",
+                                escalation_id = %esc_id,
+                                error = %e,
+                                "Failed to resolve linked escalation on rejection"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Workflow-bound tasks surface rejection through task failure + workflow
     // resume. Non-workflow callers still need a direct notification.
     if should_resume_waiting_session(&decision) {

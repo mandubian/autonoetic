@@ -616,6 +616,65 @@ fn approval_or_interaction_id(e: &SessionTimelineEntry) -> Option<String> {
     }
 }
 
+struct ApprovalRow {
+    id: String,
+    kind: &'static str,
+    is_pending: bool,
+    summary: String,
+}
+
+fn collect_approval_rows(
+    entries: &[SessionTimelineEntry],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> Vec<ApprovalRow> {
+    let mut rows: Vec<ApprovalRow> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for e in entries.iter().rev() {
+        let (kind, id) = match e.event_type.as_str() {
+            "escalation.pending" => {
+                ("ESCALATION", e.refs.approval_request_id.clone())
+            }
+            "approval.pending" => {
+                ("APPROVAL", e.refs.approval_request_id.clone()
+                    .or_else(|| approval_or_interaction_id(e)))
+            }
+            "plan.pending" => ("PLAN", e.refs.plan_id.clone()),
+            "user.ask.pending" => {
+                ("ASK", e.refs.interaction_id.clone()
+                    .or_else(|| approval_or_interaction_id(e)))
+            }
+            _ => continue,
+        };
+        let Some(id) = id else { continue };
+        if !seen.insert(id.clone()) { continue; }
+        let is_pending = !resolved.contains(&id) && !acted.contains(&id);
+        let summary = extract_gate_summary(e);
+        rows.push(ApprovalRow { id, kind, is_pending, summary });
+    }
+    rows.sort_by_key(|r| !r.is_pending);
+    rows
+}
+
+fn extract_gate_summary(e: &SessionTimelineEntry) -> String {
+    let Some(payload) = e.payload.as_deref() else { return String::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else { return String::new() };
+    for field in &["reason", "action", "synthesis", "title", "question", "agent_id"] {
+        if let Some(s) = v.get(*field).and_then(|x| x.as_str()) {
+            return truncate_str(s, 70);
+        }
+    }
+    String::new()
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -788,11 +847,13 @@ struct GateInput {
 struct GateModal {
     gate: GateRef,
     scroll: u16,
-    /// When true, the timeline stays interactive; a compact banner reminds the
-    /// operator that a gate is still open (`g` reopens the full modal).
     peek_timeline: bool,
-    /// Fallback detail from `approvals.inspect` when the timeline row is sparse.
     inspect_lines: Vec<String>,
+}
+
+struct ApprovalsPopup {
+    selected: usize,
+    scroll: u16,
 }
 
 fn gate_modal_kind(gate: &GateRef) -> bool {
@@ -1522,6 +1583,7 @@ pub fn run(
     let mut last_announced_plan_event: Option<String> = None;
     let mut last_announced_gate_event: Option<String> = None;
     let mut gate_modal: Option<GateModal> = None;
+    let mut approvals_popup: Option<ApprovalsPopup> = None;
     let mut last_session_status_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
@@ -2084,6 +2146,70 @@ pub fn run(
                         }
                     }
 
+                    // Approvals popup — list all pending + resolved gates; act directly.
+                    if let Some(ref mut popup) = approvals_popup {
+                        let rows = collect_approval_rows(&entries, &resolved, &acted);
+                        if rows.is_empty() {
+                            approvals_popup = None;
+                        } else {
+                            let ctrl_c = key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL);
+                            if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
+                                // fall through to global quit
+                            } else {
+                                match key.code {
+                                    KeyCode::Esc => { approvals_popup = None; }
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        if popup.selected + 1 < rows.len() {
+                                            popup.selected += 1;
+                                        }
+                                    }
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        popup.selected = popup.selected.saturating_sub(1);
+                                    }
+                                    KeyCode::Char('G') | KeyCode::End => {
+                                        popup.selected = rows.len().saturating_sub(1);
+                                    }
+                                    KeyCode::Char('g') | KeyCode::Home => {
+                                        popup.selected = 0;
+                                    }
+                                    KeyCode::Char('y') | KeyCode::Char('n') => {
+                                        let idx = popup.selected.min(rows.len().saturating_sub(1));
+                                        let row = &rows[idx];
+                                        if !row.is_pending {
+                                            status = Some(format!("already resolved: {}", row.id));
+                                        } else if row.kind == "PLAN" || row.kind == "ASK" {
+                                            status = Some(format!(
+                                                "{}: Esc to close, then resolve from timeline",
+                                                row.kind
+                                            ));
+                                        } else {
+                                            let approve = key.code == KeyCode::Char('y');
+                                            let method = if approve { "approvals.approve" } else { "approvals.reject" };
+                                            match rpc(client, method, serde_json::json!({
+                                                "request_id": row.id,
+                                                "decided_by": "operator",
+                                            })) {
+                                                Ok(_) => {
+                                                    acted.insert(row.id.clone());
+                                                    status = Some(format!(
+                                                        "✓ {} {}",
+                                                        if approve { "approved" } else { "rejected" },
+                                                        row.id
+                                                    ));
+                                                    force_timeline_refresh = true;
+                                                }
+                                                Err(e) => status = Some(format!("✗ {e}")),
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     let ctrl_c = key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL);
                     if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
@@ -2286,10 +2412,29 @@ pub fn run(
                             }
                         }
                         KeyCode::Char('a') => {
-                            // Pure view change now (we always fetch at `detail`) — no
-                            // reload, so already-fetched history re-filters instantly.
                             floor = cycle_floor(floor);
                             detail = None;
+                        }
+                        KeyCode::Char('A') => {
+                            if content_view.is_some() || artifact_file_view.is_some()
+                                || artifact_viewer.is_some() || detail.is_some()
+                                || input.is_some() || compose.is_some()
+                                || gate_modal.is_some()
+                            {
+                            } else if approvals_popup.is_some() {
+                                approvals_popup = None;
+                            } else {
+                                let rows = collect_approval_rows(&entries, &resolved, &acted);
+                                if rows.is_empty() {
+                                    status = Some("no approvals in this session".to_string());
+                                } else {
+                                    approvals_popup = Some(ApprovalsPopup { selected: 0, scroll: 0 });
+                                    status = Some(
+                                        "approvals: j/k navigate · y approve · n reject · Esc close"
+                                            .to_string(),
+                                    );
+                                }
+                            }
                         }
                         KeyCode::Char('s') => squash = !squash,
                         // [ / ]: jump to the previous / next first-class
@@ -2819,6 +2964,8 @@ pub fn run(
                     gate_modal
                         .as_ref()
                         .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
+                    None,
+                    &[],
                 )
             })?;
         }
@@ -3159,6 +3306,8 @@ pub fn run(
                 gate_modal
                     .as_ref()
                     .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
+                approvals_popup.as_ref(),
+                &collect_approval_rows(&entries, &resolved, &acted),
             )
         })?;
 
@@ -4840,6 +4989,8 @@ fn draw(
     content_view: Option<&ContentView>,
     gate_modal: Option<&GateModal>,
     gate_modal_entry: Option<&SessionTimelineEntry>,
+    approvals_popup: Option<&ApprovalsPopup>,
+    approval_rows: &[ApprovalRow],
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -5301,6 +5452,59 @@ fn draw(
     if let Some(modal) = gate_modal {
         draw_gate_modal(f, modal, gate_modal_entry, input, status);
     }
+
+    if let Some(popup) = approvals_popup {
+        draw_approvals_popup(f, popup, approval_rows);
+    }
+}
+
+fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup, rows: &[ApprovalRow]) {
+    let pending = rows.iter().filter(|r| r.is_pending).count();
+    let resolved_count = rows.len() - pending;
+    let title = format!(
+        " Approvals — {} pending · {} resolved [A/Esc close · j/k nav · y approve · n reject] ",
+        pending, resolved_count,
+    );
+    let area = centered_rect(75, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let max_scroll = rows.len().saturating_sub(inner_height) as u16;
+    let scroll = popup.scroll.min(max_scroll);
+
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let marker = if i == popup.selected { "▸" } else { " " };
+            let status_icon = if r.is_pending { "⏳" } else { "✓" };
+            let id_short: String = r.id.chars().take(20).collect();
+            let style = if i == popup.selected {
+                Style::default().fg(Color::Yellow).bg(Color::Black)
+            } else if r.is_pending {
+                Style::default().fg(Color::Cyan).bg(Color::Black)
+            } else {
+                Style::default().fg(Color::DarkGray).bg(Color::Black)
+            };
+            Line::from(Span::styled(
+                format!(" {} {} {:<8} {:<20} {}", marker, status_icon, r.kind, id_short, r.summary),
+                style,
+            ))
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .style(Style::default().bg(Color::Black)),
+            )
+            .scroll((scroll, 0)),
+        area,
+    );
 }
 
 fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
