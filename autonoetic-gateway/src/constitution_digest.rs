@@ -125,7 +125,26 @@ pub fn initialize_constitution(config: &GatewayConfig) -> anyhow::Result<()> {
             *guard = Some(loaded);
             Ok(())
         }
-        Some(existing) => ensure_same_runtime_config(existing.as_ref(), loaded.as_ref()),
+        Some(existing) => {
+            // Production keeps the strict single-process drift guard. In the
+            // gateway crate's own unit tests, however, each test constructs a
+            // router/store with its own tempdir `gateway_dir`, so the guard
+            // (which compares gateway_dir) would fail the 2nd router built in
+            // the shared lib-test process. Allow re-init to replace the global
+            // under test — the unit suite runs single-threaded, so no two tests
+            // race on it. Integration tests run as separate processes (fresh
+            // global each), so they exercise the production path below.
+            #[cfg(test)]
+            {
+                let _ = existing;
+                *guard = Some(loaded);
+                Ok(())
+            }
+            #[cfg(not(test))]
+            {
+                ensure_same_runtime_config(existing.as_ref(), loaded.as_ref())
+            }
+        }
     }
 }
 
