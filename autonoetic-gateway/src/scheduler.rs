@@ -717,6 +717,31 @@ pub async fn reap_orphaned_sessions(
     for (idx, (child_session_id, parent_session_id, root_session_id, agent_id)) in
         orphans.into_iter().enumerate()
     {
+        // A child parked at an approval gate is NOT an orphan. The async-spawn
+        // pattern legitimately ends the immediate parent's turn (transcript
+        // status `completed`) while the child stays suspended awaiting an
+        // operator decision — coordinated by the still-alive root. Reaping it
+        // here would discard committed work (e.g. a just-created revision) and
+        // drive the parent to retry, producing a cancel→retry→collision storm.
+        // Leave approval-suspended children to the operator and the gate-timeout
+        // lifecycle (P-2.11) instead.
+        match crate::scheduler::approval::pending_approval_requests_for_session(
+            &config,
+            Some(store.as_ref()),
+            &child_session_id,
+        ) {
+            Ok(pending) if !pending.is_empty() => {
+                tracing::info!(
+                    child_session_id = %child_session_id,
+                    parent_session_id = %parent_session_id,
+                    pending_approvals = pending.len(),
+                    "Orphan-child reaper (R+12): skipping child parked at an approval gate"
+                );
+                continue;
+            }
+            _ => {}
+        }
+
         tracing::info!(
             child_session_id = %child_session_id,
             parent_session_id = %parent_session_id,
