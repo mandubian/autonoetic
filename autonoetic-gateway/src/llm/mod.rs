@@ -105,12 +105,28 @@ pub fn is_context_overflow_error(status: u16, body: &str) -> bool {
             //    OpenAI-compatible server that doesn't use a standard code/type.
             if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
                 let lc = msg.to_lowercase();
+                let has_overflow_verb = lc.contains("exceed")
+                    || lc.contains("too long")
+                    || lc.contains("too many tokens");
+                // A size/length/window/token hint distinguishes a *context size*
+                // overflow from unrelated "context" errors that merely share the
+                // word — most importantly "context deadline exceeded" (a timeout,
+                // NOT an overflow), which must not be routed into overflow recovery.
+                let has_size_hint = lc.contains("size")
+                    || lc.contains("length")
+                    || lc.contains("window")
+                    || lc.contains("token");
                 if lc.contains("exceeds the available context")
                     || lc.contains("exceeds the context")
                     || lc.contains("context length exceeded")
                     || lc.contains("maximum context length")
-                    || lc.contains("context window")
-                        && (lc.contains("exceed") || lc.contains("too long"))
+                    || (lc.contains("context window") && has_overflow_verb)
+                    // General catch for OpenAI-compatible servers that phrase it
+                    // differently (e.g. llama.cpp / vLLM "Context size has been
+                    // exceeded."). Requires "context" + an overflow verb + a
+                    // size/length/window/token hint, so timeouts like
+                    // "context deadline exceeded" are NOT misclassified.
+                    || (lc.contains("context") && has_overflow_verb && has_size_hint)
                 {
                     return true;
                 }

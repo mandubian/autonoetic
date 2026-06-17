@@ -603,6 +603,35 @@ mod tests {
         }
 
         #[test]
+        fn context_size_has_been_exceeded_500() {
+            // Observed from a local OpenAI-compatible server: HTTP 500 with a
+            // non-standard "Context size has been exceeded." message and a
+            // generic server_error type. Previously unrecognized → terminal
+            // failure instead of an aggressive-governor retry.
+            let body = r#"{"error":{"code":500,"message":"Context size has been exceeded.","type":"server_error"}}"#;
+            assert!(is_context_overflow_error(500, body));
+        }
+
+        #[test]
+        fn unrelated_context_error_without_overflow_verb_is_not_overflow() {
+            // Guard against the general "context" catch over-matching: an error
+            // mentioning context but no overflow verb must NOT be treated as
+            // overflow.
+            let body = r#"{"error":{"message":"invalid context id provided","type":"invalid_request_error"}}"#;
+            assert!(!is_context_overflow_error(400, body));
+        }
+
+        #[test]
+        fn context_deadline_exceeded_timeout_is_not_overflow() {
+            // "context deadline exceeded" is a timeout/cancellation (Go/gRPC),
+            // NOT a context-size overflow. It has "context" + "exceed" but no
+            // size/length/window/token hint, so it must NOT route into
+            // overflow recovery (trimming context wouldn't help a timeout).
+            let body = r#"{"error":{"message":"context deadline exceeded","type":"server_error"}}"#;
+            assert!(!is_context_overflow_error(500, body));
+        }
+
+        #[test]
         fn n_prompt_tokens_and_n_ctx_keys_alone_are_enough() {
             // Defensive: if the server reports both counters, it's an overflow
             // even if the message wording is unusual.
