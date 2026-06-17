@@ -2227,44 +2227,11 @@ pub fn run(
                         KeyCode::Enter => {
                             if detail.is_some() {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
-                            } else if content_tree.is_some() && content_view.is_none() {
-                                if let Some(tree) = content_tree.as_ref() {
-                                    content_view =
-                                        open_selected_content(client, root_session_id, tree, &mut status);
-                                }
-                            } else if content_view.is_some() {
-                                // Content viewer overlay — don't drill timeline behind it.
-                            } else if let Some(g) =
-                                view_gate.as_ref().filter(|g| g.kind == GateKind::Plan)
-                            {
-                                if open_plan_review(
-                                    client,
-                                    root_session_id,
-                                    &g.id,
-                                    &mut detail,
-                                    &mut detail_scroll,
-                                    &mut detail_h_scroll,
-                                ) {
-                                    status = Some(format!("plan review: {}", g.id));
-                                } else {
-                                    status = Some(format!("✗ could not load plan {}", g.id));
-                                }
-                            } else if let Some(g) =
-                                view_gate.as_ref().filter(|g| g.kind == GateKind::Interaction)
-                            {
-                                let (options, allow_freeform) = interaction_choices(&entries, &g.id);
-                                input = Some(GateInput {
-                                    action: GateAction::Answer,
-                                    id: g.id.clone(),
-                                    buffer: String::new(),
-                                    options,
-                                    allow_freeform,
-                                    motivation_required: false,
-                                    required_confirm_phrase: None,
-                                    acknowledged_capabilities: Vec::new(),
-                                });
-                                status = None;
                             } else if let Some((_, src)) = view_indexed.get(selected) {
+                                // Open detail for the selected row — same semantics as
+                                // mouse double-click. Avoid blocking on content_tree or
+                                // view_gate so Enter always opens detail regardless of
+                                // sidebar/gate overlays (mouse already behaves this way).
                                 if let Some(msg) = open_row_detail_or_plan_review(
                                     client,
                                     root_session_id,
