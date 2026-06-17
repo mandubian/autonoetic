@@ -675,6 +675,37 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+fn fetch_approval_rows(client: &RoomClient, root_session_id: &str) -> Vec<ApprovalRow> {
+    let params = serde_json::json!({
+        "root_session_id": root_session_id,
+        "limit": 500u32,
+        "min_altitude": "attention",
+    });
+    let entries: Vec<SessionTimelineEntry> = match rpc(client, "session.timeline.list", params) {
+        Ok(v) => v
+            .get("events")
+            .and_then(|e| e.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let resolved: HashSet<String> = entries
+        .iter()
+        .filter_map(|e| match e.event_type.as_str() {
+            "approval.approved" | "approval.rejected" | "approval.cancelled" => {
+                e.refs.approval_request_id.clone()
+            }
+            "plan.approved" => e.refs.plan_id.clone(),
+            _ => None,
+        })
+        .collect();
+    collect_approval_rows(&entries, &resolved, &HashSet::new())
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -854,6 +885,7 @@ struct GateModal {
 struct ApprovalsPopup {
     selected: usize,
     scroll: u16,
+    rows: Vec<ApprovalRow>,
 }
 
 fn gate_modal_kind(gate: &GateRef) -> bool {
@@ -2148,8 +2180,7 @@ pub fn run(
 
                     // Approvals popup — list all pending + resolved gates; act directly.
                     if let Some(ref mut popup) = approvals_popup {
-                        let rows = collect_approval_rows(&entries, &resolved, &acted);
-                        if rows.is_empty() {
+                        if popup.rows.is_empty() {
                             approvals_popup = None;
                         } else {
                             let ctrl_c = key.code == KeyCode::Char('c')
@@ -2157,10 +2188,11 @@ pub fn run(
                             if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
                                 // fall through to global quit
                             } else {
+                                let row_count = popup.rows.len();
                                 match key.code {
                                     KeyCode::Esc => { approvals_popup = None; }
                                     KeyCode::Char('j') | KeyCode::Down => {
-                                        if popup.selected + 1 < rows.len() {
+                                        if popup.selected + 1 < row_count {
                                             popup.selected += 1;
                                         }
                                     }
@@ -2168,14 +2200,14 @@ pub fn run(
                                         popup.selected = popup.selected.saturating_sub(1);
                                     }
                                     KeyCode::Char('G') | KeyCode::End => {
-                                        popup.selected = rows.len().saturating_sub(1);
+                                        popup.selected = row_count.saturating_sub(1);
                                     }
                                     KeyCode::Char('g') | KeyCode::Home => {
                                         popup.selected = 0;
                                     }
                                     KeyCode::Char('y') | KeyCode::Char('n') => {
-                                        let idx = popup.selected.min(rows.len().saturating_sub(1));
-                                        let row = &rows[idx];
+                                        let idx = popup.selected.min(row_count.saturating_sub(1));
+                                        let row = &popup.rows[idx];
                                         if !row.is_pending {
                                             status = Some(format!("already resolved: {}", row.id));
                                         } else if row.kind == "PLAN" || row.kind == "ASK" {
@@ -2185,19 +2217,24 @@ pub fn run(
                                             ));
                                         } else {
                                             let approve = key.code == KeyCode::Char('y');
+                                            let row_id = row.id.clone();
                                             let method = if approve { "approvals.approve" } else { "approvals.reject" };
                                             match rpc(client, method, serde_json::json!({
-                                                "request_id": row.id,
+                                                "request_id": &row_id,
                                                 "decided_by": "operator",
                                             })) {
                                                 Ok(_) => {
-                                                    acted.insert(row.id.clone());
+                                                    acted.insert(row_id.clone());
                                                     status = Some(format!(
                                                         "✓ {} {}",
                                                         if approve { "approved" } else { "rejected" },
-                                                        row.id
+                                                        row_id
                                                     ));
                                                     force_timeline_refresh = true;
+                                                    popup.rows = fetch_approval_rows(client, &root_session_id);
+                                                    if popup.selected >= popup.rows.len() {
+                                                        popup.selected = popup.rows.len().saturating_sub(1);
+                                                    }
                                                 }
                                                 Err(e) => status = Some(format!("✗ {e}")),
                                             }
@@ -2424,11 +2461,15 @@ pub fn run(
                             } else if approvals_popup.is_some() {
                                 approvals_popup = None;
                             } else {
-                                let rows = collect_approval_rows(&entries, &resolved, &acted);
+                                let rows = fetch_approval_rows(client, &root_session_id);
                                 if rows.is_empty() {
                                     status = Some("no approvals in this session".to_string());
                                 } else {
-                                    approvals_popup = Some(ApprovalsPopup { selected: 0, scroll: 0 });
+                                    approvals_popup = Some(ApprovalsPopup {
+                                        selected: 0,
+                                        scroll: 0,
+                                        rows,
+                                    });
                                     status = Some(
                                         "approvals: j/k navigate · y approve · n reject · Esc close"
                                             .to_string(),
@@ -2965,7 +3006,6 @@ pub fn run(
                         .as_ref()
                         .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                     None,
-                    &[],
                 )
             })?;
         }
@@ -3307,7 +3347,6 @@ pub fn run(
                     .as_ref()
                     .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                 approvals_popup.as_ref(),
-                &collect_approval_rows(&entries, &resolved, &acted),
             )
         })?;
 
@@ -4990,7 +5029,6 @@ fn draw(
     gate_modal: Option<&GateModal>,
     gate_modal_entry: Option<&SessionTimelineEntry>,
     approvals_popup: Option<&ApprovalsPopup>,
-    approval_rows: &[ApprovalRow],
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -5454,11 +5492,12 @@ fn draw(
     }
 
     if let Some(popup) = approvals_popup {
-        draw_approvals_popup(f, popup, approval_rows);
+        draw_approvals_popup(f, popup);
     }
 }
 
-fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup, rows: &[ApprovalRow]) {
+fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup) {
+    let rows = &popup.rows;
     let pending = rows.iter().filter(|r| r.is_pending).count();
     let resolved_count = rows.len() - pending;
     let title = format!(
