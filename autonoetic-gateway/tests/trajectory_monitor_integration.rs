@@ -124,7 +124,10 @@ fn signal_toggles_prevent_individual_signal_triggers() {
 fn fingerprint_entropy_detects_repetition() {
     let mut mon = TrajectoryMonitor::new(cfg());
 
-    // 4 identical fingerprints → entropy near 0 → critical.
+    // 4 identical fingerprints → entropy near 0. Repetition entropy is
+    // ADVISORY: it surfaces as a Warn signal, never Critical, so a repetitive
+    // I/O agent (e.g. researcher fetching many URLs) is not gated on
+    // repetition alone. Tick past the warm-up (min_turns = 3) first.
     let fp = 42u64;
     for turn in 1u64..=4 {
         let _ = mon.tick(
@@ -141,12 +144,30 @@ fn fingerprint_entropy_detects_repetition() {
         &quiet_guard_state(),
     );
 
-    let has_entropy_critical = r.health.signals().iter().any(|s| {
-        s.kind == DivergenceSignalKind::RepetitionEntropy && s.severity == SignalSeverity::Critical
-    });
-    assert!(has_entropy_critical, "expected entropy=critical signal from repetition");
+    let entropy_signals: Vec<_> = r
+        .health
+        .signals()
+        .iter()
+        .filter(|s| s.kind == DivergenceSignalKind::RepetitionEntropy)
+        .collect();
+    assert!(
+        !entropy_signals.is_empty(),
+        "expected an entropy advisory signal from repetition"
+    );
+    assert!(
+        entropy_signals
+            .iter()
+            .all(|s| s.severity == SignalSeverity::Warn),
+        "repetition entropy must be advisory (Warn), never Critical: {entropy_signals:?}"
+    );
+    // Entropy alone must not drive the session to Critical (the operator gate).
+    assert!(
+        !matches!(r.health, TrajectoryHealth::Critical { .. }),
+        "entropy alone must not reach Critical: {:?}",
+        r.health
+    );
 
-    // Payload must carry signals.
+    // Payload must still carry signals (advisory divergence is recorded).
     let payload = build_event_payload(&r.health).unwrap();
     assert!(payload["signals"].as_array().map(|a| a.len() > 0).unwrap_or(false));
 }

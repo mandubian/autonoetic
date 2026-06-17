@@ -145,7 +145,7 @@ impl TrajectoryMonitor {
             }
         }
         if toggles.repetition_entropy {
-            if let Some(s) = self.repetition_entropy_signal() {
+            if let Some(s) = self.repetition_entropy_signal(turn_counter) {
                 signals.push(s);
             }
         }
@@ -229,45 +229,51 @@ impl TrajectoryMonitor {
         }
     }
 
-    fn repetition_entropy_signal(&self) -> Option<DivergenceSignal> {
+    fn repetition_entropy_signal(&self, turn_counter: u64) -> Option<DivergenceSignal> {
         let cfg = &self.config.repetition_entropy;
+        // Warm-up: divergence is a trajectory property, not a single-turn one.
+        // I/O-heavy agents (e.g. `researcher.default`) legitimately fire many
+        // similar calls in their opening turns — fetching pages, re-querying.
+        // Don't judge tool-call repetition before `min_turns` so that burst
+        // does not trip the signal at turn 1.
+        if turn_counter < cfg.min_turns {
+            return None;
+        }
         if self.fingerprint_window.len() < cfg.min_observations.max(1) {
             return None;
         }
         let entropy = shannon_entropy_bits(&self.fingerprint_window);
-        if entropy <= cfg.critical_bits {
-            Some(
-                DivergenceSignal::new(
-                    DivergenceSignalKind::RepetitionEntropy,
-                    SignalSeverity::Critical,
-                    entropy,
-                    cfg.critical_bits,
-                )
-                .with_evidence(format!(
-                    "tool-fingerprint entropy {:.2} bits over last {} calls (critical ≤ {:.2})",
-                    entropy,
-                    self.fingerprint_window.len(),
-                    cfg.critical_bits
-                )),
-            )
-        } else if entropy <= cfg.warn_bits {
-            Some(
-                DivergenceSignal::new(
-                    DivergenceSignalKind::RepetitionEntropy,
-                    SignalSeverity::Warn,
-                    entropy,
-                    cfg.warn_bits,
-                )
-                .with_evidence(format!(
-                    "tool-fingerprint entropy {:.2} bits over last {} calls (warn ≤ {:.2})",
-                    entropy,
-                    self.fingerprint_window.len(),
-                    cfg.warn_bits
-                )),
-            )
-        } else {
-            None
+        if entropy > cfg.warn_bits {
+            return None;
         }
+        // Repetition entropy is ADVISORY: it caps at `Warn` and never escalates
+        // a session to `Critical` on its own, so it never raises the operator
+        // divergence gate. Repeating a tool call is weak evidence of being
+        // stuck — a researcher fetching many URLs is doing its job. The
+        // gate-worthy `Critical` verdicts come from the loop guard's semantic
+        // no-progress (P-7.19) and the error-burst signal. The evidence still
+        // records how low the entropy is (`critical_bits` band) so the
+        // divergence event stays informative.
+        let band = if entropy <= cfg.critical_bits {
+            "critically low"
+        } else {
+            "low"
+        };
+        Some(
+            DivergenceSignal::new(
+                DivergenceSignalKind::RepetitionEntropy,
+                SignalSeverity::Warn,
+                entropy,
+                cfg.warn_bits,
+            )
+            .with_evidence(format!(
+                "tool-fingerprint entropy {:.2} bits over last {} calls ({}, warn ≤ {:.2}) — advisory, not gating",
+                entropy,
+                self.fingerprint_window.len(),
+                band,
+                cfg.warn_bits
+            )),
+        )
     }
 
     fn error_burst_signal(&self) -> Option<DivergenceSignal> {
@@ -476,10 +482,13 @@ mod tests {
     // ── Per-signal extraction ───────────────────────────────────────────
 
     #[test]
-    fn repetition_entropy_zero_for_repeated_fingerprint() {
-        // Send the same fingerprint enough times to reach min_observations.
+    fn repetition_entropy_is_advisory_warn_never_critical() {
+        // Repeated identical fingerprints (entropy ≈ 0) must surface a Warn
+        // advisory — NOT a Critical signal — so a repetitive I/O agent never
+        // raises the operator divergence gate on repetition alone.
         let mut mon = TrajectoryMonitor::new(cfg());
         let fp = 42;
+        // Tick past the warm-up (min_turns = 3) and min_observations (4).
         for turn in 1..=4 {
             let _ = mon.tick(
                 turn,
@@ -488,23 +497,67 @@ mod tests {
                 &quiet_guard_state(),
             );
         }
-        // Entropy ≈ 0 → critical band.
         let r = mon.tick(
             5,
             &[ToolObservation { fingerprint: fp, failed: false }],
             None,
             &quiet_guard_state(),
         );
-        let has_entropy_critical = r
+        let entropy_signals: Vec<_> = r
             .health
             .signals()
             .iter()
-            .any(|s| s.kind == DivergenceSignalKind::RepetitionEntropy && s.severity == SignalSeverity::Critical);
+            .filter(|s| s.kind == DivergenceSignalKind::RepetitionEntropy)
+            .collect();
         assert!(
-            has_entropy_critical,
-            "expected entropy=critical signal, got health={:?}",
+            !entropy_signals.is_empty(),
+            "expected an entropy advisory signal, got health={:?}",
             r.health
         );
+        assert!(
+            entropy_signals
+                .iter()
+                .all(|s| s.severity == SignalSeverity::Warn),
+            "repetition entropy must cap at Warn, got {:?}",
+            entropy_signals
+        );
+        // …and it must not, by itself, drive the session to Critical.
+        assert!(
+            !matches!(r.health, TrajectoryHealth::Critical { .. }),
+            "entropy alone must not reach Critical, got {:?}",
+            r.health
+        );
+    }
+
+    #[test]
+    fn repetition_entropy_warmup_suppresses_early_turns() {
+        // Even with identical fingerprints meeting min_observations, the signal
+        // stays silent before min_turns (default 3) — an opening burst of
+        // similar calls (researcher fetching many URLs in turn 1) is fine.
+        let mut mon = TrajectoryMonitor::new(cfg());
+        for turn in 1..=2 {
+            let r = mon.tick(
+                turn,
+                &[
+                    ToolObservation { fingerprint: 9, failed: false },
+                    ToolObservation { fingerprint: 9, failed: false },
+                    ToolObservation { fingerprint: 9, failed: false },
+                    ToolObservation { fingerprint: 9, failed: false },
+                ],
+                None,
+                &quiet_guard_state(),
+            );
+            let has_entropy = r
+                .health
+                .signals()
+                .iter()
+                .any(|s| s.kind == DivergenceSignalKind::RepetitionEntropy);
+            assert!(
+                !has_entropy,
+                "entropy fired during warm-up at turn {} (health={:?})",
+                turn, r.health
+            );
+        }
     }
 
     #[test]

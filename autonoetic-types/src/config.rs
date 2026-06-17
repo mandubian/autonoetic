@@ -2496,6 +2496,14 @@ pub struct TrajectoryRepetitionEntropyConfig {
     /// repeating itself.
     #[serde(default = "default_repetition_entropy_warn_bits")]
     pub warn_bits: f32,
+    /// Entropy at or below this (in bits) is labelled "critically low" in the
+    /// divergence evidence. The repetition-entropy signal is **advisory**: it
+    /// caps at `Warn` severity and never escalates a session to `Critical` on
+    /// its own (so it never raises the operator divergence gate). Tool-call
+    /// repetition is weak evidence of being stuck — an I/O agent such as
+    /// `researcher.default` legitimately repeats fetch/search calls. The
+    /// gate-worthy `Critical` verdicts come from the loop guard's semantic
+    /// no-progress (P-7.19) and the error-burst signal.
     #[serde(default = "default_repetition_entropy_critical_bits")]
     pub critical_bits: f32,
     /// Minimum number of tool calls in the window before the signal is
@@ -2503,6 +2511,12 @@ pub struct TrajectoryRepetitionEntropyConfig {
     /// two calls observed.
     #[serde(default = "default_repetition_entropy_min_observations")]
     pub min_observations: usize,
+    /// Warm-up: the signal is not evaluated until the session reaches this
+    /// turn. Divergence is a trajectory property, not a single-turn one — an
+    /// agent's opening burst of similar calls (e.g. a researcher fetching many
+    /// pages in turn 1) must not trip it.
+    #[serde(default = "default_repetition_entropy_min_turns")]
+    pub min_turns: u64,
 }
 
 fn default_repetition_entropy_warn_bits() -> f32 {
@@ -2514,6 +2528,9 @@ fn default_repetition_entropy_critical_bits() -> f32 {
 fn default_repetition_entropy_min_observations() -> usize {
     4
 }
+fn default_repetition_entropy_min_turns() -> u64 {
+    3
+}
 
 impl Default for TrajectoryRepetitionEntropyConfig {
     fn default() -> Self {
@@ -2521,6 +2538,7 @@ impl Default for TrajectoryRepetitionEntropyConfig {
             warn_bits: default_repetition_entropy_warn_bits(),
             critical_bits: default_repetition_entropy_critical_bits(),
             min_observations: default_repetition_entropy_min_observations(),
+            min_turns: default_repetition_entropy_min_turns(),
         }
     }
 }
