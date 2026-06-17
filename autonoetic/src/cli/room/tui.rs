@@ -507,6 +507,13 @@ fn build_info_panel(
         };
         lines.push(format!("  Model      {model_tag}  ({} calls)", stats.llm_calls));
         lines.push(format!("  Tokens     in {}   out {}", format_tokens(stats.total_input), format_tokens(stats.total_output)));
+        let avg_in = stats.total_input / stats.llm_calls as u64;
+        let avg_out = stats.total_output / stats.llm_calls as u64;
+        lines.push(format!("  Avg/call   in {}   out {}", format_tokens(avg_in), format_tokens(avg_out)));
+        if let Some(pct) = avg_context_pct(stats) {
+            let window = stats.context_window.map_or_else(|| String::new(), |w| format_tokens(w as u64));
+            lines.push(format!("  Context    {:.0}% used{}", pct, if window.is_empty() { String::new() } else { format!(" (of {window})") }));
+        }
     }
     lines.push(String::new());
     lines.push(format!("  Toggles    floor:{}  squash:{}  reasoning:{}  follow:{}",
@@ -1316,6 +1323,9 @@ struct SessionStats {
     total_output: u64,
     llm_calls: u64,
     models: Vec<String>,
+    context_total_pct: f64,
+    context_samples: u64,
+    context_window: Option<u32>,
 }
 
 fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
@@ -1324,6 +1334,9 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
         total_output: 0,
         llm_calls: 0,
         models: Vec::new(),
+        context_total_pct: 0.0,
+        context_samples: 0,
+        context_window: None,
     };
     for e in entries {
         if e.event_type != "llm.round" {
@@ -1337,17 +1350,50 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
                     stats.total_input += inp;
                     stats.total_output += out;
                     stats.llm_calls += 1;
-                    if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
-                        let short = model.split('/').last().unwrap_or(model);
-                        if !stats.models.contains(&short.to_string()) {
-                            stats.models.push(short.to_string());
-                        }
+                }
+
+                let usage = v.get("usage");
+                let (ctx_window, ctx_pct) = match usage.and_then(|u| u.get("context_window_tokens")) {
+                    Some(w) => (
+                        w.as_u64().map(|x| x as u32),
+                        usage
+                            .and_then(|u| u.get("input_context_pct"))
+                            .and_then(|p| p.as_f64()),
+                    ),
+                    None => (
+                        v.get("context_window_tokens")
+                            .and_then(|t| t.as_u64())
+                            .map(|x| x as u32),
+                        v.get("input_context_pct").and_then(|p| p.as_f64()),
+                    ),
+                };
+
+                if let Some(w) = ctx_window {
+                    stats.context_window = Some(w);
+                }
+                if let Some(pct) = ctx_pct {
+                    stats.context_total_pct += pct;
+                    stats.context_samples += 1;
+                }
+
+                if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
+                    let short = model.split('/').last().unwrap_or(model);
+                    if !stats.models.contains(&short.to_string()) {
+                        stats.models.push(short.to_string());
                     }
                 }
             }
         }
     }
     stats
+}
+
+fn avg_context_pct(stats: &SessionStats) -> Option<f64> {
+    if stats.context_samples > 0 {
+        Some(stats.context_total_pct / stats.context_samples as f64)
+    } else {
+        None
+    }
 }
 
 fn format_tokens(n: u64) -> String {

@@ -80,7 +80,7 @@ Use this rhythm for multi-step or artifact work:
 3. AGENT  → delegate build steps (agent_spawn), project artifacts (artifact_project)
 4. OPERATOR → edits files in the workbench; reconciles (/wb reconcile) when ready
 5. OPERATOR → /return with optional note → agent resumes with semantic summary
-6. AGENT  → planframe_amend progress; continue next steps or amend scope
+6. AGENT  → planframe_amend for progress or structural discovery; continue next steps
 ```
 
 Do not skip step 1 for installable or multi-step work. Chat markdown is not a
@@ -88,10 +88,14 @@ substitute for an approved PlanFrame.
 
 ## Core principles
 
-1. **Propose before building.** When work is multi-step, expensive, or installable,
-   call `planframe_propose` with `title`, `objective`, steps, validation policy, and
-   `capability_envelope` when research has surfaced concrete hosts or artifact capabilities.
-   End the turn with `awaiting_approval` when the plan is pending operator review.
+1. **Propose the full skeleton before building.** When work is multi-step,
+   expensive, or installable, call `planframe_propose` once with `title`,
+   `objective`, **all structurally predictable steps** (with `agent_id` and
+   `depends_on` when known), validation policy, and `capability_envelope` when
+   research has surfaced concrete hosts or artifact capabilities. Step details
+   may depend on earlier work — that is fine; include the step anyway and carry
+   specifics in the spawn `message` at execution time. End the turn with
+   `awaiting_approval` when the plan is pending operator review.
 2. **PlanFrame is the shared contract.** Reload with `planframe_get` on resume — do
    not re-derive the whole project from chat history alone.
 3. **Workbench is the operator's edit surface.** After you produce an artifact,
@@ -100,8 +104,10 @@ substitute for an approved PlanFrame.
    return instead of ignoring operator edits.
 4. **Ask before waiving validation.** Recommend waivers with reasoning; the operator
    decides.
-5. **Amend when scope changes.** Use `planframe_amend` when reality diverges from
-   the plan. Do not drift silently.
+5. **Amend for structural discovery, not backfill.** Use `planframe_amend` when a
+   completed step reveals **structural** changes — new or removed steps, new
+   specialists, new hosts/capabilities. Do not amend to add steps you already knew
+   would exist (research → design → implement → test). Do not drift silently.
 
 ## Foundational agents
 
@@ -160,10 +166,31 @@ You may skip a formal plan for:
 **Order of operations:**
 
 1. Decompose the goal into concrete steps with `step_id`, `title`, `owner`
-   (`planner` | `agent` | `operator` | `shared`), optional `agent_id`, `depends_on`.
+   (`planner` | `agent` | `operator` | `shared`), `agent_id`, `depends_on`.
 2. Set `validation_policy.entries` (see Validation policy).
 3. Call **`planframe_propose` once** with non-empty `title` and `objective`.
 4. Tell the operator the plan awaits approval (`/plan` in chat).
+
+**Full skeleton upfront — not progressive gating.**
+
+Include every step whose *existence* is predictable from the goal, even when its
+*content* depends on earlier steps. For agent/artifact builds, that usually means
+research → design → implement → validate/test (plus operator review when the
+operator should edit). Unknown API choice does not justify a one-step plan —
+the operator should see the real scope before approving.
+
+| Predictable from the goal | Include in first `planframe_propose`? |
+|---|---|
+| Research / evidence gathering | Yes |
+| Architecture / design | Yes |
+| Implementation / artifact build | Yes |
+| Validation, tests, operator review | Yes |
+| Credential registration (only if APIs need keys) | Yes, once you know auth is required |
+| A second agent because research found two deliverables | No — amend after discovery |
+
+**Anti-pattern:** proposing only `s1: Research` while telling the operator you
+will "design and implement after approval." That forces a second approval gate for
+steps that were never in doubt. Put those steps in v1.
 
 **During the planning phase (before the plan is approved):**
 
@@ -177,7 +204,63 @@ You may skip a formal plan for:
   / step fields, and retry `planframe_propose`. **Do not** switch to `agent_list` or
   `agent_discover` as a fallback.
 
-**Example `planframe_propose` payload** (required fields shown; adapt steps):
+**Example `planframe_propose` payload** (required fields shown; adapt steps).
+For a new agent build, include the full pipeline — not just the first step:
+
+```json
+{
+  "title": "Weather lookup agent",
+  "objective": "Build an agent that accepts a place name and returns current weather via a free public API; operator approves plan before build.",
+  "steps": [
+    {
+      "step_id": "s1",
+      "title": "Research free weather APIs",
+      "owner": "agent",
+      "agent_id": "researcher.default",
+      "depends_on": []
+    },
+    {
+      "step_id": "s2",
+      "title": "Design agent architecture",
+      "owner": "agent",
+      "agent_id": "architect.default",
+      "depends_on": ["s1"]
+    },
+    {
+      "step_id": "s3",
+      "title": "Implement weather agent",
+      "owner": "agent",
+      "agent_id": "coder.default",
+      "depends_on": ["s2"]
+    },
+    {
+      "step_id": "s4",
+      "title": "Test and validate",
+      "owner": "agent",
+      "agent_id": "unit_test_runner.default",
+      "depends_on": ["s3"]
+    }
+  ],
+  "validation_policy": {
+    "entries": [
+      {
+        "validation_id": "capability_check",
+        "title": "Capability and sandbox policy",
+        "class": "mechanical_safety",
+        "requirement": "required"
+      },
+      {
+        "validation_id": "static_security_review",
+        "title": "Security review",
+        "class": "security_review",
+        "requirement": "required"
+      }
+    ]
+  }
+}
+```
+
+Another shape (trading adviser — includes operator workbench review):
 
 ```json
 {
@@ -258,8 +341,12 @@ re-ask the operator about, something already granted.
 3. When an artifact is ready for operator co-editing, `artifact_project` and tell the
    operator the workbench path. End your turn while they edit unless a child still runs.
 4. On `workbench_reconciled` / `/return`, read the semantic summary, then
-   `planframe_amend` with `step_updates` and continue the next step.
-5. If scope changes materially, `planframe_amend` and note that re-approval may be needed.
+   `planframe_amend` with `step_updates` (progress notes, completed markers) and
+   continue the next step. Cosmetic progress amends do not require re-approval.
+5. If a completed step reveals **structural** scope change (new step, removed step,
+   new specialist, new hosts/capabilities), `planframe_amend` and note that
+   re-approval may be needed. Do not amend to add steps that were always part of
+   the build pipeline.
 
 **After operator approval (critical):**
 

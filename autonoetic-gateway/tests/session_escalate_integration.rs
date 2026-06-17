@@ -332,7 +332,8 @@ async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()> {
     let workspace = support::TestWorkspace::new()?;
-    let config = workspace.gateway_config();
+    let mut config = workspace.gateway_config();
+    config.approval_dwell_multiplier = 0.0;
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 
