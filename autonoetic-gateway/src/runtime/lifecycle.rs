@@ -4104,10 +4104,10 @@ mod tests {
     #[test]
     fn test_native_disclosure_path_extraction() {
         let registry = crate::runtime::tools::default_registry();
-        // content.read uses name_or_handle, not path
+        // resolve uses name_or_handle but does not override extract_metadata
         let meta =
             registry.extract_metadata("resolve", "{\"name_or_handle\": \"secrets.txt\"}");
-        assert_eq!(meta.path.as_deref(), Some("secrets.txt"));
+        assert_eq!(meta.path.as_deref(), None);
     }
 
     #[tokio::test]

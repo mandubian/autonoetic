@@ -825,11 +825,8 @@ mod tests {
             .expect("first proposal");
         assert!(!first.skipped);
 
-        let second = propose_discovered_envelope(&store, root, "discovered", None, "operator")?
-            .expect("second proposal");
-        assert!(second.skipped);
-        assert_eq!(second.envelope_id, first.envelope_id);
-        assert_eq!(store.get_proposed_envelopes(root)?.len(), 1);
+        let second = propose_discovered_envelope(&store, root, "discovered", None, "operator")?;
+        assert!(second.is_none(), "second proposal: hosts already locked, nothing to propose");
         Ok(())
     }
 

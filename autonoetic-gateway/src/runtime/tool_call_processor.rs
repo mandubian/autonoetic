@@ -1267,6 +1267,9 @@ mod tests {
         let registry = default_registry();
         let mut disclosure_state = DisclosureState::default();
 
+        let gateway_store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gw_dir).unwrap(),
+        );
         let mut processor = ToolCallProcessor::new(
             &mut mcp_runtime,
             &registry,
@@ -1274,7 +1277,7 @@ mod tests {
             &mut disclosure_state,
             None,
             None,
-            None,
+            Some(gateway_store),
             None,
         )
         .with_session_context(

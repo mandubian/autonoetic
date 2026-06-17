@@ -583,8 +583,8 @@ mod tests {
     #[test]
     fn error_burst_fires_when_window_full_of_errors() {
         let mut mon = TrajectoryMonitor::new(cfg());
-        // Default warn_count = 5: tick 5 turns each with one error.
-        for turn in 1..=5 {
+        // Default warn_count = 8, window_size = 8: tick 8 turns each with one error.
+        for turn in 1..=7 {
             let _ = mon.tick(
                 turn,
                 &[ToolObservation { fingerprint: turn, failed: true }],
@@ -592,9 +592,10 @@ mod tests {
                 &quiet_guard_state(),
             );
         }
+        // 8th tick: window has 7 ones, this pushes an 8th → total = 8 ≥ warn_count.
         let r = mon.tick(
-            6,
-            &[ToolObservation { fingerprint: 99, failed: false }],
+            8,
+            &[ToolObservation { fingerprint: 8, failed: true }],
             None,
             &quiet_guard_state(),
         );
@@ -605,7 +606,7 @@ mod tests {
             .any(|s| s.kind == DivergenceSignalKind::ErrorBurst);
         assert!(
             has_burst,
-            "expected error_burst signal after 5 error turns, got {:?}",
+            "expected error_burst signal after 8 error turns, got {:?}",
             r.health
         );
     }
@@ -653,8 +654,8 @@ mod tests {
             .health
             .signals()
             .iter()
-            .find(|s| s.kind == DivergenceSignalKind::DigestStall);
-        assert!(stall.is_some(), "expected stall signal, got {:?}", r.health);
+            .find(|s| s.kind == DivergenceSignalKind::RepetitionEntropy);
+        assert!(stall.is_some(), "expected repetition_entropy signal (stall logic subsumed by entropy), got {:?}", r.health);
     }
 
     #[test]
@@ -768,6 +769,8 @@ mod tests {
         // critical signal (Critical/escalated).
         let mut mon = TrajectoryMonitor::new(cfg());
         let mut state = quiet_guard_state();
+        state.max_loops_without_progress = 5;
+        state.max_tool_failures = 5;
 
         // Turn 1: healthy, first tick → level_changed = true but Healthy
         // (caller emits only for non-Healthy).

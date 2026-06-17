@@ -942,7 +942,7 @@ mod tests {
 
         let mut raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-        raw["digest"] = serde_json::Value::String("sha256:deadbeef".to_string());
+        raw["artifact_manifest_digest"] = serde_json::Value::String("sha256:deadbeef".to_string());
         let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
         perms.set_readonly(false);
         std::fs::set_permissions(&manifest_path, perms).unwrap();
