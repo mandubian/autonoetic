@@ -12,8 +12,29 @@
 //! They are pure (no sandbox), so they run in CI without bubblewrap.
 
 use autonoetic_gateway::runtime::tools::artifact_exec::promotion_run_is_network_isolated;
+use autonoetic_gateway::sandbox::{BwrapIsolationOverrides, SandboxDriverKind};
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
+
+#[test]
+fn driver_network_off_guarantee_truth_table() {
+    let gate = BwrapIsolationOverrides::promotion_gate_overrides();
+    let normal = BwrapIsolationOverrides::default();
+
+    // Bubblewrap: offline only when force_network_off is set.
+    assert!(SandboxDriverKind::Bubblewrap.guarantees_network_off(&gate));
+    assert!(!SandboxDriverKind::Bubblewrap.guarantees_network_off(&normal));
+
+    // Docker (`--network none`) and wasm (WASI, no sockets) are always offline.
+    assert!(SandboxDriverKind::Docker.guarantees_network_off(&gate));
+    assert!(SandboxDriverKind::Docker.guarantees_network_off(&normal));
+    assert!(SandboxDriverKind::Wasm.guarantees_network_off(&gate));
+    assert!(SandboxDriverKind::Wasm.guarantees_network_off(&normal));
+
+    // MicroVm: operator firecracker config controls the NIC — never asserted.
+    assert!(!SandboxDriverKind::MicroVm.guarantees_network_off(&gate));
+    assert!(!SandboxDriverKind::MicroVm.guarantees_network_off(&normal));
+}
 
 fn manifest(agent_id: &str, sandbox: &str) -> AgentManifest {
     AgentManifest {
@@ -81,15 +102,26 @@ fn all_promotion_verdict_roles_isolated_on_bubblewrap() {
 }
 
 #[test]
-fn non_isolating_drivers_keep_predeny_for_promotion_roles() {
-    // docker/microvm/wasm do not honor force_network_off, so the
-    // deterministic-without-network pre-deny (P-3.10) must be preserved.
-    for driver in ["docker", "microvm", "wasm"] {
+fn drivers_that_guarantee_offline_also_run_isolated() {
+    // docker (`--network none`) and wasm (WASI, no sockets) are always offline,
+    // so promotion-verdict roles on them must ALSO run rather than be pre-denied.
+    for driver in ["docker", "wasm"] {
         assert!(
-            !promotion_run_is_network_isolated(&manifest("unit_test_runner.default", driver)),
-            "driver {driver} cannot guarantee network-off; pre-deny must be kept"
+            promotion_run_is_network_isolated(&manifest("unit_test_runner.default", driver)),
+            "driver {driver} guarantees network-off; the suite must run, not be pre-denied"
         );
     }
+}
+
+#[test]
+fn microvm_keeps_predeny_for_promotion_roles() {
+    // microvm's NIC is controlled by the operator firecracker --config-file; the
+    // gateway cannot assert it is offline, so the deterministic-without-network
+    // pre-deny (P-3.10) must be preserved.
+    assert!(
+        !promotion_run_is_network_isolated(&manifest("unit_test_runner.default", "microvm")),
+        "microvm cannot guarantee network-off; pre-deny must be kept"
+    );
 }
 
 #[test]

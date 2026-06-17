@@ -173,6 +173,30 @@ impl SandboxDriverKind {
             other => anyhow::bail!("Unsupported sandbox driver '{}'", other),
         }
     }
+
+    /// Whether this driver guarantees the run has **no network access** under the
+    /// given isolation overrides. Single source of truth for "is this execution
+    /// physically offline" — used by the promotion gate to decide whether a
+    /// deterministic test suite can be trusted to run in isolation (P-3.10)
+    /// instead of being statically pre-denied on mere import detection.
+    ///
+    /// - **Bubblewrap**: offline iff `force_network_off` (the gate sets it via
+    ///   [`BwrapIsolationOverrides::promotion_gate_overrides`]); enforced by
+    ///   `--unshare-all` with no `--share-net`.
+    /// - **Docker**: always offline — `docker_command` hardcodes `--network none`.
+    /// - **Wasm**: always offline — the in-process WASI preview1 tier exposes no
+    ///   sockets (only a preopened workspace dir, args, env).
+    /// - **MicroVm**: NOT guaranteed — network is whatever the operator's
+    ///   firecracker `--config-file` declares; the gateway passes only that file
+    ///   and cannot assert the absence of a NIC. Conservative `false`.
+    pub fn guarantees_network_off(self, overrides: &BwrapIsolationOverrides) -> bool {
+        match self {
+            Self::Bubblewrap => overrides.force_network_off,
+            Self::Docker => true,
+            Self::Wasm => true,
+            Self::MicroVm => false,
+        }
+    }
 }
 
 /// Dependency runtime ecosystem used to install generated code dependencies.

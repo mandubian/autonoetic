@@ -433,20 +433,21 @@ impl NativeTool for ArtifactExecTool {
         }
 
         // Promotion-verdict roles (unit_test_runner, evaluators, auditor) run in
-        // a physically network-isolated sandbox: promotion_gate_overrides() sets
-        // force_network_off, which the bubblewrap driver enforces via
-        // `--unshare-all` (no `--share-net`). On that driver we do NOT statically
-        // pre-deny when RemoteAccessAnalyzer merely *detects* a network import:
-        // the deterministic suite is run inside the isolated sandbox. Mocked tests
-        // pass; tests that genuinely reach the network fail at runtime with a
-        // ConnectionError, which the verdict role reports as `unable_to_evaluate`.
-        // The detected patterns are surfaced as informational findings on the run
-        // output, not a hard block — so a service that imports `urllib` but mocks
-        // the HTTP caller is no longer falsely blocked from promotion.
+        // a physically network-isolated sandbox under promotion_gate_overrides()
+        // (force_network_off). When the configured driver *guarantees* the run is
+        // offline (see SandboxDriverKind::guarantees_network_off — bubblewrap with
+        // force_network_off, docker `--network none`, wasm WASI-no-sockets), we do
+        // NOT statically pre-deny when RemoteAccessAnalyzer merely *detects* a
+        // network import: the deterministic suite is run inside the isolated
+        // sandbox. Mocked tests pass; tests that genuinely reach the network fail
+        // at runtime with a ConnectionError, which the verdict role reports as
+        // `unable_to_evaluate`. The detected patterns are surfaced as informational
+        // findings on the run output, not a hard block — so a service that imports
+        // `urllib` but mocks the HTTP caller is no longer falsely blocked.
         //
-        // Drivers that do not honor force_network_off (docker/microvm/wasm) cannot
-        // guarantee the run is offline, so the deterministic-without-network
-        // pre-deny (P-3.10) is preserved for them.
+        // Drivers that cannot guarantee the run is offline (today: microvm, whose
+        // NIC is controlled by the operator firecracker config) keep the
+        // deterministic-without-network pre-deny (P-3.10).
         let promotion_verdict_role = manifest_may_record_promotion_verdicts(manifest);
         let promotion_isolated_run = promotion_run_is_network_isolated(manifest);
         let informational_remote_patterns = if promotion_isolated_run {
@@ -1050,16 +1051,21 @@ impl NativeTool for ArtifactExecTool {
 /// sandbox (mocked tests pass; tests that genuinely reach the network fail at
 /// runtime → the verdict role reports `unable_to_evaluate`).
 ///
-/// True only for promotion-verdict roles (`manifest_may_record_promotion_verdicts`)
-/// on a driver that enforces `force_network_off`. Today that is the bubblewrap
-/// driver (`--unshare-all` without `--share-net`, set by
-/// `BwrapIsolationOverrides::promotion_gate_overrides`). The docker/microvm/wasm
-/// drivers do not honor `force_network_off`, so their promotion runs keep the
-/// deterministic-without-network pre-deny (P-3.10).
+/// True for promotion-verdict roles (`manifest_may_record_promotion_verdicts`)
+/// on any driver that *guarantees* the run is offline under the promotion-gate
+/// overrides — see [`SandboxDriverKind::guarantees_network_off`] for the
+/// per-driver truth (bubblewrap with `force_network_off`, docker `--network none`,
+/// wasm WASI-no-sockets → yes; microvm → no, the operator firecracker config
+/// controls the NIC, so its promotion runs keep the deterministic-without-network
+/// pre-deny, P-3.10).
 pub fn promotion_run_is_network_isolated(manifest: &AgentManifest) -> bool {
     manifest_may_record_promotion_verdicts(manifest)
         && SandboxDriverKind::parse(&manifest.runtime.sandbox)
-            .map(|d| matches!(d, SandboxDriverKind::Bubblewrap))
+            .map(|d| {
+                d.guarantees_network_off(
+                    &crate::sandbox::BwrapIsolationOverrides::promotion_gate_overrides(),
+                )
+            })
             .unwrap_or(false)
 }
 
