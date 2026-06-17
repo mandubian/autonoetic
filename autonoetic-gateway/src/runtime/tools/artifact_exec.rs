@@ -1021,7 +1021,8 @@ impl NativeTool for ArtifactExecTool {
         if !informational_remote_patterns.is_empty() {
             body["network_isolated_run"] = serde_json::Value::Bool(true);
             body["detected_patterns"] =
-                serde_json::to_value(&informational_remote_patterns).unwrap_or_default();
+                serde_json::to_value(&informational_remote_patterns)
+                    .unwrap_or(serde_json::Value::Array(vec![]));
         }
 
         if !overrides.share_net {
