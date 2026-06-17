@@ -15,6 +15,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod openai;
 pub mod provider;
+pub mod xml_tool_calls;
 
 /// Build a `reqwest::Client` tuned for LLM API calls.
 ///

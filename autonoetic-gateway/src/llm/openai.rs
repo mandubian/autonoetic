@@ -540,7 +540,7 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     let text = extract_text_content(&choice["message"]["content"]);
     let reasoning_content = extract_reasoning_content(&choice["message"]);
 
-    let tool_calls = choice["message"]["tool_calls"]
+    let mut tool_calls: Vec<ToolCall> = choice["message"]["tool_calls"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -564,6 +564,24 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
                 .collect()
         })
         .unwrap_or_default();
+
+    // Fallback: extract XML-style tool calls from the text content when the
+    // structured `tool_calls` field is empty but the response contains
+    // `<tool_call>` blocks. This handles models that use XML-based chat
+    // templates (e.g. Qwen 3.5 with qwen35-template.jinja) where the server
+    // may not extract tool calls into the structured JSON field.
+    if tool_calls.is_empty() && text.contains("<tool_call>") {
+        let (_reasoning, xml_calls) =
+            crate::llm::xml_tool_calls::extract_xml_tool_calls(&text);
+        if !xml_calls.is_empty() {
+            tracing::info!(
+                target: "llm::openai",
+                count = xml_calls.len(),
+                "Extracted XML tool calls from response text fallback"
+            );
+            tool_calls = xml_calls;
+        }
+    }
 
     let stop_reason = parse_stop_reason(choice["finish_reason"].as_str().unwrap_or(""));
 
