@@ -622,6 +622,16 @@ mod tests {
         }
 
         #[test]
+        fn context_deadline_exceeded_timeout_is_not_overflow() {
+            // "context deadline exceeded" is a timeout/cancellation (Go/gRPC),
+            // NOT a context-size overflow. It has "context" + "exceed" but no
+            // size/length/window/token hint, so it must NOT route into
+            // overflow recovery (trimming context wouldn't help a timeout).
+            let body = r#"{"error":{"message":"context deadline exceeded","type":"server_error"}}"#;
+            assert!(!is_context_overflow_error(500, body));
+        }
+
+        #[test]
         fn n_prompt_tokens_and_n_ctx_keys_alone_are_enough() {
             // Defensive: if the server reports both counters, it's an overflow
             // even if the message wording is unusual.
