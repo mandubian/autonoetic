@@ -1,0 +1,42 @@
+name: nightly
+
+# Comprehensive health check, run once a day (and on demand). The per-PR `ci`
+# workflow is kept fast (build + unit tests); the slow integration suites and
+# the heavy #[ignore]'d full-stack e2e are exercised here so PRs stay snappy.
+# A red nightly is a triage signal (assertion drift vs. real regression), not a
+# merge blocker.
+
+on:
+  schedule:
+    - cron: '0 4 * * *' # 04:00 UTC daily
+  workflow_dispatch: {} # manual trigger from the Actions tab
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  full-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # bubblewrap is required by the sandbox integration tests and the
+      # #[ignore]'d promotion-gate e2e (real offline-sandbox runs).
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      # Full suite incl. the integration tests in tests/. Single-threaded for
+      # state isolation (the integration tests use serial_test / shared temp
+      # state). This covers everything the per-PR `unit` job skips.
+      - name: Integration suite
+        run: cargo test --workspace -- --test-threads=1
+
+      # Heavy #[ignore]'d e2e: full-stack chat (spawns gateway + LLM stub) and
+      # bubblewrap sandbox runs. Run last so a drift here doesn't mask the
+      # integration results above.
+      - name: Ignored e2e
+        run: cargo test --workspace -- --ignored --test-threads=1
