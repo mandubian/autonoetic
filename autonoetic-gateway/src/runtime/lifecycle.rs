@@ -105,6 +105,33 @@ impl ExecuteLoopTermination {
     }
 }
 
+/// Pre-send overflow guard. When the context governor is exhausted
+/// (`GovernorResult::Overflow`), decide whether the post-reduction prompt would
+/// still exceed the model's assumed context window (`effective_limit + margin`).
+///
+/// Returns a `context_overflow:`-tagged error (so the scheduler's recovery
+/// retries with the aggressive pipeline instead of sending a doomed request)
+/// when the estimate exceeds the window; `None` when the prompt is still under
+/// the window (only within the safety margin) and may be sent.
+fn overflow_presend_block(
+    estimated_tokens: usize,
+    effective_limit: usize,
+    margin: usize,
+) -> Option<anyhow::Error> {
+    let assumed_window = effective_limit.saturating_add(margin);
+    if estimated_tokens > assumed_window {
+        Some(anyhow::anyhow!(
+            "context_overflow: context governor exhausted — estimated {} tokens exceeds model context window ~{} (effective_limit {} + margin {}); not sending",
+            estimated_tokens,
+            assumed_window,
+            effective_limit,
+            margin
+        ))
+    } else {
+        None
+    }
+}
+
 fn build_critical_divergence_interaction(
     session_id: &str,
     root_session_id: String,
@@ -1773,6 +1800,37 @@ impl AgentExecutor {
                             diagnostic = ?diag,
                             "ContextGovernor exhausted — all strategies failed"
                         );
+                        // Don't knowingly send a prompt that exceeds the model's
+                        // context window. Use the POST-governor estimate
+                        // (`ctx.breakdown.total_tokens`, after every reduction
+                        // strategy ran) — not the pre-governor `budget_breakdown`.
+                        // If it still exceeds the assumed window
+                        // (`effective_limit + margin`), sending is a guaranteed
+                        // provider context-overflow, so surface a
+                        // `context_overflow:`-tagged error here to route into the
+                        // scheduler's recovery (retry once with the aggressive
+                        // pipeline; a second overflow is terminal) instead of
+                        // paying a round-trip for a 500 we can already predict.
+                        // Prompts only within the safety margin (still under the
+                        // window) fall through and are sent as before.
+                        let post_governor_tokens = ctx.breakdown.total_tokens;
+                        if let Some(err) =
+                            overflow_presend_block(post_governor_tokens, effective_limit, margin)
+                        {
+                            let _ = tracer.log_event(
+                                "context_governor",
+                                "overflow_blocked_send",
+                                autonoetic_types::causal_chain::EntryStatus::Error,
+                                Some(serde_json::json!({
+                                    "estimated_tokens": post_governor_tokens,
+                                    "assumed_window": effective_limit.saturating_add(margin),
+                                    "effective_limit": effective_limit,
+                                    "margin_tokens": margin,
+                                    "overflow_recovery": self.overflow_recovery,
+                                })),
+                            );
+                            return Err(err);
+                        }
                     }
                     Ok(GovernorResult::WithinBudget) => {
                         // Emit a TUI-visible warning card when the estimated prompt
@@ -3261,6 +3319,36 @@ fn waiting_for_child_yield_reason(
 mod tests {
     use super::*;
     use autonoetic_types::agent::SessionState;
+
+    // -- overflow_presend_block ------------------------------------------------
+
+    #[test]
+    fn overflow_presend_block_errors_with_context_overflow_tag_when_over_window() {
+        // effective_limit 30000 + margin 2000 → assumed window 32000.
+        let err = overflow_presend_block(33_000, 30_000, 2_000)
+            .expect("over-window estimate must block");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("context_overflow:"),
+            "blocked error must be tagged for the scheduler's overflow recovery: {msg}"
+        );
+    }
+
+    #[test]
+    fn overflow_presend_block_allows_send_within_safety_margin() {
+        // 31000 is over effective_limit (30000) but under the window (32000) —
+        // only within the safety margin, so it is NOT blocked (sent as before).
+        assert!(overflow_presend_block(31_000, 30_000, 2_000).is_none());
+    }
+
+    #[test]
+    fn overflow_presend_block_boundary_at_window_is_allowed() {
+        // Exactly at the assumed window is not "exceeds" — allowed.
+        assert!(overflow_presend_block(32_000, 30_000, 2_000).is_none());
+        // One token over the window blocks.
+        assert!(overflow_presend_block(32_001, 30_000, 2_000).is_some());
+    }
+
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmDriver, StopReason, TokenUsage, ToolCall,
         ToolDefinition,
