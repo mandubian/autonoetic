@@ -1773,6 +1773,40 @@ impl AgentExecutor {
                             diagnostic = ?diag,
                             "ContextGovernor exhausted — all strategies failed"
                         );
+                        // Don't knowingly send a prompt that exceeds the model's
+                        // context window. `effective_limit` already subtracts the
+                        // safety margin, so the assumed window is
+                        // `effective_limit + margin`. If, even after exhausting
+                        // every reduction strategy, the estimate still exceeds the
+                        // window, sending is a guaranteed provider context-overflow
+                        // error. Surface a `context_overflow:`-tagged error here so
+                        // the scheduler's recovery retries with the aggressive
+                        // pipeline (and, if that is also exhausted, fails fast)
+                        // instead of paying a round-trip for a 500 we can already
+                        // predict. Prompts only within the safety margin (still
+                        // under the window) fall through and are sent as before.
+                        let assumed_window = effective_limit.saturating_add(margin);
+                        if budget_breakdown.total_tokens > assumed_window {
+                            let _ = tracer.log_event(
+                                "context_governor",
+                                "overflow_blocked_send",
+                                autonoetic_types::causal_chain::EntryStatus::Error,
+                                Some(serde_json::json!({
+                                    "estimated_tokens": budget_breakdown.total_tokens,
+                                    "assumed_window": assumed_window,
+                                    "effective_limit": effective_limit,
+                                    "margin_tokens": margin,
+                                    "overflow_recovery": self.overflow_recovery,
+                                })),
+                            );
+                            return Err(anyhow::anyhow!(
+                                "context_overflow: context governor exhausted — estimated {} tokens exceeds model context window ~{} (effective_limit {} + margin {}); not sending",
+                                budget_breakdown.total_tokens,
+                                assumed_window,
+                                effective_limit,
+                                margin
+                            ));
+                        }
                     }
                     Ok(GovernorResult::WithinBudget) => {
                         // Emit a TUI-visible warning card when the estimated prompt
