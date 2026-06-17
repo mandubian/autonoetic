@@ -18,7 +18,7 @@ metadata:
     llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "agent.", "artifact.", "content."]
+        allowed: ["knowledge_", "agent_", "artifact_", "content_"]
       - type: "AgentSpawn"
         max_children: 10
       - type: "ReadAccess"

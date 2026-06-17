@@ -147,7 +147,7 @@ metadata:
         # budget_tokens: 4096  # Optional: override reasoning token budget (Anthropic only)
     capabilities:
       - type: "ToolInvoke"
-        allowed: ["content.", "knowledge.", "agent."]
+        allowed: ["content_", "knowledge_", "agent_"]
       - type: "MemoryWrite"
         scopes: ["self.*", "skills/*"]
       - type: "AgentSpawn"
@@ -247,7 +247,7 @@ Capabilities fall into three categories:
 
 | Capability | Fields | Description |
 |------------|--------|-------------|
-| `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web.*`, `sandbox.*`) |
+| `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web_*`, `sandbox_*`) |
 | `ReadAccess` | `scopes: [string]` | Read access to content, memory, knowledge (includes search) |
 | `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes `knowledge_store`) |
 | `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts |
@@ -758,7 +758,7 @@ llm_config:
          model: "gpt-4o"
        capabilities:
          - type: "ToolInvoke"
-           allowed: ["content.", "knowledge."]
+            allowed: ["content_", "knowledge_"]
          - type: "MemoryWrite"
            scopes: ["self.*", "skills/*"]
        validation: "soft"

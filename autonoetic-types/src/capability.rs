@@ -1,7 +1,7 @@
 //! Capability enums for agent permission declarations.
 //!
 //! Capability categories:
-//! - **SandboxFunctions**: MCP tool access by prefix (web.*, sandbox.*)
+//! - **SandboxFunctions**: MCP tool access by prefix (web_, sandbox_)
 //! - **ReadAccess**: Read content, memory, knowledge (includes search)
 //! - **WriteAccess**: Write content, memory, knowledge (includes share)
 //! - **CodeExecution**: Execute scripts in sandbox

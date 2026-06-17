@@ -20,7 +20,7 @@ metadata:
       temperature: 0.2
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge."]
+        allowed: ["knowledge_"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"

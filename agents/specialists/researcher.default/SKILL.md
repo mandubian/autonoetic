@@ -18,7 +18,7 @@ metadata:
     llm_preset: research
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "web.", "mcp_"]
+        allowed: ["knowledge_", "web_", "mcp_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "bash -c "]
         commands: ["curl", "wget", "jq", "date", "echo", "cat", "ls", "pwd", "wc",

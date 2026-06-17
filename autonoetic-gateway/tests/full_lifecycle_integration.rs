@@ -30,7 +30,7 @@ agent:
   description: "Implements focused changes with verification."
   capabilities:
     - type: "SandboxFunctions"
-      allowed: ["content.", "knowledge."]
+      allowed: ["content_", "knowledge_"]
 llm_config:
   provider: "openai"
   model: "gpt-4o"
@@ -79,7 +79,7 @@ agent:
   description: "Installs new durable specialists."
   capabilities:
     - type: "SandboxFunctions"
-      allowed: ["content.", "agent."]
+      allowed: ["content_", "agent_"]
     - type: "AgentInstall"
 llm_config:
   provider: "openai"

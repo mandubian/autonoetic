@@ -18,7 +18,7 @@ metadata:
     llm_preset: smart
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "agent.", "credential."]
+        allowed: ["knowledge_", "agent_", "credential_"]
       - type: "CredentialAccess"
         services: ["*"]
       - type: "AgentSpawn"

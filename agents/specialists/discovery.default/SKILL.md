@@ -20,7 +20,7 @@ metadata:
       temperature: 0.0
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["agent.", "knowledge."]
+        allowed: ["agent_", "knowledge_"]
       - type: "ReadAccess"
         scopes: ["self.*"]
       - type: "WriteAccess"

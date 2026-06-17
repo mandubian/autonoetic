@@ -18,7 +18,7 @@ metadata:
     llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "agent."]
+        allowed: ["knowledge_", "agent_"]
       - type: "AgentRevision"
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*", "agents/*"]

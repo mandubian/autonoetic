@@ -52,7 +52,7 @@ Capabilities use pattern-based scoping:
 ```yaml
 capabilities:
   - type: "ToolInvoke"
-    allowed: ["content.", "knowledge.", "agent."]
+    allowed: ["content_", "knowledge_", "agent_"]
   - type: "MemoryWrite"
     scopes: ["self.*", "skills/*"]
   - type: "AgentSpawn"

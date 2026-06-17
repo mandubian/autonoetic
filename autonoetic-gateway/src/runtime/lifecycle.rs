@@ -1567,6 +1567,10 @@ impl AgentExecutor {
                         .available_definitions_filtered(&self.manifest, Some(&tier_filter)),
                 );
                 // Add tools explicitly discovered via tool_discover, bypassing tier filter.
+                // Native capability gating already ran in available_definitions_filtered
+                // (is_available). can_invoke_tool is intentionally NOT re-applied here:
+                // it gates SandboxFunctions MCP prefixes (mcp_*), not native tool names,
+                // and would silently drop tier-discovered tools like web_search.
                 if !self.discovered_tools.is_empty() {
                     let all_defs: Vec<ToolDefinition> = self.registry
                         .available_definitions_filtered(&self.manifest, None);
@@ -1581,7 +1585,7 @@ impl AgentExecutor {
                                 def.name == *pattern
                             }
                         });
-                        if matches && policy.can_invoke_tool(&def.name).is_allowed() {
+                        if matches {
                             t.push(def.clone());
                         }
                     }

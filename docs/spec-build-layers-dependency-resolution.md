@@ -214,7 +214,7 @@ Packager agent profile:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["content.", "artifact.", "sandbox_exec"]
+    allowed: ["content_", "artifact_", "sandbox_exec"]
   - type: "ReadAccess"
     scopes: ["self.*", "session/*"]
   - type: "WriteAccess"

@@ -20,7 +20,7 @@ metadata:
       temperature: 0.1
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["content.", "artifact.", "sandbox."]
+        allowed: ["content_", "artifact_", "sandbox_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "pip ", "npm install", "bash -c ", "sh -c "]
       - type: "NetworkAccess"

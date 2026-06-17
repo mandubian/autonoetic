@@ -36,7 +36,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 | Tool | Requires Capability | Notes |
 |------|---------------------|-------|
 | `agent_spawn` | `AgentSpawn` | Spawn child agent sessions |
-| `agent_discover` | `SandboxFunctions: ["agent."]` | Discover available agents |
+| `agent_discover` | `SandboxFunctions: ["agent_"]` | Discover available agents |
 | `agent_inspect` | `ReadAccess` | Inspect any agent's metadata/capabilities/revision (existence check = it resolves) |
 
 ### Revision & Activation Tools
@@ -66,7 +66,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 
 ## Important: SandboxFunctions vs Native Tools
 
-**Common misconception**: `SandboxFunctions` with prefix `"content."` grants access to `resolve`, `content_write`, etc.
+**Common misconception**: `SandboxFunctions` with prefix `"content_"` grants access to `resolve`, `content_write`, etc.
 
 **Reality**: `SandboxFunctions` is for **MCP (Model Context Protocol) tools only**. Native content tools require `ReadAccess` and `WriteAccess` capabilities.
 
@@ -74,7 +74,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 ❌ WRONG:
   capabilities:
     - type: "SandboxFunctions"
-      allowed: ["content."]  # This does NOT grant resolve access!
+      allowed: ["content_"]  # This does NOT grant resolve access!
 
 ✅ CORRECT:
   capabilities:
@@ -105,7 +105,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge.", "agent."]
+    allowed: ["knowledge_", "agent_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*"]
   - type: "AgentSpawn"
@@ -120,7 +120,7 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge.", "agent."]
+    allowed: ["knowledge_", "agent_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*", "agents/*"]
   - type: "AgentSpawn"
@@ -137,7 +137,7 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge.", "sandbox."]
+    allowed: ["knowledge_", "sandbox_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*", "scripts/*"]
   - type: "CodeExecution"
@@ -152,7 +152,7 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge.", "web.", "mcp_"]
+    allowed: ["knowledge_", "web_", "mcp_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*"]
   - type: "NetworkAccess"
@@ -167,7 +167,7 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge."]
+    allowed: ["knowledge_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*"]
   - type: "CodeExecution"
@@ -182,7 +182,7 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge.", "sandbox."]
+    allowed: ["knowledge_", "sandbox_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*"]
   - type: "CodeExecution"
@@ -197,7 +197,7 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge."]
+    allowed: ["knowledge_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*"]
   - type: "CodeExecution"
@@ -212,7 +212,7 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge.", "sandbox."]
+    allowed: ["knowledge_", "sandbox_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*"]
   - type: "CodeExecution"
@@ -265,7 +265,7 @@ capabilities:
 
 ### SandboxFunctions (for MCP tools)
 ```json
-{"type": "SandboxFunctions", "allowed": ["web.", "resolve"]}
+{"type": "SandboxFunctions", "allowed": ["web_", "resolve"]}
 ```
 
 ### CodeExecution (script patterns)
