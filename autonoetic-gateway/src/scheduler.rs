@@ -698,6 +698,30 @@ pub async fn reap_orphaned_sessions(
         return Ok(());
     }
 
+    // A child parked at an approval gate is NOT an orphan. The async-spawn
+    // pattern legitimately ends the immediate parent's turn (transcript status
+    // `completed`) while the child stays suspended awaiting an operator
+    // decision — coordinated by the still-alive root. Reaping it would discard
+    // committed work (e.g. a just-created revision) and drive the parent to
+    // retry, producing a cancel→retry→collision storm. Leave such children to
+    // the operator and the gate-timeout lifecycle (P-2.11).
+    //
+    // Load pending approvals ONCE into a set of parked session ids — cheap
+    // versus re-querying per orphan (O(orphans × pending)). If approval state
+    // cannot be determined, be conservative and skip this whole reap cycle
+    // rather than risk cancelling a parked child; the next cycle retries.
+    let approval_parked_sessions: std::collections::HashSet<String> =
+        match store.get_pending_approvals() {
+            Ok(pending) => pending.into_iter().map(|a| a.session_id).collect(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Orphan-child reaper (R+12): could not load pending approvals — skipping this reap cycle (conservative)"
+                );
+                return Ok(());
+            }
+        };
+
     let config = execution.config();
     let now = chrono::Utc::now();
     let now_rfc = now.to_rfc3339();
@@ -717,6 +741,17 @@ pub async fn reap_orphaned_sessions(
     for (idx, (child_session_id, parent_session_id, root_session_id, agent_id)) in
         orphans.into_iter().enumerate()
     {
+        // Skip children parked at an approval gate (see note above the
+        // `approval_parked_sessions` set).
+        if approval_parked_sessions.contains(&child_session_id) {
+            tracing::info!(
+                child_session_id = %child_session_id,
+                parent_session_id = %parent_session_id,
+                "Orphan-child reaper (R+12): skipping child parked at an approval gate"
+            );
+            continue;
+        }
+
         tracing::info!(
             child_session_id = %child_session_id,
             parent_session_id = %parent_session_id,
