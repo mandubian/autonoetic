@@ -432,13 +432,39 @@ impl NativeTool for ArtifactExecTool {
             }
         }
 
-        if remote_analysis.requires_approval && !approval_validated_for_command {
-            if manifest_may_record_promotion_verdicts(manifest) {
+        // Promotion-verdict roles (unit_test_runner, evaluators, auditor) run in
+        // a physically network-isolated sandbox: promotion_gate_overrides() sets
+        // force_network_off, which the bubblewrap driver enforces via
+        // `--unshare-all` (no `--share-net`). On that driver we do NOT statically
+        // pre-deny when RemoteAccessAnalyzer merely *detects* a network import:
+        // the deterministic suite is run inside the isolated sandbox. Mocked tests
+        // pass; tests that genuinely reach the network fail at runtime with a
+        // ConnectionError, which the verdict role reports as `unable_to_evaluate`.
+        // The detected patterns are surfaced as informational findings on the run
+        // output, not a hard block — so a service that imports `urllib` but mocks
+        // the HTTP caller is no longer falsely blocked from promotion.
+        //
+        // Drivers that do not honor force_network_off (docker/microvm/wasm) cannot
+        // guarantee the run is offline, so the deterministic-without-network
+        // pre-deny (P-3.10) is preserved for them.
+        let promotion_verdict_role = manifest_may_record_promotion_verdicts(manifest);
+        let promotion_isolated_run = promotion_run_is_network_isolated(manifest);
+        let informational_remote_patterns = if promotion_isolated_run {
+            remote_analysis.detected_patterns.clone()
+        } else {
+            Vec::new()
+        };
+
+        if remote_analysis.requires_approval
+            && !approval_validated_for_command
+            && !promotion_isolated_run
+        {
+            if promotion_verdict_role {
                 return Ok(serde_json::json!({
                     "ok": false,
                     "exit_code": null,
                     "stdout": "",
-                    "stderr": "Promotion-gate execution (P-3.10): artifact test run requires network access. Unit tests must be deterministic without live network.",
+                    "stderr": "Promotion-gate execution (P-3.10): artifact test run requires network access and the configured sandbox driver cannot guarantee network isolation. Unit tests must be deterministic without live network.",
                     "promotion_gate_network_denied": true,
                     "recommendation": "unable_to_evaluate",
                     "detected_patterns": remote_analysis.detected_patterns,
@@ -987,6 +1013,16 @@ impl NativeTool for ArtifactExecTool {
             "entrypoint": entrypoint,
         });
 
+        // Informational only: on the network-isolated promotion-gate path the
+        // detected remote-access patterns are NOT a block — the run already
+        // happened offline. Surface them so the verdict role can reason about
+        // mocked-vs-live coverage without re-running its own analyzer.
+        if !informational_remote_patterns.is_empty() {
+            body["network_isolated_run"] = serde_json::Value::Bool(true);
+            body["detected_patterns"] =
+                serde_json::to_value(&informational_remote_patterns).unwrap_or_default();
+        }
+
         if !overrides.share_net {
             let has_network_cap = manifest
                 .capabilities
@@ -1005,6 +1041,26 @@ impl NativeTool for ArtifactExecTool {
 
         serde_json::to_string(&body).map_err(Into::into)
     }
+}
+
+/// Whether a promotion-verdict artifact run executes in a physically
+/// network-isolated sandbox. When true, `RemoteAccessAnalyzer` detections are
+/// treated as informational findings on the run output rather than a static
+/// pre-deny: the deterministic suite is allowed to run inside the isolated
+/// sandbox (mocked tests pass; tests that genuinely reach the network fail at
+/// runtime → the verdict role reports `unable_to_evaluate`).
+///
+/// True only for promotion-verdict roles (`manifest_may_record_promotion_verdicts`)
+/// on a driver that enforces `force_network_off`. Today that is the bubblewrap
+/// driver (`--unshare-all` without `--share-net`, set by
+/// `BwrapIsolationOverrides::promotion_gate_overrides`). The docker/microvm/wasm
+/// drivers do not honor `force_network_off`, so their promotion runs keep the
+/// deterministic-without-network pre-deny (P-3.10).
+pub fn promotion_run_is_network_isolated(manifest: &AgentManifest) -> bool {
+    manifest_may_record_promotion_verdicts(manifest)
+        && SandboxDriverKind::parse(&manifest.runtime.sandbox)
+            .map(|d| matches!(d, SandboxDriverKind::Bubblewrap))
+            .unwrap_or(false)
 }
 
 fn build_command(entrypoint: &str, args: &[String]) -> String {

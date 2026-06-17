@@ -69,12 +69,18 @@ You run in a **promotion-gate sandbox with network permanently disabled** — ev
 - Do NOT run `pip install`, `npm install`, `curl`, `wget`, or any fetch against the internet.
 - Do NOT retry failed network tests with different commands — one network signal is terminal.
 
-**When you detect network dependency** (any of):
-- `artifact_exec` returns `promotion_gate_network_denied: true` or `approval_required: true` because tests touch URLs/hosts
-- Test output contains `ECONNREFUSED`, `ConnectionError`, `Name or service not known`, `Network is unreachable`, `getaddrinfo failed`, `timeout` to external hosts, or HTTP 5xx from live services
-- Test source (from `artifact_inspect`) imports `requests`/`httpx`/`urllib` **and** calls them without mocks
+**Run first, judge from the runtime outcome — do not pre-judge from imports.**
+The sandbox is physically network-isolated, so it is safe to *run* the suite even
+when the source imports `requests`/`httpx`/`urllib`. A suite that mocks the HTTP
+caller will **pass** — that is the correct, idempotent design, and it is a `pass`,
+not `unable_to_evaluate`. Importing a network library is **not** itself a network
+dependency; only an actual live call is. Do not read mocked code and guess.
 
-→ Return `status: "unable_to_evaluate"` immediately with a finding that tests require live network and cannot be evaluated in the sealed promotion sandbox. **Do not** return `status: "fail"` for environment/network blockers — that invites the planner to send you back in a loop.
+**A genuine network dependency is proven by the run, by any of:**
+- Test output contains `ECONNREFUSED`, `ConnectionError`, `Name or service not known`, `Network is unreachable`, `getaddrinfo failed`, `timeout` to external hosts, or HTTP 5xx from live services
+- `artifact_exec` returns `promotion_gate_network_denied: true` or `approval_required: true` (this only happens on sandbox drivers that cannot guarantee isolation; the default bubblewrap promotion sandbox runs the tests instead of pre-denying)
+
+→ Then return `status: "unable_to_evaluate"` with a finding that the tests require live network and cannot be evaluated in the sealed promotion sandbox. **Do not** return `status: "fail"` for environment/network blockers — that invites the planner to send you back in a loop.
 
 If the entire suite is network/integration-only, skip `promotion_record` and return `unable_to_evaluate` (same as “no tests”).
 
