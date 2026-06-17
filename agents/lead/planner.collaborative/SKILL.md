@@ -120,10 +120,16 @@ These are **agent IDs for `agent_spawn`** — not tool names. Use them in plan s
 | `architect.default` | Multi-file design, structural breakdown |
 | `coder.default` | Durable code and artifact-producing implementation |
 | `executor.default` | Quick deterministic scripts without artifact handoff |
-| `agent-factory.default` | Building a new agent end-to-end |
+| `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (`revision create` + `promote`). Pipeline owner for both greenfield builds and post-federation install. |
 | `discovery.default` | Finding a non-foundational agent (spawn with intent) |
 | `auditor.default` / `static_evaluator.default` / `unit_test_runner.default` | Federation review roles |
-| `registration.default` | Long human-in-the-loop credential ceremonies only |
+| `registration.default` | Human-in-the-loop **credential** ceremonies only (OAuth, identity verification, many `user_ask` turns). **Never** for artifact install or `agent_revision_promote`. |
+
+**Install routing (critical):** When `coder.default` (or workbench reconcile) has produced an
+`artifact_ref` and federation escalation is approved, spawn **`agent-factory.default`** with that
+`artifact_ref` — it handles revision create + promote internally. Do **not** spawn
+`registration.default`, `specialized_builder.default`, or roster-search for an "installer" agent.
+`registration.default` is for cold-start credential onboarding only, not gateway promotion.
 
 You do not need `agent_list` to learn these names — they are stable. Prefer them
 in plans and spawns unless the task needs a specialized agent you do not know.
@@ -175,9 +181,9 @@ You may skip a formal plan for:
 
 Include every step whose *existence* is predictable from the goal, even when its
 *content* depends on earlier steps. For agent/artifact builds, that usually means
-research → design → implement → validate/test (plus operator review when the
-operator should edit). Unknown API choice does not justify a one-step plan —
-the operator should see the real scope before approving.
+research → design → implement → validate/test → federation review → gateway install
+(plus operator review when the operator should edit). Unknown API choice does not
+justify a one-step plan — the operator should see the real scope before approving.
 
 | Predictable from the goal | Include in first `planframe_propose`? |
 |---|---|
@@ -185,7 +191,9 @@ the operator should see the real scope before approving.
 | Architecture / design | Yes |
 | Implementation / artifact build | Yes |
 | Validation, tests, operator review | Yes |
-| Credential registration (only if APIs need keys) | Yes, once you know auth is required |
+| Federation / promotion review (`federation.escalate`) | Yes, for installable artifacts |
+| Gateway install (`agent-factory.default` after escalation approval) | Yes, for installable artifacts |
+| Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — use planner `credential_setup` or `registration.default` for long ceremonies |
 | A second agent because research found two deliverables | No — amend after discovery |
 
 **Anti-pattern:** proposing only `s1: Research` while telling the operator you
@@ -239,6 +247,21 @@ For a new agent build, include the full pipeline — not just the first step:
       "owner": "agent",
       "agent_id": "unit_test_runner.default",
       "depends_on": ["s3"]
+    },
+    {
+      "step_id": "s5",
+      "title": "Federation review and operator escalation",
+      "owner": "planner",
+      "depends_on": ["s4"],
+      "notes": "Spawn auditor, static_evaluator, unit_test_runner; promotion_query; federation.escalate"
+    },
+    {
+      "step_id": "s6",
+      "title": "Install agent revision",
+      "owner": "agent",
+      "agent_id": "agent-factory.default",
+      "depends_on": ["s5"],
+      "notes": "After apr-esc approval only; pass artifact_ref from s3"
     }
   ],
   "validation_policy": {
@@ -376,9 +399,12 @@ reasoning instead of re-deriving everything from chat history.
 ## Delegation (after plan approval)
 
 1. **Foundational match** → `agent_spawn` the known `agent_id` from the plan or table above.
-2. **Unknown non-foundational target** → one `agent_discover` with `intent`, or spawn
+2. **Post-federation install** → when escalation is approved and you hold an `artifact_ref`,
+   spawn **`agent-factory.default`** with that ref in the message. Do not call
+   `agent_list`, `agent_discover`, or `registration.default` to "find an installer."
+3. **Unknown non-foundational target** → one `agent_discover` with `intent`, or spawn
    `discovery.default` with the task description — not repeated `agent_list`.
-3. **No candidate** → `agent-factory.default` to build new.
+4. **No candidate for a new build** → `agent-factory.default` to build from scratch.
 
 Include PlanFrame context (`plan_id`, current step) in spawn metadata when useful.
 
@@ -411,6 +437,35 @@ In `planframe_propose`, use `validation_policy.entries` (not ad-hoc field names)
 
 Adapt titles and add entries for packaging or federation when the plan requires them.
 
+## Evaluation federation and install
+
+When an installable artifact exists (after `coder.default` or workbench reconcile):
+
+**Federation**
+
+1. Spawn federation roles in parallel (`async=true`): `auditor.default`,
+   `static_evaluator.default`, and `unit_test_runner.default` when the artifact has code.
+2. Join with one `workflow_wait`, then `promotion_query({artifact_ref})`.
+3. Call `federation.escalate` with role verdicts and `planner_synthesis`. Save the returned
+   `approval_request_id` (`apr-esc-*`). Do **not** use `session.escalate` for promotion review.
+4. Tell the operator how to approve/reject in plain text; **do not** `user_ask` for the same
+   decision — `user_ask` does not resolve `apr-esc-*` gates.
+
+**After operator approval**
+
+1. `approval_status({approval_id})` — confirm `approved`.
+2. Spawn **`agent-factory.default`** with the `artifact_ref`, `agent_id`, and escalation id.
+   It runs revision create + promote internally.
+3. When `agent-factory` reports `installed: true`, the agent is live — spawn it directly;
+   do not re-promote or spawn `registration.default`.
+
+**Never for install:** `registration.default` (credentials only), manual `content_write` of
+`SKILL.md` / `runtime.lock` as a substitute for promotion, or `agent_discover` intents mixing
+"install" and "register" when `agent-factory.default` is already the correct target.
+
+**On install conflict** (`already has active revision`, dedup errors): inspect with
+`agent_inspect` / `agent_revision_list` — do not spawn parallel builders or re-run `coder`.
+
 ## Resumption
 
 On resume (after `workflow_wait`, child completion, plan approval, or workbench return):
@@ -434,6 +489,8 @@ reconcile/discard is typically via chat `/wb`)
 
 **Delegation & state:** `agent_spawn`, `workflow_wait`, `workflow_state`, `resolve`,
 `knowledge_store`, `user_ask`
+
+**Federation & promotion:** `promotion_query`, `federation.escalate`, `approval_status`
 
 **Roster (sparse use):** `agent_discover` (non-empty `intent`), `agent_list` (only when
 choosing an unknown target — never as a retry loop)

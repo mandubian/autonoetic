@@ -5,6 +5,8 @@
 //! viewer, and (later) external channel bridges all share the *same* formatting.
 //! Presentation only — importance/altitude is decided gateway-side.
 
+use std::collections::HashSet;
+
 use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry};
 
@@ -1913,12 +1915,53 @@ pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
     coalesce_indexed(entries).into_iter().map(|(r, _)| r).collect()
 }
 
+/// Approval ids already surfaced by a linked `escalation.pending` row.
+///
+/// `federation.escalate` emits both `escalation.pending` (verdict summary) and
+/// `approval.pending` (`session_escalate` mirror) for the same `apr-esc-*` gate.
+pub fn linked_promotion_escalation_approval_ids(
+    entries: &[SessionTimelineEntry],
+) -> HashSet<String> {
+    entries
+        .iter()
+        .filter(|e| e.event_type == "escalation.pending")
+        .filter_map(|e| e.refs.approval_request_id.clone())
+        .collect()
+}
+
+/// Hide the `session_escalate` approval mirror when the federation escalation
+/// card is already on the timeline for the same approval request.
+pub fn is_redundant_promotion_escalation_approval(
+    entry: &SessionTimelineEntry,
+    linked_escalation_approvals: &HashSet<String>,
+) -> bool {
+    if entry.event_type != "approval.pending" {
+        return false;
+    }
+    let payload = match parse_entry_payload(entry) {
+        Some(v) => v,
+        None => return false,
+    };
+    if payload_field_str(&payload, "action").as_deref() != Some("session_escalate") {
+        return false;
+    }
+    let request_id = payload_field_str(&payload, "request_id")
+        .or_else(|| entry.refs.approval_request_id.clone());
+    request_id
+        .as_ref()
+        .is_some_and(|id| linked_escalation_approvals.contains(id))
+}
+
 /// Like [`coalesce`], but also returns each row's [`RowSource`] for drill-down.
 pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, RowSource)> {
+    let linked_escalation_approvals = linked_promotion_escalation_approval_ids(entries);
     let mut out = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_len: usize = 0;
     for (i, e) in entries.iter().enumerate() {
+        if is_redundant_promotion_escalation_approval(e, &linked_escalation_approvals) {
+            continue;
+        }
         // Defense-in-depth: only fold Routine-tier events that are ALSO below
         // the Attention altitude. This preserves the original invariant that
         // Attention/Error rows (gates, failures, interventions) NEVER collapse,
@@ -3250,6 +3293,70 @@ mod tests {
         assert!(line.contains("[coder]"));
         // Revision id shown as-is (already prefixed), not doubled to "rev rev-9".
         assert!(line.contains("escalation: recommend promote (rev-9)"));
+    }
+
+    #[test]
+    fn coalesce_indexed_hides_session_escalate_mirror_when_escalation_pending_exists() {
+        let approval_id = "apr-esc-esc_ed2ebff710e4";
+        let mut esc = entry(
+            SessionRole::Specialist {
+                kind: "weather-lo".into(),
+            },
+            Principal::agent("weather-lookup"),
+            "escalation.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "escalation_id": "esc_ed2ebff710e44b27bf4cb82d2e6f4547",
+                "agent_id": "weather-lookup",
+                "revision_id": "1",
+                "synthesis": "All federation roles passed.",
+                "escalation_type": "promotion_review",
+            }),
+        );
+        esc.refs.approval_request_id = Some(approval_id.into());
+        let appr = entry(
+            SessionRole::Specialist {
+                kind: "weather-lo".into(),
+            },
+            Principal::agent("weather-lookup"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": approval_id,
+                "action": "session_escalate",
+                "reason": "Promotion review for agent 'weather-lookup'",
+                "context": "All federation roles passed.",
+            }),
+        );
+        let rows = coalesce_indexed(&[esc, appr]);
+        assert_eq!(rows.len(), 1);
+        let RenderedRow::Line(spec) = &rows[0].0 else {
+            panic!("expected line row");
+        };
+        assert!(spec.headline.contains("PROMOTION ESCALATION"));
+        assert!(!spec.headline.contains("SESSION ESCALATION"));
+    }
+
+    #[test]
+    fn session_escalate_without_escalation_pending_still_renders() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "esc-human-1",
+                "action": "session_escalate",
+                "reason": "stuck on integration test",
+                "context": "needs operator guidance",
+            }),
+        );
+        let rows = coalesce_indexed(&[appr]);
+        assert_eq!(rows.len(), 1);
+        let RenderedRow::Line(spec) = &rows[0].0 else {
+            panic!("expected line row");
+        };
+        assert!(spec.headline.contains("SESSION ESCALATION"));
     }
 
     #[test]

@@ -1807,6 +1807,46 @@ pub fn run(
                                             Err(e) => status = Some(e),
                                         }
                                     }
+                                    SlashCommand::EmergencyStopAndRedirect { message } => {
+                                        let reason = "Operator emergency stop from session room TUI";
+                                        match rpc(
+                                            client,
+                                            "root_session.emergency_stop",
+                                            serde_json::json!({
+                                                "root_session_id": root_session_id,
+                                                "reason": reason,
+                                                "requested_by_type": "operator",
+                                                "requested_by_id": "session-room",
+                                                "trigger_kind": "manual",
+                                                "notify_where_practical": true,
+                                            }),
+                                        ) {
+                                            Ok(_) => {
+                                                if let Some(msg) = message
+                                                    .as_deref()
+                                                    .filter(|m| !m.is_empty())
+                                                {
+                                                    let send_status = send_message(
+                                                        client,
+                                                        root_session_id,
+                                                        msg,
+                                                        target_agent_id.as_deref(),
+                                                    );
+                                                    status = Some(format!(
+                                                        "✓ emergency stop — {send_status}"
+                                                    ));
+                                                } else {
+                                                    status = Some("✓ emergency stop issued".to_string());
+                                                }
+                                                force_timeline_refresh = true;
+                                                follow = true;
+                                            }
+                                            Err(e) => {
+                                                status =
+                                                    Some(format!("✗ emergency stop failed: {e}"));
+                                            }
+                                        }
+                                    }
                                     SlashCommand::Unknown(verb) => {
                                         let v = if verb.is_empty() {
                                             "(empty)".to_string()
@@ -2861,12 +2901,20 @@ pub fn run(
             }
         }
         // Rows + their source mapping (lets Enter drill into the underlying event).
+        let linked_escalation_approvals =
+            render::linked_promotion_escalation_approval_ids(&visible);
         let mut indexed: Vec<(RenderedRow, RowSource)> = if squash {
             render::coalesce_indexed(&visible)
         } else {
             visible
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| {
+                    !render::is_redundant_promotion_escalation_approval(
+                        e,
+                        &linked_escalation_approvals,
+                    )
+                })
                 .map(|(i, e)| (RenderedRow::Line(render::render_spec(e)), RowSource::Single(i)))
                 .collect()
         };

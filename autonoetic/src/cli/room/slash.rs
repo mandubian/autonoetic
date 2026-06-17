@@ -49,6 +49,8 @@ pub enum SlashCommand {
     },
     /// List pending wiki proposals for this session.
     ListWikiProposals,
+    /// Emergency-stop the current session and optionally redirect with a message.
+    EmergencyStopAndRedirect { message: Option<String> },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
@@ -115,6 +117,7 @@ pub fn help_lines() -> Vec<String> {
         "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
         "  /test <scenario>           inject synthetic events (dev)".to_string(),
         "  /test help                 list test scenarios".to_string(),
+        "  /estop [redirect message]  emergency-stop session · optionally re-send a message to redirect it".to_string(),
         String::new(),
         "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
@@ -151,6 +154,12 @@ pub fn parse(input: &str) -> SlashCommand {
         }
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
+        "estop" | "emergency-stop" => {
+            let msg = tail.trim();
+            SlashCommand::EmergencyStopAndRedirect {
+                message: if msg.is_empty() { None } else { Some(msg.to_string()) },
+            }
+        }
         other => SlashCommand::Unknown(other.to_string()),
     }
 }
