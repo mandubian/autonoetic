@@ -111,6 +111,15 @@ pub fn is_context_overflow_error(status: u16, body: &str) -> bool {
                     || lc.contains("maximum context length")
                     || lc.contains("context window")
                         && (lc.contains("exceed") || lc.contains("too long"))
+                    // General catch for OpenAI-compatible servers that phrase it
+                    // differently (e.g. llama.cpp / vLLM "Context size has been
+                    // exceeded."). Any error mentioning "context" together with an
+                    // overflow verb is treated as overflow so the aggressive-governor
+                    // retry fires instead of failing the turn terminally.
+                    || lc.contains("context")
+                        && (lc.contains("exceed")
+                            || lc.contains("too long")
+                            || lc.contains("too many tokens"))
                 {
                     return true;
                 }
