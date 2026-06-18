@@ -52,12 +52,14 @@ pub async fn handle_room_with_target(
     // Interactive shell — reads via session.timeline.list, resolves gates via
     // approvals.* / interaction.resolve_and_answer.
     if args.tui {
+        let presets: Vec<String> = config.llm_presets.keys().cloned().collect();
         return tui::run(
             &client,
             &mut root_session_id,
             min_altitude,
             args.limit,
             &mut target_agent_id,
+            &presets,
         );
     }
 

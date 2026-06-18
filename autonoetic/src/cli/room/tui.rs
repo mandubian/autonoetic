@@ -1616,6 +1616,7 @@ pub fn run(
     initial_floor: Altitude,
     limit: u32,
     target_agent_id: &mut Option<String>,
+    presets: &[String],
 ) -> anyhow::Result<()> {
     crate::cli::terminal::require_interactive_terminal("Session Room")?;
     enable_raw_mode()?;
@@ -1993,6 +1994,57 @@ pub fn run(
                                                 status =
                                                     Some(format!("✗ emergency stop failed: {e}"));
                                             }
+                                        }
+                                    }
+                                    SlashCommand::ModelShow => {
+                                        match rpc(client, "session.inference.get", serde_json::json!({
+                                            "session_id": &*root_session_id,
+                                        })) {
+                                            Ok(v) => {
+                                                let pn = v.get("preset_name").and_then(|x| x.as_str()).unwrap_or("?");
+                                                let prov = v.get("provider").and_then(|x| x.as_str()).unwrap_or("?");
+                                                let mdl = v.get("model").and_then(|x| x.as_str()).unwrap_or("?");
+                                                let ovr = v.get("session_override_preset").and_then(|x| x.as_str()).filter(|x| !x.is_empty());
+                                                let avail = presets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" · ");
+                                                let binding = match ovr {
+                                                    Some(p) => format!(" (override: {p})"),
+                                                    None => String::new(),
+                                                };
+                                                status = Some(format!(
+                                                    "→ {pn}{binding}: {prov}/{mdl}   available: {avail}"
+                                                ));
+                                            }
+                                            Err(e) => status = Some(format!("✗ {e}")),
+                                        }
+                                    }
+                                    SlashCommand::ModelSet { preset } => {
+                                        match rpc(client, "session.inference.set", serde_json::json!({
+                                            "session_id": &*root_session_id,
+                                            "preset": &preset,
+                                            "set_by": "operator:tui",
+                                        })) {
+                                            Ok(v) => {
+                                                let prov = v.get("resolved").and_then(|r| r.get("provider")).and_then(|x| x.as_str()).unwrap_or("?");
+                                                let mdl = v.get("resolved").and_then(|r| r.get("model")).and_then(|x| x.as_str()).unwrap_or("?");
+                                                status = Some(format!("✓ model override → {preset} ({prov}/{mdl})"));
+                                            }
+                                            Err(e) => status = Some(format!("✗ {e}")),
+                                        }
+                                    }
+                                    SlashCommand::ModelClear => {
+                                        match rpc(client, "session.inference.clear", serde_json::json!({
+                                            "session_id": &*root_session_id,
+                                            "set_by": "operator:tui",
+                                        })) {
+                                            Ok(v) => {
+                                                let cleared = v.get("cleared").and_then(|x| x.as_bool()).unwrap_or(false);
+                                                if cleared {
+                                                    status = Some("✓ session model override cleared".to_string());
+                                                } else {
+                                                    status = Some("ℹ no override was set".to_string());
+                                                }
+                                            }
+                                            Err(e) => status = Some(format!("✗ {e}")),
                                         }
                                     }
                                     SlashCommand::Unknown(verb) => {

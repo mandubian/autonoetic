@@ -15,6 +15,9 @@
 //! - `/plan` / `/plan approve [id]` — list or approve pending PlanFrames
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — full command reference in the detail pane
+//! - `/model` — show current inference profile
+//! - `/model <preset>` — set session-level model override
+//! - `/model clear` — clear the override
 //!
 //! See [`help_lines()`] for the complete key map and slash-command list.
 
@@ -51,13 +54,19 @@ pub enum SlashCommand {
     ListWikiProposals,
     /// Emergency-stop the current session and optionally redirect with a message.
     EmergencyStopAndRedirect { message: Option<String> },
+    /// Show resolved inference profile for the current session.
+    ModelShow,
+    /// Override the session inference preset until cleared.
+    ModelSet { preset: String },
+    /// Remove the session inference override.
+    ModelClear,
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /cron · /wiki · /test · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /cron · /wiki · /test · /model · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -118,6 +127,9 @@ pub fn help_lines() -> Vec<String> {
         "  /test <scenario>           inject synthetic events (dev)".to_string(),
         "  /test help                 list test scenarios".to_string(),
         "  /estop [redirect message]  emergency-stop session · optionally re-send a message to redirect it".to_string(),
+        "  /model                     show current inference profile".to_string(),
+        "  /model <preset>            override model until cleared".to_string(),
+        "  /model clear               remove the session override".to_string(),
         String::new(),
         "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
@@ -152,6 +164,7 @@ pub fn parse(input: &str) -> SlashCommand {
             let name = tail.trim().to_string();
             SlashCommand::Test { name }
         }
+        "model" => parse_model(tail),
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         "estop" | "emergency-stop" => {
@@ -274,6 +287,19 @@ fn parse_session(tail: &str) -> SlashCommand {
             };
             SlashCommand::SwitchSession(id.trim().to_string())
         }
+    }
+}
+
+fn parse_model(tail: &str) -> SlashCommand {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        return SlashCommand::ModelShow;
+    }
+    if trimmed.eq_ignore_ascii_case("clear") || trimmed.eq_ignore_ascii_case("reset") {
+        return SlashCommand::ModelClear;
+    }
+    SlashCommand::ModelSet {
+        preset: trimmed.to_string(),
     }
 }
 
@@ -538,5 +564,34 @@ mod tests {
                 name: String::new()
             }
         );
+    }
+
+    #[test]
+    fn parse_model_show() {
+        assert_eq!(parse("/model"), SlashCommand::ModelShow);
+        assert_eq!(parse("/model  "), SlashCommand::ModelShow);
+    }
+
+    #[test]
+    fn parse_model_set() {
+        assert_eq!(
+            parse("/model gpt-4o"),
+            SlashCommand::ModelSet {
+                preset: "gpt-4o".into()
+            }
+        );
+        assert_eq!(
+            parse("/model  default  "),
+            SlashCommand::ModelSet {
+                preset: "default".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_model_clear() {
+        assert_eq!(parse("/model clear"), SlashCommand::ModelClear);
+        assert_eq!(parse("/model reset"), SlashCommand::ModelClear);
+        assert_eq!(parse("/model  clear  "), SlashCommand::ModelClear);
     }
 }
