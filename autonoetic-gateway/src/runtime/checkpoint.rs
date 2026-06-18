@@ -203,6 +203,19 @@ pub struct SessionCheckpoint {
     /// timeout checker to fail tasks that wait too long for approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<String>,
+
+    /// Sentinel divergence suppression state (sentinel.suppress).
+    /// Without this, suppression is lost on resume and the planner is
+    /// re-notified about divergence it already suppressed.
+    #[serde(default)]
+    pub suppress_until_turn: u64,
+
+    /// Last known trajectory divergence level (e.g. "healthy", "diverging").
+    /// Without this, the monitor resets to None on resume and the first
+    /// post-resume tick always fires level_changed=true, re-detecting
+    /// divergence from the restored LoopGuard state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory_last_level: Option<String>,
 }
 
 impl SessionCheckpoint {
@@ -218,6 +231,11 @@ impl SessionCheckpoint {
         if let Some(ref cm) = self.compression_metadata {
             runtime.compression_metadata = cm.clone();
         }
+        runtime.suppress_until_turn =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(self.suppress_until_turn));
+        runtime
+            .trajectory_monitor
+            .restore_last_level(self.trajectory_last_level.as_deref());
     }
 
     pub fn initial_user_message(&self) -> String {
@@ -544,6 +562,8 @@ impl SessionFork {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
             ..checkpoint.clone()
         };
         save_checkpoint(config, &forked_checkpoint)?;
@@ -618,6 +638,8 @@ mod tests {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
         };
 
         save_checkpoint(&config, &checkpoint).expect("should save");
@@ -676,6 +698,8 @@ mod tests {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
         };
 
         let mut c2 = c1.clone();
@@ -742,6 +766,8 @@ mod tests {
                 assistant_message: None,
                 pending_action: None,
                 suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
             };
             save_checkpoint(&config, &checkpoint).unwrap();
         }

@@ -83,6 +83,18 @@ impl TrajectoryMonitor {
         }
     }
 
+    /// Restore the last known divergence level from a checkpoint.
+    /// Called on session resume to prevent the first post-resume tick
+    /// from always firing level_changed=true.
+    pub fn restore_last_level(&mut self, level: Option<&str>) {
+        self.last_level = level.and_then(restore_level);
+    }
+
+    /// Snapshot the last known level for checkpoint serialization.
+    pub fn last_level_as_string(&self) -> Option<String> {
+        self.last_level.map(|s| s.to_string())
+    }
+
     /// `true` if the monitor will run at all. When the master switch is
     /// off the monitor is inert and produces no events.
     pub fn enabled(&self) -> bool {
@@ -855,5 +867,17 @@ mod tests {
             assert!(matches!(r.health, TrajectoryHealth::Healthy));
             assert_eq!(r.health.causal_action(), None);
         }
+    }
+}
+
+/// Map a level string back to the internal &'static str.
+/// Used by `restore_last_level` on session resume.
+fn restore_level(s: &str) -> Option<&'static str> {
+    match s {
+        "healthy" => Some("healthy"),
+        "watching" => Some("watching"),
+        "diverging" => Some("diverging"),
+        "critical" => Some("critical"),
+        _ => None,
     }
 }

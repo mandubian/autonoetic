@@ -823,6 +823,8 @@ impl AgentExecutor {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: self.suppress_until_turn.load(std::sync::atomic::Ordering::Relaxed),
+            trajectory_last_level: self.trajectory_monitor.last_level_as_string(),
         }
     }
 

@@ -191,6 +191,8 @@ mod session_resume_tests {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
         };
         let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
         assert_eq!(id, "tid-99");

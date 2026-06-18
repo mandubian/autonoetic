@@ -1580,6 +1580,8 @@ impl GatewayExecutionService {
                 assistant_message: None,
                 pending_action: None,
                 suspended_at: None,
+                suppress_until_turn: 0,
+                trajectory_last_level: None,
             }
         };
         cp.yield_reason = YieldReason::EmergencyStop {
@@ -1842,6 +1844,27 @@ impl GatewayExecutionService {
         Option<String>,
     )> {
         use autonoetic_types::background::UserInteractionStatus;
+
+        // Cancel stale divergence-sentinel interactions from before this resume.
+        // The trajectory monitor restarts fresh on resume (sliding windows empty,
+        // last_level restored from checkpoint), so old divergence prompts are
+        // from a different monitoring context and should not block the operator.
+        if let Some(store) = self.gateway_store.as_ref() {
+            let root = crate::runtime::content_store::root_session_id(session_id);
+            if let Ok(pending) = store.get_pending_interactions_for_root_session(&root) {
+                for inter in &pending {
+                    if matches!(
+                        inter.kind,
+                        autonoetic_types::background::UserInteractionKind::DivergenceSentinel,
+                    ) {
+                        let _ = store.cancel_user_interaction(
+                            &inter.interaction_id,
+                            "cancelled on session resume — trajectory monitor restarted",
+                        );
+                    }
+                }
+            }
+        }
 
         if matches!(
             checkpoint.yield_reason,
