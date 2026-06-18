@@ -5575,6 +5575,17 @@ fn draw(
             .unwrap_or_default();
         Paragraph::new(format!(" {label}: {}▏{err}   {hint}", gi.buffer))
             .style(Style::default().fg(Color::Cyan))
+    } else if let Some(s) = status {
+        // Show the last action's status result prominently in the footer.
+        let color = if s.starts_with('✗') {
+            Color::Red
+        } else if s.starts_with('✓') {
+            Color::Green
+        } else {
+            Color::Yellow
+        };
+        Paragraph::new(format!(" {s}"))
+            .style(Style::default().fg(color))
     } else {
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
         let turn_hint = rows.get(safe_selected).and_then(|r| match r {
