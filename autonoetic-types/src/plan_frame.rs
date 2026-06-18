@@ -353,6 +353,16 @@ pub struct PlanFramesApproveResult {
     pub plan: PlanFrame,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanFramesGetParams {
+    pub plan_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanFramesGetResult {
+    pub plan: PlanFrame,
+}
+
 /// Structural diff of the safety-relevant **envelope** between two plan
 /// revisions. Used by `planframe_amend` to decide whether an amendment
 /// **inherits** the prior operator approval (no envelope change) or

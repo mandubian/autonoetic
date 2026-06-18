@@ -107,7 +107,7 @@ pub struct WikiListTool;
 
 impl NativeTool for WikiListTool {
     fn name(&self) -> &'static str {
-        "wiki.list"
+        "wiki_list"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -152,7 +152,7 @@ pub struct WikiGetTool;
 
 impl NativeTool for WikiGetTool {
     fn name(&self) -> &'static str {
-        "wiki.get"
+        "wiki_get"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -209,7 +209,7 @@ pub struct WikiProposeTool;
 
 impl NativeTool for WikiProposeTool {
     fn name(&self) -> &'static str {
-        "wiki.propose"
+        "wiki_propose"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

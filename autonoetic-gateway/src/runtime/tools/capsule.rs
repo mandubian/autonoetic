@@ -63,7 +63,7 @@ pub struct CapsuleExportTool;
 
 impl NativeTool for CapsuleExportTool {
     fn name(&self) -> &'static str {
-        "capsule.export"
+        "capsule_export"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -177,7 +177,7 @@ pub struct CapsuleImportTool;
 
 impl NativeTool for CapsuleImportTool {
     fn name(&self) -> &'static str {
-        "capsule.import"
+        "capsule_import"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

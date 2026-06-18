@@ -1270,6 +1270,49 @@ impl JsonRpcRouter {
                 }
             }
 
+            "planframes.get" => {
+                let params: autonoetic_types::plan_frame::PlanFramesGetParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for planframes.get: {}", e),
+                            );
+                        }
+                    };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match store.load_plan_frame(&params.plan_id) {
+                    Ok(Some(plan)) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(
+                            autonoetic_types::plan_frame::PlanFramesGetResult { plan },
+                        )
+                        .unwrap_or_else(|_| serde_json::json!({"plan": null})),
+                    ),
+                    Ok(None) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Plan '{}' not found", params.plan_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("planframes.get failed: {}", e),
+                    ),
+                }
+            }
+
             "planframes.approve" => {
                 let params: autonoetic_types::plan_frame::PlanFramesApproveParams =
                     match serde_json::from_value(req.params) {

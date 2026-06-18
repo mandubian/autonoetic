@@ -35,7 +35,7 @@ pub struct FederationEscalateTool;
 
 impl NativeTool for FederationEscalateTool {
     fn name(&self) -> &'static str {
-        "federation.escalate"
+        "federation_escalate"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

@@ -70,7 +70,11 @@ pub fn resolve_inference_profile(
     let (preset_name, preset_source) = if let Some(ref name) = session_override {
         (Some(name.clone()), PresetSource::SessionOverride)
     } else if let Some(ref name) = manifest.llm_preset {
-        (Some(name.clone()), PresetSource::AgentManifest)
+        let remapped = config
+            .llm_preset_mapping
+            .get(name.as_str())
+            .cloned();
+        (Some(remapped.unwrap_or_else(|| name.clone())), PresetSource::AgentManifest)
     } else if let Some(name) = resolve_preset_name_for_agent(agent_id, &config.llm_preset_mapping) {
         (Some(name.to_string()), PresetSource::Mapping)
     } else if manifest.llm_config.is_some() {

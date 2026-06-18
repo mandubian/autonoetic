@@ -308,7 +308,7 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
             }
         }
         (None, Some(_)) => {
-            if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\s*\n?"#).ok() {
+            if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\n"#).ok() {
                 updated = re.replace(&updated, "").to_string();
             }
         }

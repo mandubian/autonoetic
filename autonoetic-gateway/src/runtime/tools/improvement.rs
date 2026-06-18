@@ -59,7 +59,7 @@ pub struct AbReplayTool;
 
 impl NativeTool for AbReplayTool {
     fn name(&self) -> &'static str {
-        "improvement.ab_replay"
+        "improvement_ab_replay"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -390,7 +390,7 @@ impl NativeTool for AbReplayTool {
                 &args.agent_id,
                 &rev_a.revision_id,
                 None,
-                "improvement.ab_replay",
+                "improvement_ab_replay",
             )?;
             queued_ids.push(run.eval_run_id);
         }
@@ -406,7 +406,7 @@ impl NativeTool for AbReplayTool {
                 &args.agent_id,
                 &rev_b.revision_id,
                 Some(rev_a.revision_id.clone()),
-                "improvement.ab_replay",
+                "improvement_ab_replay",
             )?;
             queued_ids.push(run.eval_run_id);
         }

@@ -63,7 +63,7 @@ fn tool_available_with_capsule_export_capability() {
 #[test]
 fn tool_definitions_advertise_required_fields() {
     let exp = CapsuleExportTool.definition();
-    assert_eq!(exp.name, "capsule.export");
+    assert_eq!(exp.name, "capsule_export");
     let required = exp.input_schema["required"].as_array().unwrap();
     assert!(
         required.iter().any(|v| v == "agent_id"),
@@ -71,7 +71,7 @@ fn tool_definitions_advertise_required_fields() {
     );
 
     let imp = CapsuleImportTool.definition();
-    assert_eq!(imp.name, "capsule.import");
+    assert_eq!(imp.name, "capsule_import");
     let required = imp.input_schema["required"].as_array().unwrap();
     assert!(
         required.iter().any(|v| v == "archive"),

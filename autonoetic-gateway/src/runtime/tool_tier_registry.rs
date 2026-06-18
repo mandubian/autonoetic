@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(r.tier_for_tool("knowledge_search"), ToolTier::Core);
         assert_eq!(r.tier_for_tool("artifact_inspect"), ToolTier::Core);
         assert_eq!(r.tier_for_tool("agent_spawn"), ToolTier::Workflow);
-        assert_eq!(r.tier_for_tool("federation.escalate"), ToolTier::Workflow);
+        assert_eq!(r.tier_for_tool("federation_escalate"), ToolTier::Workflow);
         assert_eq!(r.tier_for_tool("promotion_query"), ToolTier::Workflow);
         assert_eq!(r.tier_for_tool("promotion_record"), ToolTier::Specialized);
         assert_eq!(r.tier_for_tool("credential_setup"), ToolTier::Workflow);

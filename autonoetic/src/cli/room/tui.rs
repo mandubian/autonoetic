@@ -746,20 +746,76 @@ struct ArtifactFileView {
     scroll: u16,
 }
 
-/// One entry in the live session content tree (Pillar D). The name is a
-/// mutable pointer over an immutable content-addressed blob — a *draft* the
-/// operator can watch being written, before any artifact is built.
-struct ContentEntry {
-    name: String,
-    alias: String,
-    visibility: String,
+/// One selectable node in the live session content pane.
+/// Sections show a plan, an artifact, a plan step (indented), an artifact file (indented),
+/// or a content-store draft.
+#[derive(Clone)]
+enum LiveContentNode {
+    Plan {
+        plan_id: String,
+        title: String,
+        status: String,
+    },
+    PlanStep {
+        title: String,
+    },
+    Artifact {
+        artifact_id: String,
+        artifact_ref: String,
+        kind: String,
+        name: String,
+    },
+    ArtifactFile {
+        name: String,
+        alias: String,
+        artifact_id: String,
+        artifact_ref: String,
+    },
+    Draft {
+        name: String,
+        alias: String,
+        visibility: String,
+    },
 }
 
-/// Live session content tree: every `content_write`/`content_patch` name the
-/// session has registered, listed from t=0. Toggle with `c`, `j`/`k` to
-/// navigate, `Enter` or `o` to open a markdown-aware viewer for the selection.
-struct ContentTree {
-    entries: Vec<ContentEntry>,
+impl LiveContentNode {
+    /// Human-readable label for the node.
+    fn label(&self) -> String {
+        match self {
+            LiveContentNode::Plan { title, status, .. } => {
+                format!("📋 {} [{}]", title, status)
+            }
+            LiveContentNode::PlanStep { title } => {
+                format!("  📄 {}", title)
+            }
+            LiveContentNode::Artifact { name, kind, .. } => {
+                format!("📦 {} ({})", name, kind)
+            }
+            LiveContentNode::ArtifactFile { name, .. } => {
+                format!("  📄 {}", name)
+            }
+            LiveContentNode::Draft { name, visibility, .. } => {
+                let vis_tag = match visibility.as_str() {
+                    "private" => " 🔒",
+                    "global" => " 🌐",
+                    _ => "",
+                };
+                format!("📝 {}{}", name, vis_tag)
+            }
+        }
+    }
+}
+
+/// Live session content pane: a sectioned tree showing plans, artifacts, and drafts.
+/// Toggle with `c`, `j`/`k` to navigate, `o` to open the selected item.
+struct LiveContentPane {
+    /// All selectable nodes in order (no section headers — sections are rendered as
+    /// separators based on the section_bounds).
+    nodes: Vec<LiveContentNode>,
+    /// Start index of each section in `nodes`.
+    /// e.g. [(0, "Plans"), (3, "Artifacts"), (7, "Drafts"), (10, "")] means
+    /// nodes[0..3] are Plans, nodes[3..7] are Artifacts, nodes[7..10] are Drafts.
+    sections: Vec<(usize, &'static str)>,
     selected: usize,
     scroll: u16,
 }
@@ -775,15 +831,13 @@ struct ContentView {
     scroll: u16,
 }
 
-/// `content.read` for the tree's selected entry; surfaces RPC errors via `status`.
-fn open_selected_content(
+/// `content.read` for the given draft name; surfaces RPC errors via `status`.
+fn open_content_draft(
     client: &RoomClient,
     root_session_id: &str,
-    tree: &ContentTree,
+    name: &str,
     status: &mut Option<String>,
 ) -> Option<ContentView> {
-    let entry = tree.entries.get(tree.selected)?;
-    let name = entry.name.clone();
     match rpc(
         client,
         "content.read",
@@ -800,7 +854,7 @@ fn open_selected_content(
                     .unwrap_or("")
                     .to_string();
                 Some(ContentView {
-                    name,
+                    name: name.to_string(),
                     handle,
                     content: content.to_string(),
                     scroll: 0,
@@ -1608,7 +1662,7 @@ pub fn run(
     let mut artifact_viewer: Option<ArtifactViewer> = None;
     let mut artifact_file_view: Option<ArtifactFileView> = None;
     // Pillar D: live session content tree (drafts visible from t=0) + viewer.
-    let mut content_tree: Option<ContentTree> = None;
+    let mut live_content_pane: Option<LiveContentPane> = None;
     let mut content_view: Option<ContentView> = None;
     let mut quit_armed_until: Option<Instant> = None;
     let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
@@ -2260,8 +2314,8 @@ pub fn run(
                         KeyCode::Esc => {
                             if content_view.is_some() {
                                 content_view = None;
-                            } else if content_tree.is_some() {
-                                content_tree = None;
+                            } else if live_content_pane.is_some() {
+                                live_content_pane = None;
                             } else if artifact_file_view.is_some() {
                                 // no-op: 'o' is ignored while the artifact file view
                                 // is open; the operator closes it with Esc first.
@@ -2432,7 +2486,7 @@ pub fn run(
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
                             } else if let Some((_, src)) = view_indexed.get(selected) {
                                 // Open detail for the selected row — same semantics as
-                                // mouse double-click. Avoid blocking on content_tree or
+                                // mouse double-click. Avoid blocking on live_content_pane or
                                 // view_gate so Enter always opens detail regardless of
                                 // sidebar/gate overlays (mouse already behaves this way).
                                 if let Some(msg) = open_row_detail_or_plan_review(
@@ -2601,64 +2655,293 @@ pub fn run(
                                 status = Some("info: j/k scroll · Esc close".to_string());
                             }
                         }
-                        // c: toggle the live session content tree (Pillar D).
-                        // Lists every content_write/content_patch name from t=0
-                        // so the operator can watch what the session is producing
-                        // before any artifact is built.
+                        // c: toggle the live session content pane — a sectioned tree
+                        // showing plans, artifacts, and session drafts.
+                        // Navigate with j/k, open with o.
                         KeyCode::Char('c') => {
                             if content_view.is_some() || artifact_file_view.is_some()
                                 || artifact_viewer.is_some() || detail.is_some()
                                 || input.is_some() || compose.is_some()
                             {
                                 // don't grab 'c' while another overlay/text input is active
-                            } else if content_tree.is_some() {
-                                content_tree = None;
+                            } else if live_content_pane.is_some() {
+                                live_content_pane = None;
                             } else {
-                                match rpc(
+                                let mut all_nodes: Vec<LiveContentNode> = Vec::new();
+                                let mut sections: Vec<(usize, &'static str)> = Vec::new();
+
+                                // --- Plans section ---
+                                let plan_start = all_nodes.len();
+                                // Fetch pending plans
+                                if let Ok(v) = rpc(
+                                    client,
+                                    "planframes.list_pending",
+                                    serde_json::json!({ "root_session_id": &*root_session_id }),
+                                ) {
+                                    if let Some(arr) = v.get("plans").and_then(|p| p.as_array()) {
+                                        for plan in arr {
+                                            let plan_id = plan.get("plan_id").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                                            let title = plan.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                            // Add plan node
+                                            all_nodes.push(LiveContentNode::Plan {
+                                                plan_id,
+                                                title,
+                                                status: "pending".to_string(),
+                                            });
+                                            // Add each step as an indented child
+                                            if let Some(steps) = plan.get("steps").and_then(|s| s.as_array()) {
+                                                for step in steps {
+                                                    let step_title = step.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                                    all_nodes.push(LiveContentNode::PlanStep { title: step_title });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Scan entries for plan.approved events with plan_ids
+                                // not already fetched as pending.
+                                let existing_plan_ids: std::collections::HashSet<String> = all_nodes
+                                    .iter()
+                                    .filter_map(|n| match n {
+                                        LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                for entry in entries.iter().rev() {
+                                    if entry.event_type == "plan.approved" {
+                                        if let Some(ref pid) = entry.refs.plan_id {
+                                            if !existing_plan_ids.contains(pid) {
+                                                if let Ok(v) = rpc(
+                                                    client,
+                                                    "planframes.get",
+                                                    serde_json::json!({ "plan_id": pid }),
+                                                ) {
+                                                    if let Some(plan) = v.get("plan") {
+                                                        let title = plan.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                                        all_nodes.push(LiveContentNode::Plan {
+                                                            plan_id: pid.clone(),
+                                                            title,
+                                                            status: "approved".to_string(),
+                                                        });
+                                                        if let Some(steps) = plan.get("steps").and_then(|s| s.as_array()) {
+                                                            for step in steps {
+                                                                let step_title = step.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                                                all_nodes.push(LiveContentNode::PlanStep { title: step_title });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let plan_count = all_nodes.len() - plan_start;
+                                if plan_count > 0 {
+                                    sections.push((plan_start, "Plans"));
+                                }
+
+                                // --- Artifacts section ---
+                                let artifact_start = all_nodes.len();
+                                let mut seen_artifact_ids = std::collections::HashSet::new();
+                                for entry in entries.iter().rev() {
+                                    if let Some(ref aid) = entry.refs.artifact_id {
+                                        if seen_artifact_ids.insert(aid.clone()) {
+                                            if let Ok(v) = rpc(
+                                                client,
+                                                "artifact.list_files",
+                                                serde_json::json!({
+                                                    "artifact_ref": aid,
+                                                    "session_id": &*root_session_id,
+                                                }),
+                                            ) {
+                                                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or(aid).to_string();
+                                                let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("artifact").to_string();
+                                                all_nodes.push(LiveContentNode::Artifact {
+                                                    artifact_id: aid.clone(),
+                                                    artifact_ref: aid.clone(),
+                                                    kind,
+                                                    name,
+                                                });
+                                                if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
+                                                    for file in files {
+                                                        let fname = file.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                                                        let alias = file.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                                                        all_nodes.push(LiveContentNode::ArtifactFile {
+                                                            name: fname,
+                                                            alias,
+                                                            artifact_id: aid.clone(),
+                                                            artifact_ref: aid.clone(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if seen_artifact_ids.len() >= 5 {
+                                        break;
+                                    }
+                                }
+                                let artifact_count = all_nodes.len() - artifact_start;
+                                if artifact_count > 0 {
+                                    sections.push((artifact_start, "Artifacts"));
+                                }
+
+                                // --- Drafts section ---
+                                let draft_start = all_nodes.len();
+                                if let Ok(v) = rpc(
                                     client,
                                     "content.list",
                                     serde_json::json!({ "session_id": root_session_id.clone() }),
                                 ) {
-                                    Ok(v) => {
-                                        let entries: Vec<ContentEntry> = v
-                                            .get("files")
-                                            .and_then(|f| f.as_array())
-                                            .map(|arr| {
-                                                arr.iter().filter_map(|f| {
-                                                    let name = f.get("name")?.as_str()?;
-                                                    // Skip implicit task artifacts (impl_*);
-                                                    // they are JSON metadata for parent agents,
-                                                    // not operator-readable content.
-                                                    if name.starts_with("impl_") {
-                                                        return None;
-                                                    }
-                                                    Some(ContentEntry {
-                                                        name: name.to_string(),
-                                                        alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
-                                                        visibility: f.get("visibility").and_then(|v| v.as_str()).unwrap_or("session").to_string(),
-                                                    })
-                                                }).collect()
-                                            })
-                                            .unwrap_or_default();
-                                        if entries.is_empty() {
-                                            status = Some("no content entries yet (session has not written any drafts)".to_string());
-                                        } else {
-                                            content_tree = Some(ContentTree { entries, selected: 0, scroll: 0 });
-                                            status = Some(format!("content: {} entries · j/k navigate · o view · O open in editor · Esc close", content_tree.as_ref().unwrap().entries.len()));
-                                        }
+                                    let drafts: Vec<LiveContentNode> = v
+                                        .get("files")
+                                        .and_then(|f| f.as_array())
+                                        .map(|arr| {
+                                            arr.iter().filter_map(|f| {
+                                                let name = f.get("name")?.as_str()?;
+                                                if name.starts_with("impl_") {
+                                                    return None;
+                                                }
+                                                Some(LiveContentNode::Draft {
+                                                    name: name.to_string(),
+                                                    alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                                                    visibility: f.get("visibility").and_then(|v| v.as_str()).unwrap_or("session").to_string(),
+                                                })
+                                            }).collect()
+                                        })
+                                        .unwrap_or_default();
+                                    let draft_count = drafts.len();
+                                    all_nodes.extend(drafts);
+                                    if draft_count > 0 {
+                                        sections.push((draft_start, "Drafts"));
                                     }
-                                    Err(e) => status = Some(format!("content list failed: {e}")),
+                                }
+
+                                if sections.is_empty() {
+                                    status = Some("no content found for this session".to_string());
+                                } else {
+                                    live_content_pane = Some(LiveContentPane {
+                                        nodes: all_nodes,
+                                        sections,
+                                        selected: 0,
+                                        scroll: 0,
+                                    });
+                                    status = Some("content: j/k navigate · o open · Esc close".to_string());
                                 }
                             }
                         }
                         KeyCode::Char('o') => {
-                            // Content tree open → open a markdown-aware viewer
-                            // for the selected entry (before the artifact branch).
+                            // Open the selected item in the live content pane
                             if content_view.is_some() {
                                 // already viewing content; ignore
-                            } else if let Some(tree) = content_tree.as_ref() {
-                                content_view =
-                                    open_selected_content(client, root_session_id, tree, &mut status);
+                            } else if let Some(pane) = live_content_pane.as_ref() {
+                                let idx = pane.selected.min(pane.nodes.len().saturating_sub(1));
+                                if let Some(ref node) = pane.nodes.get(idx) {
+                                    match node {
+                                        LiveContentNode::Plan { .. }
+                                        | LiveContentNode::PlanStep { .. } => {
+                                            // Find the plan_id (walk up for PlanStep)
+                                            let pid = match node {
+                                                LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
+                                                _ => {
+                                                    // Find parent plan by scanning backwards
+                                                    pane.nodes[..=idx].iter().rev().find_map(|n| match n {
+                                                        LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
+                                                        _ => None,
+                                                    })
+                                                }
+                                            };
+                                            if let Some(pid) = pid {
+                                                if let Ok(v) = rpc(
+                                                    client,
+                                                    "planframes.get",
+                                                    serde_json::json!({ "plan_id": pid }),
+                                                ) {
+                                                    if let Some(plan) = v.get("plan") {
+                                                        if let Ok(frame) = serde_json::from_value::<autonoetic_types::plan_frame::PlanFrame>(plan.clone()) {
+                                                            let lines = format_plan_frame_lines(&frame, false);
+                                                            detail = Some(DetailPane::plan_review(frame.plan_id.clone(), lines));
+                                                            status = Some("plan detail · Esc close".to_string());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        LiveContentNode::Artifact { artifact_ref, .. } => {
+                                            let result = rpc(
+                                                client,
+                                                "artifact.list_files",
+                                                serde_json::json!({
+                                                    "artifact_ref": artifact_ref,
+                                                    "session_id": root_session_id.clone(),
+                                                }),
+                                            );
+                                            match result {
+                                                Ok(v) => {
+                                                    let artifact_id = v.get("artifact_id").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                                                    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("").to_string();
+                                                    let files: Vec<ArtifactFileEntry> = v
+                                                        .get("files")
+                                                        .and_then(|f| f.as_array())
+                                                        .map(|arr| {
+                                                            arr.iter().filter_map(|f| {
+                                                                Some(ArtifactFileEntry {
+                                                                    name: f.get("name")?.as_str()?.to_string(),
+                                                                    alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                                                                })
+                                                            }).collect()
+                                                        })
+                                                        .unwrap_or_default();
+                                                    if files.is_empty() {
+                                                        status = Some("no files in artifact".to_string());
+                                                    } else {
+                                                        artifact_viewer = Some(ArtifactViewer {
+                                                            artifact_id,
+                                                            artifact_ref: artifact_ref.clone(),
+                                                            kind,
+                                                            files,
+                                                            selected: 0,
+                                                            scroll: 0,
+                                                        });
+                                                        status = Some("artifact files · j/k navigate · o open · Esc close".to_string());
+                                                    }
+                                                }
+                                                Err(e) => status = Some(format!("artifact list failed: {e}")),
+                                            }
+                                        }
+                                        LiveContentNode::ArtifactFile { artifact_ref, name, .. } => {
+                                            let result = rpc(
+                                                client,
+                                                "artifact.read_file",
+                                                serde_json::json!({
+                                                    "artifact_ref": artifact_ref,
+                                                    "file_name": name,
+                                                    "session_id": root_session_id.clone(),
+                                                }),
+                                            );
+                                            match result {
+                                                Ok(v) => {
+                                                    if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                                        artifact_file_view = Some(ArtifactFileView {
+                                                            artifact_id: artifact_ref.clone(),
+                                                            file_name: name.clone(),
+                                                            content: content.to_string(),
+                                                            scroll: 0,
+                                                        });
+                                                    } else {
+                                                        status = Some("artifact.read_file: no content field".to_string());
+                                                    }
+                                                }
+                                                Err(e) => status = Some(format!("artifact read failed: {e}")),
+                                            }
+                                        }
+                                        LiveContentNode::Draft { name, .. } => {
+                                            content_view = open_content_draft(
+                                                client, root_session_id, name, &mut status,
+                                            );
+                                        }
+                                    }
+                                }
                             } else if artifact_file_view.is_some() {
                             } else if let Some(ref viewer) = artifact_viewer {
                                 if let Some(file) = viewer.files.get(viewer.selected) {
@@ -2763,15 +3046,15 @@ pub fn run(
                         // and open it in an external editor (read-only snapshot).
                         // Available whenever the content pane is up.
                         KeyCode::Char('O')
-                            if content_view.is_some() || content_tree.is_some() =>
+                            if content_view.is_some() || live_content_pane.is_some() =>
                         {
                             status = Some(project_live_and_open(client, root_session_id));
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             if let Some(view) = content_view.as_mut() {
                                 view.scroll = view.scroll.saturating_add(1);
-                            } else if let Some(tree) = content_tree.as_mut() {
-                                tree.selected = (tree.selected + 1).min(tree.entries.len().saturating_sub(1));
+                            } else if let Some(pane) = live_content_pane.as_mut() {
+                                pane.selected = (pane.selected + 1).min(pane.nodes.len().saturating_sub(1));
                             } else if artifact_file_view.is_some() {
                                 artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_add(1);
                             } else if artifact_viewer.is_some() {
@@ -2790,8 +3073,8 @@ pub fn run(
                         KeyCode::Up | KeyCode::Char('k') => {
                             if let Some(view) = content_view.as_mut() {
                                 view.scroll = view.scroll.saturating_sub(1);
-                            } else if let Some(tree) = content_tree.as_mut() {
-                                tree.selected = tree.selected.saturating_sub(1);
+                            } else if let Some(pane) = live_content_pane.as_mut() {
+                                pane.selected = pane.selected.saturating_sub(1);
                             } else if artifact_file_view.is_some() {
                                 artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_sub(1);
                             } else if artifact_viewer.is_some() {
@@ -2999,7 +3282,7 @@ pub fn run(
                     early_gate_count,
                     artifact_viewer.as_ref(),
                     artifact_file_view.as_ref(),
-                    content_tree.as_ref(),
+                    live_content_pane.as_ref(),
                     content_view.as_ref(),
                     gate_modal.as_ref(),
                     gate_modal
@@ -3340,7 +3623,7 @@ pub fn run(
                 gate_count,
                 artifact_viewer.as_ref(),
                 artifact_file_view.as_ref(),
-                content_tree.as_ref(),
+                live_content_pane.as_ref(),
                 content_view.as_ref(),
                 gate_modal.as_ref(),
                 gate_modal
@@ -5024,7 +5307,7 @@ fn draw(
     gate_count: usize,
     artifact_viewer: Option<&ArtifactViewer>,
     artifact_file_view: Option<&ArtifactFileView>,
-    content_tree: Option<&ContentTree>,
+    live_content_pane: Option<&LiveContentPane>,
     content_view: Option<&ContentView>,
     gate_modal: Option<&GateModal>,
     gate_modal_entry: Option<&SessionTimelineEntry>,
@@ -5438,40 +5721,113 @@ fn draw(
                 .scroll((scroll, 0)),
             area,
         );
-    } else if let Some(ref tree) = content_tree {
+    } else if let Some(ref pane) = live_content_pane {
         let area = centered_rect(65, 70, f.area());
         f.render_widget(Clear, area);
-        let lines: Vec<Line> = tree
-            .entries
+
+        let mut visual_lines: Vec<(usize, String)> = Vec::new();
+        for (sec_idx, &(start, label)) in pane.sections.iter().enumerate() {
+            visual_lines.push((usize::MAX, format!("── {label} ──")));
+            let end = pane
+                .sections
+                .get(sec_idx + 1)
+                .map(|&(s, _)| s)
+                .unwrap_or(pane.nodes.len());
+            for node_idx in start..end {
+                if let Some(node) = pane.nodes.get(node_idx) {
+                    let text = match node {
+                        LiveContentNode::Plan {
+                            plan_id,
+                            title,
+                            status,
+                        } => {
+                            let label = if title.is_empty() {
+                                &plan_id[..plan_id.len().min(12)]
+                            } else {
+                                title.as_str()
+                            };
+                            format!("  {label} ({status})")
+                        }
+                        LiveContentNode::PlanStep { title } => {
+                            format!("    ▶ {title}")
+                        }
+                        LiveContentNode::Artifact {
+                            artifact_id: _,
+                            artifact_ref: _,
+                            kind,
+                            name,
+                        } => {
+                            format!("  {name} [{kind}]")
+                        }
+                        LiveContentNode::ArtifactFile {
+                            name,
+                            alias: _,
+                            artifact_id: _,
+                            artifact_ref: _,
+                        } => {
+                            format!("    📄 {name}")
+                        }
+                        LiveContentNode::Draft {
+                            name,
+                            alias: _,
+                            visibility,
+                        } => {
+                            let lock = match visibility.as_str() {
+                                "private" => " 🔒",
+                                "global" => " 🌐",
+                                _ => "",
+                            };
+                            format!("  {name}{lock}")
+                        }
+                    };
+                    visual_lines.push((node_idx, text));
+                }
+            }
+        }
+
+        let selected_visual = visual_lines
+            .iter()
+            .position(|(idx, _)| *idx == pane.selected)
+            .unwrap_or(0);
+
+        let lines: Vec<Line> = visual_lines
             .iter()
             .enumerate()
-            .map(|(i, e)| {
-                let marker = if i == tree.selected { " > " } else { "   " };
-                let style = if i == tree.selected {
-                    Style::default().fg(Color::Yellow).bg(Color::Black)
+            .map(|(vi, (node_idx, text))| {
+                let is_header = *node_idx == usize::MAX;
+                let is_selected = vi == selected_visual;
+                let style = if is_header {
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .bg(Color::Black)
+                } else if is_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .bg(Color::Black)
                 } else {
                     Style::default().bg(Color::Black)
                 };
-                let vis_tag = match e.visibility.as_str() {
-                    "private" => " 🔒",
-                    "global" => " 🌐",
-                    _ => "",
+                let marker = if is_selected && !is_header {
+                    " >"
+                } else {
+                    "  "
                 };
                 Line::from(Span::styled(
-                    format!("{}{}{}", marker, e.name, vis_tag),
+                    format!("{marker}{text}"),
                     style,
                 ))
             })
             .collect();
+
         let inner_height = area.height.saturating_sub(2) as usize;
         let max_scroll = lines.len().saturating_sub(inner_height);
-        let scroll = tree
-            .selected
+        let scroll = selected_visual
             .saturating_sub(inner_height / 2)
             .min(max_scroll) as u16;
+
         let title = format!(
-            " 📝 session content (drafts · t=0) — {} entries [o view · O open in editor · Esc close] ",
-            tree.entries.len()
+            " 📋 Live Content — {} items (Plans · Artifacts · Drafts) [j/k nav · o open · Esc close] ",
+            pane.nodes.len()
         );
         f.render_widget(
             Paragraph::new(lines)

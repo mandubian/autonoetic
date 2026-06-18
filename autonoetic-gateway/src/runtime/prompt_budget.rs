@@ -743,18 +743,18 @@ mod tests {
                 input_schema: serde_json::json!({}),
             })
             .chain([ToolDefinition {
-                name: "federation.escalate".to_string(),
+                name: "federation_escalate".to_string(),
                 description: "Escalate".to_string(),
                 input_schema: serde_json::json!({}),
             }])
             .collect();
 
-        let discovered = HashSet::from(["federation.escalate".to_string()]);
+        let discovered = HashSet::from(["federation_escalate".to_string()]);
         let capped = cap_tool_definitions_preserving_discovered(tools, 40, &discovered);
 
         assert_eq!(capped.len(), 40);
         assert!(
-            capped.iter().any(|t| t.name == "federation.escalate"),
+            capped.iter().any(|t| t.name == "federation_escalate"),
             "discovered tool must survive truncation"
         );
     }

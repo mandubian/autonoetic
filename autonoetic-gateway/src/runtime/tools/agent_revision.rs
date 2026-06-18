@@ -2818,7 +2818,7 @@ do not re-issue."
                     return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
                         "Promotion gate (FullJury): revision '{}' has federation role verdicts \
                      but no approved operator escalation. \
-                     The planner must call federation.escalate with revision_id='{}' \
+                     The planner must call federation_escalate with revision_id='{}' \
                      and the operator must approve before promotion.",
                         args.revision_id, args.revision_id
                     ))

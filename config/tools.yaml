@@ -31,7 +31,7 @@ rules:
   - prefix: tool_discover
     tier: core
   # Platform documentation — every agent can learn about the system it runs on.
-  - prefix: wiki.
+  - prefix: wiki_
     tier: core
 
   # Workflow tier: orchestration and approval flow.
@@ -54,7 +54,7 @@ rules:
   - prefix: agent_inspect
     tier: workflow
   # Federation promotion gate — planner orchestration after jury roles complete.
-  - prefix: federation.
+  - prefix: federation_
     tier: workflow
   # Read-only promotion status for planners collecting federation verdicts.
   # Must precede the promotion_ specialized rule (promotion_record stays gated).
