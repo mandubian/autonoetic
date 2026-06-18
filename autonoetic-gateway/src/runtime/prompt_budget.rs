@@ -260,7 +260,7 @@ pub fn compress_tool_definitions(
         .map(|t| ToolDefinition {
             name: t.name,
             description: t.description,
-            input_schema: serde_json::json!({}),
+            input_schema: serde_json::json!({"type": "object"}),
         })
         .collect()
 }
@@ -728,8 +728,8 @@ mod tests {
 
         let compressed = compress_tool_definitions(tools, 3);
         assert_eq!(compressed.len(), 2);
-        assert_eq!(compressed[0].input_schema, serde_json::json!({}));
-        assert_eq!(compressed[1].input_schema, serde_json::json!({}));
+        assert_eq!(compressed[0].input_schema, serde_json::json!({"type": "object"}));
+        assert_eq!(compressed[1].input_schema, serde_json::json!({"type": "object"}));
         assert_eq!(compressed[0].name, "content_write");
         assert_eq!(compressed[1].name, "web_search");
     }
