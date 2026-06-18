@@ -3042,7 +3042,6 @@ mod tests {
                 "context": "Signals:\n- loop_pressure (critical): 10 consecutive cycles without meaningful progress (limit 10)",
                 "options": [
                     {"id": "ack", "label": "Acknowledge"},
-                    {"id": "continue", "label": "Continue"},
                     {"id": "stop", "label": "Stop"},
                 ],
                 "allow_freeform": true,

@@ -456,11 +456,6 @@ mod tests {
                     value: "acknowledged".into(),
                 },
                 autonoetic_types::background::UserInteractionOption {
-                    id: "continue".into(),
-                    label: "Continue".into(),
-                    value: "continue".into(),
-                },
-                autonoetic_types::background::UserInteractionOption {
                     id: "stop".into(),
                     label: "Stop".into(),
                     value: "stop".into(),
