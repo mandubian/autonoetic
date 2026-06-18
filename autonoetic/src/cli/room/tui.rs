@@ -51,6 +51,11 @@ const COMPOSE_PANEL_HEIGHT: u16 = 7;
 const QUIT_ARM_SECS: u64 = 3;
 const QUIT_ARM_STATUS: &str = "Quit? press q or Ctrl+C again within 3s — Esc cancels";
 
+/// Seconds the operator has to press Esc again after arming to trigger
+/// an emergency stop of the running session.
+const ESTOP_ARM_SECS: u64 = 2;
+const ESTOP_ARM_STATUS: &str = "Interrupt session? press Esc again within 2s";
+
 fn quit_armed(armed_until: &Option<Instant>) -> bool {
     armed_until
         .filter(|until| Instant::now() < *until)
@@ -65,6 +70,24 @@ fn arm_quit(armed_until: &mut Option<Instant>, status: &mut Option<String>) {
 fn disarm_quit(armed_until: &mut Option<Instant>, status: &mut Option<String>) {
     *armed_until = None;
     if status.as_deref() == Some(QUIT_ARM_STATUS) {
+        *status = None;
+    }
+}
+
+fn estop_armed(armed_until: &Option<Instant>) -> bool {
+    armed_until
+        .filter(|until| Instant::now() < *until)
+        .is_some()
+}
+
+fn arm_estop(armed_until: &mut Option<Instant>, status: &mut Option<String>) {
+    *armed_until = Some(Instant::now() + Duration::from_secs(ESTOP_ARM_SECS));
+    *status = Some(ESTOP_ARM_STATUS.to_string());
+}
+
+fn disarm_estop(armed_until: &mut Option<Instant>, status: &mut Option<String>) {
+    *armed_until = None;
+    if status.as_deref() == Some(ESTOP_ARM_STATUS) {
         *status = None;
     }
 }
@@ -1666,6 +1689,7 @@ pub fn run(
     let mut live_content_pane: Option<LiveContentPane> = None;
     let mut content_view: Option<ContentView> = None;
     let mut quit_armed_until: Option<Instant> = None;
+    let mut estop_armed_until: Option<Instant> = None;
     let mut last_mouse_click: Option<(Instant, usize, u16, u16)> = None;
     let mut last_announced_plan_event: Option<String> = None;
     let mut last_announced_gate_event: Option<String> = None;
@@ -2356,6 +2380,7 @@ pub fn run(
                     let ctrl_c = key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL);
                     if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
+                        disarm_estop(&mut estop_armed_until, &mut status);
                         if quit_armed(&quit_armed_until) {
                             break 'room;
                         }
@@ -2383,8 +2408,34 @@ pub fn run(
                                 detail_h_scroll = 0;
                                 session_pick_list = None;
                                         wiki_request_ids = None;
+                            } else if estop_armed(&estop_armed_until) {
+                                // Double-Esc within the arm window → emergency stop
+                                disarm_estop(&mut estop_armed_until, &mut status);
+                                match rpc(
+                                    client,
+                                    "root_session.emergency_stop",
+                                    serde_json::json!({
+                                        "root_session_id": &*root_session_id,
+                                        "reason": "Interrupted by operator (double Esc in room TUI)",
+                                        "requested_by_type": "operator",
+                                        "requested_by_id": "session-room",
+                                        "trigger_kind": "manual",
+                                        "notify_where_practical": true,
+                                    }),
+                                ) {
+                                    Ok(_) => {
+                                        status = Some("✓ session interrupted — press i to send a new message, F to fork from a turn".to_string());
+                                        force_timeline_refresh = true;
+                                        follow = true;
+                                    }
+                                    Err(e) => {
+                                        status = Some(format!("✗ interrupt failed: {e}"));
+                                    }
+                                }
                             } else {
+                                // First Esc with nothing open → arm the interrupt window
                                 disarm_quit(&mut quit_armed_until, &mut status);
+                                arm_estop(&mut estop_armed_until, &mut status);
                             }
                         }
                         // Number pick from session list: when the detail pane is

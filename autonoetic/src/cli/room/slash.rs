@@ -82,8 +82,8 @@ pub fn help_lines() -> Vec<String> {
         "  [ / ]        jump to previous / next checkpoint row".to_string(),
         "  f / Space    toggle follow (pin to newest)".to_string(),
         "  Enter        event detail · plan review on plan row · answer pending question".to_string(),
-        "  Esc          close detail / overlay · cancel quit · peek timeline from gate modal"
-            .to_string(),
+        "  Esc          close detail / overlay · cancel quit · peek timeline from gate modal".to_string(),
+        "               double-Esc (nothing open) = interrupt session".to_string(),
         "  h / l        horizontal scroll in detail pane".to_string(),
         "  ?            session info panel (stats, toggles, active gates)".to_string(),
         String::new(),
