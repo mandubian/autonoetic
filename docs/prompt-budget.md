@@ -30,8 +30,9 @@ prompt_budget:
   warn_at_pct: 80
   # Safety margin subtracted from context window before enforcement
   margin_tokens: 1024
-  # Whether to compress tool schemas to {} on turns after turn 0
-  compress_tool_schemas_after_turn_0: true
+  # Whether to compress tool schemas to {"type": "object"} on turns after turn 0
+  # Default: false — stripping schemas causes LLM tool-call divergence
+  compress_tool_schemas_after_turn_0: false
 ```
 
 ### Reduction Cascade (Context Governor)
@@ -43,13 +44,15 @@ classifies the turn as `context_overflow`.
 
 | Strategy | Behavior |
 |----------|----------|
-| `tool_schema_compression` | Replace tool JSON schemas with `{}` placeholders. |
-| `capsule` | Hierarchical state-capsule summarization of old turns (LLM call). |
 | `trim_history` | Remove oldest message groups, preserving tool-call/result pairs. |
+| `capsule` | Hierarchical state-capsule summarization of old turns (LLM call). |
+| `tool_schema_compression` | Replace tool JSON schemas with `{"type": "object"}` placeholders. Last resort — damages tool-calling accuracy. |
 | `demote_tools` | Drop Specialized-tier tools, keep Core + Workflow. |
 
 Strategy names match those emitted in `GovernorAction` diagnostics and
-causal events.
+causal events. Schema compression runs late in the pipeline because
+stripping tool schemas causes the LLM to hallucinate parameters and
+diverge from the expected tool-call contract.
 
 ### Section Caps
 
@@ -95,9 +98,11 @@ The approval-exception ensures that `approval_status`, `approval_withdraw`, and 
 
 ## Tool Schema Compression
 
-When `compress_tool_schemas_after_turn_0` is `true`, tool definitions on turn 1+ have their JSON schemas replaced with `{}`. The model already knows the tools from turn 0, so the full schema is redundant. This saves significant tokens for agents with many tools.
+When `compress_tool_schemas_after_turn_0` is `true`, tool definitions on turn 1+ have their JSON schemas replaced with `{"type": "object"}`. This saves significant tokens for agents with many tools.
 
-**Empirically validated** with real LLMs (see `openrouter_integration::test_openrouter_tool_compression`): models correctly call tools with compressed schemas on subsequent turns.
+**Disabled by default.** Stripping tool schemas damages the LLM's ability to call tools correctly — without property names, types, and required fields, the model hallucinates parameters and produces malformed tool calls. Most LLM providers also cache identical tool arrays at reduced cost (~10%), so changing schemas between turns defeats prompt caching and is counterproductive.
+
+The context governor still compresses schemas as a **last resort** when the context budget is exhausted (after history trimming and capsule summarization), regardless of this setting.
 
 ## Foundation Layering
 
