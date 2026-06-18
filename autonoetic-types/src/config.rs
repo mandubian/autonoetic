@@ -2311,8 +2311,11 @@ pub struct PromptBudgetConfig {
     #[serde(default = "default_prompt_budget_margin")]
     pub margin_tokens: usize,
 
-    /// Strip tool JSON schemas to `{}` after the first turn to save tokens.
-    /// Some LLM providers require full schemas on every request — enable with caution.
+    /// Strip tool JSON schemas to `{"type": "object"}` after the first turn to save tokens.
+    /// Disabled by default — most LLM providers require full schemas on every request,
+    /// and stripping them causes tool-call divergence (wrong params, missing required fields).
+    /// The context governor will still compress schemas as a last resort when the
+    /// context budget is exceeded, regardless of this setting.
     #[serde(default)]
     pub compress_tool_schemas_after_turn_0: bool,
 

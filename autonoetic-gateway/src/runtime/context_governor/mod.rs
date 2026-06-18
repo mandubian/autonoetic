@@ -39,8 +39,13 @@ use std::path::PathBuf;
 impl ContextGovernor {
     /// Build the default pipeline.
     ///
-    /// Order: schema compression → capsule summarization → history trimming
+    /// Order: history trimming → capsule summarization → schema compression
     /// → tool demotion.
+    ///
+    /// Schema compression is intentionally late in the pipeline: stripping
+    /// tool schemas damages the LLM's ability to call tools correctly (wrong
+    /// parameter names, missing required fields, hallucinated arguments).
+    /// It should only run when trimming and summarization are insufficient.
     pub fn new(config: &GovernorConfig) -> Self {
         let mut capsule = capsule::CapsuleStrategy::new(
             config.http_client.clone(),
@@ -50,9 +55,9 @@ impl ContextGovernor {
             capsule = capsule.with_gateway_dir(dir.clone());
         }
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
-            Box::new(schema_compress::ToolSchemaCompressionStrategy::new()),
-            Box::new(capsule),
             Box::new(trimming::TrimHistoryStrategy),
+            Box::new(capsule),
+            Box::new(schema_compress::ToolSchemaCompressionStrategy::new()),
             Box::new(demotion::ToolDemotionStrategy),
         ];
         Self { strategies }
@@ -65,10 +70,10 @@ impl ContextGovernor {
     /// (trim + demote).
     pub fn new_aggressive(config: &GovernorConfig) -> Self {
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
-            // Force schema compression on every turn (even turn 0)
-            Box::new(schema_compress::ToolSchemaCompressionStrategy::forced()),
             // Skip capsule (already attempted in prior run)
             Box::new(trimming::TrimHistoryStrategy),
+            // Force schema compression on every turn (even turn 0)
+            Box::new(schema_compress::ToolSchemaCompressionStrategy::forced()),
             Box::new(demotion::ToolDemotionStrategy),
         ];
         Self { strategies }
