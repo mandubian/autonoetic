@@ -120,29 +120,39 @@ impl LlmDriver for AnthropicDriver {
         let body = self.build_body(req, false);
 
         const MAX_RETRIES: u32 = 3;
-        const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        let complete_timeout = crate::llm::request_timeout();
+        // Bound total wall-clock so a slow endpoint can't multiply the
+        // per-request timeout across retries.
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
         for attempt in 0..=MAX_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
-                    .timeout(COMPLETE_TIMEOUT)
+                    .timeout(complete_timeout)
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
-                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
-                    tracing::warn!(
+                Err(e) => {
+                    if let Some(wait_ms) = crate::llm::next_connection_retry_wait(
+                        &e,
                         attempt,
-                        wait_ms,
-                        error = %e,
-                        "Anthropic connection error, retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                    continue;
+                        loop_start.elapsed(),
+                        retry_deadline,
+                    ) {
+                        tracing::warn!(
+                            attempt,
+                            wait_ms,
+                            error = %e,
+                            "Anthropic connection error, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(e.into());
                 }
-                Err(e) => return Err(e.into()),
             };
             let status = response.status().as_u16();
 

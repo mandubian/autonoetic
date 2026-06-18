@@ -539,6 +539,23 @@ rules:
 
 ---
 
+## LLM request timeout & retries
+
+Each non-streaming `complete()` call applies a **per-request timeout** and a
+bounded, fail-fast retry policy so a slow or overloaded endpoint cannot stall a
+turn for many minutes.
+
+| Setting | Value | Notes |
+|---|---|---|
+| per-request timeout | `120s` default | Override with env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` (floor 5s). |
+| connect timeout | `15s` | Fail fast on unreachable endpoints (vs ~2min OS TCP timeout). |
+| retries — fast connection errors (refused/reset) | up to `3` | Quick backoff; these fail in well under the timeout. |
+| retries — request **timeout** | at most `1` | A timeout already consumed a full attempt; retrying it is how a degraded endpoint compounds. |
+| overall retry deadline | `2 × per-request timeout` | Stops retrying once cumulative wall-clock exceeds this — caps worst case at ~one timeout + one retry. |
+
+Worst case for a hung endpoint is therefore ~`2 × timeout` (≈4 min at the
+default), not the previous ~`4 × 300s` (≈20 min).
+
 ## LLM Presets
 
 Unified registry for all LLM configurations. Each preset is either **fixed** (concrete provider/model) or **routing** (dynamic selection from fixed presets at call time).
