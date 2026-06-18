@@ -166,7 +166,7 @@ fn build_critical_divergence_interaction(
             agent_id, turn_counter, evidence
         ),
         None => format!(
-            "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge, continue, stop, or enter a note.",
+            "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge (dismiss — the session keeps running), stop, or enter a note.",
             agent_id, turn_counter
         ),
     };
@@ -187,16 +187,17 @@ fn build_critical_divergence_interaction(
                 signals_summary
             )
         }),
+        // Two distinct choices only. The prompt is non-blocking — the session
+        // keeps running while it's pending — so "Acknowledge" (dismiss/noted)
+        // and "Stop" (emergency-stop) are the only actions with different
+        // effects. A former third option, "Continue", behaved identically to
+        // "Acknowledge" (issue #500); "stop nagging me" is the agent's
+        // `sentinel.suppress` job, not a per-prompt operator action.
         options: vec![
             autonoetic_types::background::UserInteractionOption {
                 id: "ack".to_string(),
                 label: "Acknowledge".to_string(),
                 value: "acknowledged".to_string(),
-            },
-            autonoetic_types::background::UserInteractionOption {
-                id: "continue".to_string(),
-                label: "Continue".to_string(),
-                value: "continue".to_string(),
             },
             autonoetic_types::background::UserInteractionOption {
                 id: "stop".to_string(),
@@ -3533,11 +3534,11 @@ mod tests {
                 .contains("child_failure_pressure")
         );
         assert!(interaction.allow_freeform);
-        assert_eq!(interaction.options.len(), 3);
+        // Two distinct options only (issue #500 — "continue" was a no-op dup of "ack").
+        assert_eq!(interaction.options.len(), 2);
         assert_eq!(interaction.options[0].id, "ack");
-        assert_eq!(interaction.options[1].id, "continue");
-        assert_eq!(interaction.options[2].id, "stop");
-        assert_eq!(interaction.options[2].value, "stop");
+        assert_eq!(interaction.options[1].id, "stop");
+        assert_eq!(interaction.options[1].value, "stop");
         assert_eq!(interaction.workflow_id.as_deref(), Some("wf-1"));
         assert_eq!(interaction.task_id.as_deref(), Some("task-1"));
     }
