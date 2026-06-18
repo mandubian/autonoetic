@@ -649,10 +649,28 @@ fn create_revision_from_files(
             file_map,
             script_entry,
         )?;
+
+        // If the existing revision is Archived, resurrect it back to Candidate
+        // so it becomes usable again. Otherwise the LLM loops forever: same
+        // content → same digest → same "already_exists" response, but the
+        // archived revision can't be promoted.
+        let status_label = if matches!(
+            existing_rev.status,
+            autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+        ) {
+            let _ = gateway_store.update_agent_revision_status(
+                &revision_id,
+                autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            );
+            "reactivated"
+        } else {
+            "already_exists"
+        };
+
         return Ok(PersistedRevisionResult {
             response: serde_json::json!({
                 "ok": true,
-                "status": "already_exists",
+                "status": status_label,
                 "revision_id": revision_id,
                 "content_digest": existing_rev.content_digest,
                 "agent_id": common.agent_id,
