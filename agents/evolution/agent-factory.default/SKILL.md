@@ -289,6 +289,26 @@ Do not loop the wait, and do not spin `workflow_state`.
    specialized_builder verifies these records exist against the
    artifact_ref that is being installed.
 
+**Gate and install the SAME `artifact_ref` — re-gate on any rebuild.**
+Promotion verdicts are bound to the artifact's **content digest**, not to the
+agent. If the artifact changes after gating — the coder rebuilt it to address
+evaluator/unit-test findings, or you now hold a newer `artifact_ref` than the
+one you gated — the recorded verdicts are for the OLD digest and no longer
+apply. Before Step 5:
+
+- The `artifact_ref` you pass to `specialized_builder` MUST be the exact ref the
+  gates recorded `promotion_record`s against (the ref you spawned the gates with
+  in this step).
+- If a **new** `artifact_ref` appeared after gating, treat the prior verdicts as
+  stale: **re-run every required gate** (auditor + static_evaluator +
+  unit_test_runner, per the row) against the NEW ref and `workflow_wait`-join
+  again — *then* proceed to Step 5.
+- Do not delegate the install assuming the old verdicts carry over. They do not:
+  `agent_revision_promote` refuses with a **FullJury escalation** because the new
+  revision has no verdicts for its digest — but only *after* specialized_builder
+  has burned LLM cycles and created an orphan candidate revision. Re-gating up
+  front avoids that dead end.
+
 If only the auditor is required (`audit_only` gating mode, pure-skill
 rows): tell specialized_builder `"Gating: audit_only"` and pass the
 auditor's `promotion_record` evidence in the delegation.
@@ -299,6 +319,11 @@ default for pure-skill agents): tell specialized_builder
 operator's explicit intent.
 
 ### Step 5: Install via specialized_builder
+
+**Precondition:** the `artifact_ref` you are about to pass is the same one the
+Step 4 gates ran against. If it changed since gating (a rebuild), go back to
+Step 4 and re-gate the new ref first — never install a ref whose verdicts are
+stale (see "Gate and install the SAME `artifact_ref`" above).
 
 **Why we delegate** (not optional): you do **not** have the `AgentRevision` capability — see your manifest above. The gateway's policy engine will reject `agent_revision_create_from_intent` and `agent_revision_promote` calls from this agent. `specialized_builder.default` is the **only** agent licensed to call those tools.
 
