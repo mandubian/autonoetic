@@ -289,19 +289,23 @@ Do not loop the wait, and do not spin `workflow_state`.
    specialized_builder verifies these records exist against the
    artifact_ref that is being installed.
 
-**Gate and install the SAME `artifact_ref` — re-gate on any rebuild.**
-Promotion verdicts are bound to the artifact's **content digest**, not to the
-agent. If the artifact changes after gating — the coder rebuilt it to address
-evaluator/unit-test findings, or you now hold a newer `artifact_ref` than the
-one you gated — the recorded verdicts are for the OLD digest and no longer
-apply. Before Step 5:
+**Gate and install the SAME artifact identity — re-gate on any rebuild.**
+Promotion verdicts are bound to the artifact's **canonical identity** (its
+`artifact_id` / content digest), not to the agent — and *not* to the literal
+ref string: `ar.*` and `art_*` forms that resolve to the same digest are the
+same artifact and need **no** re-gating. What matters is whether the *content*
+changed. If the artifact was rebuilt after gating — the coder addressed
+evaluator/unit-test findings, or you now hold a ref that resolves to a different
+digest than the one you gated — the recorded verdicts are for the OLD digest and
+no longer apply. Before Step 5:
 
-- The `artifact_ref` you pass to `specialized_builder` MUST be the exact ref the
-  gates recorded `promotion_record`s against (the ref you spawned the gates with
-  in this step).
-- If a **new** `artifact_ref` appeared after gating, treat the prior verdicts as
-  stale: **re-run every required gate** (auditor + static_evaluator +
-  unit_test_runner, per the row) against the NEW ref and `workflow_wait`-join
+- The artifact you pass to `specialized_builder` MUST resolve to the **same
+  canonical identity** (`artifact_id` / digest) the gates recorded
+  `promotion_record`s against. A differently-formatted ref for the same digest
+  is fine; a different digest is not.
+- If the artifact's **digest changed** after gating (a rebuild), treat the prior
+  verdicts as stale: **re-run every required gate** (auditor + static_evaluator +
+  unit_test_runner, per the row) against the new artifact and `workflow_wait`-join
   again — *then* proceed to Step 5.
 - Do not delegate the install assuming the old verdicts carry over. They do not:
   `agent_revision_promote` refuses with a **FullJury escalation** because the new
@@ -320,10 +324,12 @@ operator's explicit intent.
 
 ### Step 5: Install via specialized_builder
 
-**Precondition:** the `artifact_ref` you are about to pass is the same one the
-Step 4 gates ran against. If it changed since gating (a rebuild), go back to
-Step 4 and re-gate the new ref first — never install a ref whose verdicts are
-stale (see "Gate and install the SAME `artifact_ref`" above).
+**Precondition:** the artifact you are about to pass must resolve to the **same
+canonical identity** (`artifact_id` / content digest) the Step 4 gates ran
+against — a differently-formatted ref for the same digest is fine. If the
+**digest changed** since gating (a rebuild), go back to Step 4 and re-gate the
+new artifact first — never install one whose verdicts are stale (see "Gate and
+install the SAME artifact identity" above).
 
 **Why we delegate** (not optional): you do **not** have the `AgentRevision` capability — see your manifest above. The gateway's policy engine will reject `agent_revision_create_from_intent` and `agent_revision_promote` calls from this agent. `specialized_builder.default` is the **only** agent licensed to call those tools.
 
