@@ -1302,21 +1302,32 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             });
 
         let existing = gateway_store.list_agent_revisions(&args.agent_id)?;
-        let active_revisions: Vec<String> = existing
+        let ready_revisions: Vec<String> = existing
             .iter()
             .filter(|rev| {
                 matches!(
                     rev.status,
-                    autonoetic_types::agent_revision::AgentRevisionStatus::Ready
-                        | autonoetic_types::agent_revision::AgentRevisionStatus::Candidate
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
                 )
             })
             .map(|r| r.revision_id.clone())
             .collect();
-        if !active_revisions.is_empty() {
+        // Auto-archive any Candidate (never-promoted) revisions — they are
+        // aborted install attempts and should not block a fresh install.
+        for rev in &existing {
+            if matches!(
+                rev.status,
+                autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            ) {
+                let _ = gateway_store.update_agent_revision_status(
+                    &rev.revision_id,
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+                );
+            }
+        }
+        if !ready_revisions.is_empty() {
             if args.replace {
-                // Archive all active revisions before installing the new one.
-                for rev_id in &active_revisions {
+                for rev_id in &ready_revisions {
                     gateway_store
                         .update_agent_revision_status(
                             rev_id,
@@ -1329,11 +1340,11 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             } else {
                 return Ok(ToolError::fatal(
                     format!(
-                        "Agent '{}' already has an active revision ({}). \
+                        "Agent '{}' already has a promoted revision ({}). \
                          Use agent_revision_list / agent_revision_inspect (or agent_inspect if you hold ReadAccess) to check before installing. \
                          If you need to update, pass replace: true to archive the existing revision first.",
                         args.agent_id,
-                        active_revisions.join(", ")
+                        ready_revisions.join(", ")
                     ),
                     None::<String>,
                 ).to_error_response());
