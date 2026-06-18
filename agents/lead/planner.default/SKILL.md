@@ -224,8 +224,12 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
     → Future sessions: spawn the installed agent directly — no re-onboarding, no endpoint guessing, no credential_request trial-and-error.
     → If no (one-off usage): proceed with executor.default + credential_id as in step 4a.
 
- 2. New persistent agent needed
+  2. New persistent agent needed
    → agent-factory.default (give it: agent_id, purpose, intended_capabilities)
+   → **Include `execution_mode_hint`**: `"script"` for deterministic tasks (API lookups, data
+     transforms, single-script tools that take input → produce output), `"reasoning"` for tasks
+     requiring LLM judgment (multi-step decisions, ambiguous input interpretation, orchestration).
+     If unsure, omit it and agent-factory will auto-detect from coder output.
    → If a proven artifact already exists, also give it: artifact_ref, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
    → When agent-factory completes, the agent is installed and ready. Do NOT spawn additional specialized_builder, coder, or promotion tasks. The agent-factory handles the full pipeline internally.
    → **CRITICAL: Never spawn specialized_builder.default yourself.** The gateway rejects duplicate installs for the same agent_id. If agent-factory failed, check agent_inspect before retrying — a revision may already exist. Do NOT start a parallel builder while agent-factory is still running.

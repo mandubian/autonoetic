@@ -98,7 +98,41 @@ Choose the installation route based on `intended_capabilities` and task complexi
 | Code with external network/file/exec | **Gated code**: coder → packager (if deps) → evaluator + auditor → builder |
 | `design_needed: true` or multi-file/complex structure | **Design-heavy**: architect → then appropriate code path |
 
-Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `NetworkAccess`, `ReadAccess`, `WriteAccess`, `MemoryAccess`, `BackgroundReevaluation`, `SchedulerAccess` — use reasoning-only path.
+Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `NetworkAccess`, `ReadAccess`,
+`WriteAccess`, `MemoryAccess`, `BackgroundReevaluation`, `SchedulerAccess` — use reasoning-only path.
+
+### Execution Mode Decision: `script` vs `reasoning`
+
+**This is the most important decision you make.** Getting it wrong produces a broken agent.
+
+| Signal | Mode |
+|--------|------|
+| Coder produced a standalone script with CLI args or stdin (any language: Python, Node, Go, Rust, Shell, Ruby, etc.) | **`script`** |
+| Task is deterministic: same input → same output, no judgment needed | **`script`** |
+| Task wraps an external API/tool and just returns the result | **`script`** |
+| Task requires multi-step reasoning, decision branches, or LLM judgment | **`reasoning`** |
+| Agent must interpret ambiguous natural-language input before acting | **`reasoning`** |
+| `execution_mode_hint: "script"` from planner | **`script`** |
+
+**When coder returns a single entry-point script** (e.g. `weather_agent.py`, `main.go`,
+`index.js`, `fetch.sh` — any language): that is a **script-mode** agent. Set
+`execution_mode: "script"` and `script_entry` to the entry file. The script must start with a
+shebang line (`#!/usr/bin/env python3`, `#!/usr/bin/env node`, `#!/usr/bin/env bash`, etc.) or be
+a compiled binary.
+
+**Detection signals across languages:**
+- Shebang line (`#!`) at the top of the entry file
+- CLI argument parsing: `sys.argv` (Python), `process.argv` (Node), `os.Args`/`flag` (Go), `std::env::args` (Rust), `$1`/`$@` (Shell), `ARGV` (Ruby)
+- Entry-point convention: `if __name__ == "__main__"` (Python), `func main()` (Go/Rust), top-level code (Node/Shell/Ruby)
+- stdin reading: `sys.stdin`, `process.stdin`, `bufio.NewReader(os.Stdin)`, `io::stdin()`, `read`
+
+**When coder returns library code without a CLI entry point** (modules, classes, no main):
+that is a **reasoning-mode** agent. The LLM orchestrates the library code via `sandbox_exec`.
+Set `execution_mode: "reasoning"` and include `llm_preset`.
+
+**Common mistake:** an agent that "wraps a script" should be `script` mode, not `reasoning` mode.
+If the script takes the input and produces the output deterministically, there is no reasoning needed —
+the gateway runs the script directly. Only use `reasoning` when the LLM must decide what to do.
 
 ## Tools for delegation
 
@@ -229,9 +263,12 @@ Call `agent_spawn` with `agent_id="coder.default"`, `async=true`, passing the im
 
 On resume after coder completes (the child state arrives in your turn-start context; call `workflow_state` once if you need the full reuse_guards):
 1. Read the completed task's `output` (from the wake-up context or `workflow_state`).
-2. From `output.named_outputs`, inspect dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
-3. Use `resolve` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload only when the named outputs don't already tell you what you need.
-4. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
+2. **Inspect the artifact to determine execution mode** (see "Execution Mode Decision" above):
+   - If the artifact contains a script with a CLI entry point (shebang, `main()`, argv parsing, stdin — any language) → `execution_mode: "script"`, set `script_entry` to that file
+   - If the artifact is library code only (no entry point) → `execution_mode: "reasoning"`, include `llm_preset`
+3. From `output.named_outputs`, inspect dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
+4. Use `resolve` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload only when the named outputs don't already tell you what you need.
+5. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
 
 ### Step 3: Packager (if dependency files found)
 
