@@ -233,13 +233,12 @@ impl LlmDriver for OpenAiDriver {
             }
         }
 
-        const MAX_RETRIES: u32 = 3;
         let complete_timeout = crate::llm::request_timeout();
         // Bound total wall-clock so a slow endpoint can't multiply the
         // per-request timeout across retries.
         let retry_deadline = complete_timeout.saturating_mul(2);
         let loop_start = std::time::Instant::now();
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
@@ -272,7 +271,7 @@ impl LlmDriver for OpenAiDriver {
             let status = response.status();
 
             if status.as_u16() == 429 || status.as_u16() == 529 {
-                if attempt < MAX_RETRIES {
+                if attempt < crate::llm::MAX_CONNECTION_RETRIES {
                     let wait_ms = (attempt + 1) as u64 * 2000;
                     tracing::warn!(
                         status = status.as_u16(),
@@ -283,7 +282,7 @@ impl LlmDriver for OpenAiDriver {
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
-                anyhow::bail!("OpenAI API rate limited after {} retries", MAX_RETRIES);
+                anyhow::bail!("OpenAI API rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
             }
 
             if !status.is_success() {
@@ -347,8 +346,7 @@ impl LlmDriver for OpenAiDriver {
 
         let body = self.build_body(req, true);
 
-        const MAX_RETRIES: u32 = 3;
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
@@ -359,7 +357,7 @@ impl LlmDriver for OpenAiDriver {
 
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < crate::llm::MAX_CONNECTION_RETRIES => {
                     let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
                     tracing::warn!(
                         attempt,

@@ -551,10 +551,15 @@ turn for many minutes.
 | connect timeout | `15s` | Fail fast on unreachable endpoints (vs ~2min OS TCP timeout). |
 | retries — fast connection errors (refused/reset) | up to `3` | Quick backoff; these fail in well under the timeout. |
 | retries — request **timeout** | at most `1` | A timeout already consumed a full attempt; retrying it is how a degraded endpoint compounds. |
-| overall retry deadline | `2 × per-request timeout` | Stops retrying once cumulative wall-clock exceeds this — caps worst case at ~one timeout + one retry. |
+| overall retry deadline | `2 × per-request timeout` | Stops retrying once cumulative wall-clock (incl. the next backoff) would reach this — caps the *request-timeout* worst case at ~one timeout + one retry. |
 
 Worst case for a hung endpoint is therefore ~`2 × timeout` (≈4 min at the
 default), not the previous ~`4 × 300s` (≈20 min).
+
+> The deadline bounds *request timeouts*. The `connect timeout` (15s, fixed) is
+> separate: at very low `request_timeout` settings (near the 5s floor) a single
+> connect attempt can exceed `2 × timeout`. The deadline still caps the number
+> of retries; it does not shorten an in-flight connect attempt.
 
 ## LLM Presets
 

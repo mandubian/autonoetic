@@ -743,5 +743,20 @@ mod tests {
         fn default_timeout_is_two_minutes() {
             assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECS, 120);
         }
+
+        #[test]
+        fn backoff_that_would_cross_deadline_stops_now() {
+            // attempt 2 still has connection budget (cap 3) and elapsed (239.5s)
+            // is under the 240s deadline — but the attempt-2 backoff (2000ms)
+            // would push us past it, so we must NOT sleep-then-retry late.
+            assert_eq!(
+                retry_wait_decision(true, false, 2, Duration::from_millis(239_500), DEADLINE),
+                None
+            );
+            // Comfortably under the deadline: attempt 1 at 10s elapsed retries.
+            assert!(
+                retry_wait_decision(true, false, 1, Duration::from_secs(10), DEADLINE).is_some()
+            );
+        }
     }
 }

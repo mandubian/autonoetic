@@ -170,13 +170,12 @@ impl LlmDriver for GeminiDriver {
         let body = self.build_body(req);
         let url = self.url();
 
-        const MAX_RETRIES: u32 = 3;
         let complete_timeout = crate::llm::request_timeout();
         // Bound total wall-clock so a slow endpoint can't multiply the
         // per-request timeout across retries.
         let retry_deadline = complete_timeout.saturating_mul(2);
         let loop_start = std::time::Instant::now();
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&url)
@@ -220,13 +219,13 @@ impl LlmDriver for GeminiDriver {
                     );
                 }
                 if status == 429 {
-                    if attempt < MAX_RETRIES {
+                    if attempt < crate::llm::MAX_CONNECTION_RETRIES {
                         let wait_ms = (attempt + 1) as u64 * 2000;
                         tracing::warn!(status, attempt, wait_ms, "Gemini rate limited, retrying");
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         continue;
                     }
-                    anyhow::bail!("Gemini rate limited after {} retries", MAX_RETRIES);
+                    anyhow::bail!("Gemini rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
                 }
                 tracing::warn!(
                     target: "autonoetic::llm::gemini",

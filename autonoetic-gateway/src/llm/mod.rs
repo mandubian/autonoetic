@@ -140,7 +140,14 @@ pub(crate) fn retry_wait_decision(
     if attempt >= cap {
         return None;
     }
-    Some(connection_retry_backoff_ms(attempt))
+    let wait_ms = connection_retry_backoff_ms(attempt);
+    // Don't sleep past the deadline: if the backoff itself would push us to/over
+    // the cap, stop now rather than sleep and then start an attempt that's
+    // already late. (Keeps the cumulative wall-clock honest.)
+    if elapsed.saturating_add(std::time::Duration::from_millis(wait_ms)) >= deadline {
+        return None;
+    }
+    Some(wait_ms)
 }
 
 /// Check whether a non-success status / body indicates a context-overflow error
