@@ -39,6 +39,10 @@
 pub enum Binds {
     Agent,
     Gateway,
+    /// §O decider obligations bind whoever *decides* a gate (operator, an
+    /// agent-decider, or a policy engine) — the symmetric counterpart to the
+    /// agent's rule-duties and the gateway's right-duties (#359).
+    Decider,
 }
 
 impl Binds {
@@ -46,6 +50,7 @@ impl Binds {
         match self {
             Binds::Agent => "agent",
             Binds::Gateway => "gateway",
+            Binds::Decider => "decider",
         }
     }
 }
@@ -122,8 +127,42 @@ pub fn rights() -> &'static [Right] {
     ]
 }
 
-/// The enforcement register. P-7's four checks (P-7.5/7.7/7.19/7.20) plus one
-/// check per seeded right.
+/// A §O decider obligation — a duty binding whoever *decides* a gate. The
+/// symmetric counterpart to a [`Principle`] (agent) and a [`Right`] (gateway);
+/// modelled in the register the same way (#359 / #399).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Obligation {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub statement: &'static str,
+}
+
+/// Decider obligations (§O, bind the decider). Seeded with the two enacted
+/// clauses (O-1 motivation, O-2 attribution); O-3/O-4/O-5 enter by amendment as
+/// each becomes mechanically enforced (#399).
+pub fn obligations() -> &'static [Obligation] {
+    &[
+        Obligation {
+            id: "O-1",
+            title: "Motivated decision",
+            statement: "A decision owes a motivation, graduated by stakes. A rejection/abort, or \
+                        an approval of an elevated-authority or external/irreversible action, is \
+                        BLOCKING: it does not commit until a non-empty reason is recorded. Silent \
+                        rejection by a decider is as illegitimate as a gateway denial with no rule \
+                        ID (Ri-0.3).",
+        },
+        Obligation {
+            id: "O-2",
+            title: "Attributed decision",
+            statement: "Every decision is attributed to the deciding principal (id + kind) on the \
+                        causal chain and cannot be reattributed. The agent under decision can \
+                        always tell who decided and what kind of principal they are.",
+        },
+    ]
+}
+
+/// The enforcement register. P-7's four checks (P-7.5/7.7/7.19/7.20), one
+/// check per seeded right, plus §O decider obligations (O-1/O-2).
 pub fn enforcement_register() -> &'static [EnforcementEntry] {
     &[
         // ── P-7 (binds agent) ──
@@ -178,6 +217,26 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "constitution_right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event",
             config: Some("default_workflow_wait_secs"),
         },
+        // ── O-1 (binds decider) ──
+        EnforcementEntry {
+            clause_id: "O-1",
+            rule_id: "O-1",
+            check_id: "decider_obligation_motivation",
+            code: "scheduler/approval.rs::enforce_decider_motivation (classifier decision_is_blocking) \
+                   at the decide_request_with_options chokepoint; emits decider_obligation.refused/.satisfied",
+            test: "constitution_o_1_decider_motivation.rs + scheduler::approval::tests::decider_obligation_emits_tagged_o1_event",
+            config: Some("decider_obligations.enabled"),
+        },
+        // ── O-2 (binds decider) ──
+        EnforcementEntry {
+            clause_id: "O-2",
+            rule_id: "O-2",
+            check_id: "decider_attribution",
+            code: "decided_by + decided_by_kind on the approval (principal::decider_principal_kind, #361) \
+                   + actor bound into the causal-chain entry hash (causal_chain.rs)",
+            test: "constitution_o_1_decider_motivation.rs",
+            config: None,
+        },
     ]
 }
 
@@ -191,26 +250,36 @@ pub fn right(id: &str) -> Option<&'static Right> {
     rights().iter().find(|r| r.id == id)
 }
 
-/// True when `clause_id` resolves to a known principle or right.
-pub fn clause_exists(clause_id: &str) -> bool {
-    principle(clause_id).is_some() || right(clause_id).is_some()
+/// Look up a decider obligation by ID.
+pub fn obligation(id: &str) -> Option<&'static Obligation> {
+    obligations().iter().find(|o| o.id == id)
 }
 
-/// Human-readable title for a clause (principle *or* right). `None` if the
-/// clause is unknown.
+/// True when `clause_id` resolves to a known principle, right, or obligation.
+pub fn clause_exists(clause_id: &str) -> bool {
+    principle(clause_id).is_some()
+        || right(clause_id).is_some()
+        || obligation(clause_id).is_some()
+}
+
+/// Human-readable title for a clause (principle, right, *or* obligation).
+/// `None` if the clause is unknown.
 pub fn clause_title(clause_id: &str) -> Option<&'static str> {
     principle(clause_id)
         .map(|p| p.title)
         .or_else(|| right(clause_id).map(|r| r.title))
+        .or_else(|| obligation(clause_id).map(|o| o.title))
 }
 
 /// Bind direction for a clause: principles bind the agent, rights bind the
-/// gateway. `None` if the clause is unknown.
+/// gateway, obligations bind the decider. `None` if the clause is unknown.
 pub fn binds(clause_id: &str) -> Option<Binds> {
     if principle(clause_id).is_some() {
         Some(Binds::Agent)
     } else if right(clause_id).is_some() {
         Some(Binds::Gateway)
+    } else if obligation(clause_id).is_some() {
+        Some(Binds::Decider)
     } else {
         None
     }
@@ -303,10 +372,12 @@ pub fn render_register_markdown() -> String {
 
     out.push_str("## Bind-direction summary\n\n");
     out.push_str(&format!(
-        "{} principle(s) (bind the agent), {} right(s) (bind the gateway). \
+        "{} principle(s) (bind the agent), {} right(s) (bind the gateway), \
+         {} obligation(s) (bind the decider). \
          Counts are partial while migration (#303) is in progress — not the design ratio.\n\n",
         principles().len(),
         rights().len(),
+        obligations().len(),
     ));
 
     out.push_str("## Principles (bind: agent)\n\n");
@@ -321,6 +392,13 @@ pub fn render_register_markdown() -> String {
         out.push_str(&format!("### {} — {}\n\n", r.id, r.title));
         out.push_str(&format!("{}\n\n", r.statement));
         out.push_str(&render_entries_table(r.id));
+    }
+
+    out.push_str("## Obligations (bind: decider)\n\n");
+    for o in obligations() {
+        out.push_str(&format!("### {} — {}\n\n", o.id, o.title));
+        out.push_str(&format!("{}\n\n", o.statement));
+        out.push_str(&render_entries_table(o.id));
     }
     out
 }
@@ -378,6 +456,29 @@ mod tests {
                 r.id
             );
         }
+        for o in obligations() {
+            assert!(
+                entries_for(o.id).next().is_some(),
+                "obligation {} has no enforcement entries",
+                o.id
+            );
+        }
+    }
+
+    #[test]
+    fn decider_obligations_are_registered_and_attributable() {
+        // §O clauses resolve like principles/rights, and bind the decider.
+        assert!(clause_exists("O-1"));
+        assert!(clause_exists("O-2"));
+        assert_eq!(binds("O-1"), Some(Binds::Decider));
+        assert_eq!(clause_title("O-1"), Some("Motivated decision"));
+        // The O-1 motivation event (enforced_rules: ["O-1"]) attributes to its
+        // clause via contract-health — not dropped as `unattributed`.
+        let health = contract_health(["O-1", "O-1", "O-2"]);
+        assert_eq!(health.unattributed, 0);
+        assert!(health.by_clause.contains(&("O-1".to_string(), 2)));
+        assert!(health.by_clause.contains(&("O-2".to_string(), 1)));
+        assert_eq!(clause_of_rule("O-1"), Some("O-1"));
     }
 
     #[test]
