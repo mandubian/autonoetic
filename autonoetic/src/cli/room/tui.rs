@@ -894,6 +894,115 @@ fn open_content_draft(
     }
 }
 
+/// Open the selected node in the live content pane.
+/// Shared by the Enter and `o` key handlers.
+fn open_content_pane_node(
+    pane: &LiveContentPane,
+    idx: usize,
+    client: &RoomClient,
+    root_session_id: &str,
+    detail: &mut Option<DetailPane>,
+    detail_scroll: &mut u16,
+    detail_h_scroll: &mut u16,
+    artifact_viewer: &mut Option<ArtifactViewer>,
+    artifact_file_view: &mut Option<ArtifactFileView>,
+    content_view: &mut Option<ContentView>,
+    status: &mut Option<String>,
+) {
+    let idx = idx.min(pane.nodes.len().saturating_sub(1));
+    if let Some(ref node) = pane.nodes.get(idx) {
+        match node {
+            LiveContentNode::Plan { .. } | LiveContentNode::PlanStep { .. } => {
+                let pid = match node {
+                    LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
+                    _ => {
+                        pane.nodes[..=idx].iter().rev().find_map(|n| match n {
+                            LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
+                            _ => None,
+                        })
+                    }
+                };
+                if let Some(pid) = pid {
+                    if let Ok(v) = rpc(client, "planframes.get", serde_json::json!({ "plan_id": pid })) {
+                        if let Some(plan) = v.get("plan") {
+                            if let Ok(frame) = serde_json::from_value::<autonoetic_types::plan_frame::PlanFrame>(plan.clone()) {
+                                let lines = format_plan_frame_lines(&frame, false);
+                                *detail = Some(DetailPane::plan_review(frame.plan_id.clone(), lines));
+                                *detail_scroll = 0;
+                                *detail_h_scroll = 0;
+                                *status = Some("plan detail · Esc close".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            LiveContentNode::Artifact { artifact_ref, .. } => {
+                let result = rpc(client, "artifact.list_files", serde_json::json!({
+                    "artifact_ref": artifact_ref,
+                    "session_id": root_session_id,
+                }));
+                match result {
+                    Ok(v) => {
+                        let artifact_id = v.get("artifact_id").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                        let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("").to_string();
+                        let files: Vec<ArtifactFileEntry> = v
+                            .get("files")
+                            .and_then(|f| f.as_array())
+                            .map(|arr| {
+                                arr.iter().filter_map(|f| {
+                                    Some(ArtifactFileEntry {
+                                        name: f.get("name")?.as_str()?.to_string(),
+                                        alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                                    })
+                                }).collect()
+                            })
+                            .unwrap_or_default();
+                        if files.is_empty() {
+                            *status = Some("no files in artifact".to_string());
+                        } else {
+                            *artifact_viewer = Some(ArtifactViewer {
+                                artifact_id,
+                                artifact_ref: artifact_ref.clone(),
+                                kind,
+                                files,
+                                selected: 0,
+                                scroll: 0,
+                            });
+                            *status = Some("artifact files · j/k navigate · o open · Esc close".to_string());
+                        }
+                    }
+                    Err(e) => *status = Some(format!("artifact list failed: {e}")),
+                }
+            }
+            LiveContentNode::ArtifactFile { artifact_ref, name, .. } => {
+                let result = rpc(client, "artifact.read_file", serde_json::json!({
+                    "artifact_ref": artifact_ref,
+                    "file_name": name,
+                    "session_id": root_session_id,
+                }));
+                match result {
+                    Ok(v) => {
+                        if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                            *artifact_file_view = Some(ArtifactFileView {
+                                artifact_id: artifact_ref.clone(),
+                                file_name: name.clone(),
+                                content: content.to_string(),
+                                scroll: 0,
+                            });
+                        } else {
+                            *status = Some("artifact.read_file: no content field".to_string());
+                        }
+                    }
+                    Err(e) => *status = Some(format!("artifact read failed: {e}")),
+                }
+            }
+            LiveContentNode::Draft { name, .. } => {
+                *content_view = open_content_draft(client, root_session_id, name, status);
+            }
+        }
+    }
+}
+
 /// Extract artifact_ref from a timeline entry, if it has one.
 /// Returns an `ar.*` or `art_*` ref that the gateway can resolve.
 fn artifact_ref_for_entry(entry: &SessionTimelineEntry) -> Option<String> {
@@ -2389,16 +2498,25 @@ pub fn run(
                     }
                     match key.code {
                         KeyCode::Esc => {
-                            if content_view.is_some() {
+                            // Batch-close: when a sub-view is open from the content pane,
+                            // one Esc closes everything back to the main timeline view.
+                            if live_content_pane.is_some()
+                                && (content_view.is_some()
+                                    || artifact_file_view.is_some()
+                                    || artifact_viewer.is_some())
+                            {
                                 content_view = None;
-                            } else if live_content_pane.is_some() {
+                                artifact_file_view = None;
+                                artifact_viewer = None;
                                 live_content_pane = None;
+                            } else if content_view.is_some() {
+                                content_view = None;
                             } else if artifact_file_view.is_some() {
-                                // no-op: 'o' is ignored while the artifact file view
-                                // is open; the operator closes it with Esc first.
                                 artifact_file_view = None;
                             } else if artifact_viewer.is_some() {
                                 artifact_viewer = None;
+                            } else if live_content_pane.is_some() {
+                                live_content_pane = None;
                             } else if info_panel_open {
                                 info_panel_open = false;
                                 info_scroll = 0;
@@ -2587,11 +2705,15 @@ pub fn run(
                         KeyCode::Enter => {
                             if detail.is_some() {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
+                            } else if let Some(ref pane) = live_content_pane {
+                                open_content_pane_node(
+                                    pane, pane.selected, client, root_session_id,
+                                    &mut detail, &mut detail_scroll, &mut detail_h_scroll,
+                                    &mut artifact_viewer, &mut artifact_file_view,
+                                    &mut content_view, &mut status,
+                                );
                             } else if let Some((_, src)) = view_indexed.get(selected) {
-                                // Open detail for the selected row — same semantics as
-                                // mouse double-click. Avoid blocking on live_content_pane or
-                                // view_gate so Enter always opens detail regardless of
-                                // sidebar/gate overlays (mouse already behaves this way).
+                                // Open detail for the selected row
                                 if let Some(msg) = open_row_detail_or_plan_review(
                                     client,
                                     root_session_id,
@@ -2929,7 +3051,7 @@ pub fn run(
                                         selected: 0,
                                         scroll: 0,
                                     });
-                                    status = Some("content: j/k navigate · o open · Esc close".to_string());
+                                    status = Some("content: j/k navigate · Enter/o open · Esc close".to_string());
                                 }
                             }
                         }
@@ -2938,113 +3060,12 @@ pub fn run(
                             if content_view.is_some() {
                                 // already viewing content; ignore
                             } else if let Some(pane) = live_content_pane.as_ref() {
-                                let idx = pane.selected.min(pane.nodes.len().saturating_sub(1));
-                                if let Some(ref node) = pane.nodes.get(idx) {
-                                    match node {
-                                        LiveContentNode::Plan { .. }
-                                        | LiveContentNode::PlanStep { .. } => {
-                                            // Find the plan_id (walk up for PlanStep)
-                                            let pid = match node {
-                                                LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
-                                                _ => {
-                                                    // Find parent plan by scanning backwards
-                                                    pane.nodes[..=idx].iter().rev().find_map(|n| match n {
-                                                        LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
-                                                        _ => None,
-                                                    })
-                                                }
-                                            };
-                                            if let Some(pid) = pid {
-                                                if let Ok(v) = rpc(
-                                                    client,
-                                                    "planframes.get",
-                                                    serde_json::json!({ "plan_id": pid }),
-                                                ) {
-                                                    if let Some(plan) = v.get("plan") {
-                                                        if let Ok(frame) = serde_json::from_value::<autonoetic_types::plan_frame::PlanFrame>(plan.clone()) {
-                                                            let lines = format_plan_frame_lines(&frame, false);
-                                                            detail = Some(DetailPane::plan_review(frame.plan_id.clone(), lines));
-                                                            status = Some("plan detail · Esc close".to_string());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        LiveContentNode::Artifact { artifact_ref, .. } => {
-                                            let result = rpc(
-                                                client,
-                                                "artifact.list_files",
-                                                serde_json::json!({
-                                                    "artifact_ref": artifact_ref,
-                                                    "session_id": root_session_id.clone(),
-                                                }),
-                                            );
-                                            match result {
-                                                Ok(v) => {
-                                                    let artifact_id = v.get("artifact_id").and_then(|a| a.as_str()).unwrap_or("").to_string();
-                                                    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("").to_string();
-                                                    let files: Vec<ArtifactFileEntry> = v
-                                                        .get("files")
-                                                        .and_then(|f| f.as_array())
-                                                        .map(|arr| {
-                                                            arr.iter().filter_map(|f| {
-                                                                Some(ArtifactFileEntry {
-                                                                    name: f.get("name")?.as_str()?.to_string(),
-                                                                    alias: f.get("alias").and_then(|a| a.as_str()).unwrap_or("").to_string(),
-                                                                })
-                                                            }).collect()
-                                                        })
-                                                        .unwrap_or_default();
-                                                    if files.is_empty() {
-                                                        status = Some("no files in artifact".to_string());
-                                                    } else {
-                                                        artifact_viewer = Some(ArtifactViewer {
-                                                            artifact_id,
-                                                            artifact_ref: artifact_ref.clone(),
-                                                            kind,
-                                                            files,
-                                                            selected: 0,
-                                                            scroll: 0,
-                                                        });
-                                                        status = Some("artifact files · j/k navigate · o open · Esc close".to_string());
-                                                    }
-                                                }
-                                                Err(e) => status = Some(format!("artifact list failed: {e}")),
-                                            }
-                                        }
-                                        LiveContentNode::ArtifactFile { artifact_ref, name, .. } => {
-                                            let result = rpc(
-                                                client,
-                                                "artifact.read_file",
-                                                serde_json::json!({
-                                                    "artifact_ref": artifact_ref,
-                                                    "file_name": name,
-                                                    "session_id": root_session_id.clone(),
-                                                }),
-                                            );
-                                            match result {
-                                                Ok(v) => {
-                                                    if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                                                        artifact_file_view = Some(ArtifactFileView {
-                                                            artifact_id: artifact_ref.clone(),
-                                                            file_name: name.clone(),
-                                                            content: content.to_string(),
-                                                            scroll: 0,
-                                                        });
-                                                    } else {
-                                                        status = Some("artifact.read_file: no content field".to_string());
-                                                    }
-                                                }
-                                                Err(e) => status = Some(format!("artifact read failed: {e}")),
-                                            }
-                                        }
-                                        LiveContentNode::Draft { name, .. } => {
-                                            content_view = open_content_draft(
-                                                client, root_session_id, name, &mut status,
-                                            );
-                                        }
-                                    }
-                                }
+                                open_content_pane_node(
+                                    pane, pane.selected, client, root_session_id,
+                                    &mut detail, &mut detail_scroll, &mut detail_h_scroll,
+                                    &mut artifact_viewer, &mut artifact_file_view,
+                                    &mut content_view, &mut status,
+                                );
                             } else if artifact_file_view.is_some() {
                             } else if let Some(ref viewer) = artifact_viewer {
                                 if let Some(file) = viewer.files.get(viewer.selected) {

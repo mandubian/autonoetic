@@ -612,6 +612,17 @@ impl From<anyhow::Error> for ToolError {
                 return Some("Ensure all required fields are provided and not empty.".to_string());
             }
 
+            if lower.contains("invalid json arguments")
+                && lower.contains("capabilities[")
+                && lower.contains("missing field")
+            {
+                return Some("capabilities items are tagged objects and each type requires specific fields: \
+                    SandboxFunctions→allowed[], NetworkAccess→hosts[], \
+                    ReadAccess/WriteAccess/UserProfileAccess→scopes[], \
+                    AgentSpawn→max_children, BackgroundReevaluation→min_interval_secs+allow_reasoning, \
+                    PromoteWith→capabilities[]. Add the missing field named in the error and retry.".to_string());
+            }
+
             if lower.contains("invalid json") {
                 return Some("Check the tool schema and ensure JSON is valid.".to_string());
             }

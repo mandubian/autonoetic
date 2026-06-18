@@ -17,7 +17,7 @@ metadata:
       description: >
         Takes a failed session, reads causal events and digest, identifies
         gateway-code-level root cause, and files a well-scoped GitHub issue
-        via github.issue.create. Never edits code, never opens PRs.
+        via github_issue_create. Never edits code, never opens PRs.
     llm_preset: agentic
     llm_overrides:
       temperature: 0.1
@@ -58,7 +58,7 @@ File well-scoped GitHub issues for code-level problems found in failed agent ses
 3. Read the session digest via `digest.query` for the full execution trace.
 4. Identify the root cause — is it a code bug (script error, missing error handling, schema mismatch) vs a prompt-level issue?
 5. If code-level: compose a GitHub issue with evidence, session ID, and suggested fix area.
-6. Call `github.issue.create` to file the issue.
+6. Call `github_issue_create` to file the issue.
 7. Return the issue URL.
 
 ## Bounded Capabilities (Constitutional Invariant)

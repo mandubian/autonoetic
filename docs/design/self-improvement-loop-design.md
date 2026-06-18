@@ -122,7 +122,7 @@ well-scoped GitHub issue** with evidence (session ID, causal events,
 suggested fix area). The operator implements the fix on their own time.
 
 This is **bounded**: the proposer only opens issues, never edits code, never
-auto-merges. It is a focused agent with `github.issue.create` and
+auto-merges. It is a focused agent with `github_issue_create` and
 `execution.search` capabilities and nothing else.
 
 ### G4 — Eval compare statistical logic

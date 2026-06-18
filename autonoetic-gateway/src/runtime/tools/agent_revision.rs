@@ -1125,6 +1125,268 @@ impl NativeTool for AgentRevisionCreateTool {
     }
 }
 
+/// JSON Schema `oneOf` branches for the `Capability` enum, mirroring
+/// `#[serde(tag = "type", deny_unknown_fields)]`. Surfacing each variant's
+/// required fields in the tool definition stops the LLM from omitting
+/// mandatory fields like `SandboxFunctions.allowed` (it previously only saw
+/// `"type": "array"` + prose examples).
+///
+/// Kept in sync with `autonoetic_types::capability::Capability` — the
+/// `capability_oneof_schema_covers_all_variants` test guards against drift.
+fn capability_oneof_schema() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": "object",
+            "description": "MCP tool access by prefix. Tool names are mcp_<server>_<tool>, so prefix-match on that form.",
+            "properties": {
+                "type": { "const": "SandboxFunctions" },
+                "allowed": { "type": "array", "items": { "type": "string" }, "description": "MCP tool prefixes (prefix-matched, trailing * optional), e.g. [\"mcp_web_*\",\"mcp_docs_fetch\",\"mcp_*\"]" }
+            },
+            "required": ["type", "allowed"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Read access to content/memory/knowledge (includes search).",
+            "properties": {
+                "type": { "const": "ReadAccess" },
+                "scopes": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"self.*\",\"content.*\"]" }
+            },
+            "required": ["type", "scopes"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Write access to content/memory/knowledge (includes share).",
+            "properties": {
+                "type": { "const": "WriteAccess" },
+                "scopes": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"self.*\",\"content.*\"]" }
+            },
+            "required": ["type", "scopes"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "HTTP/network access — escapes the sandbox boundary.",
+            "properties": {
+                "type": { "const": "NetworkAccess" },
+                "hosts": { "type": "array", "items": { "type": "string" }, "description": "Host patterns, e.g. [\"*\"] or [\"api.example.com\"]" }
+            },
+            "required": ["type", "hosts"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Create child agent sessions.",
+            "properties": {
+                "type": { "const": "AgentSpawn" },
+                "max_children": { "type": "integer", "minimum": 0, "description": "Limit on concurrent children." },
+                "max_spawn_depth": { "type": "integer", "minimum": 0, "default": 0, "description": "Max spawn chain depth (0 = system default)." }
+            },
+            "required": ["type", "max_children"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Send messages to other agents.",
+            "properties": {
+                "type": { "const": "AgentMessage" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Periodic wake-ups for background processing.",
+            "properties": {
+                "type": { "const": "BackgroundReevaluation" },
+                "min_interval_secs": { "type": "integer", "minimum": 1 },
+                "allow_reasoning": { "type": "boolean" }
+            },
+            "required": ["type", "min_interval_secs", "allow_reasoning"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Execute scripts/code in the sandbox.",
+            "properties": {
+                "type": { "const": "CodeExecution" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"], "description": "Command prefix patterns." },
+                "commands": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Specific shell commands (word-boundary match)." }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Request a gateway-level emergency stop (dedicated responders only).",
+            "properties": { "type": { "const": "EmergencyStop" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to agent revision operations (create, promote, rollback).",
+            "properties": {
+                "type": { "const": "AgentRevision" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to evaluation operations (suite publish, run, report).",
+            "properties": {
+                "type": { "const": "Evaluation" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to approval queue operations.",
+            "properties": {
+                "type": { "const": "ApprovalQueue" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to scheduler signal operations.",
+            "properties": {
+                "type": { "const": "SchedulerSignal" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to credential operations (check, request, setup).",
+            "properties": {
+                "type": { "const": "CredentialAccess" },
+                "services": { "type": "array", "items": { "type": "string" }, "default": ["*"], "description": "e.g. [\"github\"]" }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to user profile operations (read, update, share, revoke).",
+            "properties": {
+                "type": { "const": "UserProfileAccess" },
+                "scopes": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"read\"] or [\"read\",\"write\"]" }
+            },
+            "required": ["type", "scopes"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to scheduler/cron operations.",
+            "properties": {
+                "type": { "const": "SchedulerAccess" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Install a remote SKILL.md as a new local agent.",
+            "properties": {
+                "type": { "const": "SkillInstall" },
+                "allowed_sources": { "type": "array", "items": { "type": "string" }, "default": ["*"], "description": "Permitted URL hosts." }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Submit constitutional amendment proposals.",
+            "properties": {
+                "type": { "const": "ConstitutionalProposal" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Read reasoning traces from other agents' sessions.",
+            "properties": {
+                "type": { "const": "ReasoningAudit" },
+                "targets": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Allow running with max_session_price_usd while model price metadata is unavailable.",
+            "properties": { "type": { "const": "budget.no_price_available.allow" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Create GitHub issues.",
+            "properties": {
+                "type": { "const": "GithubIssueCreate" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Submit adversarial attack-pattern proposals (system-tier red-team only).",
+            "properties": { "type": { "const": "SecurityRedTeam" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Export/import Cognitive Capsules across machines or gateways.",
+            "properties": { "type": { "const": "CapsuleExport" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Propose new wiki pages to be curated into the platform wiki.",
+            "properties": { "type": { "const": "WikiContribute" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to PlanFrame operations (propose, amend, approve, list, get).",
+            "properties": {
+                "type": { "const": "PlanFrameAccess" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Pre-authorizes promotion of an agent whose declared capabilities fall within this set.",
+            "properties": {
+                "type": { "const": "PromoteWith" },
+                "agent_id": { "type": "string", "default": "" },
+                "capabilities": { "type": "array", "items": { "$ref": "#/$defs/Capability" } }
+            },
+            "required": ["type", "capabilities"],
+            "additionalProperties": false
+        }
+    ])
+}
+
 pub struct AgentRevisionCreateFromIntentTool;
 
 impl NativeTool for AgentRevisionCreateFromIntentTool {
@@ -1140,6 +1402,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
     }
 
     fn definition(&self) -> ToolDefinition {
+        let capability_branches = capability_oneof_schema();
         ToolDefinition {
             name: self.name().to_string(),
             description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_ref — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, pass the artifact_ref returned by artifact_build.".to_string(),
@@ -1158,7 +1421,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "llm_config": { "type": "object", "description": "Legacy inline provider/model — prefer llm_preset" },
                     "capabilities": {
                         "type": "array",
-                        "description": "Each item must be a tagged Capability object — bare strings are rejected. Examples: {\"type\":\"NetworkAccess\",\"hosts\":[\"*\"]}, {\"type\":\"ReadAccess\",\"scopes\":[\"self.*\"]}, {\"type\":\"SandboxFunctions\",\"allowed\":[\"content.\",\"knowledge.\"]}, {\"type\":\"EmergencyStop\"}."
+                        "description": "Each item is a tagged Capability object (bare strings are rejected). See $defs/Capability for each variant's required fields.",
+                        "items": { "$ref": "#/$defs/Capability" }
                     },
                     "io": {
                         "type": "object",
@@ -1171,7 +1435,10 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "credential_services": { "type": "array", "items": { "type": "string" }, "description": "Service names whose credentials the agent needs at spawn time. The env-var name is derived deterministically from the service name (e.g. 'moltbook' → MOLTBOOK_SECRET). Only meaningful for script-mode agents." }
                 },
                 "required": ["agent_id", "instructions", "description", "capabilities"],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "$defs": {
+                    "Capability": { "oneOf": capability_branches }
+                }
             }),
         }
     }
@@ -4249,5 +4516,120 @@ mod capability_lenient_deser_tests {
         assert_eq!(response_json["status"].as_str(), Some("coalesced"));
         assert_eq!(response_json["dedupe_key"].as_str(), Some(spec.dedupe_key.as_str()));
         assert_eq!(response_json["retry_advice"].as_str(), Some("wait"));
+    }
+}
+
+#[cfg(test)]
+mod capability_schema_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Drift guard: the `capability_oneof_schema()` oneOf branches must cover
+    /// every `Capability` variant exactly (by serialized `type` tag), and must
+    /// not advertise variants the enum no longer has. When you add or rename a
+    /// `Capability` variant, update the enum, this list, and
+    /// `capability_oneof_schema`.
+    #[test]
+    fn capability_oneof_schema_covers_all_variants() {
+        let representatives: Vec<Capability> = vec![
+            Capability::SandboxFunctions { allowed: vec![] },
+            Capability::ReadAccess { scopes: vec![] },
+            Capability::WriteAccess { scopes: vec![] },
+            Capability::NetworkAccess { hosts: vec![] },
+            Capability::AgentSpawn { max_children: 0, max_spawn_depth: 0 },
+            Capability::AgentMessage { patterns: vec![] },
+            Capability::BackgroundReevaluation { min_interval_secs: 1, allow_reasoning: false },
+            Capability::CodeExecution { patterns: vec![], commands: vec![] },
+            Capability::EmergencyStop,
+            Capability::AgentRevision { patterns: vec![] },
+            Capability::Evaluation { patterns: vec![] },
+            Capability::ApprovalQueue { patterns: vec![] },
+            Capability::SchedulerSignal { patterns: vec![] },
+            Capability::CredentialAccess { services: vec![] },
+            Capability::UserProfileAccess { scopes: vec![] },
+            Capability::SchedulerAccess { patterns: vec![] },
+            Capability::SkillInstall { allowed_sources: vec![] },
+            Capability::ConstitutionalProposal { patterns: vec![] },
+            Capability::ReasoningAudit { targets: vec![] },
+            Capability::BudgetNoPriceAvailableAllow,
+            Capability::GithubIssueCreate { patterns: vec![] },
+            Capability::SecurityRedTeam,
+            Capability::CapsuleExport,
+            Capability::WikiContribute,
+            Capability::PlanFrameAccess { patterns: vec![] },
+            Capability::PromoteWith { agent_id: String::new(), capabilities: vec![] },
+        ];
+
+        let expected: BTreeSet<String> = representatives
+            .iter()
+            .map(|c| {
+                let v = serde_json::to_value(c).unwrap();
+                v["type"].as_str().unwrap().to_string()
+            })
+            .collect();
+
+        let schema = capability_oneof_schema();
+        let branches = schema.as_array().expect("oneOf schema is an array");
+        let actual: BTreeSet<String> = branches
+            .iter()
+            .map(|b| {
+                b["properties"]["type"]["const"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("branch missing type const: {b}"))
+                    .to_string()
+            })
+            .collect();
+
+        let missing: Vec<_> = expected.difference(&actual).cloned().collect();
+        let extra: Vec<_> = actual.difference(&expected).cloned().collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "schema/enum drift — missing from schema: {missing:?}, extra in schema: {extra:?}"
+        );
+    }
+
+    /// Every oneOf branch must require `type` (the serde discriminator) and the
+    /// fields that have no `#[serde(default)]` in the enum. This catches the
+    /// original bug: a branch that omits a required field, letting the LLM
+    /// produce JSON serde then rejects.
+    #[test]
+    fn capability_oneof_schema_enforces_required_fields() {
+        let schema = capability_oneof_schema();
+        let branches = schema.as_array().expect("oneOf schema is an array");
+        assert!(branches.len() > 10);
+
+        // type tag → set of fields that MUST be required (no serde default in the enum).
+        let must_require: &[(&str, &[&str])] = &[
+            ("SandboxFunctions", &["type", "allowed"]),
+            ("ReadAccess", &["type", "scopes"]),
+            ("WriteAccess", &["type", "scopes"]),
+            ("NetworkAccess", &["type", "hosts"]),
+            ("AgentSpawn", &["type", "max_children"]),
+            (
+                "BackgroundReevaluation",
+                &["type", "min_interval_secs", "allow_reasoning"],
+            ),
+            ("UserProfileAccess", &["type", "scopes"]),
+            ("PromoteWith", &["type", "capabilities"]),
+        ];
+
+        for (tag, required_fields) in must_require {
+            let branch = branches
+                .iter()
+                .find(|b| b["properties"]["type"]["const"].as_str() == Some(*tag))
+                .unwrap_or_else(|| panic!("no schema branch for {tag}"));
+            let required: Vec<String> = branch["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{tag} branch missing `required`"))
+                .iter()
+                .map(|r| r.as_str().unwrap().to_string())
+                .collect();
+            for field in *required_fields {
+                assert!(
+                    required.iter().any(|r| r == *field),
+                    "{tag} schema branch must require `{field}` (got required: {required:?})"
+                );
+            }
+        }
     }
 }
