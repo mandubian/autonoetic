@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-1 principle(s) (bind the agent), 2 right(s) (bind the gateway). Counts are partial while migration (#303) is in progress — not the design ratio.
+1 principle(s) (bind the agent), 2 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -36,4 +36,22 @@ When a child task reaches a terminal state or resolves a gate, the gateway wakes
 | rule id | check | code | test | config |
 |---|---|---|---|---|
 | `Ri-0.14` | `child_state_wakeup` | `scheduler/workflow_store.rs::update_task_run_status (send_child_state_notification) + scheduler/signal.rs + scheduler/task_notify.rs` | `constitution_right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event` | `default_workflow_wait_secs` |
+
+## Obligations (bind: decider)
+
+### O-1 — Motivated decision
+
+A decision owes a motivation, graduated by stakes. A rejection/abort, or an approval of an elevated-authority or external/irreversible action, is BLOCKING: it does not commit until a non-empty reason is recorded. Silent rejection by a decider is as illegitimate as a gateway denial with no rule ID (Ri-0.3).
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `O-1` | `decider_obligation_motivation` | `scheduler/approval.rs::enforce_decider_motivation (classifier decision_is_blocking) at the decide_request_with_options chokepoint; emits decider_obligation.refused/.satisfied` | `constitution_o_1_decider_motivation.rs + scheduler::approval::tests::decider_obligation_emits_tagged_o1_event` | `decider_obligations.enabled` |
+
+### O-2 — Attributed decision
+
+Every decision is attributed to the deciding principal (id + kind) on the causal chain and cannot be reattributed. The agent under decision can always tell who decided and what kind of principal they are.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `O-2` | `decider_attribution` | `decided_by + decided_by_kind on the approval (principal::decider_principal_kind, #361) + actor bound into the causal-chain entry hash (causal_chain.rs)` | `constitution_o_1_decider_motivation.rs` | — |
 

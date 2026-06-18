@@ -1346,15 +1346,27 @@ fn decision_is_blocking(
 /// Enforce the §O decider obligation: refuse a BLOCKING-tier decision with no
 /// motivation. Presence-only check (never judges the reason's quality —
 /// Lawful Executor). Disabled via `decider_obligations.enabled = false`.
+/// Outcome of the §O (O-1) decider-motivation check. `Refused` is conveyed as
+/// the `Err` of [`enforce_decider_motivation`]; the `Ok` variants distinguish a
+/// BLOCKING decision that satisfied its duty from one the obligation doesn't
+/// apply to (so the caller only emits a `satisfied` event for the former).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeciderObligationOutcome {
+    /// Not a BLOCKING-tier decision (or obligations disabled) — no duty owed.
+    NotApplicable,
+    /// BLOCKING decision that carried the required motivation.
+    Satisfied,
+}
+
 fn enforce_decider_motivation(
     config: &GatewayConfig,
     request: &ApprovalRequest,
     decided_by: &str,
     status: &ApprovalStatus,
     reason: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DeciderObligationOutcome> {
     if !config.decider_obligations.enabled {
-        return Ok(());
+        return Ok(DeciderObligationOutcome::NotApplicable);
     }
     if decision_is_blocking(request, decided_by, status) {
         let has_reason = reason.map(|r| !r.trim().is_empty()).unwrap_or(false);
@@ -1367,8 +1379,52 @@ fn enforce_decider_motivation(
                 status.as_str()
             );
         }
+        return Ok(DeciderObligationOutcome::Satisfied);
     }
-    Ok(())
+    Ok(DeciderObligationOutcome::NotApplicable)
+}
+
+/// Emit an `O-1`-tagged causal event recording the §O motivation-obligation
+/// outcome (`decider_obligation.refused` / `…satisfied`), so contract-health
+/// (`enforcement_register::contract_health`) attributes it to clause O-1.
+/// Best-effort: a store/emit failure must not change the decision outcome.
+fn emit_decider_obligation_event(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request: &ApprovalRequest,
+    decided_by: &str,
+    status: &ApprovalStatus,
+    action: &str,
+) {
+    let Some(store) = gateway_store else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: request.agent_id.clone(),
+        session_id: request.session_id.clone(),
+        turn_id: None,
+        event_seq: now.timestamp_millis().max(0) as u64,
+        timestamp: now.to_rfc3339(),
+        category: "decider_obligation".to_string(),
+        action: action.to_string(),
+        status: if action == "refused" { "error" } else { "success" }.to_string(),
+        enforced_rules: vec!["O-1".to_string()],
+        target: Some(request.request_id.clone()),
+        payload: Some(
+            serde_json::json!({
+                "request_id": request.request_id,
+                "approval_level": request.approval_level.to_config(),
+                "status": status.as_str(),
+                "decided_by": decided_by,
+            })
+            .to_string(),
+        ),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some(format!("§O (O-1) decider motivation {action}")),
+    };
+    let _ = store.create_causal_event(&event);
 }
 
 fn decide_request(
@@ -1421,7 +1477,24 @@ fn decide_request_with_options(
     // §O symmetric obligation (#359 / #395): a principal decider owes a
     // motivation for a BLOCKING-tier decision (reject/abort, or approval of an
     // elevated-authority / external-irreversible action). Checked before commit.
-    enforce_decider_motivation(config, &request, decided_by, &status, reason.as_deref())?;
+    // Either outcome is recorded as an O-1-tagged causal event (#399) so
+    // contract-health can attribute it.
+    match enforce_decider_motivation(config, &request, decided_by, &status, reason.as_deref()) {
+        Ok(DeciderObligationOutcome::Satisfied) => {
+            emit_decider_obligation_event(
+                gateway_store,
+                &request,
+                decided_by,
+                &status,
+                "satisfied",
+            );
+        }
+        Ok(DeciderObligationOutcome::NotApplicable) => {}
+        Err(e) => {
+            emit_decider_obligation_event(gateway_store, &request, decided_by, &status, "refused");
+            return Err(e);
+        }
+    }
 
     let decision = ApprovalDecision {
         request_id: request.request_id,
@@ -1717,6 +1790,66 @@ mod tests {
             ..Default::default()
         };
         assert!(super::enforce_decider_motivation(&cfg_off, &local, "operator", &ApprovalStatus::Rejected, None).is_ok());
+    }
+
+    #[test]
+    fn decider_obligation_emits_tagged_o1_event() {
+        use crate::enforcement_register::contract_health;
+        use crate::scheduler::gateway_store::GatewayStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(tmp.path()).unwrap();
+
+        let request = ApprovalRequest {
+            request_id: "apr-o1".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "sess-o1".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "x".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+                detected_hosts: None,
+            },
+            created_at: "2026-06-18T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("sess-o1".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            similar_to_request_id: None,
+            similarity_score: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+        };
+
+        super::emit_decider_obligation_event(
+            Some(&store),
+            &request,
+            "operator",
+            &ApprovalStatus::Rejected,
+            "refused",
+        );
+
+        let events = store.search_causal_events(Some("sess-o1"), None, 10).unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.category == "decider_obligation")
+            .expect("a decider_obligation event was emitted");
+        assert_eq!(ev.action, "refused");
+        assert_eq!(ev.enforced_rules, vec!["O-1".to_string()]);
+
+        // …and contract-health attributes it to clause O-1 (not unattributed).
+        let health = contract_health(ev.enforced_rules.iter());
+        assert_eq!(health.unattributed, 0);
+        assert!(health.by_clause.contains(&("O-1".to_string(), 1)));
     }
 
     #[test]
