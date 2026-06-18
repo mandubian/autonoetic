@@ -62,6 +62,8 @@ pub enum EscalationStatus {
     Approved,
     /// Operator rejected the escalation (promotion blocked).
     Rejected,
+    /// Cancelled by emergency stop or session lifecycle — not reviewed.
+    Cancelled,
 }
 
 impl EscalationStatus {
@@ -70,6 +72,7 @@ impl EscalationStatus {
             EscalationStatus::Pending => "pending",
             EscalationStatus::Approved => "approved",
             EscalationStatus::Rejected => "rejected",
+            EscalationStatus::Cancelled => "cancelled",
         }
     }
 
@@ -78,6 +81,7 @@ impl EscalationStatus {
             "pending" => Some(EscalationStatus::Pending),
             "approved" => Some(EscalationStatus::Approved),
             "rejected" => Some(EscalationStatus::Rejected),
+            "cancelled" => Some(EscalationStatus::Cancelled),
             _ => None,
         }
     }

@@ -1414,6 +1414,21 @@ impl GatewayExecutionService {
             )?;
         }
 
+        // Cancel pending escalations for this root session. Without this,
+        // the escalation stays "pending" after the linked approval was
+        // cancelled, and federation_escalate blocks forever ("already exists")
+        // while approval_status returns "not found" — a divergence loop.
+        for esc in store.list_pending_escalations()? {
+            if esc.root_session_id == root_session_id {
+                let _ = store.resolve_escalation(
+                    &esc.escalation_id,
+                    autonoetic_types::escalation::EscalationStatus::Cancelled,
+                    &format!("emergency_stop:{stop_id}"),
+                    Some("Cancelled by emergency stop"),
+                );
+            }
+        }
+
         let cancel_note = format!("emergency_stop:{stop_id} — {reason}");
         for inter in store.get_pending_interactions_for_root_session(root_session_id)? {
             store.cancel_user_interaction(&inter.interaction_id, &cancel_note)?;
