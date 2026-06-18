@@ -27,7 +27,10 @@ pub mod provider;
 /// - `tcp_keepalive`: 30 s — detect dead TCP connections proactively.
 /// - **No global request timeout** — LLM streams can run for minutes; a blanket
 ///   `timeout()` would kill legitimate long-running responses. Instead, each
-///   non-streaming `complete()` call applies a per-request timeout (5 min).
+///   non-streaming `complete()` call applies a per-request timeout
+///   ([`request_timeout`], default 120s, env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`)
+///   with a fail-fast, wall-clock-bounded retry policy
+///   ([`next_connection_retry_wait`]).
 pub fn build_llm_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -61,8 +64,90 @@ pub fn is_transient_connection_error(err: &reqwest::Error) -> bool {
 
 pub const MAX_CONNECTION_RETRIES: u32 = 3;
 
+/// A *timeout* already consumed a full per-request budget; retrying it with
+/// another full-length attempt is how a degraded endpoint compounds into many
+/// minutes of wasted wall-clock. So timeouts retry at most once (fast-failing
+/// connection errors like refused/reset keep [`MAX_CONNECTION_RETRIES`]).
+pub const MAX_TIMEOUT_RETRIES: u32 = 1;
+
+/// Default per-request timeout for a non-streaming `complete()` call.
+/// Lowered from a previous 300s: 5 minutes per attempt let a slow/overloaded
+/// endpoint burn ~20 min/turn (timeout × retries) before failing. Override with
+/// `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+/// The per-request completion timeout, from `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`
+/// (clamped to a sane floor) or [`DEFAULT_REQUEST_TIMEOUT_SECS`].
+pub fn request_timeout() -> std::time::Duration {
+    let secs = std::env::var("AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s >= 5)
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {
     (attempt as u64) * 1000
+}
+
+/// Retry decision for a transient connection error on an LLM call.
+///
+/// Returns `Some(wait_ms)` to retry after a backoff, or `None` to stop. It
+/// fail-fasts on two axes the old "retry up to N times" logic ignored:
+/// - **wall-clock deadline**: once `elapsed >= deadline` (typically 2× the
+///   per-request timeout), stop — a persistently slow endpoint must not
+///   multiply the timeout across retries.
+/// - **timeout vs blip**: a request timeout (`is_timeout`) retries at most
+///   [`MAX_TIMEOUT_RETRIES`]; fast-failing connection errors retry up to
+///   [`MAX_CONNECTION_RETRIES`].
+pub fn next_connection_retry_wait(
+    err: &reqwest::Error,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    let is_timeout = err.is_timeout() || err.to_string().to_lowercase().contains("timed out");
+    retry_wait_decision(
+        is_transient_connection_error(err),
+        is_timeout,
+        attempt,
+        elapsed,
+        deadline,
+    )
+}
+
+/// Pure decision core of [`next_connection_retry_wait`], split out so it can be
+/// unit-tested without fabricating a `reqwest::Error`.
+pub(crate) fn retry_wait_decision(
+    is_transient: bool,
+    is_timeout: bool,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    if !is_transient {
+        return None;
+    }
+    if elapsed >= deadline {
+        return None;
+    }
+    let cap = if is_timeout {
+        MAX_TIMEOUT_RETRIES
+    } else {
+        MAX_CONNECTION_RETRIES
+    };
+    if attempt >= cap {
+        return None;
+    }
+    let wait_ms = connection_retry_backoff_ms(attempt);
+    // Don't sleep past the deadline: if the backoff itself would push us to/over
+    // the cap, stop now rather than sleep and then start an attempt that's
+    // already late. (Keeps the cumulative wall-clock honest.)
+    if elapsed.saturating_add(std::time::Duration::from_millis(wait_ms)) >= deadline {
+        return None;
+    }
+    Some(wait_ms)
 }
 
 /// Check whether a non-success status / body indicates a context-overflow error

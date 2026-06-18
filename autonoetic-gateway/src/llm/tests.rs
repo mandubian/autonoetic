@@ -678,4 +678,85 @@ mod tests {
             assert!(!is_context_overflow_error(500, "internal server error"));
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Fail-fast retry policy — retry_wait_decision / default timeout
+    // -----------------------------------------------------------------------
+    mod retry_policy {
+        use crate::llm::{
+            retry_wait_decision, DEFAULT_REQUEST_TIMEOUT_SECS, MAX_CONNECTION_RETRIES,
+            MAX_TIMEOUT_RETRIES,
+        };
+        use std::time::Duration;
+
+        const DEADLINE: Duration = Duration::from_secs(240);
+
+        #[test]
+        fn non_transient_never_retries() {
+            assert_eq!(
+                retry_wait_decision(false, false, 0, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn timeout_retries_at_most_once() {
+            assert_eq!(MAX_TIMEOUT_RETRIES, 1);
+            // attempt 0 retries…
+            assert!(retry_wait_decision(true, true, 0, Duration::ZERO, DEADLINE).is_some());
+            // …attempt 1 stops.
+            assert_eq!(
+                retry_wait_decision(true, true, 1, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn fast_connection_error_retries_up_to_max() {
+            assert_eq!(MAX_CONNECTION_RETRIES, 3);
+            for attempt in 0..MAX_CONNECTION_RETRIES {
+                assert!(
+                    retry_wait_decision(true, false, attempt, Duration::ZERO, DEADLINE).is_some(),
+                    "attempt {attempt} should retry"
+                );
+            }
+            assert_eq!(
+                retry_wait_decision(true, false, MAX_CONNECTION_RETRIES, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn wall_clock_deadline_stops_retries_even_with_budget() {
+            // attempt 0 (budget remains) but elapsed past the deadline → stop.
+            assert_eq!(
+                retry_wait_decision(true, false, 0, Duration::from_secs(241), DEADLINE),
+                None
+            );
+            assert_eq!(
+                retry_wait_decision(true, true, 0, Duration::from_secs(241), DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn default_timeout_is_two_minutes() {
+            assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECS, 120);
+        }
+
+        #[test]
+        fn backoff_that_would_cross_deadline_stops_now() {
+            // attempt 2 still has connection budget (cap 3) and elapsed (239.5s)
+            // is under the 240s deadline — but the attempt-2 backoff (2000ms)
+            // would push us past it, so we must NOT sleep-then-retry late.
+            assert_eq!(
+                retry_wait_decision(true, false, 2, Duration::from_millis(239_500), DEADLINE),
+                None
+            );
+            // Comfortably under the deadline: attempt 1 at 10s elapsed retries.
+            assert!(
+                retry_wait_decision(true, false, 1, Duration::from_secs(10), DEADLINE).is_some()
+            );
+        }
+    }
 }

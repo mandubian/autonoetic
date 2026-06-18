@@ -119,41 +119,50 @@ impl LlmDriver for AnthropicDriver {
     async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let body = self.build_body(req, false);
 
-        const MAX_RETRIES: u32 = 3;
-        const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-        for attempt in 0..=MAX_RETRIES {
+        let complete_timeout = crate::llm::request_timeout();
+        // Bound total wall-clock so a slow endpoint can't multiply the
+        // per-request timeout across retries.
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
-                    .timeout(COMPLETE_TIMEOUT)
+                    .timeout(complete_timeout)
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
-                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
-                    tracing::warn!(
+                Err(e) => {
+                    if let Some(wait_ms) = crate::llm::next_connection_retry_wait(
+                        &e,
                         attempt,
-                        wait_ms,
-                        error = %e,
-                        "Anthropic connection error, retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                    continue;
+                        loop_start.elapsed(),
+                        retry_deadline,
+                    ) {
+                        tracing::warn!(
+                            attempt,
+                            wait_ms,
+                            error = %e,
+                            "Anthropic connection error, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(e.into());
                 }
-                Err(e) => return Err(e.into()),
             };
             let status = response.status().as_u16();
 
             if status == 429 || status == 529 {
-                if attempt < MAX_RETRIES {
+                if attempt < crate::llm::MAX_CONNECTION_RETRIES {
                     let wait_ms = (attempt + 1) as u64 * 2000;
                     tracing::warn!(status, attempt, wait_ms, "Anthropic rate limited, retrying");
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
-                anyhow::bail!("Anthropic rate limited after {} retries", MAX_RETRIES);
+                anyhow::bail!("Anthropic rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
             }
 
             if !reqwest::StatusCode::from_u16(status)
@@ -213,8 +222,7 @@ impl LlmDriver for AnthropicDriver {
         use futures::StreamExt;
 
         let body = self.build_body(req, true);
-        const MAX_RETRIES: u32 = 3;
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
@@ -223,7 +231,7 @@ impl LlmDriver for AnthropicDriver {
             );
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < crate::llm::MAX_CONNECTION_RETRIES => {
                     let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
                     tracing::warn!(
                         attempt,
@@ -239,7 +247,7 @@ impl LlmDriver for AnthropicDriver {
             let status = response.status().as_u16();
 
             if status == 429 || status == 529 {
-                if attempt < MAX_RETRIES {
+                if attempt < crate::llm::MAX_CONNECTION_RETRIES {
                     let wait_ms = (attempt + 1) as u64 * 2000;
                     tracing::warn!(
                         status,
@@ -250,7 +258,7 @@ impl LlmDriver for AnthropicDriver {
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
-                anyhow::bail!("Anthropic rate limited after {} retries", MAX_RETRIES);
+                anyhow::bail!("Anthropic rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
             }
 
             if !reqwest::StatusCode::from_u16(status)
