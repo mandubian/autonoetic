@@ -175,19 +175,19 @@ fn test_artifact_fingerprint_stable_across_shell_wrappers() {
         &["wttr.in".to_string()],
         "python3 -c 'import requests; requests.get(\"https://wttr.in/Paris\")'",
         Some("art-weather-abc"),
-    );
+        &manifest.capabilities,    );
     let fp_shell_v2 = compute_fingerprint(
         &manifest.agent.id,
         &["wttr.in".to_string()],
         "python3 /tmp/weather.py Paris",
         Some("art-weather-abc"),
-    );
+        &manifest.capabilities,    );
     let fp_shell_v3 = compute_fingerprint(
         &manifest.agent.id,
         &["wttr.in".to_string()],
         "python3 /tmp/weather.py London",
         Some("art-weather-abc"),
-    );
+        &manifest.capabilities,    );
 
     assert_eq!(
         fp_shell_v1, fp_shell_v2,
@@ -208,13 +208,13 @@ fn test_artifact_fingerprint_differs_across_artifacts() {
         &["wttr.in".to_string()],
         "code",
         Some("art-weather-v1"),
-    );
+        &manifest.capabilities,    );
     let fp_art_b = compute_fingerprint(
         &manifest.agent.id,
         &["wttr.in".to_string()],
         "code",
         Some("art-weather-v2"),
-    );
+        &manifest.capabilities,    );
 
     assert_ne!(
         fp_art_a, fp_art_b,
@@ -239,7 +239,7 @@ fn test_lifecycle_cache_reuse_simulated() {
         &targets,
         WEATHER_ARTIFACT_CODE,
         Some("art-weather-lifecycle"),
-    );
+        &manifest.capabilities,    );
 
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache create");
     let now = chrono::Utc::now().to_rfc3339();
@@ -264,7 +264,7 @@ fn test_lifecycle_cache_reuse_simulated() {
         &["wttr.in".to_string()],
         "python3 /tmp/weather.py London",
         Some("art-weather-lifecycle"),
-    );
+        &manifest.capabilities,    );
 
     assert_eq!(
         fingerprint_first, fingerprint_second,

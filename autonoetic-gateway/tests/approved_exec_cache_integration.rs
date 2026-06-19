@@ -299,16 +299,16 @@ fn test_normalize_targets_dedup() {
 
 #[test]
 fn test_compute_fingerprint_deterministic() {
-    let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
-    let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
+    let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None, &[]);
+    let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None, &[]);
     assert_eq!(fp1, fp2);
     assert!(fp1.starts_with("sha256:"));
 }
 
 #[test]
 fn test_compute_fingerprint_different() {
-    let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None);
-    let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None);
+    let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None, &[]);
+    let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None, &[]);
     assert_ne!(fp1, fp2);
 }
 
@@ -324,6 +324,7 @@ fn test_cache_full_cycle() {
         &["api.example.com".to_string()],
         "import requests\nrequests.get('https://api.example.com')",
         None,
+        &[],
     );
     assert!(cache.find(&fingerprint).is_none());
 
@@ -350,6 +351,7 @@ fn test_cache_full_cycle() {
         &["api.example.com".to_string()],
         "import requests\nrequests.post('https://api.example.com')", // POST instead of GET
         None,
+        &[],
     );
     assert!(cache.find(&different_fingerprint).is_none());
 }
@@ -371,7 +373,7 @@ fn test_cache_not_used_for_unresolved_targets() {
     // Unresolved means no concrete targets to match against
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache should create");
     let targets = normalize_targets(&patterns);
-    let _fingerprint = compute_fingerprint("test.agent", &targets, "code", None);
+    let _fingerprint = compute_fingerprint("test.agent", &targets, "code", None, &[]);
 
     // In the real flow, this would NOT be recorded because coverage is Unresolved
     assert_eq!(cache.len(), 0);
@@ -404,7 +406,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
         "https://api.example.com/data",
     )];
     let targets = normalize_targets(&patterns);
-    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None);
+    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None, &manifest.capabilities);
 
     let cache = ApprovedExecCache::new(&gateway_dir).expect("cache should create");
     let now = chrono::Utc::now().to_rfc3339();
@@ -474,6 +476,84 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
             tracing::info!(error = %err_msg, "sandbox.exec cache hit - execution may fail in test env but approval was skipped");
         }
     }
+}
+
+/// #381 acceptance: an approval cached under one capability scope must NOT be
+/// reused after the agent's capabilities change.
+///
+/// Note on the issue's "widen NetworkAccess" wording: the approved-exec cache is
+/// only consulted for agents WITHOUT `NetworkAccess` — an agent that holds
+/// `NetworkAccess` is authorized and bypasses the approval/cache path entirely
+/// (`sandbox.rs`: `if !agent_has_network_access { …approval/cache… }`). So the
+/// meaningful "capabilities changed" case for a *cached* exec is a non-network
+/// capability change. Here the agent's `CodeExecution` scope changes between the
+/// cached approval and reuse: the fingerprint differs, so the entry found under
+/// the old scope is NOT found under the new one — the gateway routes to a fresh
+/// approval instead of silently reusing the stale grant. Proven at the cache +
+/// fingerprint layer (the same `compute_fingerprint` the gateway calls at every
+/// sandbox.exec reuse site), which is deterministic and not coupled to the
+/// orthogonal command-analysis / approval-trigger path.
+#[test]
+fn test_capability_change_misses_cache_recorded_under_old_scope() {
+    let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+
+    // No NetworkAccess (the cache only applies to non-network agents). The
+    // CodeExecution scope is what changes between approval and reuse.
+    let mut narrow_manifest = test_agent_manifest();
+    narrow_manifest.capabilities = vec![Capability::CodeExecution {
+        patterns: vec!["python3 scripts/legacy.py".to_string()],
+        commands: vec![],
+    }];
+    let mut wide_manifest = test_agent_manifest();
+    wide_manifest.capabilities = vec![Capability::CodeExecution {
+        patterns: vec!["*".to_string()],
+        commands: vec![],
+    }];
+
+    // Concrete URL with no host authorization (the originally-approved exec).
+    let code_content = r#"print("https://api.example.com/data")"#;
+    let patterns = vec![create_pattern("url_literal", "https://api.example.com/data")];
+    let targets = normalize_targets(&patterns);
+
+    // Pre-populate the cache as if approved under the NARROW capability scope.
+    let narrow_fp =
+        compute_fingerprint("test.agent", &targets, code_content, None, &narrow_manifest.capabilities);
+    let now = chrono::Utc::now().to_rfc3339();
+    let cache = ApprovedExecCache::new(&gateway_dir).expect("cache should create");
+    cache
+        .record(ApprovedExecEntry {
+            fingerprint: narrow_fp.clone(),
+            agent_id: "test.agent".to_string(),
+            remote_targets: targets.clone(),
+            code_content: code_content.to_string(),
+            approval_request_id: "apr-narrow".to_string(),
+            approved_at: now.clone(),
+            approved_by: "operator".to_string(),
+            last_used_at: now.clone(),
+        })
+        .expect("record should succeed");
+
+
+    // Under the ORIGINAL (narrow) scope the entry is reusable…
+    assert!(
+        cache.find(&narrow_fp).is_some(),
+        "approval recorded under the narrow scope must be found under that same scope"
+    );
+
+    // …but once the agent's capabilities change, the lookup the gateway performs
+    // uses a different fingerprint, so the stale grant is NOT reused — the run
+    // would route to a fresh approval instead. This is the #381 guarantee, proven
+    // through the real ApprovedExecCache + compute_fingerprint (the same fingerprint
+    // the gateway computes at every sandbox.exec reuse site).
+    let wide_fp =
+        compute_fingerprint("test.agent", &targets, code_content, None, &wide_manifest.capabilities);
+    assert_ne!(narrow_fp, wide_fp, "a capability change must change the fingerprint");
+    assert!(
+        cache.find(&wide_fp).is_none(),
+        "a changed capability scope must NOT reuse the approval cached under the old scope"
+    );
 }
 
 #[test]
@@ -589,7 +669,7 @@ requests.get("https://api.cache-test.dev")"#;
         "import + URL should classify as Concrete"
     );
 
-    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None);
+    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None, &manifest.capabilities);
 
     // Pre-populate cache
     let cache = ApprovedExecCache::new(&gateway_dir).expect("cache should create");
