@@ -753,29 +753,45 @@ pub async fn handle_gateway_exec_cache(
         GatewayExecCacheCommands::List { json } => {
             let entries = cache.all();
             if *json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
+                // Curated view: omit `code_content` (potentially large/sensitive
+                // approved source) so it isn't leaked into logs/pipelines.
+                let view: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "fingerprint": e.fingerprint,
+                            "agent_id": e.agent_id,
+                            "remote_targets": e.remote_targets,
+                            "approval_request_id": e.approval_request_id,
+                            "approved_at": e.approved_at,
+                            "approved_by": e.approved_by,
+                            "last_used_at": e.last_used_at,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&view)?);
             } else if entries.is_empty() {
                 println!("No cached exec approvals.");
             } else {
                 println!(
-                    "{:<22} {:<18} {:<20} {:<12} {}",
+                    "{:<22} {:<18} {:<26} {:<12} {}",
                     "FINGERPRINT", "AGENT", "APPROVED_AT", "BY", "TARGETS"
                 );
                 for e in &entries {
-                    // Show a short, copyable prefix of the fingerprint.
+                    // Short, copyable prefix of the fingerprint; full RFC3339
+                    // timestamp (keep the timezone — this is audit tooling).
                     let short_fp = e.fingerprint.chars().take(21).collect::<String>();
-                    let approved = e.approved_at.chars().take(19).collect::<String>();
                     println!(
-                        "{:<22} {:<18} {:<20} {:<12} {}",
+                        "{:<22} {:<18} {:<26} {:<12} {}",
                         short_fp,
                         e.agent_id,
-                        approved,
+                        e.approved_at,
                         e.approved_by,
                         e.remote_targets.join(", ")
                     );
                 }
                 println!(
-                    "\n{} entr{}. Revoke with: gateway exec-cache revoke <fingerprint>",
+                    "\n{} entr{}. Revoke with: autonoetic gateway exec-cache revoke <fingerprint>",
                     entries.len(),
                     if entries.len() == 1 { "y" } else { "ies" }
                 );

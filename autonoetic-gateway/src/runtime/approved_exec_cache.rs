@@ -152,7 +152,12 @@ impl ApprovedExecCache {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(entries)?;
-        std::fs::write(&self.cache_path, json)?;
+        // Atomic write: write a temp file then rename, so a crash or a concurrent
+        // reader never sees a torn/partial index. (Full cross-process
+        // lost-update serialization is a separate follow-up — see #380.)
+        let tmp = self.cache_path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.cache_path)?;
         Ok(())
     }
 }
