@@ -18,8 +18,8 @@ pub const POST_SESSION_NARRATIVE_CONTENT_NAME: &str = "post_session_narrative.md
 /// Writer agent id for provenance on extracted memories.
 pub const DIGEST_AGENT_ID: &str = "autonoetic.digest";
 
-/// Bundled prompt for the gateway-internal digest LLM (see `agents/digest/SKILL.md`).
-const EMBEDDED_DIGEST_SKILL: &str = include_str!("../../../agents/digest/SKILL.md");
+/// Bundled prompt for the gateway-internal digest LLM (see `agents/autonoetic.digest/SKILL.md`).
+const EMBEDDED_DIGEST_SKILL: &str = include_str!("../../../agents/autonoetic.digest/SKILL.md");
 
 #[derive(Debug, Deserialize)]
 struct DigestMemoryItem {
@@ -40,7 +40,7 @@ struct DigestLlmOutput {
 }
 
 pub fn load_digest_skill_body(agents_dir: &Path) -> anyhow::Result<String> {
-    let path = agents_dir.join("digest").join("SKILL.md");
+    let path = agents_dir.join("autonoetic.digest").join("SKILL.md");
     let raw = if path.is_file() {
         std::fs::read_to_string(&path).map_err(|e| {
             anyhow::anyhow!("post-session digest could not read {}: {}", path.display(), e)
