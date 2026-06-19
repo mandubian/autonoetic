@@ -390,6 +390,11 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayGrantCommands,
     },
+    /// Inspect or revoke cross-session approved sandbox-exec cache entries.
+    ExecCache {
+        #[command(subcommand)]
+        command: GatewayExecCacheCommands,
+    },
     /// Inspect or answer pending user interactions.
     Interactions {
         #[command(subcommand)]
@@ -641,6 +646,28 @@ pub enum GatewayApprovalCommands {
         /// Only include approvals since this time (e.g. `1h`, `24h`, `7d`).
         #[arg(long)]
         since: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayExecCacheCommands {
+    /// List cached approved sandbox-exec fingerprints with metadata.
+    List {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a cached approval by fingerprint, or all of them.
+    Revoke {
+        /// The fingerprint (`sha256:…`) to revoke. Copy it from `exec-cache list`.
+        #[arg(conflicts_with = "all")]
+        fingerprint: Option<String>,
+        /// Revoke every cached exec approval.
+        #[arg(long)]
+        all: bool,
+        /// Reason for revocation (recorded in the causal audit trail).
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 

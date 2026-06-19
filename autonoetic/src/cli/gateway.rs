@@ -831,6 +831,144 @@ pub async fn handle_gateway_grants(
     Ok(())
 }
 
+pub async fn handle_gateway_exec_cache(
+    config_path: &Path,
+    command: &super::common::GatewayExecCacheCommands,
+) -> anyhow::Result<()> {
+    use super::common::GatewayExecCacheCommands;
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let cache =
+        autonoetic_gateway::runtime::approved_exec_cache::ApprovedExecCache::new(&gateway_dir)?;
+
+    match command {
+        GatewayExecCacheCommands::List { json } => {
+            let entries = cache.all();
+            if *json {
+                // Curated view: omit `code_content` (potentially large/sensitive
+                // approved source) so it isn't leaked into logs/pipelines.
+                let view: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "fingerprint": e.fingerprint,
+                            "agent_id": e.agent_id,
+                            "remote_targets": e.remote_targets,
+                            "approval_request_id": e.approval_request_id,
+                            "approved_at": e.approved_at,
+                            "approved_by": e.approved_by,
+                            "last_used_at": e.last_used_at,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else if entries.is_empty() {
+                println!("No cached exec approvals.");
+            } else {
+                println!(
+                    "{:<22} {:<18} {:<26} {:<12} {}",
+                    "FINGERPRINT", "AGENT", "APPROVED_AT", "BY", "TARGETS"
+                );
+                for e in &entries {
+                    // Short, copyable prefix of the fingerprint; full RFC3339
+                    // timestamp (keep the timezone — this is audit tooling).
+                    let short_fp = e.fingerprint.chars().take(21).collect::<String>();
+                    println!(
+                        "{:<22} {:<18} {:<26} {:<12} {}",
+                        short_fp,
+                        e.agent_id,
+                        e.approved_at,
+                        e.approved_by,
+                        e.remote_targets.join(", ")
+                    );
+                }
+                println!(
+                    "\n{} entr{}. Revoke with: autonoetic gateway exec-cache revoke <fingerprint>",
+                    entries.len(),
+                    if entries.len() == 1 { "y" } else { "ies" }
+                );
+            }
+        }
+        GatewayExecCacheCommands::Revoke {
+            fingerprint,
+            all,
+            reason,
+        } => {
+            if fingerprint.is_none() && !all {
+                anyhow::bail!("Specify a <fingerprint> or --all to revoke exec-cache approvals");
+            }
+            let reason_text = reason.as_deref().unwrap_or("Revoked by operator");
+
+            let (count, target) = if *all {
+                (cache.clear()?, None)
+            } else {
+                let fp = fingerprint.as_deref().unwrap();
+                // Accept a full `sha256:…` or a unique prefix copied from `list`.
+                let matches: Vec<String> = cache
+                    .all()
+                    .into_iter()
+                    .map(|e| e.fingerprint)
+                    .filter(|f| f == fp || f.starts_with(fp))
+                    .collect();
+                match matches.len() {
+                    0 => {
+                        println!("No cached exec approval matching '{}'.", fp);
+                        return Ok(());
+                    }
+                    1 => {
+                        let full = &matches[0];
+                        let removed = cache.remove(full)?;
+                        (usize::from(removed), Some(full.clone()))
+                    }
+                    n => {
+                        anyhow::bail!(
+                            "'{}' matches {} entries — use the full fingerprint from `exec-cache list`",
+                            fp,
+                            n
+                        );
+                    }
+                }
+            };
+
+            if count == 0 {
+                println!("No matching exec-cache approvals revoked.");
+                return Ok(());
+            }
+            println!(
+                "Revoked {} cached exec approval(s) (reason: {}). The next matching exec will require fresh approval.",
+                count, reason_text
+            );
+
+            // Best-effort audit event.
+            if let Ok(store) =
+                autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            {
+                let _ = store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+                    event_id: format!("exec-cache-revoke-{}", uuid::Uuid::new_v4()),
+                    agent_id: "gateway".to_string(),
+                    session_id: "operator".to_string(),
+                    turn_id: None,
+                    event_seq: 0,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    category: "exec_cache_revocation".to_string(),
+                    action: if *all { "revoke_all" } else { "revoke" }.to_string(),
+                    status: "completed".to_string(),
+                    enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                    target: target.clone(),
+                    payload: Some(
+                        serde_json::json!({ "reason": reason_text, "count": count }).to_string(),
+                    ),
+                    payload_ref: None,
+                    evidence_ref: None,
+                    reason: reason.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_interactive_approvals(
     config: &autonoetic_types::config::GatewayConfig,
     gateway_store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,

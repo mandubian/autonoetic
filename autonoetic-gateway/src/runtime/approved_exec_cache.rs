@@ -99,6 +99,39 @@ impl ApprovedExecCache {
         entries.get(fingerprint).cloned()
     }
 
+    /// Returns all cached entries (cloned), sorted by `approved_at`. For
+    /// operator inspection / revocation tooling (#380).
+    pub fn all(&self) -> Vec<ApprovedExecEntry> {
+        let entries = self.entries.lock().unwrap();
+        let mut out: Vec<ApprovedExecEntry> = entries.values().cloned().collect();
+        out.sort_by(|a, b| a.approved_at.cmp(&b.approved_at));
+        out
+    }
+
+    /// Removes a cached approval by fingerprint, persisting the change. Returns
+    /// `true` if an entry was removed (#380). Revoking forces the next matching
+    /// exec back through approval.
+    pub fn remove(&self, fingerprint: &str) -> anyhow::Result<bool> {
+        let mut entries = self.entries.lock().unwrap();
+        let removed = entries.remove(fingerprint).is_some();
+        if removed {
+            self.flush(&entries)?;
+        }
+        Ok(removed)
+    }
+
+    /// Removes all cached approvals, persisting the change. Returns the number
+    /// removed (#380).
+    pub fn clear(&self) -> anyhow::Result<usize> {
+        let mut entries = self.entries.lock().unwrap();
+        let n = entries.len();
+        if n > 0 {
+            entries.clear();
+            self.flush(&entries)?;
+        }
+        Ok(n)
+    }
+
     /// Updates the last_used_at timestamp for an entry.
     pub fn update_last_used(&self, fingerprint: &str) -> anyhow::Result<()> {
         let mut entries = self.entries.lock().unwrap();
@@ -119,7 +152,12 @@ impl ApprovedExecCache {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(entries)?;
-        std::fs::write(&self.cache_path, json)?;
+        // Atomic write: write a temp file then rename, so a crash or a concurrent
+        // reader never sees a torn/partial index. (Full cross-process
+        // lost-update serialization is a separate follow-up — see #380.)
+        let tmp = self.cache_path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.cache_path)?;
         Ok(())
     }
 }
