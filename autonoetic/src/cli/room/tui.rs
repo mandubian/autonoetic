@@ -3539,6 +3539,7 @@ pub fn run(
         }
         let turn_boundaries = annotate_turns_and_in_flight(
             &mut indexed,
+            &visible,
             &open_turns,
             show_reasoning,
             &extra_inflight_rows,
@@ -3840,12 +3841,14 @@ fn last_line_row_index(indexed: &[(RenderedRow, RowSource)]) -> Option<usize> {
 
 fn annotate_turns_and_in_flight(
     rows: &mut [(RenderedRow, RowSource)],
+    visible: &[SessionTimelineEntry],
     open_turns: &HashSet<String>,
     show_reasoning: bool,
     extra_inflight_rows: &HashSet<usize>,
 ) -> HashMap<usize, bool> {
     let mut last_turn: Option<String> = None;
     let mut last_row_for_turn: HashMap<String, usize> = HashMap::new();
+    let mut collapsed_open_turn_rows: HashSet<usize> = HashSet::new();
     let mut turn_ordinals: HashMap<String, u32> = HashMap::new();
     let mut next_turn_index: u32 = 0;
     let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
@@ -3862,25 +3865,44 @@ fn annotate_turns_and_in_flight(
             }
         }
     }
+    for (i, (row, src)) in rows.iter().enumerate() {
+        if let RenderedRow::Collapsed { .. } = row {
+            if let RowSource::Run { start, len } = src {
+                if visible[*start..start + len]
+                    .iter()
+                    .any(|e| e.turn_id.as_ref().is_some_and(|t| open_turns.contains(t)))
+                {
+                    collapsed_open_turn_rows.insert(i);
+                }
+            }
+        }
+    }
     for (i, (row, _)) in rows.iter_mut().enumerate() {
-        if let RenderedRow::Line(spec) = row {
-            if let Some(t) = &spec.turn_id {
-                let ordinal = *turn_ordinals.entry(t.clone()).or_insert_with(|| {
-                    next_turn_index += 1;
-                    next_turn_index
+        match row {
+            RenderedRow::Line(spec) => {
+                if let Some(t) = &spec.turn_id {
+                    let ordinal = *turn_ordinals.entry(t.clone()).or_insert_with(|| {
+                        next_turn_index += 1;
+                        next_turn_index
+                    });
+                    spec.turn_index = Some(ordinal);
+                } else {
+                    spec.turn_index = None;
+                }
+                let open_turn_row = spec.turn_id.as_ref().is_some_and(|t| {
+                    open_turns.contains(t) && last_row_for_turn.get(t).copied() == Some(i)
                 });
-                spec.turn_index = Some(ordinal);
-            } else {
-                spec.turn_index = None;
+                if open_turn_row || extra_inflight_rows.contains(&i) {
+                    spec.in_flight = true;
+                }
+                if !show_reasoning && spec.headline.contains('\u{1F4AD}') {
+                    spec.show_reasoning = false;
+                }
             }
-            let open_turn_row = spec.turn_id.as_ref().is_some_and(|t| {
-                open_turns.contains(t) && last_row_for_turn.get(t).copied() == Some(i)
-            });
-            if open_turn_row || extra_inflight_rows.contains(&i) {
-                spec.in_flight = true;
-            }
-            if !show_reasoning && spec.headline.contains('\u{1F4AD}') {
-                spec.show_reasoning = false;
+            RenderedRow::Collapsed { in_flight, .. } => {
+                if collapsed_open_turn_rows.contains(&i) || extra_inflight_rows.contains(&i) {
+                    *in_flight = true;
+                }
             }
         }
     }
@@ -4455,14 +4477,19 @@ fn is_divider_line(line: &Line) -> bool {
             .unwrap_or(false)
 }
 
-fn build_collapsed_row_line(count: usize, summary: &str) -> Line<'static> {
+fn build_collapsed_row_line(
+    count: usize,
+    summary: &str,
+    in_flight: bool,
+    spinner_glyph: &str,
+) -> Line<'static> {
     let style = Style::default().fg(Color::DarkGray);
-    let text = format!(
-        "{} ⟨{} {}⟩",
-        render::altitude_glyph(Altitude::Detail),
-        count,
-        summary
-    );
+    let glyph = if in_flight {
+        format!("{spinner_glyph:<2}")
+    } else {
+        format!("{:<2}", render::altitude_glyph(Altitude::Detail))
+    };
+    let text = format!("{} ⟨{} {}⟩", glyph, count, summary);
     Line::from(Span::styled(text, style))
 }
 
@@ -5571,8 +5598,12 @@ fn draw(
                 let n = lines.len();
                 (lines, n)
             }
-            RenderedRow::Collapsed { count, summary } => {
-                let line = build_collapsed_row_line(*count, summary);
+            RenderedRow::Collapsed {
+                count,
+                summary,
+                in_flight,
+            } => {
+                let line = build_collapsed_row_line(*count, summary, *in_flight, spinner_glyph);
                 (vec![line], 1usize)
             }
         };
@@ -6572,7 +6603,7 @@ mod tests {
 
         // A collapsed run is never a single resolvable gate.
         let run = (
-            RenderedRow::Collapsed { count: 2, summary: "x".into() },
+            RenderedRow::Collapsed { count: 2, summary: "x".into(), in_flight: false },
             RowSource::Run { start: 0, len: 2 },
         );
         assert!(selectable_gate(&appr, Some(&run), &empty, &empty).is_none());
@@ -7088,7 +7119,13 @@ mod tests {
             spec_with_turn(Some("A"), "third"),
         ];
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        let boundaries = annotate_turns_and_in_flight(&mut rows, &open, true, &HashSet::new());
+        let boundaries = annotate_turns_and_in_flight(
+            &mut rows,
+            &[],
+            &open,
+            true,
+            &HashSet::new(),
+        );
         // Boundary only at the start of the turn (i=0).
         assert!(boundaries.contains_key(&0));
         assert!(!boundaries.contains_key(&1));
@@ -7121,7 +7158,7 @@ mod tests {
             spec_with_turn(None, "no turn"),
             spec_with_turn(Some("C"), "t3"),
         ];
-        annotate_turns_and_in_flight(&mut rows, &HashSet::new(), true, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &HashSet::new(), true, &HashSet::new());
         let indices: Vec<Option<u32>> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7154,7 +7191,7 @@ mod tests {
         ];
         let open: HashSet<String> = HashSet::new();
         let extra: HashSet<usize> = [1].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &open, true, &extra);
+        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &extra);
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7173,7 +7210,7 @@ mod tests {
             spec_with_turn(Some("B"), "late"),
         ];
         let open: HashSet<String> = HashSet::new();
-        annotate_turns_and_in_flight(&mut rows, &open, true, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &HashSet::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7193,7 +7230,7 @@ mod tests {
             spec_with_turn(Some("A"), "\u{1F4AD} thinking out loud"),
         ];
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &open, false, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &open, false, &HashSet::new());
         let shown: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7202,6 +7239,100 @@ mod tests {
             })
             .collect();
         assert_eq!(shown, vec![true, false]);
+    }
+
+    #[test]
+    fn collapsed_run_shows_spinner_when_it_contains_open_turn_event() {
+        // Routine turn-internal events are collapsed. When the turn is still
+        // open (turn.start seen but no turn.end yet), the collapsed row must
+        // show the spinner so the operator knows the session is working.
+        use autonoetic_types::principal::Principal;
+        use autonoetic_types::session_timeline::{SessionRole, TimelineRefs};
+
+        fn entry(et: &str, turn_id: Option<&str>) -> SessionTimelineEntry {
+            SessionTimelineEntry {
+                event_id: format!("ev-{et}"),
+                root_session_id: "r".into(),
+                source_session_id: "r".into(),
+                turn_id: turn_id.map(str::to_string),
+                principal: Principal::agent("planner.default"),
+                role: SessionRole::Planner,
+                event_type: et.into(),
+                altitude: Altitude::Detail,
+                occurred_at: "2026-06-01T00:00:00Z".into(),
+                payload: None,
+                refs: TimelineRefs::default(),
+            }
+        }
+
+        let visible = vec![
+            entry("turn.start", Some("A")),
+            entry("llm.round", Some("A")),
+            entry("tool.requested", Some("A")),
+        ];
+        let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
+        let open: HashSet<String> = ["A".into()].into_iter().collect();
+        annotate_turns_and_in_flight(&mut rows, &visible, &open, true, &HashSet::new());
+
+        assert_eq!(rows.len(), 1);
+        assert!(
+            matches!(
+                &rows[0].0,
+                RenderedRow::Collapsed { in_flight: true, .. }
+            ),
+            "collapsed run containing an open-turn event should be in_flight"
+        );
+    }
+
+    #[test]
+    fn collapsed_run_not_spinner_for_closed_turn() {
+        use autonoetic_types::principal::Principal;
+        use autonoetic_types::session_timeline::{SessionRole, TimelineRefs};
+
+        fn entry(et: &str, turn_id: Option<&str>) -> SessionTimelineEntry {
+            SessionTimelineEntry {
+                event_id: format!("ev-{et}"),
+                root_session_id: "r".into(),
+                source_session_id: "r".into(),
+                turn_id: turn_id.map(str::to_string),
+                principal: Principal::agent("planner.default"),
+                role: SessionRole::Planner,
+                event_type: et.into(),
+                altitude: Altitude::Detail,
+                occurred_at: "2026-06-01T00:00:00Z".into(),
+                payload: None,
+                refs: TimelineRefs::default(),
+            }
+        }
+
+        let visible = vec![
+            entry("turn.start", Some("A")),
+            entry("turn.end", Some("A")),
+        ];
+        let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
+        annotate_turns_and_in_flight(&mut rows, &visible, &HashSet::new(), true, &HashSet::new());
+
+        assert!(
+            matches!(
+                &rows[0].0,
+                RenderedRow::Collapsed { in_flight: false, .. }
+            ),
+            "collapsed run for a closed turn should not be in_flight"
+        );
+    }
+
+    #[test]
+    fn collapsed_run_line_uses_spinner_glyph_when_in_flight() {
+        let line = build_collapsed_row_line(3, "turn.start×3", true, "⠋");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("⠋ "), "in-flight collapsed row should start with spinner glyph: {text}");
+
+        let line = build_collapsed_row_line(3, "turn.start×3", false, "⠋");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.starts_with('·') || text.starts_with('⟨'),
+            "closed collapsed row should not start with spinner: {text}"
+        );
     }
 
     #[test]

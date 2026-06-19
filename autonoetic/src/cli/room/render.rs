@@ -1750,7 +1750,13 @@ pub fn render_line(entry: &SessionTimelineEntry) -> String {
 pub enum RenderedRow {
     /// A single event rendered as a structured spec.
     Line(RowSpec),
-    Collapsed { count: usize, summary: String },
+    /// A collapsed run of routine events. `in_flight` is set by the TUI when
+    /// any event inside the run belongs to an open turn.
+    Collapsed {
+        count: usize,
+        summary: String,
+        in_flight: bool,
+    },
 }
 
 /// Visual class for a timeline row — lets channels style agent narrative
@@ -2109,7 +2115,11 @@ fn flush_run(
         n => {
             let run: Vec<&SessionTimelineEntry> = entries[start..start + n].iter().collect();
             out.push((
-                RenderedRow::Collapsed { count: n, summary: collapsed_summary(&run) },
+                RenderedRow::Collapsed {
+                    count: n,
+                    summary: collapsed_summary(&run),
+                    in_flight: false,
+                },
                 RowSource::Run { start, len: n },
             ));
         }
@@ -2623,7 +2633,7 @@ pub fn row_text(row: &RenderedRow) -> std::borrow::Cow<'_, str> {
             spec.actor_label,
             spec.to_plain_text()
         )),
-        RenderedRow::Collapsed { count, summary } => std::borrow::Cow::Owned(format!(
+        RenderedRow::Collapsed { count, summary, .. } => std::borrow::Cow::Owned(format!(
             "{} ⟨{} {}⟩",
             altitude_glyph(Altitude::Detail),
             count,
@@ -2758,7 +2768,7 @@ mod tests {
         let rows = coalesce(&entries);
         assert_eq!(rows.len(), 3, "run + checkpoint + lone routine");
         match &rows[0] {
-            RenderedRow::Collapsed { count, summary } => {
+            RenderedRow::Collapsed { count, summary, .. } => {
                 assert_eq!(*count, 3);
                 assert!(summary.contains("turn.start×2"));
                 assert!(summary.contains("llm.round"));
@@ -2876,13 +2886,14 @@ mod tests {
         let rows = coalesce(&entries);
         // No row may be a Collapsed run containing an Attention/Error event.
         for r in &rows {
-            if let RenderedRow::Collapsed { summary, .. } = r {
-                // A collapsed run is allowed only for Detail/Routine events; assert
-                // it does not mention the high-importance types.
-                assert!(
-                    !summary.contains("user.ask.pending") && !summary.contains("llm.request_failed"),
-                    "high-importance event leaked into a collapsed run: {summary}"
-                );
+            match r {
+                RenderedRow::Collapsed { summary, .. } => {
+                    assert!(
+                        !summary.contains("user.ask.pending") && !summary.contains("llm.request_failed"),
+                        "high-importance event leaked into a collapsed run: {summary}"
+                    );
+                }
+                _ => {}
             }
         }
         // The Attention and Error rows must be present as individual lines.
