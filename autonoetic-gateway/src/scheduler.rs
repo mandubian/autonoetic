@@ -1927,7 +1927,35 @@ async fn process_pending_notifications(
     let port = execution.config().port;
     let timeout_secs = execution.config().signal_delivery_timeout_secs;
 
+    // Debounce: track sessions that already received a child-state
+    // notification in this pump cycle. When multiple children complete
+    // near-simultaneously (e.g. parallel fan-out without workflow_wait),
+    // each would otherwise trigger a separate planner wake. The first
+    // wake carries the full workflow status (injected at resume time by
+    // gateway_signal_turn_start_context), so subsequent child-state
+    // notifications for the same session are redundant. Coalesce them:
+    // mark as delivered without sending.
+    let mut child_notified_sessions: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for n in pending {
+        // Coalesce redundant child-state notifications.
+        if n.notification_type
+            == autonoetic_types::notification::NotificationType::ChildStateNotification
+            && child_notified_sessions.contains(&n.target_session_id)
+        {
+            tracing::info!(
+                notification_id = %n.notification_id,
+                target_session_id = %n.target_session_id,
+                "Coalescing redundant child-state notification (another child-state signal for this session was already delivered in this cycle)"
+            );
+            store.update_notification_status(
+                &n.notification_id,
+                autonoetic_types::notification::NotificationStatus::Delivered,
+            )?;
+            continue;
+        }
+
         // Map NotificationRecord payload to Signal.
         // Only current Signal payloads are accepted for deterministic delivery.
         let signal = match n.notification_type {
@@ -1984,6 +2012,15 @@ async fn process_pending_notifications(
                     &n.notification_id,
                     autonoetic_types::notification::NotificationStatus::Delivered,
                 )?;
+
+                // Track for coalescing: if this was a child-state
+                // notification, subsequent ones for the same session
+                // will be coalesced.
+                if n.notification_type
+                    == autonoetic_types::notification::NotificationType::ChildStateNotification
+                {
+                    child_notified_sessions.insert(n.target_session_id.clone());
+                }
             }
         } else {
             // Payload is not interpretable as a supported notification signal:

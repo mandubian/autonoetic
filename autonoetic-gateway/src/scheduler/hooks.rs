@@ -419,6 +419,7 @@ impl HookExecutor {
                         .and_then(|v| v.as_str())
                         .unwrap_or("workflow join satisfied")
                         .to_string(),
+                    child_summaries: Vec::new(),
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 }
             }

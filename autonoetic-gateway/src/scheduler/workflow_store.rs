@@ -1158,6 +1158,7 @@ pub fn update_task_run_status(
             wf.status,
             WorkflowRunStatus::EmergencyStopping | WorkflowRunStatus::EmergencyStopped
         );
+        let mut join_just_satisfied = false;
         // Bug fix: removed !wf.join_task_ids.is_empty() check - check_join_condition correctly
         // returns true for empty join_task_ids, and workflows with empty join_task_ids need to
         // transition to Resumable when tasks complete
@@ -1166,6 +1167,7 @@ pub fn update_task_run_status(
             && wf.status != WorkflowRunStatus::Resumable
         {
             if let Ok(true) = check_join_condition(config, store, workflow_id) {
+                join_just_satisfied = true;
                 let mut wf_mut = wf;
                 wf_mut.status = WorkflowRunStatus::Resumable;
                 wf_mut.updated_at = now_rfc3339();
@@ -1197,6 +1199,12 @@ pub fn update_task_run_status(
                     "Join condition satisfied — workflow marked Resumable"
                 );
 
+                // Gather child summaries for all terminal join tasks so the
+                // planner doesn't need separate workflow_state + artifact
+                // inspect rounds to see what each child produced.
+                let child_summaries =
+                    gather_join_child_summaries(config, store, workflow_id, &wf_mut.join_task_ids);
+
                 let hook_delivers_join_signal = hook_executor.is_some_and(|executor| {
                     executor.has_deliver_signal_hook(
                         autonoetic_types::hooks::HookEvent::WorkflowJoinSatisfied,
@@ -1211,6 +1219,7 @@ pub fn update_task_run_status(
                         &wf_mut.root_session_id,
                         workflow_id,
                         wf_mut.join_task_ids.clone(),
+                        child_summaries,
                     ) {
                         tracing::warn!(
                             target: "signal",
@@ -1231,31 +1240,37 @@ pub fn update_task_run_status(
             }
         }
 
-        if let Some(child_event_type) = child_state_event_type(status) {
-            let target_session_id = if task.parent_session_id.is_empty() {
-                root_session_id.as_str()
-            } else {
-                task.parent_session_id.as_str()
-            };
-            tracing::info!(
-                target: "workflow",
-                workflow_id = %workflow_id,
-                task_id = %task_id,
-                event_type = %child_event_type,
-                "Emitting child-state notification to parent session"
-            );
-            if let Err(e) = crate::scheduler::signal::send_child_state_notification(
-                store,
-                target_session_id,
-                child_state_notification,
-            ) {
-                tracing::warn!(
-                    target: "signal",
+        // Send per-child notification — but skip it when the join was just
+        // satisfied in this same update. The join-satisfied signal already
+        // carries all child summaries, so sending both is redundant and
+        // causes a double planner wake (two LLM round-trips instead of one).
+        if !join_just_satisfied {
+            if let Some(child_event_type) = child_state_event_type(status) {
+                let target_session_id = if task.parent_session_id.is_empty() {
+                    root_session_id.as_str()
+                } else {
+                    task.parent_session_id.as_str()
+                };
+                tracing::info!(
+                    target: "workflow",
                     workflow_id = %workflow_id,
                     task_id = %task_id,
-                    error = %e,
-                    "Failed to send child-state notification"
+                    event_type = %child_event_type,
+                    "Emitting child-state notification to parent session"
                 );
+                if let Err(e) = crate::scheduler::signal::send_child_state_notification(
+                    store,
+                    target_session_id,
+                    child_state_notification,
+                ) {
+                    tracing::warn!(
+                        target: "signal",
+                        workflow_id = %workflow_id,
+                        task_id = %task_id,
+                        error = %e,
+                        "Failed to send child-state notification"
+                    );
+                }
             }
         }
     }
@@ -1306,6 +1321,60 @@ pub(crate) fn schedule_task_stage_retry(
     )?;
 
     Ok(())
+}
+
+/// Gather child-state summaries for all terminal tasks in a join group.
+/// Used to enrich the WorkflowJoinSatisfied signal so the planner can see
+/// every child's result without separate `workflow_state` / artifact inspect
+/// rounds.
+fn gather_join_child_summaries(
+    config: &GatewayConfig,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    workflow_id: &str,
+    join_task_ids: &[String],
+) -> Vec<ChildStateNotification> {
+    // When join_task_ids is empty, the join checks ALL tasks in the
+    // workflow. Gather all terminal tasks in that case.
+    let all_tasks = list_task_runs_for_workflow(config, store, workflow_id);
+    let task_ids: Vec<String> = if join_task_ids.is_empty() {
+        match &all_tasks {
+            Ok(tasks) => tasks.iter().map(|t| t.task_id.clone()).collect(),
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        join_task_ids.to_vec()
+    };
+
+    let task_map: std::collections::HashMap<String, TaskRun> = match &all_tasks {
+        Ok(tasks) => tasks.iter().map(|t| (t.task_id.clone(), t.clone())).collect(),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut summaries = Vec::new();
+    for tid in &task_ids {
+        let Some(task) = task_map.get(tid) else {
+            continue;
+        };
+        if !matches!(
+            task.status,
+            TaskRunStatus::Succeeded
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled
+                | TaskRunStatus::Aborted
+        ) {
+            continue;
+        }
+        let failure_meta = task
+            .last_failure_class
+            .map(crate::runtime::failure_classification::metadata_for_failure_class);
+        summaries.push(build_child_state_notification(
+            task,
+            task.status,
+            task.result_summary.as_deref(),
+            failure_meta.as_ref(),
+        ));
+    }
+    summaries
 }
 
 fn child_state_event_type(status: TaskRunStatus) -> Option<&'static str> {
@@ -5126,31 +5195,39 @@ mod tests {
         assert_eq!(resolved.payload["child_status"], "failed");
         assert_eq!(resolved.payload["failure_class"], "policy_denied");
 
+        // When the join is satisfied (single task completes → join triggers),
+        // the child-state notification is coalesced into the
+        // WorkflowJoinSatisfied signal — no separate ChildStateNotification
+        // is queued. The join signal carries child_summaries instead.
         let notifications = store
             .list_notifications_for_session(
                 &wf.root_session_id,
                 autonoetic_types::notification::NotificationStatus::Pending,
             )
             .unwrap();
-        let child_signal = notifications
+        let join_signal = notifications
             .iter()
             .find(|notification| {
                 notification.notification_type
-                    == autonoetic_types::notification::NotificationType::ChildStateNotification
+                    == autonoetic_types::notification::NotificationType::WorkflowJoinSatisfied
             })
-            .expect("child-state notification should be queued");
+            .expect("workflow join satisfied notification should be queued");
         let signal: crate::scheduler::signal::Signal =
-            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+            serde_json::from_value(join_signal.payload.clone()).expect("signal should deserialize");
         match signal {
-            crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
-                assert_eq!(notification.task_id, "task-child-resolve");
-                assert_eq!(notification.child_status, "failed");
+            crate::scheduler::signal::Signal::WorkflowJoinSatisfied {
+                child_summaries, ..
+            } => {
+                // The coalesced child summary should carry the task details.
+                assert_eq!(child_summaries.len(), 1);
+                assert_eq!(child_summaries[0].task_id, "task-child-resolve");
+                assert_eq!(child_summaries[0].child_status, "failed");
                 assert_eq!(
-                    notification.failure_class,
+                    child_summaries[0].failure_class,
                     Some(autonoetic_types::tool_error::FailureClass::PolicyDenied)
                 );
             }
-            other => panic!("expected child-state notification, got {other:?}"),
+            other => panic!("expected WorkflowJoinSatisfied, got {other:?}"),
         }
     }
 }

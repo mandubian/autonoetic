@@ -2134,7 +2134,13 @@ impl GatewayExecutionService {
 
             let mut history = checkpoint.history.clone();
             let (turn_start_messages, resume_message) =
-                gateway_signal_turn_start_context(message, metadata);
+                gateway_signal_turn_start_context(
+                    message,
+                    metadata,
+                    Some(&self.config),
+                    self.gateway_store.as_deref(),
+                    &session_id,
+                );
             history.extend(turn_start_messages);
             history.push(crate::llm::Message::user(resume_message));
             let initial_msg = checkpoint.initial_user_message();
@@ -2944,7 +2950,13 @@ impl GatewayExecutionService {
                         .await?
                     } else {
                         let (turn_start_messages, initial_message) =
-                            gateway_signal_turn_start_context(&runtime.initial_user_message, metadata);
+                            gateway_signal_turn_start_context(
+                                &runtime.initial_user_message,
+                                metadata,
+                                Some(&self.config),
+                                self.gateway_store.as_deref(),
+                                session_id,
+                            );
                         let mut history = build_initial_history(
                             &runtime.agent_dir,
                             &runtime.instructions,
@@ -3005,7 +3017,13 @@ impl GatewayExecutionService {
                     }
                 } else {
                     let (turn_start_messages, initial_message) =
-                        gateway_signal_turn_start_context(&runtime.initial_user_message, metadata);
+                        gateway_signal_turn_start_context(
+                            &runtime.initial_user_message,
+                            metadata,
+                            Some(&self.config),
+                            self.gateway_store.as_deref(),
+                            session_id,
+                        );
                     let mut history = build_initial_history(
                         &runtime.agent_dir,
                         &runtime.instructions,
@@ -3927,6 +3945,9 @@ fn build_initial_history(
 fn gateway_signal_turn_start_context(
     user_message: &str,
     metadata: Option<&serde_json::Value>,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
 ) -> (Vec<Message>, String) {
     let is_signal_delivery = metadata
         .and_then(|value| value.get("signal_delivered"))
@@ -3936,33 +3957,74 @@ fn gateway_signal_turn_start_context(
         return (Vec::new(), user_message.to_string());
     }
 
+    // Try to inject the workflow summary so the planner doesn't need a
+    // separate `workflow_state` tool call on wake (saves one LLM round).
+    let workflow_summary = config
+        .and_then(|cfg| {
+            crate::scheduler::compact_workflow_summary(cfg, store, session_id)
+                .ok()
+                .flatten()
+        });
+
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(user_message) else {
         return (Vec::new(), user_message.to_string());
     };
-    if parsed.get("type").and_then(|value| value.as_str()) != Some("child_state_notification") {
-        return (Vec::new(), user_message.to_string());
+
+    // Build system messages from the signal payload.
+    let mut system_messages = Vec::new();
+
+    let signal_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    if signal_type == "child_state_notification" {
+        if let Some(notification_value) = parsed.get("notification") {
+            let pretty = serde_json::to_string_pretty(notification_value)
+                .unwrap_or_else(|_| notification_value.to_string());
+            system_messages.push(Message::system(format!(
+                "[gateway child state notification]\n{}",
+                pretty
+            )));
+        }
+    } else if signal_type == "workflow_join_satisfied" {
+        // Include the join payload as a system message so the planner sees
+        // which tasks completed and any child summaries embedded in the signal.
+        let pretty = serde_json::to_string_pretty(&parsed)
+            .unwrap_or_else(|_| parsed.to_string());
+        system_messages.push(Message::system(format!(
+            "[workflow join satisfied]\n{}",
+            pretty
+        )));
     }
 
-    let Some(notification_value) = parsed.get("notification") else {
-        return (Vec::new(), user_message.to_string());
-    };
-    let Ok(notification) =
-        serde_json::from_value::<autonoetic_types::workflow::ChildStateNotification>(
-            notification_value.clone(),
-        )
-    else {
-        return (Vec::new(), user_message.to_string());
+    // Append the workflow status summary (same injection used at hibernate
+    // time in lifecycle.rs) so the planner has the full picture without a
+    // `workflow_state` round-trip.
+    if let Some(ref summary) = workflow_summary {
+        if let Some(last) = system_messages.last_mut() {
+            last.content.push_str("\n\n[workflow status] ");
+            last.content.push_str(summary);
+        } else {
+            system_messages.push(Message::system(format!(
+                "[workflow status] {}",
+                summary
+            )));
+        }
+    }
+
+    let user_prompt = if system_messages.is_empty() {
+        user_message.to_string()
+    } else {
+        match signal_type {
+            "child_state_notification" => "Gateway child-state notification delivered. The workflow status above is current — you do not need to call workflow_state. Continue from the current workflow state and use the structured gateway child state above.".to_string(),
+            "workflow_join_satisfied" => "Workflow join satisfied. The workflow status above is current — you do not need to call workflow_state. Review the completed tasks and continue planning.".to_string(),
+            _ => user_message.to_string(),
+        }
     };
 
-    let pretty = serde_json::to_string_pretty(&notification)
-        .unwrap_or_else(|_| notification_value.to_string());
-    (
-        vec![Message::system(format!(
-            "[gateway child state notification]\n{}",
-            pretty
-        ))],
-        "Gateway child-state notification delivered. Continue from the current workflow state and use the structured gateway child state above.".to_string(),
-    )
+    if system_messages.is_empty() {
+        (Vec::new(), user_message.to_string())
+    } else {
+        (system_messages, user_prompt)
+    }
 }
 
 fn persist_session_context_turn(
@@ -4176,7 +4238,7 @@ mod tests {
         });
 
         let (turn_start_messages, user_message) =
-            gateway_signal_turn_start_context(&message, Some(&metadata));
+            gateway_signal_turn_start_context(&message, Some(&metadata), None, None, "test-session");
 
         assert_eq!(turn_start_messages.len(), 1);
         assert!(matches!(turn_start_messages[0].role, crate::llm::Role::System));
@@ -4186,7 +4248,7 @@ mod tests {
         assert!(turn_start_messages[0].content.contains("\"task_id\": \"task-1\""));
         assert_eq!(
             user_message,
-            "Gateway child-state notification delivered. Continue from the current workflow state and use the structured gateway child state above."
+            "Gateway child-state notification delivered. The workflow status above is current — you do not need to call workflow_state. Continue from the current workflow state and use the structured gateway child state above."
         );
     }
 
