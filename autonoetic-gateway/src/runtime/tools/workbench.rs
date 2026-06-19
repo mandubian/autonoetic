@@ -1060,6 +1060,9 @@ impl NativeTool for WorkbenchReconcileTool {
             &now,
         )?;
 
+        let propose_waivers = config.validation_waivers.enabled
+            && config.validation_waivers.auto_propose_after_reconcile;
+
         let provenance = serde_json::json!({
             "base_artifact_id": wb.base_artifact_id,
             "new_artifact_id": bundle.artifact_id,
@@ -1068,6 +1071,7 @@ impl NativeTool for WorkbenchReconcileTool {
             "operator_added": diffs.iter().filter(|d| d.change_type == FileChangeType::Added).map(|d| d.path.clone()).collect::<Vec<_>>(),
             "deleted": diffs.iter().filter(|d| d.change_type == FileChangeType::Deleted).map(|d| d.path.clone()).collect::<Vec<_>>(),
             "unchanged": diffs.iter().filter(|d| d.change_type == FileChangeType::Unchanged).count(),
+            "propose_waivers": propose_waivers,
         });
 
         let provenance_path = meta_dir.join("reconciliation.json");
@@ -1091,6 +1095,7 @@ impl NativeTool for WorkbenchReconcileTool {
             "provenance": provenance,
             "semantic_summary": semantic_summary,
             "reconciled_at": now,
+            "propose_waivers": propose_waivers,
             "message": args.message.unwrap_or_default(),
         }))?)
     }

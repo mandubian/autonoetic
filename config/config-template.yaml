@@ -97,6 +97,15 @@ response_validation:
   repair_enabled: true
   max_repair_attempts_ceiling: 2
 
+# ── Validation Waivers ────────────────────────────────────────────────
+# Optional operator workflow to skip advisory artifact validations
+# (unit tests, style review, etc.) with recorded audit provenance.
+# Disabled by default. When enabled, `/waive` is available in the Chat TUI
+# and the picklist can be auto-proposed after `workbench reconcile`.
+validation_waivers:
+  enabled: false
+  auto_propose_after_reconcile: false
+
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
 approval_timeout_secs: 3600

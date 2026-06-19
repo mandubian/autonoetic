@@ -1071,6 +1071,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub response_validation: ResponseValidationConfig,
 
+    /// Optional validation-waiver workflow (#333).
+    /// Disabled by default; enable to let operators skip advisory validations
+    /// through a TUI picklist or `/waive` command.
+    #[serde(default)]
+    pub validation_waivers: ValidationWaiversConfig,
+
     /// Sandbox (bubblewrap) isolation overrides.
     /// Env overrides are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
     #[serde(default)]
@@ -1822,6 +1828,37 @@ impl Default for ResponseValidationConfig {
 
 fn default_response_validation_max_repair_attempts_ceiling() -> u32 {
     2
+}
+
+/// Configuration for the optional validation-waiver workflow (#333).
+///
+/// Validation waivers let operators skip advisory artifact validations
+/// (unit tests, style review, etc.) while recording the skip as audit
+/// provenance. Mechanical safety gates and security reviews can never be
+/// waived. The feature is opt-in and defaults to disabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationWaiversConfig {
+    /// Enable the operator-facing validation waiver workflow.
+    /// When false (default), `/waive` is not offered in the TUI and the
+    /// backend waiver tools are not surfaced to operators, but existing
+    /// waivers remain queryable.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Automatically propose the waiver picklist after a successful
+    /// `workbench reconcile`. When false (default), the operator must
+    /// explicitly trigger `/waive`.
+    #[serde(default)]
+    pub auto_propose_after_reconcile: bool,
+}
+
+impl Default for ValidationWaiversConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_propose_after_reconcile: false,
+        }
+    }
 }
 
 /// Sandbox (bubblewrap) isolation overrides.
@@ -2739,6 +2776,7 @@ impl Default for GatewayConfig {
             capsule: CapsuleConfig::default(),
             reclamation: ReclamationConfig::default(),
             response_validation: ResponseValidationConfig::default(),
+            validation_waivers: ValidationWaiversConfig::default(),
             sandbox: SandboxConfig::default(),
             max_session_turns: default_max_session_turns(),
             loop_guard: LoopGuardConfig::default(),
@@ -3181,5 +3219,36 @@ mod tests {
         });
         let err = serde_json::from_value::<GatewayConfig>(j).unwrap_err();
         assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn validation_waivers_defaults_to_disabled() {
+        let config = GatewayConfig::default();
+        assert!(!config.validation_waivers.enabled);
+        assert!(!config.validation_waivers.auto_propose_after_reconcile);
+    }
+
+    #[test]
+    fn validation_waivers_config_parses_when_omitted() {
+        let j = serde_json::json!({
+            "agents_dir": "/tmp/autonoetic-agents"
+        });
+        let parsed: GatewayConfig = serde_json::from_value(j).expect("parse json");
+        assert!(!parsed.validation_waivers.enabled);
+        assert!(!parsed.validation_waivers.auto_propose_after_reconcile);
+    }
+
+    #[test]
+    fn validation_waivers_config_parses_when_enabled() {
+        let j = serde_json::json!({
+            "agents_dir": "/tmp/autonoetic-agents",
+            "validation_waivers": {
+                "enabled": true,
+                "auto_propose_after_reconcile": true
+            }
+        });
+        let parsed: GatewayConfig = serde_json::from_value(j).expect("parse json");
+        assert!(parsed.validation_waivers.enabled);
+        assert!(parsed.validation_waivers.auto_propose_after_reconcile);
     }
 }
