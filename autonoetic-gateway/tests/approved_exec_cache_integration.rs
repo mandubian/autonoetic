@@ -299,16 +299,16 @@ fn test_normalize_targets_dedup() {
 
 #[test]
 fn test_compute_fingerprint_deterministic() {
-    let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
-    let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
+    let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None, &[]);
+    let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None, &[]);
     assert_eq!(fp1, fp2);
     assert!(fp1.starts_with("sha256:"));
 }
 
 #[test]
 fn test_compute_fingerprint_different() {
-    let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None);
-    let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None);
+    let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None, &[]);
+    let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None, &[]);
     assert_ne!(fp1, fp2);
 }
 
@@ -324,6 +324,7 @@ fn test_cache_full_cycle() {
         &["api.example.com".to_string()],
         "import requests\nrequests.get('https://api.example.com')",
         None,
+        &[],
     );
     assert!(cache.find(&fingerprint).is_none());
 
@@ -350,6 +351,7 @@ fn test_cache_full_cycle() {
         &["api.example.com".to_string()],
         "import requests\nrequests.post('https://api.example.com')", // POST instead of GET
         None,
+        &[],
     );
     assert!(cache.find(&different_fingerprint).is_none());
 }
@@ -371,7 +373,7 @@ fn test_cache_not_used_for_unresolved_targets() {
     // Unresolved means no concrete targets to match against
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache should create");
     let targets = normalize_targets(&patterns);
-    let _fingerprint = compute_fingerprint("test.agent", &targets, "code", None);
+    let _fingerprint = compute_fingerprint("test.agent", &targets, "code", None, &[]);
 
     // In the real flow, this would NOT be recorded because coverage is Unresolved
     assert_eq!(cache.len(), 0);
@@ -404,7 +406,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
         "https://api.example.com/data",
     )];
     let targets = normalize_targets(&patterns);
-    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None);
+    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None, &manifest.capabilities);
 
     let cache = ApprovedExecCache::new(&gateway_dir).expect("cache should create");
     let now = chrono::Utc::now().to_rfc3339();
@@ -589,7 +591,7 @@ requests.get("https://api.cache-test.dev")"#;
         "import + URL should classify as Concrete"
     );
 
-    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None);
+    let fingerprint = compute_fingerprint("test.agent", &targets, code_content, None, &manifest.capabilities);
 
     // Pre-populate cache
     let cache = ApprovedExecCache::new(&gateway_dir).expect("cache should create");
