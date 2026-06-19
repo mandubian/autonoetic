@@ -495,12 +495,38 @@ impl NativeTool for PromotionQueryTool {
 
         let store = PromotionStore::new(gw_dir)?;
 
+        let waived_validations: Vec<serde_json::Value> =
+            if let Some(ref gs) = _gateway_store {
+                match gs.list_waivers_for_artifact(&artifact_id) {
+                    Ok(waivers) => waivers
+                        .into_iter()
+                        .map(|w| {
+                            serde_json::json!({
+                                "waiver_id": w.waiver_id,
+                                "validation_id": w.validation_id,
+                                "validation_class": w.validation_class.as_str(),
+                                "waived_by": w.waived_by,
+                                "reason": w.reason,
+                                "created_at": w.created_at,
+                            })
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(target: "promotion", artifact_id = %artifact_id, error = %e, "failed to load waivers");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
         match store.get_promotion(&artifact_id) {
             Some(record) => {
                 let response = serde_json::json!({
                     "artifact_canonical_digest": artifact_canonical_digest,
                     "artifact_ref": user_ref,
                     "content_digest": record.content_digest,
+                    "waived_validations": waived_validations,
                     "evaluator_pass": record.evaluator_pass,
                     "auditor_pass": record.auditor_pass,
                     "evaluator_id": record.evaluator_id,

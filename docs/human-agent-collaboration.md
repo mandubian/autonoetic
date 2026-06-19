@@ -8,7 +8,7 @@ The collaboration system lets operators and agents co-edit artifacts through a s
 autonoetic run -c
 ```
 
-The `--collaborative` (or `-c`) flag selects `planner.collaborative`, which has the `PlanFrameAccess` capability required for all collaboration tools. The TUI will automatically show workbench status and enable `/wb` and `/return` commands when a workbench is active.
+The `--collaborative` (or `-c`) flag selects `planner.collaborative`, which has the `PlanFrameAccess` capability required for all collaboration tools. The TUI will automatically show workbench status and enable `/wb`, `/return`, and (when configured) `/waive` commands when a workbench is active.
 
 Without this flag, `autonoetic run` uses `planner.default` which does not have collaboration tools.
 
@@ -57,6 +57,8 @@ A deterministic classification of every changed file produced during reconciliat
 ### Validation Waiver
 
 A durable, auditable record that an operator chose to skip a specific validation check. Mechanical safety gates and security reviews **cannot** be waived. Waivers are visible in promotion records and traces.
+
+The operator-facing waiver workflow is **opt-in**. Set `validation_waivers.enabled: true` in the gateway config to enable it. When enabled, the Chat TUI provides `/waive` to trigger the workflow and `/waive <validation_id> [reason...]` to ask the orchestrator to waive a specific advisory validation. Set `validation_waivers.auto_propose_after_reconcile: true` to have `workbench reconcile` automatically set `propose_waivers: true` in `reconciliation.json`, signaling clients that they may offer a waiver picklist.
 
 ## Lifecycle
 
@@ -280,6 +282,21 @@ to the planner if needed.
 | `/wb diff` | Show diff of active workbench against base artifact |
 | `/wb reconcile` | Reconcile active workbench edits into new artifact |
 | `/wb discard` | Discard active workbench without reconciling |
+
+### Validation waivers (`/waive`)
+
+```
+/waive [validation_id] [reason...]
+```
+
+Available when `validation_waivers.enabled: true`.
+
+| Command | Description |
+|---------|-------------|
+| `/waive` | Show the active workbench's validation policy and existing waivers. |
+| `/waive <validation_id> [reason...]` | Ask the orchestrator to waive a specific advisory validation. |
+
+`mechanical_safety` and `security_review` validations cannot be waived. Waivers are recorded with a reason and surfaced in `promotion.query`.
 
 ### Return to agent (`/return`)
 

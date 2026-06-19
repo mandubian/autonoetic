@@ -287,6 +287,9 @@ enum SlashCommand {
     /// selected orchestrator (default: planner.default). Refuses to proceed
     /// when the workbench has unsaved edits unless `--force` is supplied.
     ReturnToAgent { force: bool, message: Option<String> },
+    /// `/waive [validation_id] [reason...]` — show validation waiver options
+    /// or ask the orchestrator to waive a specific advisory validation.
+    Waive { validation_id: Option<String>, reason: Option<String> },
     /// `/plan` lists pending plans; `/plan approve [plan_id]` approves one.
     PlanApprove(Option<String>),
     /// `/model` shows resolved inference; `/model <preset>` overrides; `/model clear` resets.
@@ -1134,6 +1137,18 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
             };
             Ok(SlashCommand::ReturnToAgent { force, message })
         }
+        "/waive" => {
+            let validation_id = parts.next().map(|s| s.to_string());
+            let reason = {
+                let rest: Vec<String> = parts.map(|s| s.to_string()).collect();
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            };
+            Ok(SlashCommand::Waive { validation_id, reason })
+        }
         "/plan" => {
             let sub = parts.next().map(|s| s.to_lowercase());
             match sub.as_deref() {
@@ -1179,6 +1194,7 @@ fn format_help_card() -> String {
         "  /plan                  List plans awaiting operator approval",
         "  /plan approve [id]     Approve a plan (default: latest pending)",
         "  /wb [status|diff|reconcile|discard]  Workbench actions",
+        "  /waive [validation_id] [reason]  Trigger validation waiver workflow (requires validation_waivers.enabled)",
         "  /return [--force] [note]   Hand the active workbench back to the orchestrator (planner.default).",
         "                            Refuses if there are unsaved edits; use --force to override (edits are dropped).",
         "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
@@ -2119,7 +2135,86 @@ fn handle_slash_command_submission(
             app.add_message(MessageRole::System, message);
             true
         }
+        SlashCommand::Waive { validation_id, reason } => {
+            if !config.validation_waivers.enabled {
+                app.add_message(
+                    MessageRole::System,
+                    "Validation waivers are disabled in this gateway config. \
+                     Set `validation_waivers.enabled: true` to use `/waive`."
+                        .to_string(),
+                );
+                return true;
+            }
+            let card = match validation_id {
+                Some(id) => {
+                    let reason_text = reason.unwrap_or_else(|| "operator waived via /waive".to_string());
+                    match &app.active_workbench {
+                        Some(wb) => format!(
+                            "Requesting waiver for validation `{}` on artifact `{}`.\n\
+                             Reason: {}\n\nThe orchestrator will call `validation.waive` \
+                             with artifact_id=`{}`, validation_id=`{}`, validation_class=`correctness_check`.",
+                            id, wb.base_artifact_id, reason_text, wb.base_artifact_id, id
+                        ),
+                        None => format!(
+                            "Requesting waiver for validation `{}`.\n\
+                             Reason: {}\n\nNo active workbench was detected; please confirm the artifact_id with the orchestrator.",
+                            id, reason_text
+                        ),
+                    }
+                }
+                None => format_waiver_status_card(gateway_store, app),
+            };
+            app.add_message(MessageRole::System, card);
+            // Return true so the original `/waive ...` text is sent to the orchestrator
+            // as a chat message; the orchestrator can then call `validation.waive`.
+            true
+        }
     }
+}
+
+fn format_waiver_status_card(
+    gateway_store: Option<&GatewayStore>,
+    app: &App,
+) -> String {
+    let mut lines = vec![
+        "Validation waiver trigger — available validations:".to_string(),
+        String::new(),
+    ];
+
+    if let Some(wb) = &app.active_workbench {
+        lines.push(format!("Active workbench: {}", wb.workbench_id));
+        lines.push(format!("Base artifact: {}", wb.base_artifact_id));
+        if let Some(store) = gateway_store {
+            match store.list_waivers_for_artifact(&wb.base_artifact_id) {
+                Ok(waivers) if !waivers.is_empty() => {
+                    lines.push(String::new());
+                    lines.push("Existing waivers:".to_string());
+                    for w in waivers {
+                        lines.push(format!(
+                            "  - {} ({}) — {}",
+                            w.validation_id,
+                            w.validation_class.as_str(),
+                            w.reason
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        lines.push("No active workbench. Open or create a workbench first.".to_string());
+    }
+
+    lines.push(String::new());
+    lines.push("Usage:".to_string());
+    lines.push("  /waive <validation_id> [reason...]".to_string());
+    lines.push(String::new());
+    lines.push("Example:".to_string());
+    lines.push("  /waive unit_tests Small doc-only change, no executable code touched.".to_string());
+    lines.push(String::new());
+    lines.push("Only advisory validations can be waived; mechanical_safety and security_review are enforced.".to_string());
+
+    lines.join("\n")
 }
 
 fn format_why_explanation(
@@ -6233,6 +6328,9 @@ async fn handle_chat_test_mode(
                  Ok(SlashCommand::ReturnToAgent { .. }) => {
                      println!("/return is not supported in test mode.");
                  }
+                 Ok(SlashCommand::Waive { .. }) => {
+                     println!("/waive is not supported in test mode.");
+                 }
                  Ok(SlashCommand::PlanApprove(_)) => {
                      println!("/plan is not supported in test mode.");
                  }
@@ -9619,6 +9717,34 @@ mod tests {
             SlashCommand::ReturnToAgent {
                 force: true,
                 message: Some("ship it".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_slash_command_waive() {
+        // Bare /waive shows the waiver status card.
+        assert_eq!(
+            parse_slash_command("/waive").unwrap(),
+            SlashCommand::Waive {
+                validation_id: None,
+                reason: None,
+            }
+        );
+        // /waive with validation_id but no reason.
+        assert_eq!(
+            parse_slash_command("/waive unit_tests").unwrap(),
+            SlashCommand::Waive {
+                validation_id: Some("unit_tests".to_string()),
+                reason: None,
+            }
+        );
+        // /waive with validation_id and multi-token reason.
+        assert_eq!(
+            parse_slash_command("/waive unit_tests doc only change").unwrap(),
+            SlashCommand::Waive {
+                validation_id: Some("unit_tests".to_string()),
+                reason: Some("doc only change".to_string()),
             }
         );
     }

@@ -248,6 +248,29 @@ See `docs/response-validation-gate.md` for implementation details and `docs/iter
 
 ---
 
+## Validation Waivers
+
+Optional operator workflow for skipping advisory artifact validations (unit tests, style review, etc.) with recorded audit provenance. Mechanical safety gates (`mechanical_safety`) and security reviews (`security_review`) cannot be waived.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `validation_waivers.enabled` | bool | `false` | Enable the operator-facing waiver workflow. When `false`, `/waive` is not offered in the Chat TUI, but existing waivers remain queryable. |
+| `validation_waivers.auto_propose_after_reconcile` | bool | `false` | When `enabled` is also `true`, automatically set `propose_waivers: true` in `reconciliation.json` after a successful `workbench reconcile`. Clients can use this flag to offer the waiver picklist. |
+
+Example:
+
+```yaml
+validation_waivers:
+  enabled: true
+  auto_propose_after_reconcile: false
+```
+
+Use `/waive` in the Chat TUI to trigger the workflow, or `/waive <validation_id> [reason...]` to ask the orchestrator to waive a specific advisory validation. Waivers are recorded in the `validation_waivers` table and surfaced in `promotion.query` responses.
+
+See `docs/human-agent-collaboration.md` for the broader collaboration workflow.
+
+---
+
 ## Protected Agents
 
 Controls the protected-agent promotion gate (issue #21). Agents listed here
