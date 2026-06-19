@@ -2378,6 +2378,23 @@ impl JsonRpcRouter {
                             "Failed to mirror source timeline into fork"
                         ),
                     }
+
+                    // Record fork lineage so artifact refs created in the parent
+                    // resolve from the forked session. Without this, the fork
+                    // can't see its parent's `ar.*` refs because it has a
+                    // different root session id.
+                    if let Err(e) = store.record_fork_lineage(
+                        &fork.new_session_id,
+                        &params.source_session_id,
+                    ) {
+                        tracing::warn!(
+                            target: "session.fork",
+                            new = %fork.new_session_id,
+                            source = %params.source_session_id,
+                            error = %e,
+                            "Failed to record fork lineage"
+                        );
+                    }
                 }
 
                 // Determine target agent
@@ -2385,30 +2402,45 @@ impl JsonRpcRouter {
                     .target_agent_id
                     .unwrap_or_else(|| params.source_session_id.clone());
 
-                // Log fork in causal chain (best effort, don't fail fork on logging error)
-                let causal_logger_result =
-                    crate::execution::init_gateway_causal_logger(&self.config);
-                if let Ok(causal_logger) = causal_logger_result {
-                    let branch_message_sha256 = params.branch_message.as_ref().map(|m| {
-                        use sha2::{Digest, Sha256};
-                        let mut hasher = Sha256::new();
-                        hasher.update(m.as_bytes());
-                        format!("{:x}", hasher.finalize())
+                // Log fork as a causal event directly in gateway.db.
+                // (`log_gateway_causal_event` is a no-op — this is the real write.)
+                let branch_message_sha256 = params.branch_message.as_ref().map(|m| {
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(m.as_bytes());
+                    format!("{:x}", hasher.finalize())
+                });
+                if let Some(store) = self.execution.gateway_store() {
+                    let payload = serde_json::json!({
+                        "source_session_id": params.source_session_id,
+                        "fork_turn": fork.fork_turn,
+                        "history_handle": fork.history_handle,
+                        "branch_message_sha256": branch_message_sha256,
                     });
-                    let _ = crate::execution::log_gateway_causal_event(
-                        &causal_logger,
-                        &target_agent_id,
-                        &fork.new_session_id,
-                        1,
-                        "session.forked",
-                        autonoetic_types::causal_chain::EntryStatus::Success,
-                        Some(serde_json::json!({
-                            "source_session_id": params.source_session_id,
-                            "fork_turn": fork.fork_turn,
-                            "history_handle": fork.history_handle,
-                            "branch_message_sha256": branch_message_sha256,
-                        })),
-                    );
+                    let event = autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        agent_id: target_agent_id.clone(),
+                        session_id: fork.new_session_id.clone(),
+                        turn_id: Some("turn-000001".to_string()),
+                        event_seq: 1,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "session".to_string(),
+                        action: "session.forked".to_string(),
+                        status: "success".to_string(),
+                        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                        target: None,
+                        payload: Some(payload.to_string()),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: None,
+                    };
+                    if let Err(e) = store.create_causal_event(&event) {
+                        tracing::warn!(
+                            target: "session.fork",
+                            error = %e,
+                            "Failed to write session.forked causal event"
+                        );
+                    }
                 }
 
                 JsonRpcResponse::success(

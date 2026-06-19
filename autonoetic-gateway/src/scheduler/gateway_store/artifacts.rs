@@ -2,8 +2,100 @@ use super::GatewayStore;
 use anyhow::Result;
 use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 
 impl GatewayStore {
+    // --- Fork lineage ---
+
+    /// Record that `forked_session_id` was forked from `source_session_id`.
+    /// Enables artifact-ref resolution across fork boundaries: a fork inherits
+    /// its parent's artifact refs even though it has a different root session id.
+    pub fn record_fork_lineage(
+        &self,
+        forked_session_id: &str,
+        source_session_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO session_fork_lineage
+                (forked_session_id, source_session_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![
+                forked_session_id,
+                source_session_id,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Look up the immediate source session for a forked session.
+    /// Returns `None` if the session was not forked.
+    pub fn get_fork_source(&self, forked_session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let source = conn
+            .query_row(
+                "SELECT source_session_id FROM session_fork_lineage
+                 WHERE forked_session_id = ?1",
+                params![forked_session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(source)
+    }
+
+    /// Backfill `session_fork_lineage` from existing `session.forked` causal
+    /// events. Used by migration v54 to repair forks created before the
+    /// lineage table existed. Returns the number of rows inserted.
+    pub fn backfill_fork_lineage_from_causal_events(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO session_fork_lineage (forked_session_id, source_session_id, created_at)
+             SELECT
+                 ce.session_id,
+                 json_extract(ce.payload, '$.source_session_id'),
+                 ce.timestamp
+             FROM causal_events ce
+             WHERE ce.action = 'session.forked'
+               AND ce.session_id IS NOT NULL
+               AND json_extract(ce.payload, '$.source_session_id') IS NOT NULL",
+            [],
+        )?;
+        Ok(n)
+    }
+
+    /// Walk the fork chain starting from `session_id`'s root, yielding each
+    /// ancestor source session's root. Stops at cycles or depth 16.
+    fn fork_ancestor_roots(&self, conn: &Connection, session_id: &str) -> Vec<String> {
+        let mut ancestors = Vec::new();
+        let mut visited = HashSet::new();
+        // Start from the ROOT of the session — fork lineage is recorded under
+        // the fork's root id, so a child ("fork-abc/T5") must look up its
+        // root ("fork-abc") to find the lineage entry.
+        let mut cursor = crate::runtime::content_store::root_session_id(session_id).to_string();
+        for _ in 0..16 {
+            let Ok(source) = conn
+                .query_row(
+                    "SELECT source_session_id FROM session_fork_lineage
+                     WHERE forked_session_id = ?1",
+                    params![&cursor],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+            else {
+                break;
+            };
+            let Some(source) = source else { break };
+            let source_root = crate::runtime::content_store::root_session_id(&source).to_string();
+            if !visited.insert(source_root.clone()) {
+                break; // cycle guard
+            }
+            ancestors.push(source_root);
+            cursor = source;
+        }
+        ancestors
+    }
+
     // --- Artifact refs ---
 
     pub fn create_artifact_ref(&self, record: &ArtifactRefRecord) -> Result<()> {
@@ -72,7 +164,8 @@ impl GatewayStore {
 
     /// Resolves an artifact ref by ref_id across all scopes accessible from the given session.
     ///
-    /// Lookup priority: global → workflow (if any for this root session) → session.
+    /// Lookup priority: global → workflow (if any for this root session) → session
+    /// → root session → fork ancestor roots (parent, grandparent, …).
     /// Pass the current session_id; root session and workflow lookup are derived automatically.
     pub fn resolve_artifact_ref_any_scope(
         &self,
@@ -133,12 +226,52 @@ impl GatewayStore {
             }
         }
 
+        // 5. Walk fork ancestor roots — a forked session inherits its parent's
+        //    artifact refs. For each ancestor, check both its workflow scope
+        //    (if linked to one) and its session scope, from nearest to furthest.
+        for ancestor_root in self.fork_ancestor_roots(&conn, session_id) {
+            if ancestor_root == root_sid {
+                continue; // already checked in steps 2 and 4
+            }
+
+            // 5a. Workflow scope for this ancestor's root session.
+            let ancestor_wf: Option<String> = conn
+                .query_row(
+                    "SELECT workflow_id FROM workflow_index WHERE root_session_id = ?1",
+                    params![&ancestor_root],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            if let Some(wf_id) = ancestor_wf {
+                if let Some(r) = Self::resolve_artifact_ref_with_conn(
+                    &conn,
+                    ArtifactRefScopeType::Workflow,
+                    &wf_id,
+                    ref_id,
+                )? {
+                    return Ok(Some(r));
+                }
+            }
+
+            // 5b. Session scope for this ancestor's root.
+            if let Some(r) = Self::resolve_artifact_ref_with_conn(
+                &conn,
+                ArtifactRefScopeType::Session,
+                &ancestor_root,
+                ref_id,
+            )? {
+                return Ok(Some(r));
+            }
+        }
+
         Ok(None)
     }
 
     /// Find an active short ref (`ar.*`) for a canonical artifact ID (`art_*`)
     /// that is resolvable from the given session. Searches scopes in priority
-    /// order: Global → Workflow → Session → Root.
+    /// order: Global → Workflow → Session → Root → Fork ancestor roots.
     ///
     /// Returns `None` if no active ref exists, or if all existing refs are
     /// expired, revoked, or scoped outside the caller's reach.
@@ -188,17 +321,51 @@ impl GatewayStore {
             )
             .optional()?;
 
+        // Build a map of fork ancestor root → rank (4, 5, 6, … nearest first).
+        let fork_ancestors = self.fork_ancestor_roots(&conn, session_id);
+
+        // Also resolve each ancestor's workflow so workflow-scoped refs resolve
+        // across fork boundaries (artifact refs are often workflow-scoped).
+        let ancestor_wfs: Vec<(String, u8)> = fork_ancestors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ancestor_root)| {
+                let wf: Option<String> = conn
+                    .query_row(
+                        "SELECT workflow_id FROM workflow_index WHERE root_session_id = ?1",
+                        params![ancestor_root],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                wf.map(|w| (w, 4 + i as u8))
+            })
+            .collect();
+
+        let fork_rank = |scope_id: &str| -> Option<u8> {
+            fork_ancestors
+                .iter()
+                .position(|a| a == scope_id)
+                .map(|i| 4 + i as u8)
+        };
+
         let rank = |scope_type: &str, scope_id: &str| -> u8 {
             if scope_type == "global" { return 0; }
             if scope_type == "workflow" {
                 if let Some(ref wf) = wf_candidate {
                     if scope_id == wf.as_str() { return 1; }
                 }
+                // Check ancestor workflows.
+                if let Some((_, r)) = ancestor_wfs.iter().find(|(w, _)| w == scope_id) {
+                    return *r;
+                }
                 return 255;
             }
             if scope_type == "session" {
                 if scope_id == session_id { return 2; }
                 if scope_id == root_sid { return 3; }
+                if let Some(r) = fork_rank(scope_id) { return r; }
                 return 255;
             }
             255

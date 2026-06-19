@@ -82,6 +82,27 @@ pub(crate) fn tool_result_counts_as_progress(result: &str) -> bool {
     false
 }
 
+/// Returns `true` when the tool result is a stagnant no-op poll — a successful
+/// call that carries no new information and therefore should NOT reset the
+/// loop-guard's no-progress counter.
+///
+/// Currently covers:
+/// - `workflow_wait` with `waited_secs == 0` and `join_satisfied == false`
+///   (probe returned "still running" — the agent already knew this)
+pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
+    if tool_name != "workflow_wait" {
+        return false;
+    }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+        let waited = parsed.get("waited_secs").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+        let satisfied = parsed.get("join_satisfied").and_then(|v| v.as_bool()).unwrap_or(false);
+        let failed = parsed.get("any_failed").and_then(|v| v.as_bool()).unwrap_or(false);
+        // A 0-second wait that didn't satisfy and didn't fail is a no-op probe.
+        return waited == 0 && !satisfied && !failed;
+    }
+    false
+}
+
 pub(crate) fn load_manifest_loop_guard_declaration(agent_dir: &Path) -> Option<LoopGuardDeclaration> {
     let skill_path = agent_dir.join("SKILL.md");
     let skill = std::fs::read_to_string(skill_path).ok()?;

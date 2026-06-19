@@ -61,6 +61,8 @@ pub enum LoopGuardTripReason {
         repeats: u32,
         floor: u32,
     },
+    /// Trip condition #6 — consecutive LLM endpoint failures.
+    LlmFailureBudget { failures: u32 },
 }
 
 impl LoopGuardTripReason {
@@ -72,6 +74,7 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::RotatingPollingPattern { .. } => "rotating_polling_pattern",
             LoopGuardTripReason::ChildFailureBudget { .. } => "child_failure_budget",
             LoopGuardTripReason::RedundantRosterPolling { .. } => "redundant_roster_polling",
+            LoopGuardTripReason::LlmFailureBudget { .. } => "llm_failure_budget",
         }
     }
 
@@ -92,6 +95,7 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::RotatingPollingPattern { .. } => "P-7.19",
             LoopGuardTripReason::ChildFailureBudget { .. } => "P-7.20",
             LoopGuardTripReason::RedundantRosterPolling { .. } => "P-7.19",
+            LoopGuardTripReason::LlmFailureBudget { .. } => "P-7.5",
         }
     }
 }
@@ -108,6 +112,12 @@ pub struct LoopGuard {
     /// Trip condition #5 — consecutive identical read-only roster reads that
     /// trigger the fast-path `RedundantRosterPolling` trip. 0 disables it.
     roster_repeat_floor: u32,
+    /// Trip condition #6 — consecutive LLM transport/endpoint failures. Unlike
+    /// tool failures, these are not per-tool: they count any failed LLM API
+    /// call (HTTP error, timeout, connection refused). When this reaches
+    /// `max_llm_failures`, the guard trips to prevent expensive retry spirals.
+    llm_failure_count: u32,
+    max_llm_failures: u32,
     /// From gateway config — max loop resets attributable to each tool name.
     progress_budget_tools: HashMap<String, u32>,
     /// How many times each budgeted tool has reset `current_loops` this session.
@@ -137,6 +147,8 @@ impl LoopGuard {
             max_window_size: default_rotation_window_size(),
             max_distinct_floor: default_rotation_distinct_floor(),
             roster_repeat_floor: default_roster_repeat_floor(),
+            llm_failure_count: 0,
+            max_llm_failures: 3,
             progress_budget_tools: HashMap::new(),
             progress_budget_used: HashMap::new(),
             current_loops: 0,
@@ -158,6 +170,8 @@ impl LoopGuard {
             max_window_size: cfg.rotation_window_size,
             max_distinct_floor: cfg.rotation_distinct_floor,
             roster_repeat_floor: cfg.roster_repeat_floor,
+            llm_failure_count: 0,
+            max_llm_failures: cfg.max_llm_failures,
             progress_budget_tools: cfg.progress_budget_tools.clone(),
             progress_budget_used: HashMap::new(),
             current_loops: 0,
@@ -201,6 +215,14 @@ impl LoopGuard {
         if self.child_failure_count >= self.max_child_failures {
             let reason = LoopGuardTripReason::ChildFailureBudget {
                 failures: self.child_failure_count,
+            };
+            self.trip_reason = Some(reason.clone());
+            return Err(format_trip_error(&reason));
+        }
+
+        if self.llm_failure_count >= self.max_llm_failures {
+            let reason = LoopGuardTripReason::LlmFailureBudget {
+                failures: self.llm_failure_count,
             };
             self.trip_reason = Some(reason.clone());
             return Err(format_trip_error(&reason));
@@ -258,11 +280,21 @@ impl LoopGuard {
     }
 
     /// Track a child agent task failure (from workflow.wait returning any_failed: true).
-    /// Counts against a separate budget from tool failures — a planner can only waste
-    /// so many delegation rounds before tripping. Unlike tool failures, this does NOT
-    /// reset on progress — once a child fails, that's a permanent budget hit.
     pub fn register_child_failure(&mut self) {
         self.child_failure_count += 1;
+    }
+
+    /// Track an LLM transport/endpoint failure. Counts consecutively — a
+    /// successful LLM call resets the counter to 0. Trips the guard at
+    /// `max_llm_failures` to prevent expensive retry spirals against a
+    /// flapping endpoint.
+    pub fn register_llm_failure(&mut self) {
+        self.llm_failure_count += 1;
+    }
+
+    /// Reset the LLM failure counter after a successful completion.
+    pub fn register_llm_success(&mut self) {
+        self.llm_failure_count = 0;
     }
 
     /// Track a successful tool call. Only counts as "progress" (resets current_loops)
@@ -389,6 +421,7 @@ impl LoopGuard {
             max_window_size: self.max_window_size,
             max_distinct_floor: self.max_distinct_floor,
             roster_repeat_floor: self.roster_repeat_floor,
+            max_llm_failures: self.max_llm_failures,
             progress_budget_tools: self.progress_budget_tools.clone(),
             progress_budget_used: self.progress_budget_used.clone(),
             current_loops: self.current_loops,
@@ -396,6 +429,7 @@ impl LoopGuard {
             last_progress_fingerprint: self.last_progress_fingerprint.clone(),
             consecutive_progress_count: self.consecutive_progress_count,
             child_failure_count: self.child_failure_count,
+            llm_failure_count: self.llm_failure_count,
             recent_fingerprints: self.recent_fingerprints.iter().copied().collect(),
         }
     }
@@ -409,6 +443,7 @@ impl LoopGuard {
             max_window_size: state.max_window_size,
             max_distinct_floor: state.max_distinct_floor,
             roster_repeat_floor: state.roster_repeat_floor,
+            max_llm_failures: state.max_llm_failures,
             progress_budget_tools: state.progress_budget_tools,
             progress_budget_used: state.progress_budget_used,
             current_loops: state.current_loops,
@@ -416,6 +451,7 @@ impl LoopGuard {
             last_progress_fingerprint: state.last_progress_fingerprint,
             consecutive_progress_count: state.consecutive_progress_count,
             child_failure_count: state.child_failure_count,
+            llm_failure_count: state.llm_failure_count,
             recent_fingerprints: state.recent_fingerprints.into_iter().collect(),
             trip_reason: None,
         }
@@ -470,6 +506,11 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
             repeats,
             floor
         ),
+        LoopGuardTripReason::LlmFailureBudget { failures } => anyhow::anyhow!(
+            "LoopGuard tripped: {} consecutive LLM endpoint failures. \
+             The model API is unavailable — suspending to prevent retry spirals.",
+            failures
+        ),
     }
 }
 
@@ -482,6 +523,10 @@ fn default_rotation_distinct_floor() -> usize {
 }
 
 fn default_roster_repeat_floor() -> u32 {
+    3
+}
+
+fn default_max_llm_failures() -> u32 {
     3
 }
 
@@ -538,6 +583,10 @@ pub struct LoopGuardState {
     /// this field default to the current build's floor.
     #[serde(default = "default_roster_repeat_floor")]
     pub roster_repeat_floor: u32,
+    /// Max consecutive LLM failures before the guard trips. Legacy
+    /// checkpoints without this field default to 3.
+    #[serde(default = "default_max_llm_failures")]
+    pub max_llm_failures: u32,
     #[serde(default)]
     pub progress_budget_tools: HashMap<String, u32>,
     #[serde(default)]
@@ -547,6 +596,9 @@ pub struct LoopGuardState {
     pub last_progress_fingerprint: Option<(String, u64)>,
     pub consecutive_progress_count: u32,
     pub child_failure_count: u32,
+    /// Consecutive LLM endpoint failures (reset to 0 on success).
+    #[serde(default)]
+    pub llm_failure_count: u32,
     /// Sliding window of recent successful-call fingerprints. Legacy
     /// checkpoints come back with an empty window; this is safe because
     /// the rotating-polling detector only trips once the window fills.
@@ -564,6 +616,7 @@ impl Default for LoopGuardState {
             max_window_size: default_rotation_window_size(),
             max_distinct_floor: default_rotation_distinct_floor(),
             roster_repeat_floor: default_roster_repeat_floor(),
+            max_llm_failures: default_max_llm_failures(),
             progress_budget_tools: HashMap::new(),
             progress_budget_used: HashMap::new(),
             current_loops: 0,
@@ -571,6 +624,7 @@ impl Default for LoopGuardState {
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            llm_failure_count: 0,
             recent_fingerprints: Vec::new(),
         }
     }
@@ -1214,5 +1268,33 @@ mod tests {
             }
         }
         assert!(guard.last_trip_reason().is_none());
+    }
+
+    #[test]
+    fn llm_failures_trip_guard() {
+        let mut guard = LoopGuard::new(10);
+        guard.register_llm_failure();
+        guard.register_llm_failure();
+        assert!(guard.check_loop().is_ok(), "2 failures should not trip (max=3)");
+        guard.register_llm_failure();
+        let err = guard.check_loop().unwrap_err();
+        assert!(err.to_string().contains("LLM endpoint failures"));
+        assert_eq!(
+            guard.last_trip_reason().unwrap().code(),
+            "llm_failure_budget"
+        );
+    }
+
+    #[test]
+    fn llm_success_resets_failure_counter() {
+        let mut guard = LoopGuard::new(10);
+        guard.register_llm_failure();
+        guard.register_llm_failure();
+        guard.register_llm_success();
+        guard.register_llm_failure();
+        assert!(
+            guard.check_loop().is_ok(),
+            "counter should be 1 after reset + 1 failure"
+        );
     }
 }

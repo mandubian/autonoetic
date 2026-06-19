@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 53;
+const SCHEMA_VERSION_LATEST: i64 = 54;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -538,6 +538,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_plan_frame_capability_envelope_v51(conn)?;
     apply_promotion_pre_authorization_v52(conn)?;
     apply_agent_suspension_v53(conn)?;
+    apply_fork_lineage_v54(conn)?;
 
     Ok(())
 }
@@ -600,6 +601,44 @@ fn apply_agent_suspension_v53(conn: &mut Connection) -> Result<()> {
         params![53_i64, "agent_suspension", chrono::Utc::now().to_rfc3339()],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+fn apply_fork_lineage_v54(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 54 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_fork_lineage (
+            forked_session_id TEXT PRIMARY KEY,
+            source_session_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
+
+    // Backfill lineage from existing `session.forked` causal events so forks
+    // created before this migration still resolve their parent's artifact refs.
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO session_fork_lineage (forked_session_id, source_session_id, created_at)
+         SELECT
+             ce.session_id,
+             json_extract(ce.payload, '$.source_session_id'),
+             ce.timestamp
+         FROM causal_events ce
+         WHERE ce.action = 'session.forked'
+           AND ce.session_id IS NOT NULL
+           AND json_extract(ce.payload, '$.source_session_id') IS NOT NULL;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![54_i64, "fork_lineage", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 

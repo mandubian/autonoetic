@@ -1968,12 +1968,23 @@ pub struct LoopGuardConfig {
     /// generic rotating-polling detector still applies).
     #[serde(default = "default_roster_repeat_floor")]
     pub roster_repeat_floor: u32,
+
+    /// Max consecutive LLM transport/endpoint failures before tripping. When
+    /// the model API is flapping (timeouts, connection refused, 5xx), the
+    /// guard trips to prevent expensive retry spirals. A successful LLM call
+    /// resets the counter to 0.
+    #[serde(default = "default_max_llm_failures")]
+    pub max_llm_failures: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
     [
         ("knowledge_store".to_string(), 3u32),
         ("knowledge_search".to_string(), 3u32),
+        // workflow_wait is a polling tool — each "still running" result
+        // shouldn't indefinitely reset the no-progress counter. After 3
+        // successful waits, further waits stop resetting current_loops.
+        ("workflow_wait".to_string(), 3u32),
     ]
     .into_iter()
     .collect()
@@ -1990,6 +2001,7 @@ impl Default for LoopGuardConfig {
             rotation_window_size: default_rotation_window_size(),
             rotation_distinct_floor: default_rotation_distinct_floor(),
             roster_repeat_floor: default_roster_repeat_floor(),
+            max_llm_failures: default_max_llm_failures(),
         }
     }
 }
@@ -2019,6 +2031,10 @@ fn default_rotation_distinct_floor() -> usize {
 }
 
 fn default_roster_repeat_floor() -> u32 {
+    3
+}
+
+fn default_max_llm_failures() -> u32 {
     3
 }
 

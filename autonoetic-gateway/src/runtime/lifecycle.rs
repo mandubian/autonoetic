@@ -1548,6 +1548,31 @@ impl AgentExecutor {
                 }
             }
 
+            // Emergency-stop pre-flight: if the root session has been
+            // emergency-stopped (by operator, security policy, or budget
+            // circuit breaker), terminate this loop immediately instead of
+            // spending another LLM turn. The external abort (AbortHandle) may
+            // not have reached this task yet, so this cooperative check closes
+            // the race window.
+            if let Some(store) = self.gateway_store.as_ref() {
+                if let Ok(stops) = store.list_emergency_stops_for_root_session(root_session_id) {
+                    if !stops.is_empty() {
+                        let _ = self.save_yield_checkpoint(
+                            history,
+                            &turn_id,
+                            YieldReason::EmergencyStop {
+                                stop_id: stops[0].stop_id.clone(),
+                            },
+                            None,
+                        );
+                        anyhow::bail!(
+                            "emergency_stop: root session '{}' was emergency-stopped",
+                            root_session_id
+                        );
+                    }
+                }
+            }
+
             if !digest_turn_active {
                 tracer.start_digest_turn()?;
                 digest_turn_active = true;
@@ -2187,8 +2212,12 @@ impl AgentExecutor {
                 }
                 let response = self.llm.complete(&req).await;
                 match response {
-                    Ok(resp) => resp,
+                    Ok(resp) => {
+                        self.guard.register_llm_success();
+                        resp
+                    }
                     Err(e) => {
+                        self.guard.register_llm_failure();
                         let _ = tracer.log_llm_request_failed(&e);
                         if fallback_chain.is_empty() {
                             return Err(e);
@@ -2867,6 +2896,18 @@ impl AgentExecutor {
                             } else if tool_result_counts_as_progress(result) {
                                 if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
                                 {
+                                    // Suppress progress reset for stagnant
+                                    // no-op polls (e.g. workflow_wait that
+                                    // returned "still running" after 0s). These
+                                    // carry no new information and should
+                                    // advance the no-progress counter instead
+                                    // of resetting it (issue: polling churn).
+                                    if crate::runtime::tool_dispatch::is_stagnant_poll(
+                                        &tc.name,
+                                        result,
+                                    ) {
+                                        continue;
+                                    }
                                     // Tools may opt into terminal-progress
                                     // semantics by stamping
                                     // `side_effect_state: "committed"` in
