@@ -900,6 +900,25 @@ fn plan_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     (headline, Some(lines.join("\n")))
 }
 
+/// True when this `approval.pending` is a federation-escalation mirror.
+/// `federation.escalate` emits both `escalation.pending` (the canonical verdict
+/// card) and an `approval.pending` with `action: session_escalate` (a resolvable
+/// mirror). We always suppress the mirror so the operator only sees one gate.
+fn is_session_escalate_mirror(entry: &SessionTimelineEntry) -> bool {
+    if entry.event_type != "approval.pending" {
+        return false;
+    }
+    let request_id = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("request_id").and_then(|x| x.as_str()).map(str::to_string))
+        .or_else(|| entry.refs.approval_request_id.clone());
+    request_id
+        .as_ref()
+        .is_some_and(|id| id.starts_with("apr-esc-"))
+}
+
 /// High-visibility session-escalate gate card (`approval.pending` + session_escalate).
 fn session_escalate_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     let p = parse_entry_payload(entry);
@@ -1682,15 +1701,25 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
             }
         }
         "approval.pending" => {
-            let action = entry
-                .payload
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string));
-            match action.as_deref() {
-                Some("wiki_propose") => wiki_proposal_gate_card(entry),
-                Some("session_escalate") => session_escalate_gate_card(entry),
-                _ => approval_gate_card(entry),
+            // Federation escalations render as `escalation.pending` cards.
+            // Their `approval.pending session_escalate` mirror is suppressed so
+            // the operator sees exactly one gate per escalation.
+            if is_session_escalate_mirror(entry) {
+                (
+                    String::new(),
+                    None,
+                )
+            } else {
+                let action = entry
+                    .payload
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string));
+                match action.as_deref() {
+                    Some("wiki_propose") => wiki_proposal_gate_card(entry),
+                    Some("session_escalate") => session_escalate_gate_card(entry),
+                    _ => approval_gate_card(entry),
+                }
             }
         }
         "user.ask.pending" => interaction_gate_card(entry),
@@ -1953,6 +1982,12 @@ pub fn is_redundant_promotion_escalation_approval(
     }
     let request_id = payload_field_str(&payload, "request_id")
         .or_else(|| entry.refs.approval_request_id.clone());
+    if request_id
+        .as_ref()
+        .is_some_and(|id| id.starts_with("apr-esc-"))
+    {
+        return true;
+    }
     request_id
         .as_ref()
         .is_some_and(|id| linked_escalation_approvals.contains(id))
@@ -3367,6 +3402,49 @@ mod tests {
             panic!("expected line row");
         };
         assert!(spec.headline.contains("SESSION ESCALATION"));
+    }
+
+    #[test]
+    fn session_escalate_mirror_with_apr_esc_prefix_always_suppressed() {
+        // Even without the escalation.pending card in the same batch, an
+        // approval.pending whose request_id starts with apr-esc- is a mirror
+        // and should produce no visible row.
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-esc-abc123",
+                "action": "session_escalate",
+                "reason": "Promotion review for agent 'weather-agent'",
+                "context": "All federation roles passed.",
+            }),
+        );
+        let rows = coalesce_indexed(&[appr]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn non_escalate_approval_pending_still_renders() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-normal-1",
+                "action": "revision_promote",
+                "agent_id": "weather-agent",
+                "reason": "acknowledge capabilities",
+            }),
+        );
+        let rows = coalesce_indexed(&[appr]);
+        assert_eq!(rows.len(), 1);
+        let RenderedRow::Line(spec) = &rows[0].0 else {
+            panic!("expected line row");
+        };
+        assert!(spec.headline.contains("PROMOTION APPROVAL"));
     }
 
     #[test]

@@ -2595,6 +2595,65 @@ do not re-issue."
                     .iter()
                     .map(|b| b.capability_type.clone())
                     .collect();
+
+                // Cross-workflow dedupe: if an identical RevisionPromote approval
+                // already exists (pending or approved) for this agent/revision/delta,
+                // reuse it instead of minting a new request ID. This prevents
+                // retries across fork/resume workflows from flooding the operator
+                // with duplicate capability-ack gates.
+                if let Some(root) = run_context
+                    .and_then(|rc| Some(rc.root_session_id.clone()).filter(|s| !s.is_empty()))
+                    .or_else(|| {
+                        session_id
+                            .map(|s| crate::runtime::content_store::root_session_id(s).to_string())
+                    })
+                {
+                    if let Some(existing) = gateway_store
+                        .find_matching_revision_promote_approval_for_root(
+                            &root,
+                            &args.agent_id,
+                            &args.revision_id,
+                            &added_capabilities,
+                            &broadened_capabilities,
+                        )?
+                    {
+                        if let Some(guard) = single_flight_guard.as_mut() {
+                            guard.disarm();
+                        }
+                        let request_id = existing.request_id.clone();
+                        let payload = serde_json::json!({
+                            "added": delta.added,
+                            "broadened": delta.broadened,
+                        });
+                        return Ok(serde_json::json!({
+                            "ok": existing.status
+                                == Some(autonoetic_types::background::ApprovalStatus::Approved),
+                            "error_type": "permission",
+                            "error": "capability_delta_requires_approval",
+                            "message": if outgoing_revision_id.is_empty() {
+                                format!(
+                                    "Promoting new agent '{}' for the first time: all declared capabilities require operator acknowledgement (R++2 / promotion-completeness). Operator approval is required.",
+                                    args.agent_id
+                                )
+                            } else {
+                                format!(
+                                    "Capability set broadened relative to outgoing revision '{}'. Operator approval is required (R++2).",
+                                    outgoing_revision_id
+                                )
+                            },
+                            "approval_required": existing.status
+                                != Some(autonoetic_types::background::ApprovalStatus::Approved),
+                            "request_id": request_id,
+                            "approval_ref": request_id,
+                            "added_capabilities": added_capabilities,
+                            "broadened_capabilities": broadened_capabilities,
+                            "delta": payload,
+                            "repair_hint": "Operator must approve the request and acknowledge each added/broadened capability by name. Then retry agent_revision_promote with `approval_ref`.",
+                        })
+                        .to_string());
+                    }
+                }
+
                 let payload = serde_json::json!({
                     "added": delta.added,
                     "broadened": delta.broadened,

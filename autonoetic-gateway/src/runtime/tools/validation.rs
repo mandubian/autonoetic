@@ -42,10 +42,19 @@ fn parse_class(s: &str) -> Option<ValidationClass> {
 }
 
 fn is_waivable(class: ValidationClass) -> bool {
-    !matches!(
+    // correctness_check (unit tests, lint, typecheck) requires operator approval
+    // because skipping a correctness gate is a high-trust decision. Quality and
+    // packaging checks remain agent-waivable.
+    matches!(
         class,
-        ValidationClass::MechanicalSafety | ValidationClass::SecurityReview
+        ValidationClass::QualityCheck | ValidationClass::PackagingCheck
     )
+}
+
+/// Returns true if the waiver class requires an operator approval before it can
+/// be recorded by an agent.
+fn requires_operator_waiver_approval(class: ValidationClass) -> bool {
+    matches!(class, ValidationClass::CorrectnessCheck)
 }
 
 pub struct ValidationWaiveTool;
@@ -137,6 +146,16 @@ impl NativeTool for ValidationWaiveTool {
 
         if !is_waivable(validation_class) {
             return Ok(ToolError::validation(format!("{} validations cannot be waived — they are mechanically enforced", args.validation_class), Some("Only waivable classes can be waived. Check the list of waivable classes.")).with_code("non_waivable_validation").to_error_response());
+        }
+
+        // correctness_check waivers (e.g. unit tests) require explicit operator
+        // approval because waiving a correctness gate is a high-trust decision.
+        // Agents cannot self-approve them.
+        if requires_operator_waiver_approval(validation_class) {
+            return Ok(ToolError::validation(
+                format!("Waiving '{}' validation for '{}' requires operator approval. An operator must run `autonoetic gateway validation waive --artifact-id {} --validation-id {} --validation-class {} --reason '<rationale>'`.", args.validation_class, args.validation_id, args.artifact_id, args.validation_id, args.validation_class),
+                Some("Correctness checks (unit tests, lint, typecheck) cannot be waived by agents. Request the operator to waive this validation explicitly."),
+            ).with_code("correctness_waiver_requires_operator").to_error_response());
         }
 
         if args.reason.trim().is_empty() {
@@ -272,5 +291,42 @@ impl NativeTool for ValidationWaiversTool {
 
     fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
         ToolMetadata::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_class_recognizes_all_validation_classes() {
+        assert_eq!(parse_class("correctness_check"), Some(ValidationClass::CorrectnessCheck));
+        assert_eq!(parse_class("quality_check"), Some(ValidationClass::QualityCheck));
+        assert_eq!(parse_class("packaging_check"), Some(ValidationClass::PackagingCheck));
+        assert_eq!(parse_class("mechanical_safety"), Some(ValidationClass::MechanicalSafety));
+        assert_eq!(parse_class("security_review"), Some(ValidationClass::SecurityReview));
+        assert_eq!(parse_class("bogus"), None);
+    }
+
+    #[test]
+    fn quality_and_packaging_are_agent_waivable() {
+        assert!(is_waivable(ValidationClass::QualityCheck));
+        assert!(is_waivable(ValidationClass::PackagingCheck));
+    }
+
+    #[test]
+    fn correctness_safety_and_security_are_not_agent_waivable() {
+        assert!(!is_waivable(ValidationClass::CorrectnessCheck));
+        assert!(!is_waivable(ValidationClass::MechanicalSafety));
+        assert!(!is_waivable(ValidationClass::SecurityReview));
+    }
+
+    #[test]
+    fn correctness_check_requires_operator_waiver_approval() {
+        assert!(requires_operator_waiver_approval(ValidationClass::CorrectnessCheck));
+        assert!(!requires_operator_waiver_approval(ValidationClass::QualityCheck));
+        assert!(!requires_operator_waiver_approval(ValidationClass::PackagingCheck));
+        assert!(!requires_operator_waiver_approval(ValidationClass::MechanicalSafety));
+        assert!(!requires_operator_waiver_approval(ValidationClass::SecurityReview));
     }
 }
