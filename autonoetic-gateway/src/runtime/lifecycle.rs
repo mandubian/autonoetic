@@ -1362,6 +1362,19 @@ impl AgentExecutor {
             self.config.as_deref(),
         )
         .await;
+        if context_window_resolved.is_none() {
+            tracing::warn!(
+                target: "autonoetic::prompt_budget",
+                agent_id = %self.manifest.agent.id,
+                model = %model,
+                "Context window size is UNKNOWN for model '{}'. Falling back to conservative \
+                 default ({} tokens). If the system prompt + tool definitions alone exceed this, \
+                 the context governor will fail on every turn. Set 'context_window_tokens' in the \
+                 llm_preset configuration or the AUTONOETIC_LLM_CONTEXT_WINDOW environment variable.",
+                model,
+                crate::runtime::prompt_budget::FALLBACK_CONTEXT_WINDOW,
+            );
+        }
         let mut latest_assistant_text: Option<String> = None;
         let has_declared_output_contract = self
             .manifest
@@ -1751,7 +1764,8 @@ impl AgentExecutor {
                     .context_window
                     .map(|w| w.saturating_sub(margin))
                     .unwrap_or_else(|| {
-                        let default_window: usize = 32_768;
+                        let default_window: usize =
+                            crate::runtime::prompt_budget::FALLBACK_CONTEXT_WINDOW;
                         default_window.saturating_sub(margin)
                     });
                 let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);

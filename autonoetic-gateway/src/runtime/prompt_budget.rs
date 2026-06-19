@@ -70,6 +70,14 @@ pub fn set_chars_per_token(value: f64) -> f64 {
 const TOOL_OVERHEAD_TOKENS: usize = 30;
 const TOOL_CALL_OVERHEAD_TOKENS: usize = 15;
 
+/// Conservative fallback context window (in tokens) used when the model's
+/// real context window cannot be determined. This is intentionally small to
+/// avoid sending prompts that exceed a small model's actual limit. However,
+/// if the system prompt + tool definitions alone exceed this, the context
+/// governor will fail on every turn — the caller should emit a warning and
+/// point the user at `context_window_tokens` configuration.
+pub const FALLBACK_CONTEXT_WINDOW: usize = 32_768;
+
 /// Tool tier for progressive disclosure.
 pub type ToolTier = autonoetic_types::agent::ToolTier;
 
@@ -400,13 +408,37 @@ impl BudgetEnforcementStrategy for TrimHistoryStrategy {
         }
 
         if current_total > budget_for_conv {
-            anyhow::bail!(
-                "Cannot trim history to fit within prompt budget: {} tokens remaining (budget: {}), \
-                 hit message floor. Consider increasing the context window \
-                 or reducing system prompt/tool definition size.",
-                current_total,
-                budget_for_conv,
-            );
+            if budget_for_conv == 0 {
+                anyhow::bail!(
+                    "Cannot trim history to fit within prompt budget: {} tokens remaining \
+                     (budget: 0), hit message floor. The conversation budget is 0 because the \
+                     system prompt ({} tokens) + tool definitions ({} tokens) already consume the \
+                     entire effective limit ({} tokens).{} Set 'context_window_tokens' in the \
+                     llm_preset configuration (or AUTONOETIC_LLM_CONTEXT_WINDOW env var) to the \
+                     model's actual context window size.",
+                    current_total,
+                    breakdown.system_prompt_tokens,
+                    breakdown.tool_definition_tokens,
+                    effective_limit,
+                    if breakdown.context_window.is_none() {
+                        format!(
+                            " The context window is UNKNOWN — using a conservative fallback of \
+                             {} tokens that is too small for this model.",
+                            FALLBACK_CONTEXT_WINDOW,
+                        )
+                    } else {
+                        String::new()
+                    },
+                );
+            } else {
+                anyhow::bail!(
+                    "Cannot trim history to fit within prompt budget: {} tokens remaining \
+                     (budget: {}), hit message floor. Consider increasing the context window \
+                     or reducing system prompt/tool definition size.",
+                    current_total,
+                    budget_for_conv,
+                );
+            }
         }
 
         let mut new_history = system;
