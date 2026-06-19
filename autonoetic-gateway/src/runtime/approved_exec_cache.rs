@@ -3,11 +3,18 @@
 //! Caches approved sandbox.exec fingerprints so identical future executions
 //! skip creating new approval requests.
 //!
-//! Cache key = SHA256(agent_id + sorted_targets + identity)
+//! Cache key = SHA256(agent_id + sorted_targets + identity + capability digest)
 //!
 //! Identity is:
 //! - `artifact:<artifact_id>` when an artifact_id is provided (stable across shell wrappers)
 //! - `code:<code_to_analyze>` otherwise (exact code match)
+//!
+//! The agent's **capability set** is folded into the key (#381): an approval is
+//! granted under a specific capability scope, so if those capabilities change
+//! (e.g. `NetworkAccess` is widened) the fingerprint changes, the cache misses,
+//! and a fresh approval is required — a narrower prior approval can't be silently
+//! reused under broader authority. Conservative by design: *any* capability
+//! change yields a new fingerprint (re-approval is cheap; a stale reuse is not).
 //!
 //! Reuse eligibility is determined by `NetworkCoverage` classification:
 //! - `Concrete`: cache/session-grant/approved-request reuse allowed
@@ -166,6 +173,7 @@ pub fn compute_fingerprint(
     targets: &[String],
     code_to_analyze: &str,
     artifact_canonical_digest: Option<&str>,
+    capabilities: &[autonoetic_types::capability::Capability],
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(agent_id.as_bytes());
@@ -179,7 +187,32 @@ pub fn compute_fingerprint(
         hasher.update(b"code:");
         hasher.update(code_to_analyze.as_bytes());
     }
+    // Bind the approval to the capability scope it was granted under (#381).
+    hasher.update(b"|caps:");
+    hasher.update(capability_digest(capabilities).as_bytes());
     format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Stable digest of an agent's capability set, order-independent. Folded into
+/// the exec-cache fingerprint so a capability change forces re-approval (#381).
+pub fn capability_digest(capabilities: &[autonoetic_types::capability::Capability]) -> String {
+    let mut rendered: Vec<String> = capabilities
+        .iter()
+        // Debug fallback (never collapse to empty) if serialization ever fails,
+        // so a serde error can't silently weaken the digest.
+        .map(|c| serde_json::to_string(c).unwrap_or_else(|_| format!("{c:?}")))
+        .collect();
+    rendered.sort();
+    let mut hasher = Sha256::new();
+    // Length-prefix each entry instead of a `|` delimiter: capability fields are
+    // arbitrary strings, so a delimiter inside one could make two different
+    // capability lists hash identically (e.g. ["a","b|"] vs ["a|b",""]). A u64
+    // length prefix is unambiguous.
+    for r in &rendered {
+        hasher.update((r.len() as u64).to_le_bytes());
+        hasher.update(r.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// Extracts the host from a URL literal using regex.
@@ -277,30 +310,30 @@ mod tests {
 
     #[test]
     fn test_compute_fingerprint_deterministic() {
-        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
-        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
+        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None, &[]);
+        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None, &[]);
         assert_eq!(fp1, fp2);
         assert!(fp1.starts_with("sha256:"));
     }
 
     #[test]
     fn test_compute_fingerprint_different_agents() {
-        let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None);
-        let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None);
+        let fp1 = compute_fingerprint("agent.a", &["host.com".to_string()], "code", None, &[]);
+        let fp2 = compute_fingerprint("agent.b", &["host.com".to_string()], "code", None, &[]);
         assert_ne!(fp1, fp2);
     }
 
     #[test]
     fn test_compute_fingerprint_different_code() {
-        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_a", None);
-        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_b", None);
+        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_a", None, &[]);
+        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code_b", None, &[]);
         assert_ne!(fp1, fp2);
     }
 
     #[test]
     fn test_compute_fingerprint_different_targets() {
-        let fp1 = compute_fingerprint("agent.id", &["host_a.com".to_string()], "code", None);
-        let fp2 = compute_fingerprint("agent.id", &["host_b.com".to_string()], "code", None);
+        let fp1 = compute_fingerprint("agent.id", &["host_a.com".to_string()], "code", None, &[]);
+        let fp2 = compute_fingerprint("agent.id", &["host_b.com".to_string()], "code", None, &[]);
         assert_ne!(fp1, fp2);
     }
 
@@ -311,13 +344,13 @@ mod tests {
             &["wttr.in".to_string()],
             "python3 -c 'old wrapper'",
             Some("art-abc123"),
-        );
+            &[],        );
         let fp2 = compute_fingerprint(
             "agent.id",
             &["wttr.in".to_string()],
             "python3 /tmp/main.py",
             Some("art-abc123"),
-        );
+            &[],        );
         assert_eq!(
             fp1, fp2,
             "same artifact_id + targets should produce same fingerprint regardless of code"
@@ -331,8 +364,8 @@ mod tests {
             &["host.com".to_string()],
             "code",
             Some("art-123"),
-        );
-        let fp_code = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None);
+            &[],        );
+        let fp_code = compute_fingerprint("agent.id", &["host.com".to_string()], "code", None, &[]);
         assert_ne!(
             fp_artifact, fp_code,
             "artifact and code fingerprints should differ"
@@ -341,9 +374,43 @@ mod tests {
 
     #[test]
     fn test_compute_fingerprint_different_artifacts() {
-        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", Some("art-1"));
-        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", Some("art-2"));
+        let fp1 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", Some("art-1"), &[]);
+        let fp2 = compute_fingerprint("agent.id", &["host.com".to_string()], "code", Some("art-2"), &[]);
         assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn capability_change_changes_fingerprint() {
+        use autonoetic_types::capability::Capability;
+        let narrow = vec![Capability::NetworkAccess {
+            hosts: vec!["api.open-meteo.com".to_string()],
+        }];
+        let wide = vec![Capability::NetworkAccess {
+            hosts: vec!["api.open-meteo.com".to_string(), "evil.example.com".to_string()],
+        }];
+        let fp_narrow =
+            compute_fingerprint("agent.id", &["api.open-meteo.com".to_string()], "code", None, &narrow);
+        let fp_wide =
+            compute_fingerprint("agent.id", &["api.open-meteo.com".to_string()], "code", None, &wide);
+        // #381: widening NetworkAccess must change the fingerprint so a prior
+        // (narrower) approval is not silently reused → cache miss → re-approval.
+        assert_ne!(fp_narrow, fp_wide);
+        // …but the same capability set is stable (deterministic reuse).
+        let fp_narrow_again =
+            compute_fingerprint("agent.id", &["api.open-meteo.com".to_string()], "code", None, &narrow);
+        assert_eq!(fp_narrow, fp_narrow_again);
+    }
+
+    #[test]
+    fn capability_digest_is_order_independent() {
+        use autonoetic_types::capability::Capability;
+        let net = Capability::NetworkAccess { hosts: vec!["x".to_string()] };
+        let exec = Capability::CodeExecution { patterns: vec!["*".to_string()], commands: vec![] };
+        assert_eq!(
+            capability_digest(&[net.clone(), exec.clone()]),
+            capability_digest(&[exec, net]),
+            "digest must not depend on capability ordering"
+        );
     }
 
     #[test]

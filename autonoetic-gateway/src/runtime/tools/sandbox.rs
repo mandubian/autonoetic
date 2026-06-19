@@ -1062,7 +1062,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                 &normalized_targets,
                                 &code_to_analyze,
                                 explicit_mount_artifact_id.as_deref(),
-                            );
+                                &manifest.capabilities,                            );
                             if let Some(gw_dir) = gateway_dir {
                                 if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                                     if cache.find(&fingerprint).is_none() {
@@ -1492,7 +1492,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             &targets,
                             &code_to_analyze,
                             explicit_mount_artifact_id.as_deref(),
-                        );
+                            &manifest.capabilities,                        );
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                             if let Some(entry) = cache.find(&fingerprint) {
                                 tracing::info!(
@@ -1537,7 +1537,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                             &targets,
                                             &code_to_analyze,
                                             explicit_mount_artifact_id.as_deref(),
-                                        );
+                                            &manifest.capabilities,                                        );
                                         if let Some(gw_dir) = gateway_dir {
                                             if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                                                 if cache.find(&fingerprint).is_none() {
@@ -2690,7 +2690,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 &normalized_targets,
                 &code_to_analyze,
                 explicit_mount_artifact_id.as_deref(),
-            );
+                &manifest.capabilities,            );
             if let Some(gw_dir) = gateway_dir {
                 if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                     if cache.find(&fingerprint).is_none() {

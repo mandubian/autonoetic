@@ -244,7 +244,7 @@ impl NativeTool for ArtifactPrepareTool {
                 targets,
                 &artifact_code,
                 Some(&bundle.artifact_canonical_digest),
-            );
+                &manifest.capabilities,            );
 
             if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                 if cache.find(&fingerprint).is_some() {

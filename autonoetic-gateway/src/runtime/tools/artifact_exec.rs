@@ -339,7 +339,7 @@ impl NativeTool for ArtifactExecTool {
                         &normalized_targets,
                         &artifact_code,
                         Some(&bundle.artifact_canonical_digest),
-                    );
+                        &manifest.capabilities,                    );
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                         if cache.find(&fingerprint).is_none() {
                             let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
@@ -484,7 +484,7 @@ impl NativeTool for ArtifactExecTool {
                         &targets,
                         &artifact_code,
                         Some(&bundle.artifact_canonical_digest),
-                    );
+                        &manifest.capabilities,                    );
 
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                         if let Some(entry) = cache.find(&fingerprint) {
