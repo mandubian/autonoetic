@@ -153,8 +153,10 @@ Do NOT add `resource.revoke` as a runtime tool. Revocation is handled via Phase 
 
 ## Out of Scope for Phase 1
 
-- Capability change detection (Phase 2)
-- Revocation CLI/API (Phase 2)
+- Capability change detection — **done** (#381): the capability set is folded
+  into the fingerprint, so a capability change forces re-approval.
+- Revocation CLI/API — **done** (#380): see "Revocation" under Future
+  Enhancements below (`gateway exec-cache list/revoke`).
 
 ## Phase 1.5: Session Approval Grants [COMPLETE]
 
@@ -216,6 +218,14 @@ resource_approval:
 - Separate approval class: "approve all URLs on host X"
 - More convenient but broader trust
 
-### Revocation
-- Gateway CLI: `autonoetic approvals revoke-cache <fingerprint>`
-- Or API endpoint for management UI
+### Revocation — implemented (#380)
+Operator CLI over the cross-session exec cache, mirroring `gateway grants`:
+- `autonoetic gateway exec-cache list [--json]` — list cached approvals with
+  fingerprint, agent, approved-at/by, and targets.
+- `autonoetic gateway exec-cache revoke <fingerprint>` — revoke one (accepts a
+  full `sha256:…` or a unique prefix from `list`); `--all` revokes every entry;
+  `--reason` is recorded. Revocation persists and emits an
+  `exec_cache_revocation` causal event; the next matching exec re-requests
+  approval.
+
+(A management-UI API endpoint remains a possible future addition.)

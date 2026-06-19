@@ -203,6 +203,48 @@ fn test_cache_not_found() {
 }
 
 #[test]
+fn test_cache_all_remove_clear() {
+    // #380: operator-facing list + revoke over the exec cache.
+    let temp = tempdir().expect("tempdir should create");
+    let gateway_dir = temp.path();
+    let cache = ApprovedExecCache::new(gateway_dir).expect("cache should create");
+
+    let mk = |fp: &str, approved_at: &str| ApprovedExecEntry {
+        fingerprint: fp.to_string(),
+        agent_id: "test.agent".to_string(),
+        remote_targets: vec!["api.example.com".to_string()],
+        code_content: "code".to_string(),
+        approval_request_id: "apr".to_string(),
+        approved_at: approved_at.to_string(),
+        approved_by: "operator".to_string(),
+        last_used_at: approved_at.to_string(),
+    };
+    cache.record(mk("sha256:bbb", "2026-06-02T00:00:00Z")).unwrap();
+    cache.record(mk("sha256:aaa", "2026-06-01T00:00:00Z")).unwrap();
+
+    // all() returns every entry, sorted by approved_at.
+    let all = cache.all();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].fingerprint, "sha256:aaa");
+    assert_eq!(all[1].fingerprint, "sha256:bbb");
+
+    // remove() revokes one and persists; a no-op remove returns false.
+    assert!(cache.remove("sha256:aaa").unwrap());
+    assert!(!cache.remove("sha256:aaa").unwrap());
+    assert!(cache.find("sha256:aaa").is_none());
+    assert!(cache.find("sha256:bbb").is_some());
+
+    // Revocation survives reopen (persisted).
+    let reopened = ApprovedExecCache::new(gateway_dir).expect("reopen");
+    assert_eq!(reopened.len(), 1);
+
+    // clear() removes all and returns the count.
+    assert_eq!(reopened.clear().unwrap(), 1);
+    assert_eq!(reopened.len(), 0);
+    assert_eq!(reopened.clear().unwrap(), 0);
+}
+
+#[test]
 fn test_classify_coverage_url_only() {
     let patterns = vec![create_pattern(
         "url_literal",
