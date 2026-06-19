@@ -95,12 +95,15 @@ impl LlmDriver for FixedJsonDigestDriver {
 async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
-    std::fs::create_dir_all(agents_dir.join("digest"))?;
+    std::fs::create_dir_all(agents_dir.join("autonoetic.digest"))?;
     std::fs::write(
-        agents_dir.join("digest/SKILL.md"),
-        include_str!("../../agents/digest/SKILL.md"),
+        agents_dir.join("autonoetic.digest/SKILL.md"),
+        include_str!("../../agents/autonoetic.digest/SKILL.md"),
     )?;
-    std::fs::write(agents_dir.join("digest/runtime.lock"), "dependencies: []\n")?;
+    std::fs::write(
+        agents_dir.join("autonoetic.digest/runtime.lock"),
+        "dependencies: []\n",
+    )?;
 
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
