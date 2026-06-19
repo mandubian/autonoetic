@@ -3,6 +3,7 @@
 use crate::execution::{
     gateway_actor_id, init_gateway_causal_logger, sha256_hex, GatewayExecutionService, SpawnResult,
 };
+use crate::runtime::workbench_return::prepare_return_to_agent_wakeup;
 use crate::scheduler::append_task_board_entry;
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::config::GatewayConfig;
@@ -1417,6 +1418,107 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         format!("planframes.approve failed: {}", e),
+                    ),
+                }
+            }
+
+            "workbench.prepare_return_to_agent" => {
+                #[derive(serde::Deserialize)]
+                struct WorkbenchPrepareReturnParams {
+                    root_session_id: String,
+                    #[serde(default)]
+                    force: bool,
+                    #[serde(default)]
+                    note: Option<String>,
+                }
+                let params: WorkbenchPrepareReturnParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for workbench.prepare_return_to_agent: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let wf_id = match store.resolve_workflow_id(&params.root_session_id) {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                            self.config.as_ref(),
+                            &params.root_session_id,
+                        )
+                        .ok()
+                        .flatten()
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to resolve workflow ID: {}", e),
+                        );
+                    }
+                };
+
+                let maybe_wb = if let Some(wf_id) = wf_id {
+                    match store.load_active_workbench_for_workflow(&wf_id) {
+                        Ok(wb) => wb,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("Failed to load active workbench: {}", e),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let Some(wb) = maybe_wb else {
+                    return JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({ "status": "no_workbench" }),
+                    );
+                };
+
+                match prepare_return_to_agent_wakeup(
+                    store.as_ref(),
+                    &wb.workbench_id,
+                    params.force,
+                    params.note.as_deref(),
+                ) {
+                    crate::runtime::workbench_return::ReturnToAgentStatus::Refused { reason } => {
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "status": "refused",
+                                "reason": reason,
+                            }),
+                        )
+                    }
+                    crate::runtime::workbench_return::ReturnToAgentStatus::Ready {
+                        target_agent_id,
+                        outbound_message,
+                        metadata,
+                    } => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "status": "ready",
+                            "target_agent_id": target_agent_id,
+                            "message": outbound_message,
+                            "metadata": metadata,
+                        }),
                     ),
                 }
             }

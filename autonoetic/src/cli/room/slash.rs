@@ -13,6 +13,7 @@
 //! - `/session resume` — switch to the most recent session
 //! - `/cron` / `/cron list` — list scheduled jobs for the current session
 //! - `/plan` / `/plan approve [id]` — list or approve pending PlanFrames
+//! - `/return [--force] [note...]` — return the active workbench to the orchestrator
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — full command reference in the detail pane
 //! - `/model` — show current inference profile
@@ -43,6 +44,8 @@ pub enum SlashCommand {
     ListPlans,
     /// Approve a plan (`None` = latest pending).
     ApprovePlan { plan_id: Option<String> },
+    /// Return the active workbench to the orchestrator.
+    ReturnToAgent { force: bool, message: Option<String> },
     /// Fork the current session into a new branch and switch to it.
     /// `at_turn` = `None` forks from the latest checkpoint; `message` is an
     /// optional branch message appended to the forked history.
@@ -66,7 +69,7 @@ pub enum SlashCommand {
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /cron · /wiki · /test · /model · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /cron · /wiki · /test · /model · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -123,6 +126,7 @@ pub fn help_lines() -> Vec<String> {
         "  /cron  /cron list|ls       scheduled jobs for this session".to_string(),
         "  /plan  /plan list          list pending PlanFrames".to_string(),
         "  /plan approve|a|ok [id]    approve a plan frame".to_string(),
+        "  /return [--force] [note]   return the active workbench to the orchestrator".to_string(),
         "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
         "  /test <scenario>           inject synthetic events (dev)".to_string(),
         "  /test help                 list test scenarios".to_string(),
@@ -159,6 +163,7 @@ pub fn parse(input: &str) -> SlashCommand {
         "fork" => parse_fork(tail),
         "cron" => parse_cron(tail),
         "plan" => parse_plan(tail),
+        "return" => parse_return(tail),
         "wiki" => parse_wiki(tail),
         "test" => {
             let name = tail.trim().to_string();
@@ -246,6 +251,23 @@ fn parse_wiki(tail: &str) -> SlashCommand {
     } else {
         SlashCommand::Unknown(format!("wiki {trimmed}"))
     }
+}
+
+fn parse_return(tail: &str) -> SlashCommand {
+    // `/return`                         — return active workbench
+    // `/return --force`                 — force return, dropping unsaved edits
+    // `/return -f`                      — short force flag
+    // `/return some note here`          — return with operator note
+    // `/return --force ship it`         — force return with note
+    let trimmed = tail.trim();
+    let mut rest = trimmed;
+    let mut force = false;
+    if let Some(after) = rest.strip_prefix("--force").or_else(|| rest.strip_prefix("-f")) {
+        force = true;
+        rest = after.trim();
+    }
+    let message = if rest.is_empty() { None } else { Some(rest.to_string()) };
+    SlashCommand::ReturnToAgent { force, message }
 }
 
 fn parse_session(tail: &str) -> SlashCommand {
@@ -593,5 +615,44 @@ mod tests {
         assert_eq!(parse("/model clear"), SlashCommand::ModelClear);
         assert_eq!(parse("/model reset"), SlashCommand::ModelClear);
         assert_eq!(parse("/model  clear  "), SlashCommand::ModelClear);
+    }
+
+    #[test]
+    fn parse_return_variants() {
+        assert_eq!(
+            parse("/return"),
+            SlashCommand::ReturnToAgent {
+                force: false,
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/return --force"),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/return -f"),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/return please review auth flow"),
+            SlashCommand::ReturnToAgent {
+                force: false,
+                message: Some("please review auth flow".into())
+            }
+        );
+        assert_eq!(
+            parse("/return --force ship it"),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: Some("ship it".into())
+            }
+        );
     }
 }

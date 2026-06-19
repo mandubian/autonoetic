@@ -2025,6 +2025,16 @@ pub fn run(
                                             Err(e) => status = Some(e),
                                         }
                                     }
+                                    SlashCommand::ReturnToAgent { force, message } => {
+                                        status = Some(return_workbench_to_agent(
+                                            client,
+                                            root_session_id,
+                                            force,
+                                            message.as_deref(),
+                                        ));
+                                        force_timeline_refresh = true;
+                                        follow = true;
+                                    }
                                     SlashCommand::ResumeSession { agent } => {
                                         if let Some(resolved_id) =
                                             resolve_latest_session(client, agent.as_deref())
@@ -4123,6 +4133,73 @@ fn send_message(
     match rpc(client, "event.ingest", params) {
         Ok(_) => "✓ sent".to_string(),
         Err(e) => format!("✗ {e}"),
+    }
+}
+
+/// Return the active workbench to the orchestrator via the gateway. First
+/// calls `workbench.prepare_return_to_agent` to compute the payload safely
+/// (the room TUI cannot read the workspace files directly), then sends an
+/// `event.ingest` workbench_reconciled wake-up.
+fn return_workbench_to_agent(
+    client: &RoomClient,
+    root_session_id: &str,
+    force: bool,
+    note: Option<&str>,
+) -> String {
+    let prepare_params = serde_json::json!({
+        "root_session_id": root_session_id,
+        "force": force,
+        "note": note,
+    });
+    let prepared = match rpc(client, "workbench.prepare_return_to_agent", prepare_params) {
+        Ok(v) => v,
+        Err(e) => return format!("✗ {e}"),
+    };
+    let status = prepared.get("status").and_then(|s| s.as_str()).unwrap_or("");
+    match status {
+        "no_workbench" => "✗ No active workbench to return.".to_string(),
+        "refused" => {
+            let reason = prepared
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("return refused by gateway");
+            format!("✗ {reason}")
+        }
+        "ready" => {
+            let target_agent_id = prepared
+                .get("target_agent_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("planner.default");
+            let message = prepared
+                .get("message")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let metadata = prepared.get("metadata").cloned().unwrap_or(serde_json::Value::Null);
+            let mut merged = serde_json::json!({
+                "source": "session_room",
+                "root_session_id": root_session_id,
+            });
+            if let serde_json::Value::Object(ref mut map) = merged {
+                if let Some(obj) = metadata.as_object() {
+                    for (k, v) in obj {
+                        map.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            let params = serde_json::json!({
+                "event_type": "workbench_reconciled",
+                "message": message,
+                "session_id": root_session_id,
+                "target_agent_id": target_agent_id,
+                "async_mode": true,
+                "metadata": merged,
+            });
+            match rpc(client, "event.ingest", params) {
+                Ok(_) => "✓ returned workbench to planner".to_string(),
+                Err(e) => format!("✗ event.ingest failed: {e}"),
+            }
+        }
+        other => format!("✗ unknown prepare_return status: {other}"),
     }
 }
 
