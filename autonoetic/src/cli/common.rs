@@ -340,6 +340,17 @@ pub struct GatewayArgs {
 
 #[derive(Subcommand)]
 pub enum GatewayCommands {
+    /// Reset the gateway environment to bootstrap state while preserving config.
+    /// Stops the daemon, wipes the gateway database and ephemeral state, then
+    /// re-bootstraps agents without prompting for model selection.
+    Reset {
+        /// Skip the interactive confirmation prompt.
+        #[arg(short, long)]
+        yes: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Starts the Gateway daemon in the foreground
     Start {
         /// Run in the background

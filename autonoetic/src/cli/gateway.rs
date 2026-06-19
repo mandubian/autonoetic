@@ -1,11 +1,104 @@
-use std::io::Write;
-use std::path::Path;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use super::common::{
     activate_registered_mcp_servers, load_mcp_servers, mcp_registry_path, McpClient, McpTool,
     McpTransportConfig,
 };
+
+/// Files and subdirectories inside the gateway directory that are safe to remove
+/// when resetting the environment. We preserve the directory itself (and any
+/// files we do not explicitly recognize) so the reset is conservative.
+const RESET_EPHIMERAL_PATHS: &[&str] = &[
+    "gateway.db",
+    "gateway.db-shm",
+    "gateway.db-wal",
+    "history",
+    "logs",
+    "artifacts",
+    "content",
+    "revisions",
+    "recordings",
+    "sessions",
+    "vault.key",
+    "constitution",
+    "sdk",
+    "wiki",
+];
+
+/// Stop any running daemon, delete the gateway database and derived state, and
+/// re-bootstrap agents from the current config. The operator config
+/// (`config.yaml`, `persona.md`, and the `agents/` tree) is left untouched and
+/// no model-selection prompts are shown.
+pub async fn handle_gateway_reset(
+    config_path: &Path,
+    yes: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    if !yes && !json {
+        let mut stderr = std::io::stderr();
+        writeln!(
+            stderr,
+            "This will delete the gateway environment at:",
+        )?;
+        writeln!(stderr, "  {}", gateway_dir.display())?;
+        writeln!(
+            stderr,
+            "Sessions, approvals, traces, artifacts, and credentials will be lost.",
+        )?;
+        write!(stderr, "Type 'yes' to continue: ")?;
+        stderr.flush()?;
+
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        if line.trim() != "yes" {
+            anyhow::bail!("Reset cancelled.");
+        }
+    }
+
+    // Best-effort stop of a running daemon.
+    handle_gateway_stop();
+
+    if gateway_dir.exists() {
+        for rel in RESET_EPHIMERAL_PATHS {
+            let path = gateway_dir.join(rel);
+            if path.exists() {
+                if path.is_dir() {
+                    std::fs::remove_dir_all(&path)?;
+                } else {
+                    std::fs::remove_file(&path)?;
+                }
+            }
+        }
+    }
+
+    // Re-create a fresh gateway directory and bootstrap agents without touching
+    // the operator config.
+    std::fs::create_dir_all(&gateway_dir)?;
+    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
+
+    if json {
+        // Emit JSON on stdout; route informational logs to stderr so the
+        // output is machine-parseable.
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "gateway_dir": gateway_dir,
+                "activated_agents": activated,
+            })
+        );
+    } else {
+        eprintln!("Gateway environment reset.");
+        eprintln!("  Gateway dir: {}", gateway_dir.display());
+        eprintln!("  Activated agents: {activated}");
+    }
+    Ok(())
+}
 pub async fn handle_gateway_start(
     config_path: &Path,
     daemon: bool,
@@ -58,8 +151,8 @@ pub fn handle_gateway_stop() {
     info!("Stopping Gateway");
 }
 
-/// Probe and report host capabilities (sandbox tiers + language toolchains).
-/// Exit code is non-zero when no sandbox tier is runnable at all.
+    /// Probe and report host capabilities (sandbox tiers + language toolchains).
+    /// Exit code is non-zero when no sandbox tier is runnable at all.
 pub fn handle_gateway_preflight(json: bool) -> anyhow::Result<()> {
     let caps = autonoetic_gateway::host_capabilities::HostCapabilities::gather();
     if json {

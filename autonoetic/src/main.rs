@@ -135,6 +135,9 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Stop => {
                 cli::gateway::handle_gateway_stop();
             }
+            cli::common::GatewayCommands::Reset { yes, json } => {
+                cli::gateway::handle_gateway_reset(&config_path, *yes, *json).await?;
+            }
             cli::common::GatewayCommands::Preflight { json } => {
                 cli::gateway::handle_gateway_preflight(*json)?;
             }
