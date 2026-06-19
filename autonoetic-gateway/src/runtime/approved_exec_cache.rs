@@ -198,13 +198,19 @@ pub fn compute_fingerprint(
 pub fn capability_digest(capabilities: &[autonoetic_types::capability::Capability]) -> String {
     let mut rendered: Vec<String> = capabilities
         .iter()
-        .map(|c| serde_json::to_string(c).unwrap_or_default())
+        // Debug fallback (never collapse to empty) if serialization ever fails,
+        // so a serde error can't silently weaken the digest.
+        .map(|c| serde_json::to_string(c).unwrap_or_else(|_| format!("{c:?}")))
         .collect();
     rendered.sort();
     let mut hasher = Sha256::new();
+    // Length-prefix each entry instead of a `|` delimiter: capability fields are
+    // arbitrary strings, so a delimiter inside one could make two different
+    // capability lists hash identically (e.g. ["a","b|"] vs ["a|b",""]). A u64
+    // length prefix is unambiguous.
     for r in &rendered {
+        hasher.update((r.len() as u64).to_le_bytes());
         hasher.update(r.as_bytes());
-        hasher.update(b"|");
     }
     format!("{:x}", hasher.finalize())
 }
