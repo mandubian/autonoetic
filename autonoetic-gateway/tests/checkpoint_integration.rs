@@ -71,6 +71,8 @@ fn make_checkpoint(
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
     }
 }
 

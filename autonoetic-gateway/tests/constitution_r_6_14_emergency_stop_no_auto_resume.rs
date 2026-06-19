@@ -49,6 +49,8 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
     }
 }
 

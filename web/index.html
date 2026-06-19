@@ -106,6 +106,13 @@
     <!-- Connection Setup -->
     <div class="flex items-center gap-4 text-sm">
       <div class="flex flex-col">
+        <label class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Load Recent</label>
+        <select id="recent-sessions-select" onchange="selectRecentSession()" class="bg-gray-900 border border-gray-800 rounded px-2.5 py-1 text-white text-xs w-48 focus:outline-none focus:border-accentIndigo transition-colors">
+          <option value="">-- select session --</option>
+        </select>
+      </div>
+
+      <div class="flex flex-col">
         <label class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Root Session ID</label>
         <input id="session-input" type="text" placeholder="session-abc123" class="bg-gray-900 border border-gray-800 rounded px-2.5 py-1 text-white text-xs w-48 focus:outline-none focus:border-accentIndigo transition-colors">
       </div>
@@ -122,6 +129,10 @@
 
       <button id="connect-btn" onclick="toggleConnection()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs px-4 py-2 rounded shadow transition-all duration-150 mt-4">
         Connect
+      </button>
+
+      <button id="estop-btn" onclick="triggerEmergencyStop()" class="bg-accentRed hover:bg-opacity-90 active:scale-95 text-white font-bold text-xs px-3.5 py-2 rounded shadow transition-all duration-150 mt-4 hidden">
+        🚨 Stop Session
       </button>
 
       <div class="flex items-center gap-1.5 mt-4 ml-2">
@@ -172,28 +183,87 @@
     <!-- Right Panel: Plan, Hierarchy & Metadata sidebars -->
     <section class="w-1/2 flex">
       
-      <!-- Middle Pane: PlanFrame & Active Workbenches -->
+      <!-- Middle Pane: PlanFrame, Workbenches & Tabs -->
       <div class="w-1/2 border-r border-gray-800 flex flex-col bg-gray-950 bg-opacity-20">
-        <!-- PlanFrame Panel -->
-        <div class="flex-1 flex flex-col overflow-hidden">
-          <div class="px-6 py-3 border-b border-gray-800 bg-gray-950 bg-opacity-40 flex items-center justify-between">
-            <h2 class="font-display font-semibold text-sm text-gray-300 flex items-center gap-1.5">
-              <span>📋</span> Active PlanFrame
-            </h2>
-            <span id="plan-version-badge" class="bg-gray-800 text-[10px] text-gray-400 font-semibold px-2 py-0.5 rounded-full hidden">v1</span>
+        <!-- Tab Navigation -->
+        <div class="flex border-b border-gray-800 bg-gray-950 bg-opacity-40 shrink-0">
+          <button id="tab-btn-checklist" onclick="switchRightTab('checklist')" class="flex-1 py-3 text-center text-xs font-display font-bold border-b-2 border-accentIndigo text-white transition-all focus:outline-none">
+            📋 Checklist
+          </button>
+          <button id="tab-btn-constitution" onclick="switchRightTab('constitution')" class="flex-1 py-3 text-center text-xs font-display font-bold border-b-2 border-transparent text-gray-400 hover:text-white transition-all focus:outline-none">
+            🛡️ Constitution
+          </button>
+          <button id="tab-btn-wiki" onclick="switchRightTab('wiki')" class="flex-1 py-3 text-center text-xs font-display font-bold border-b-2 border-transparent text-gray-400 hover:text-white transition-all focus:outline-none">
+            📖 Wiki & Props
+          </button>
+        </div>
+
+        <!-- Tab Content 1: Checklist & Drafts -->
+        <div id="tab-content-checklist" class="flex-1 flex flex-col overflow-hidden">
+          <!-- PlanFrame Panel -->
+          <div class="flex-1 flex flex-col overflow-hidden">
+            <div class="px-6 py-3 border-b border-gray-850 bg-gray-950 bg-opacity-40 flex items-center justify-between">
+              <h2 class="font-display font-semibold text-xs text-gray-400 uppercase tracking-wider">Active Plan</h2>
+              <span id="plan-version-badge" class="bg-gray-800 text-[10px] text-gray-400 font-semibold px-2 py-0.5 rounded-full hidden">v1</span>
+            </div>
+            <div id="plan-steps" class="flex-1 overflow-y-auto p-4 space-y-2.5 text-sm">
+              <div class="text-center text-gray-500 text-xs py-8">No plan loaded yet.</div>
+            </div>
           </div>
-          <div id="plan-steps" class="flex-1 overflow-y-auto p-6 space-y-3 text-sm">
-            <div class="text-center text-gray-500 text-xs py-8">No plan loaded yet.</div>
+
+          <!-- Workbenches Panel -->
+          <div class="h-1/3 border-t border-gray-850 flex flex-col overflow-hidden bg-gray-950 bg-opacity-40">
+            <div class="px-6 py-2 border-b border-gray-850 bg-gray-950 bg-opacity-60">
+              <h2 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Active Workbenches & Drafts</h2>
+            </div>
+            <div id="workbench-list" class="flex-1 overflow-y-auto p-3 space-y-2">
+              <div class="text-center text-gray-500 text-xs py-4">No active workbenches or drafts.</div>
+            </div>
           </div>
         </div>
 
-        <!-- Workbenches Panel -->
-        <div class="h-1/3 border-t border-gray-800 flex flex-col overflow-hidden bg-gray-950 bg-opacity-40">
-          <div class="px-6 py-2 border-b border-gray-800 bg-gray-950 bg-opacity-60">
-            <h2 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Active Workbenches & Drafts</h2>
+        <!-- Tab Content 2: Constitution Profile -->
+        <div id="tab-content-constitution" class="flex-1 flex flex-col overflow-hidden hidden">
+          <div class="p-5 overflow-y-auto space-y-4 flex-1 flex flex-col">
+            <div class="bg-gray-900 border border-gray-850 p-4 rounded-xl space-y-2 shrink-0">
+              <h3 class="font-display font-bold text-xs text-gray-400 tracking-wider uppercase">Constitution Profile</h3>
+              <div class="grid grid-cols-3 gap-y-2.5 gap-x-2 text-xs font-mono">
+                <div class="text-gray-500">Version:</div>
+                <div id="const-version" class="text-gray-300 col-span-2 font-semibold">—</div>
+                <div class="text-gray-500">Format:</div>
+                <div id="const-format-version" class="text-gray-300 col-span-2">—</div>
+                <div class="text-gray-500">Digest:</div>
+                <div id="const-digest" class="text-gray-300 font-mono text-[10px] break-all col-span-2 select-all">—</div>
+              </div>
+            </div>
+            <div class="flex-1 flex flex-col space-y-2 overflow-hidden min-h-[300px]">
+              <h3 class="font-display font-bold text-xs text-gray-400 tracking-wider uppercase shrink-0">Canonical Rules & Policy</h3>
+              <div id="const-text" class="flex-1 p-4 bg-gray-950 border border-gray-900 rounded-lg font-mono text-[11px] text-gray-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed">
+                No constitution loaded.
+              </div>
+            </div>
           </div>
-          <div id="workbench-list" class="flex-1 overflow-y-auto p-4 space-y-2">
-            <div class="text-center text-gray-500 text-xs py-4">No active workbenches or drafts.</div>
+        </div>
+
+        <!-- Tab Content 3: Wiki & Knowledge Base -->
+        <div id="tab-content-wiki" class="flex-1 flex flex-col overflow-hidden hidden">
+          <!-- Wiki Proposals Section -->
+          <div class="h-1/2 border-b border-gray-850 flex flex-col overflow-hidden">
+            <div class="px-6 py-2 border-b border-gray-850 bg-gray-950 bg-opacity-40">
+              <h3 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Pending Wiki Proposals</h3>
+            </div>
+            <div id="wiki-proposals-list" class="flex-1 overflow-y-auto p-4 space-y-2 text-xs">
+              <div class="text-center text-gray-500 py-4">No pending proposals.</div>
+            </div>
+          </div>
+          <!-- Wiki Pages Section -->
+          <div class="h-1/2 flex flex-col overflow-hidden">
+            <div class="px-6 py-2 border-b border-gray-850 bg-gray-950 bg-opacity-40">
+              <h3 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Wiki Pages</h3>
+            </div>
+            <div id="wiki-pages-list" class="flex-1 overflow-y-auto p-4 space-y-2 text-xs">
+              <div class="text-center text-gray-500 py-4">No pages found.</div>
+            </div>
           </div>
         </div>
       </div>
@@ -292,6 +362,74 @@
             Submit
           </button>
         </div>
+    </div>
+  </div>
+
+  <!-- Agent Control Modal -->
+  <div id="agent-control-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm hidden">
+    <div class="w-[500px] max-w-full glass-panel glow-indigo rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
+      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+        <h3 id="agent-control-title" class="font-display font-bold text-base text-white flex items-center gap-2">
+          <span>👾</span> Agent Controls
+        </h3>
+        <button onclick="closeAgentControlModal()" class="text-gray-500 hover:text-white transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+      
+      <div class="grid grid-cols-2 gap-3 text-xs">
+        <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
+          <span class="text-[10px] text-gray-500 font-semibold block uppercase">Agent ID</span>
+          <span id="control-agent-id" class="font-mono text-gray-250 font-bold select-all">—</span>
+        </div>
+        <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
+          <span class="text-[10px] text-gray-500 font-semibold block uppercase">Seat / Role</span>
+          <span id="control-agent-name" class="font-mono text-gray-250 font-bold">—</span>
+        </div>
+      </div>
+
+      <!-- Status / Suspension Actions -->
+      <div class="bg-gray-900 border border-gray-850 p-4 rounded-xl space-y-3">
+        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Gating & Suspension</h4>
+        <div class="flex justify-between items-center text-xs">
+          <span class="text-gray-400">Current Suspension:</span>
+          <span id="control-agent-suspend-status" class="px-2 py-0.5 rounded font-mono font-bold text-[10px]">Active</span>
+        </div>
+        <div class="flex gap-2">
+          <button id="agent-suspend-btn" onclick="suspendAgent()" class="flex-1 bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/20 text-accentRed font-bold text-xs py-2 rounded shadow transition-all duration-150">
+            Suspend Agent
+          </button>
+          <button id="agent-unsuspend-btn" onclick="unsuspendAgent()" class="flex-1 bg-accentGreen/10 border border-accentGreen/30 hover:bg-accentGreen/20 text-accentGreen font-bold text-xs py-2 rounded shadow transition-all duration-150">
+            Unsuspend Agent
+          </button>
+        </div>
+      </div>
+
+      <!-- Inference Overrides -->
+      <div class="bg-gray-900 border border-gray-850 p-4 rounded-xl space-y-3">
+        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Inference Presets</h4>
+        <div class="flex flex-col space-y-2">
+          <div class="flex justify-between items-center text-xs">
+             <span class="text-gray-400">Active Preset Override:</span>
+             <span id="control-agent-preset" class="font-mono font-bold text-accentIndigo">—</span>
+          </div>
+          <div class="flex gap-2">
+            <select id="inference-preset-select" class="bg-gray-950 border border-gray-850 rounded px-2.5 py-1.5 text-white text-xs flex-1 focus:outline-none focus:border-accentIndigo">
+              <option value="default">Default</option>
+              <option value="fast">Fast (Cost-optimized)</option>
+              <option value="smart">Smart (High Reasoning)</option>
+              <option value="thorough">Thorough (Long thinking / exhaustive)</option>
+              <option value="strict">Strict (Sentinel checked)</option>
+            </select>
+            <button onclick="setInferencePreset()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs px-3.5 py-1.5 rounded shadow transition-all duration-150">
+              Apply
+            </button>
+            <button onclick="clearInferencePreset()" class="border border-gray-855 hover:bg-gray-950 text-gray-400 font-medium text-xs px-3 py-1.5 rounded transition-all duration-150">
+              Clear
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -469,6 +607,15 @@
       statusText.innerText = 'Connected';
       connectBtn.innerText = 'Disconnect';
       document.getElementById('send-btn').disabled = false;
+      document.getElementById('estop-btn').classList.remove('hidden');
+
+      // Trigger lazy loads for active tabs if connect succeeds
+      if (!document.getElementById('tab-content-constitution').classList.contains('hidden')) {
+        fetchConstitution();
+      }
+      if (!document.getElementById('tab-content-wiki').classList.contains('hidden')) {
+        fetchWiki();
+      }
 
       // 4. Determine timeline stream offset (only fetch events after our snapshot)
       let lastEventId = null;
@@ -540,6 +687,7 @@
       document.getElementById('status-text').innerText = 'Disconnected';
       document.getElementById('connect-btn').innerText = 'Connect';
       document.getElementById('send-btn').disabled = true;
+      document.getElementById('estop-btn').classList.add('hidden');
       document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-gray-500 text-sm mt-10">Disconnected. Re-enter credentials to stream.</div>';
       document.getElementById('plan-steps').innerHTML = '<div class="text-center text-gray-500 text-xs py-8">No plan loaded yet.</div>';
       document.getElementById('plan-version-badge').classList.add('hidden');
@@ -1539,6 +1687,7 @@
         const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
         group.setAttribute('transform', `translate(${node.x},${node.y})`);
         group.style.cursor = 'pointer';
+        group.onclick = () => openAgentControlModal(node.id, node.name, node.status);
 
         // Outer glow
         const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -1968,6 +2117,531 @@
     function escapeHTML(str) {
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
+
+    // Tabs navigation in Right Sidebar
+    function switchRightTab(tabId) {
+      const tabChecklist = document.getElementById('tab-content-checklist');
+      const tabConstitution = document.getElementById('tab-content-constitution');
+      const tabWiki = document.getElementById('tab-content-wiki');
+      
+      const btnChecklist = document.getElementById('tab-btn-checklist');
+      const btnConstitution = document.getElementById('tab-btn-constitution');
+      const btnWiki = document.getElementById('tab-btn-wiki');
+      
+      tabChecklist.classList.add('hidden');
+      tabConstitution.classList.add('hidden');
+      tabWiki.classList.add('hidden');
+      
+      btnChecklist.className = btnChecklist.className.replace('border-accentIndigo text-white', 'border-transparent text-gray-400 hover:text-white');
+      btnConstitution.className = btnConstitution.className.replace('border-accentIndigo text-white', 'border-transparent text-gray-400 hover:text-white');
+      btnWiki.className = btnWiki.className.replace('border-accentIndigo text-white', 'border-transparent text-gray-400 hover:text-white');
+      
+      if (tabId === 'checklist') {
+        tabChecklist.classList.remove('hidden');
+        btnChecklist.className = btnChecklist.className.replace('border-transparent text-gray-400 hover:text-white', 'border-accentIndigo text-white');
+      } else if (tabId === 'constitution') {
+        tabConstitution.classList.remove('hidden');
+        btnConstitution.className = btnConstitution.className.replace('border-transparent text-gray-400 hover:text-white', 'border-accentIndigo text-white');
+        if (isConnected) fetchConstitution();
+      } else if (tabId === 'wiki') {
+        tabWiki.classList.remove('hidden');
+        btnWiki.className = btnWiki.className.replace('border-transparent text-gray-400 hover:text-white', 'border-accentIndigo text-white');
+        if (isConnected) fetchWiki();
+      }
+    }
+
+    // Recent sessions switcher
+    async function fetchRecentSessions() {
+      const secret = document.getElementById('secret-input').value.trim() || localStorage.getItem('auto_secret') || '';
+      const port = document.getElementById('port-input').value.trim() || localStorage.getItem('auto_port') || '4100';
+      if (!secret) return;
+      const select = document.getElementById('recent-sessions-select');
+      try {
+        const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'list-sessions',
+            method: 'session.list',
+            params: { limit: 15 }
+          })
+        });
+        const json = await resp.json();
+        if (json && json.result && json.result.sessions) {
+          select.innerHTML = '<option value="">-- select session --</option>';
+          json.result.sessions.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s.root_session_id;
+            const dateStr = s.last_active_at ? new Date(s.last_active_at).toLocaleString() : 'unknown';
+            opt.innerText = `${s.agent_id} (${s.root_session_id.substring(0,8)}...) - ${dateStr}`;
+            select.appendChild(opt);
+          });
+        }
+      } catch (e) {
+        console.warn("Could not load recent sessions:", e);
+      }
+    }
+
+    function selectRecentSession() {
+      const val = document.getElementById('recent-sessions-select').value;
+      if (val) {
+        document.getElementById('session-input').value = val;
+        connect();
+      }
+    }
+
+    // Emergency Stop
+    async function triggerEmergencyStop() {
+      const sid = document.getElementById('session-input').value.trim();
+      if (!sid) return;
+      if (!confirm("Are you absolutely sure you want to trigger an Emergency Stop for this session?\nThis will stop all running agents and lock the session.")) return;
+      
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'estop',
+            method: 'root_session.emergency_stop',
+            params: {
+              root_session_id: sid,
+              reason: "Operator clicked Emergency Stop from dashboard",
+              requested_by_type: "operator",
+              requested_by_id: "dashboard"
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Failed to trigger Emergency Stop: ${json.error.message}`);
+        } else {
+          alert("Emergency Stop successfully executed!");
+          disconnect();
+        }
+      } catch (e) {
+        alert(`Connection failed: ${e.message}`);
+      }
+    }
+
+    // Constitution Viewer
+    async function fetchConstitution() {
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'get-const',
+            method: 'constitution.get',
+            params: { include_text: true }
+          })
+        });
+        const json = await resp.json();
+        if (json && json.result) {
+          document.getElementById('const-version').innerText = json.result.constitution_version || 'unknown';
+          document.getElementById('const-format-version').innerText = json.result.constitution_format_version || '1';
+          document.getElementById('const-digest').innerText = json.result.constitution_digest || 'unknown';
+          document.getElementById('const-text').innerText = json.result.text || 'No constitutional text available.';
+        }
+      } catch (e) {
+        console.error("Failed to load constitution:", e);
+      }
+    }
+
+    // Wiki & Knowledge Base Management
+    async function fetchWiki() {
+      const sid = document.getElementById('session-input').value.trim();
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      
+      // Fetch pages
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'list-wiki-pages',
+            method: 'wiki.list',
+            params: {}
+          })
+        });
+        const json = await resp.json();
+        const listDiv = document.getElementById('wiki-pages-list');
+        if (json && json.result && json.result.pages) {
+          if (json.result.pages.length === 0) {
+            listDiv.innerHTML = '<div class="text-center text-gray-500 py-4">No wiki pages found.</div>';
+          } else {
+            listDiv.innerHTML = '';
+            json.result.pages.forEach(p => {
+              const item = document.createElement('div');
+              item.className = 'p-2 rounded border border-gray-800 bg-gray-900 bg-opacity-20 flex items-center justify-between hover:bg-opacity-40 transition-all';
+              item.innerHTML = `
+                <div class="min-w-0 flex-1">
+                  <span class="font-semibold text-gray-200 block truncate">📄 ${p.title || p.id}</span>
+                  <span class="text-[9px] text-gray-500 block">ID: ${p.id}</span>
+                </div>
+                <button onclick="inspectWikiPage('${p.id}')" class="text-accentIndigo hover:underline font-semibold font-mono text-[10px] uppercase ml-2 shrink-0">View</button>
+              `;
+              listDiv.appendChild(item);
+            });
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load wiki pages:", e);
+      }
+
+      // Fetch pending proposals
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'list-wiki-props',
+            method: 'wiki.proposals_pending',
+            params: { root_session_id: sid }
+          })
+        });
+        const json = await resp.json();
+        const listDiv = document.getElementById('wiki-proposals-list');
+        if (json && json.result && json.result.proposals) {
+          if (json.result.proposals.length === 0) {
+            listDiv.innerHTML = '<div class="text-center text-gray-500 py-4">No pending proposals.</div>';
+          } else {
+            listDiv.innerHTML = '';
+            json.result.proposals.forEach(prop => {
+              let actionDetail = 'Unknown proposal';
+              if (prop.action && prop.action.wiki_proposal) {
+                const wp = prop.action.wiki_proposal;
+                actionDetail = `Propose ${wp.is_edit ? 'edit' : 'new page'} "${wp.title}"`;
+              } else if (prop.reason) {
+                actionDetail = prop.reason;
+              }
+              const item = document.createElement('div');
+              item.className = 'p-2.5 rounded border border-accentAmber/30 bg-accentAmber/5 flex flex-col space-y-1.5';
+              item.innerHTML = `
+                <div class="flex justify-between items-center">
+                  <span class="font-semibold text-accentAmber text-[11px] uppercase tracking-wide">Wiki Proposal</span>
+                  <span class="font-mono text-[10px] text-gray-500">${prop.request_id}</span>
+                </div>
+                <p class="text-gray-350 font-medium">${actionDetail}</p>
+                <div class="flex justify-end gap-2 pt-1">
+                  <button onclick="resolveWikiProposal('${prop.request_id}', false)" class="border border-gray-800 hover:bg-gray-900 text-gray-400 font-bold text-[9px] px-2 py-1 rounded uppercase">Reject</button>
+                  <button onclick="resolveWikiProposal('${prop.request_id}', true)" class="bg-accentAmber hover:bg-opacity-90 text-gray-955 font-bold text-[9px] px-2 py-1 rounded uppercase">Approve</button>
+                </div>
+              `;
+              listDiv.appendChild(item);
+            });
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load pending wiki proposals:", e);
+      }
+    }
+
+    async function inspectWikiPage(pageId) {
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'get-wiki-page',
+            method: 'wiki.get',
+            params: { id: pageId }
+          })
+        });
+        const json = await resp.json();
+        if (json && json.result && json.result.content) {
+          openDiffModal(pageId, json.result.content, null, '');
+        }
+      } catch (e) {
+        alert("Failed to load wiki page content: " + e.message);
+      }
+    }
+
+    async function resolveWikiProposal(requestId, isApprove) {
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      const method = isApprove ? 'approvals.approve' : 'approvals.reject';
+      
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'resolve-wiki',
+            method: method,
+            params: {
+              request_id: requestId,
+              decided_by: "operator",
+              reason: "Resolved from wiki dashboard panel"
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Error: ${json.error.message}`);
+        } else {
+          alert(`Wiki proposal ${isApprove ? 'approved' : 'rejected'} successfully.`);
+          fetchWiki();
+        }
+      } catch (e) {
+        alert("Failed to resolve wiki proposal: " + e.message);
+      }
+    }
+
+    // Agent Hierarchy interactive node controller
+    let selectedAgentId = null;
+    let selectedAgentName = null;
+
+    async function openAgentControlModal(agentId, agentName, status) {
+      selectedAgentId = agentId;
+      selectedAgentName = agentName;
+      
+      document.getElementById('control-agent-id').innerText = agentId;
+      document.getElementById('control-agent-name').innerText = agentName;
+      
+      const suspendStatusSpan = document.getElementById('control-agent-suspend-status');
+      suspendStatusSpan.innerText = 'Checking...';
+      suspendStatusSpan.className = 'px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-gray-800 text-gray-400';
+      
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'get-inf',
+            method: 'session.inference.get',
+            params: {
+              session_id: agentId
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json && json.result) {
+          document.getElementById('control-agent-preset').innerText = json.result.preset || 'Default';
+          document.getElementById('inference-preset-select').value = json.result.preset || 'default';
+        } else {
+          document.getElementById('control-agent-preset').innerText = 'None';
+          document.getElementById('inference-preset-select').value = 'default';
+        }
+      } catch(e) {
+        console.warn("Failed to get inference override:", e);
+        document.getElementById('control-agent-preset').innerText = 'None (Default)';
+      }
+
+      suspendStatusSpan.innerText = (status === 'suspended') ? 'SUSPENDED' : 'ACTIVE';
+      suspendStatusSpan.className = (status === 'suspended') 
+        ? 'px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-accentRed/10 text-accentRed border border-accentRed/20'
+        : 'px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-accentGreen/10 text-accentGreen border border-accentGreen/20';
+
+      document.getElementById('agent-control-modal').classList.remove('hidden');
+    }
+
+    function closeAgentControlModal() {
+      document.getElementById('agent-control-modal').classList.add('hidden');
+      selectedAgentId = null;
+      selectedAgentName = null;
+    }
+
+    async function suspendAgent() {
+      if (!selectedAgentId) return;
+      const reason = prompt("Enter reason for suspending this agent:");
+      if (reason === null) return;
+      
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'susp-agent',
+            method: 'agent.suspend',
+            params: {
+              agent_id: selectedAgentName.toLowerCase(),
+              reason: reason || undefined
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Error: ${json.error.message}`);
+        } else {
+          alert(`Agent ${selectedAgentName} suspended successfully.`);
+          closeAgentControlModal();
+        }
+      } catch (e) {
+        alert("Failed to suspend agent: " + e.message);
+      }
+    }
+
+    async function unsuspendAgent() {
+      if (!selectedAgentId) return;
+      
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'unsusp-agent',
+            method: 'agent.unsuspend',
+            params: {
+              agent_id: selectedAgentName.toLowerCase()
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Error: ${json.error.message}`);
+        } else {
+          alert(`Agent ${selectedAgentName} unsuspended successfully.`);
+          closeAgentControlModal();
+        }
+      } catch (e) {
+        alert("Failed to unsuspend agent: " + e.message);
+      }
+    }
+
+    async function setInferencePreset() {
+      if (!selectedAgentId) return;
+      const preset = document.getElementById('inference-preset-select').value;
+      const reason = prompt("Enter reason for preset override (optional):");
+      if (reason === null) return;
+      
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'set-inf',
+            method: 'session.inference.set',
+            params: {
+              session_id: selectedAgentId,
+              preset: preset,
+              reason: reason || undefined
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Error: ${json.error.message}`);
+        } else {
+          alert("Inference preset updated successfully.");
+          openAgentControlModal(selectedAgentId, selectedAgentName, 'active');
+        }
+      } catch (e) {
+        alert("Failed to set inference override: " + e.message);
+      }
+    }
+
+    async function clearInferencePreset() {
+      if (!selectedAgentId) return;
+      
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim();
+      const baseURL = `http://127.0.0.1:${port}`;
+      
+      try {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${secret}`
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'clear-inf',
+            method: 'session.inference.clear',
+            params: {
+              session_id: selectedAgentId
+            }
+          })
+        });
+        const json = await resp.json();
+        if (json.error) {
+          alert(`Error: ${json.error.message}`);
+        } else {
+          alert("Inference preset override cleared.");
+          openAgentControlModal(selectedAgentId, selectedAgentName, 'active');
+        }
+      } catch (e) {
+        alert("Failed to clear inference override: " + e.message);
+      }
+    }
+
+    // Auto-discover sessions on credentials input
+    document.getElementById('secret-input').addEventListener('input', fetchRecentSessions);
+    document.getElementById('port-input').addEventListener('input', fetchRecentSessions);
+    fetchRecentSessions();
   </script>
 </body>
 </html>

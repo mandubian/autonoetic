@@ -1313,6 +1313,71 @@ impl JsonRpcRouter {
                 }
             }
 
+            "planframes.get_active" => {
+                #[derive(serde::Deserialize)]
+                struct PlanFramesGetActiveParams {
+                    root_session_id: String,
+                }
+                let params: PlanFramesGetActiveParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for planframes.get_active: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let wf_id = match store.resolve_workflow_id(&params.root_session_id) {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                            self.config.as_ref(),
+                            &params.root_session_id,
+                        )
+                        .ok()
+                        .flatten()
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to resolve workflow ID: {}", e),
+                        );
+                    }
+                };
+
+                let plan = if let Some(wf_id) = wf_id {
+                    match store.load_active_plan_for_workflow(&wf_id) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("Failed to load active plan: {}", e),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({ "plan": plan }),
+                )
+            }
+
             "planframes.approve" => {
                 let params: autonoetic_types::plan_frame::PlanFramesApproveParams =
                     match serde_json::from_value(req.params) {

@@ -268,6 +268,8 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
     };
     save_checkpoint(&f.config, &ckpt).unwrap();
 
@@ -653,6 +655,8 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
     };
     save_checkpoint(&f.config, &ckpt).unwrap();
 
