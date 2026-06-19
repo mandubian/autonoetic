@@ -120,11 +120,11 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 shebang line (`#!/usr/bin/env python3`, `#!/usr/bin/env node`, `#!/usr/bin/env bash`, etc.) or be
 a compiled binary.
 
-**Detection signals across languages:**
+**Detection signals across languages** (these detect the *script format*, not the input method — script agents receive input via `AUTONOETIC_INPUT*` env vars read by the SDK, not raw stdin/argv):
 - Shebang line (`#!`) at the top of the entry file
-- CLI argument parsing: `sys.argv` (Python), `process.argv` (Node), `os.Args`/`flag` (Go), `std::env::args` (Rust), `$1`/`$@` (Shell), `ARGV` (Ruby)
 - Entry-point convention: `if __name__ == "__main__"` (Python), `func main()` (Go/Rust), top-level code (Node/Shell/Ruby)
-- stdin reading: `sys.stdin`, `process.stdin`, `bufio.NewReader(os.Stdin)`, `io::stdin()`, `read`
+- Input handling via SDK / env vars: `from autonoetic_sdk import load_invocation` (Python), `process.env.AUTONOETIC_INPUT` (Node)
+- CLI argument parsing as a fallback: `sys.argv` (Python), `process.argv` (Node), `os.Args`/`flag` (Go), `std::env::args` (Rust), `$1`/`$@` (Shell), `ARGV` (Ruby)
 
 **When coder returns library code without a CLI entry point** (modules, classes, no main):
 that is a **reasoning-mode** agent. The LLM orchestrates the library code via `sandbox_exec`.

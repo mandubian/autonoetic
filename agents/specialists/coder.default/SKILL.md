@@ -126,7 +126,48 @@ When the planner asks you to create an agent (e.g. "create a data processing age
 2. **Write unit tests** alongside the implementation when building a `kind: "agent_bundle"`.
    - Use filename conventions standard for the target language (e.g., `test_*.py` or `*_test.py` for Python; `*.test.js` or `*.spec.js` for JavaScript/Node.js; `*_test.go` for Go).
    - Use the language's standard library or built-in test features and mocking capabilities, avoiding external test framework dependencies.
-   - **Do NOT perform real side effects:** Ensure tests do not trigger real external operations (e.g., executing actual network registrations, posting live messages to external services, or mutating shared external databases/state). Always mock out external network requests, communications, and side-effect-heavy APIs.
+   - **ALL network calls in tests MUST be mocked.** The promotion sandbox (`unit_test_runner.default`) permanently disables network — this is constitutional rule P-3.10. Any test that makes a real HTTP request, DNS lookup, or socket connection will fail with `status: "unable_to_evaluate"`, causing the evaluator to loop you back to fix it. This is the #1 cause of wasted evaluation cycles. Mock at the HTTP client level so the test never opens a real socket.
+
+     Python example:
+     ```python
+     # CORRECT — mock the HTTP client, no real socket opened
+     from unittest.mock import patch, MagicMock
+
+     @patch("agent.requests.get")
+     def test_fetch_returns_data(mock_get):
+         mock_get.return_value = MagicMock(status_code=200, json=lambda: {"temp": 22})
+         result = fetch("paris")
+         assert result["temp"] == 22
+
+     # WRONG — opens a real connection, will fail in no-network sandbox
+     def test_fetch_returns_data():
+         result = fetch("paris")  # calls requests.get("https://api.example.com/...")
+         assert result["temp"] == 22
+     ```
+
+     JavaScript/Node.js example:
+     ```javascript
+     // CORRECT — mock the HTTP client, no real socket opened
+     const { mock } = require("node:test");
+     const assert = require("node:assert");
+     const agent = require("./agent.js");
+
+     mock.method(agent, "fetchData", async () => ({ temp: 22 }));
+     const result = await agent.fetchData("paris");
+     assert.strictEqual(result.temp, 22);
+
+     // WRONG — opens a real connection, will fail in no-network sandbox
+     const result = await agent.fetchData("paris"); // calls fetch("https://...")
+     ```
+
+     Mock patterns by library:
+     - Python `requests`: `@patch("module.requests.get")` or `responses` / `requests_mock`
+     - Python `httpx`: `@patch("module.httpx.get")` or `httpx.MockTransport`
+     - Python `urllib`: `@patch("urllib.request.urlopen")`
+     - Node.js `fetch`/`axios`: `jest.mock("axios")`, `nock`, or `node:test` `mock.method()`
+     - Go: `httptest.NewServer()` with a stub handler, inject via `http.Client`
+     - Rust: `wiremock`, `httpmock`, or trait-based injection
+
    - If your implementation or tests require external libraries/packages, you must explicitly declare them in the appropriate dependency manifest (e.g., `requirements.txt` for Python, `package.json` for JavaScript/Node.js, etc.) so they can be resolved, rather than trying to install them during execution.
 3. **Test your code** with `sandbox_exec` using the base runtime only to verify the basic correctness of your implementation (smoke-testing). You only need to run basic verification for your code; running and validating the entire unit test suite for promotion is the responsibility of `unit_test_runner.default` and other evaluation agents.
    - If external packages/libraries are required, make sure they are declared, and return a `needs_packager` handoff to the planner if package resolution/layering is needed before running.
@@ -166,6 +207,8 @@ When planner returns evaluator/auditor findings for your script:
 2. **DO** rebuild the artifact after editing, and return the new artifact_ref plus the key file names.
 3. **DO NOT** install the agent yourself.
 4. **DO NOT** claim success until findings are addressed.
+
+**If unit_test_runner returns `unable_to_evaluate` due to network:** the tests are making real HTTP/socket calls. Fix by mocking the HTTP client in the test file (see the mocking patterns above). The implementation can still make real calls in production — only the *tests* must mock them. Do not remove tests; mock them.
 
 Expected response pattern:
 `Updated files saved and artifact rebuilt. New artifact: ar.example. Please re-run the evaluation federation (static_evaluator.default, unit_test_runner.default, auditor.default) on this artifact.`
@@ -216,6 +259,10 @@ The gateway executes script agents directly (no interpreter prefix), so the sheb
 
 The gateway injects the `autonoetic_sdk` package into every script agent. Prefer the SDK input helper over direct environment parsing. The runtime sets `AUTONOETIC_INPUT_PATH` and `AUTONOETIC_INPUT` for the normalized task payload, and when metadata exists it also sets `AUTONOETIC_META_PATH` and `AUTONOETIC_META`. **Do NOT use `sys.argv` or `sys.stdin` for structured agent input unless you are explicitly adding a local CLI fallback.**
 
+**Structure for testability:** put the input-loading and entry-point logic inside a `main()` function, guarded by the language's entry-point gate. Unit tests import the module to call individual functions — if `load_invocation()` runs at module level, the import will crash because `AUTONOETIC_INPUT*` env vars are not set during test execution (`artifact_exec` does not set them).
+
+Entry-point gates by language: `if __name__ == "__main__":` (Python) · `if (require.main === module)` (Node.js) · `func main()` with package-level guard (Go) · `fn main()` (Rust)
+
 When the caller sends JSON (e.g. `{"record_id":"abc123","format":"summary"}`), parse it directly:
 
 ```python
@@ -223,39 +270,61 @@ When the caller sends JSON (e.g. `{"record_id":"abc123","format":"summary"}`), p
 import sys
 from autonoetic_sdk import load_invocation
 
-invocation = load_invocation()
-try:
-    data = invocation.input
-    record_id = data["record_id"]
-    output_format = data["format"]
-except (TypeError, KeyError):
-    print(
-        f"Error: expected JSON input with 'record_id' and 'format'. Got: {invocation.input!r}",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+
+def process(record_id: str, output_format: str) -> dict:
+    # Core logic here — unit tests call this directly.
+    ...
+
+
+def main():
+    invocation = load_invocation()
+    try:
+        data = invocation.input
+        result = process(data["record_id"], data["format"])
+    except (TypeError, KeyError):
+        print(
+            f"Error: expected JSON input with 'record_id' and 'format'. Got: {invocation.input!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 **Do NOT write `if len(sys.argv) < 3: ...` guards for agent-driven inputs.** Those fail because the gateway does not split free-text messages into separate argv tokens.
 
-If the script also needs to work standalone as a CLI tool, add a named-flag fallback AFTER the SDK/env path:
+If the script also needs to work standalone as a CLI tool, add a named-flag fallback AFTER the SDK/env path — again inside `main()`:
 
 ```python
 import argparse
 from autonoetic_sdk import load_invocation
 
-invocation = load_invocation()
-if invocation.has_runtime_input:
-    data = invocation.input
-    record_id = data["record_id"]
-    output_format = data["format"]
-else:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--record-id", required=True)
-    parser.add_argument("--format", required=True)
-    args = parser.parse_args()
-    record_id = args.record_id
-    output_format = args.format
+
+def process(record_id: str, output_format: str) -> dict:
+    ...
+
+
+def main():
+    invocation = load_invocation()
+    if invocation.has_runtime_input:
+        data = invocation.input
+        record_id = data["record_id"]
+        output_format = data["format"]
+    else:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--record-id", required=True)
+        parser.add_argument("--format", required=True)
+        args = parser.parse_args()
+        record_id = args.record_id
+        output_format = args.format
+    print(process(record_id, output_format))
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 When writing a script agent that accepts structured inputs, always declare `io.accepts` in the install intent so callers format their message as JSON:
