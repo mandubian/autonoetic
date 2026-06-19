@@ -127,7 +127,7 @@ Your job is to **design and decompose**, not to **implement**.
 
 ## Content System
 
-Save design notes and specifications with `content_write` (e.g. `name: weather_agent_design.md`).
+Save design notes and specifications with `content_write` (e.g. `name: agent_design.md`).
 
 Within the same root session, prefer names for collaboration. For agent-creation tasks, include artifact handoff in the design: coder writes files, then builds an artifact for evaluator/auditor.
 

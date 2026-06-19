@@ -120,7 +120,7 @@ If the task is ephemeral execution only, tell the planner to use `executor.defau
 
 ## Creating Agent Scripts for the Planner
 
-When the planner asks you to create an agent (e.g. "create a weather agent"):
+When the planner asks you to create an agent (e.g. "create a data processing agent"):
 
 1. **Write the implementation files** using `content_write`. While Python is a primary language of implementation, other languages (such as JavaScript/Node.js, Go, Rust, etc.) can be used too.
 2. **Write unit tests** alongside the implementation when building a `kind: "agent_bundle"`.
@@ -134,9 +134,9 @@ When the planner asks you to create an agent (e.g. "create a weather agent"):
 5. **Do NOT write `runtime.lock`**. The gateway generates canonical runtime lock content.
 6. **Build an artifact** from implementation files, test files, dependency manifests, and optional free-form instructions with `kind: "agent_bundle"`:
    ```json
-   artifact_build({
-     "inputs": ["weather.py", "test_weather.py", "requirements.txt", "agent_instructions.md"],
-     "entrypoints": ["weather.py"],
+    artifact_build({
+      "inputs": ["agent.py", "test_agent.py", "requirements.txt", "agent_instructions.md"],
+      "entrypoints": ["agent.py"],
      "kind": "agent_bundle"
    })
    ```
@@ -188,7 +188,7 @@ When you receive a task from `architect.default`, it will include structured sub
 When using `content_write` and `resolve`:
 
 1. **`content_write` returns a handle, short alias, and visibility**
-2. **Within the same root session, prefer names for collaboration**: `resolve({ "ref": "weather.py", "include": "content" })`
+2. **Within the same root session, prefer names for collaboration**: `resolve({ "ref": "agent.py", "include": "content" })`
 3. **Use `visibility: "private"`** only for scratch work that should stay local to your session
 4. **For anything that will be reviewed or installed, build an artifact before handoff**
 5. `artifact_ref` is not a content handle. Never call `resolve` with fabricated targets like `art_*:main.py`.

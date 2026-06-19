@@ -148,7 +148,7 @@ When requesting clarification, output this structure:
   "status": "clarification_needed",
   "clarification_request": {
     "question": "Should I focus on recent API changes or the full API surface?",
-    "context": "Task says 'research the weather API' but scope is ambiguous"
+    "context": "Task says 'research the REST API' but scope is ambiguous"
   }
 }
 ```

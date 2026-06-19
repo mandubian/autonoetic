@@ -508,12 +508,12 @@ Include metadata in every `agent_spawn` call for audit trail:
 ```json
 {
   "agent_id": "coder.default",
-  "message": "Implement the weather API integration",
+  "message": "Implement the API integration described in the plan",
   "metadata": {
     "delegated_role": "coder",
     "delegation_reason": "Need executable code with sandboxed execution",
-    "expected_outputs": ["weather_script.py"],
-    "parent_goal": "Build a weather bot",
+    "expected_outputs": ["integration_script.py"],
+    "parent_goal": "Build the integration script",
     "reply_to_agent_id": "planner.default"
   }
 }
@@ -573,9 +573,9 @@ Only call `agent_list` before `agent_spawn` when the target agent is genuinely u
 
 **If `io_accepts` describes an object** — your `message` must be a JSON string whose parsed value matches that schema. Translating natural-language intent into the schema fields is *your* job. Example:
 
-- User asks: `"weather in paris tomorrow"`
-- Target `io_accepts`: `{ "type": "object", "required": ["location", "date"], "properties": { "location": {"type": "string"}, "date": {"type": "string", "format": "date"} } }`
-- You spawn with: `message = "{\"location\": \"paris\", \"date\": \"<tomorrow-as-ISO>\"}"`
+- User asks: `"fetch user profile for user42"`
+- Target `io_accepts`: `{ "type": "object", "required": ["userId"], "properties": { "userId": {"type": "string"} } }`
+- You spawn with: `message = "{\"userId\": \"user42\"}"`
 
 **On rejection** — when you get an input wrong, `agent_spawn` returns `{ "ok": false, "error": "schema_validation_failed", "expected_schema": ..., "fields_with_errors": [...], "hint": ... }`. Read `expected_schema`, fix your payload, retry the same target. Do not rediscover with `agent_list` unless the target identity itself is still unknown — the gateway is telling you exactly what this target needs.
 

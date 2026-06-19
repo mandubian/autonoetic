@@ -217,26 +217,26 @@ For a new agent build, include the full pipeline — not just the first step:
 
 ```json
 {
-  "title": "Weather lookup agent",
-  "objective": "Build an agent that accepts a place name and returns current weather via a free public API; operator approves plan before build.",
+  "title": "REST API data pipeline agent",
+  "objective": "Build an agent that accepts a dataset query and returns processed results via a public REST API; operator approves plan before build.",
   "steps": [
     {
       "step_id": "s1",
-      "title": "Research free weather APIs",
+      "title": "Research available APIs and data sources",
       "owner": "agent",
       "agent_id": "researcher.default",
       "depends_on": []
     },
     {
       "step_id": "s2",
-      "title": "Design agent architecture",
+      "title": "Design agent architecture and data schema",
       "owner": "agent",
       "agent_id": "architect.default",
       "depends_on": ["s1"]
     },
     {
       "step_id": "s3",
-      "title": "Implement weather agent",
+      "title": "Implement the agent",
       "owner": "agent",
       "agent_id": "coder.default",
       "depends_on": ["s2"]

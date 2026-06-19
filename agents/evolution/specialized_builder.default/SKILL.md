@@ -145,10 +145,10 @@ Use `agent_revision_create_from_intent` as the canonical install path.
 `agent_revision_create_from_intent` example:
 ```json
 {
-  "agent_id": "weather-fetcher",
+  "agent_id": "data-fetcher",
   "artifact_ref": "ar.example",
-  "description": "Fetches weather data",
-  "instructions": "# Weather Agent\n\nYou are a weather agent...",
+  "description": "Fetches data from a public REST API",
+  "instructions": "# Data Fetcher Agent\n\nYou are a data-fetcher agent...",
   "capabilities": [
     {"type": "ReadAccess", "scopes": ["self.*"]},
     {"type": "WriteAccess", "scopes": ["self.*"]}
@@ -181,7 +181,7 @@ Activates the created revision.
 
 ```json
 {
-  "agent_id": "weather-fetcher",
+  "agent_id": "data-fetcher",
   "revision_id": "<revision_id from step 1>"
 }
 ```

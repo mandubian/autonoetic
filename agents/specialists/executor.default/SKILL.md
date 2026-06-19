@@ -117,10 +117,10 @@ When the planner delegates a task that requires an API key or secret, use `artif
 ```json
 artifact_prepare({
   "artifact_ref": "ar.example",
-  "entrypoint": "weather_lookup.py",
-  "args": ["London", "tomorrow"],
+  "entrypoint": "data_fetcher.py",
+  "args": ["input.csv", "--format", "json"],
   "required_credentials": [
-    { "credential_id": "cred_abc123", "env_var": "OPENWEATHER_API_KEY" }
+    { "credential_id": "cred_abc123", "env_var": "API_TOKEN" }
   ]
 })
 ```
@@ -138,8 +138,8 @@ Once you have the ticket, execute:
 artifact_exec({
   "deployment_ticket": "dtk-abc12345def",
   "artifact_ref": "ar.example",
-  "entrypoint": "weather_lookup.py",
-  "args": ["London", "tomorrow"]
+  "entrypoint": "data_fetcher.py",
+  "args": ["input.csv", "--format", "json"]
 })
 ```
 
@@ -151,7 +151,7 @@ For simple sandbox_exec calls without artifacts, use `credential_env` directly:
 sandbox_exec({
   "command": "python3 /tmp/script.py",
   "credential_env": [
-    { "credential_id": "cred_abc123", "env_var": "OPENWEATHER_API_KEY" }
+    { "credential_id": "cred_abc123", "env_var": "API_TOKEN" }
   ]
 })
 ```

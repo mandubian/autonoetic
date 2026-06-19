@@ -114,7 +114,7 @@ Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `Netwo
 | Agent must interpret ambiguous natural-language input before acting | **`reasoning`** |
 | `execution_mode_hint: "script"` from planner | **`script`** |
 
-**When coder returns a single entry-point script** (e.g. `weather_agent.py`, `main.go`,
+**When coder returns a single entry-point script** (e.g. `agent.py`, `main.go`,
 `index.js`, `fetch.sh` — any language): that is a **script-mode** agent. Set
 `execution_mode: "script"` and `script_entry` to the entry file. The script must start with a
 shebang line (`#!/usr/bin/env python3`, `#!/usr/bin/env node`, `#!/usr/bin/env bash`, etc.) or be
