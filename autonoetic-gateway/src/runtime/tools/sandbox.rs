@@ -2879,3 +2879,57 @@ fn shlex_split(s: &str) -> Option<Vec<String>> {
     }
     Some(tokens)
 }
+
+#[cfg(test)]
+mod approval_ref_binding_tests {
+    use super::validate_approval_ref_context;
+    use autonoetic_types::background::{
+        ApprovalDecision, ApprovalLevel, ApprovalStatus, ScheduledAction,
+    };
+
+    fn decision(agent_id: &str, session_id: &str, root: &str) -> ApprovalDecision {
+        ApprovalDecision {
+            request_id: "apr-1".to_string(),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "echo ok".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+                detected_hosts: None,
+            },
+            status: ApprovalStatus::Approved,
+            decided_at: "2026-01-01T00:00:00Z".to_string(),
+            decided_by: "operator".to_string(),
+            reason: None,
+            root_session_id: Some(root.to_string()),
+            workflow_id: None,
+            task_id: None,
+            approval_level: ApprovalLevel::Operator,
+        }
+    }
+
+    #[test]
+    fn approval_ref_rejects_cross_agent_use() {
+        let decision = decision("coder.default", "root/coder.default-1", "root");
+        let err = validate_approval_ref_context(&decision, "evaluator.default", Some("root/eval-1"))
+            .expect_err("cross-agent approval_ref should be rejected");
+        assert!(err.to_string().contains("belongs to agent"));
+    }
+
+    #[test]
+    fn approval_ref_rejects_cross_root_use() {
+        let decision = decision("coder.default", "root-a/coder.default-1", "root-a");
+        let err = validate_approval_ref_context(&decision, "coder.default", Some("root-b/coder-2"))
+            .expect_err("cross-root approval_ref should be rejected");
+        assert!(err.to_string().contains("root session"));
+    }
+
+    #[test]
+    fn approval_ref_accepts_same_agent_and_root() {
+        let decision = decision("coder.default", "root/coder.default-1", "root");
+        validate_approval_ref_context(&decision, "coder.default", Some("root/coder.default-1"))
+            .expect("same agent + same root should be accepted");
+    }
+}
