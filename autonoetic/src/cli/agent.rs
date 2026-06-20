@@ -1110,7 +1110,7 @@ fn discover_reference_bundles(root: &Path) -> anyhow::Result<Vec<std::path::Path
         }
         let group_path = group.path();
         if group_path.join("SKILL.md").exists() {
-            // Top-level bundle (e.g. agents/digest/) — not nested under a role group.
+            // Top-level bundle (e.g. agents/autonoetic.digest/) — not nested under a role group.
             bundles.push(group_path);
             continue;
         }
