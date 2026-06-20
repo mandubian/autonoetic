@@ -90,111 +90,39 @@ pub(crate) async fn execute_with_history_close_on_error(
     match runtime.execute_with_history(history).await {
         Ok(o) => Ok(o),
         Err(e) => {
-            let _ = runtime.close_session(SessionCloseReason::SpawnExecuteError.as_str());
+            let _ = runtime.close_session(SessionCloseOutcome::SpawnExecuteError);
             Err(e)
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionCloseReason {
-    SpawnExecuteError,
-    JsonRpcSpawnSuspendedApproval,
-    JsonRpcSpawnSuspendedUserInput,
-    JsonRpcSpawnComplete,
-    JsonRpcSpawnCompleteEmpty,
-    CheckpointRespawnSuspendedApproval,
-    CheckpointRespawnSuspendedUserInput,
-    CheckpointRespawnComplete,
-    CheckpointRespawnCompleteEmpty,
-}
-
-impl SessionCloseReason {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::SpawnExecuteError => "spawn_execute_error",
-            Self::JsonRpcSpawnSuspendedApproval => "jsonrpc_spawn_suspended_approval",
-            Self::JsonRpcSpawnSuspendedUserInput => "jsonrpc_spawn_suspended_user_input",
-            Self::JsonRpcSpawnComplete => "jsonrpc_spawn_complete",
-            Self::JsonRpcSpawnCompleteEmpty => "jsonrpc_spawn_complete_empty",
-            Self::CheckpointRespawnSuspendedApproval => "checkpoint_respawn_suspended",
-            Self::CheckpointRespawnSuspendedUserInput => {
-                "checkpoint_respawn_suspended_user_input"
-            }
-            Self::CheckpointRespawnComplete => "checkpoint_respawn_complete",
-            Self::CheckpointRespawnCompleteEmpty => "checkpoint_respawn_complete_empty",
-        }
-    }
-
-    fn for_jsonrpc_spawn(
-        suspended_for_approval: bool,
-        suspended_for_user_input: bool,
-        has_assistant_reply: bool,
-    ) -> Self {
-        if suspended_for_approval {
-            Self::JsonRpcSpawnSuspendedApproval
-        } else if suspended_for_user_input {
-            Self::JsonRpcSpawnSuspendedUserInput
-        } else if has_assistant_reply {
-            Self::JsonRpcSpawnComplete
-        } else {
-            Self::JsonRpcSpawnCompleteEmpty
-        }
-    }
-
-    fn for_checkpoint_respawn(
-        suspended_for_approval: bool,
-        suspended_for_user_input: bool,
-        has_assistant_reply: bool,
-    ) -> Self {
-        if suspended_for_approval {
-            Self::CheckpointRespawnSuspendedApproval
-        } else if suspended_for_user_input {
-            Self::CheckpointRespawnSuspendedUserInput
-        } else if has_assistant_reply {
-            Self::CheckpointRespawnComplete
-        } else {
-            Self::CheckpointRespawnCompleteEmpty
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CloseOrigin {
-    JsonRpcSpawn,
-    CheckpointRespawn,
-}
-
-impl CloseOrigin {
-    fn make_close_reason(
-        self,
-        suspended_for_approval: bool,
-        suspended_for_user_input: bool,
-        has_assistant_reply: bool,
-    ) -> SessionCloseReason {
-        match self {
-            Self::JsonRpcSpawn => SessionCloseReason::for_jsonrpc_spawn(
-                suspended_for_approval,
-                suspended_for_user_input,
-                has_assistant_reply,
-            ),
-            Self::CheckpointRespawn => SessionCloseReason::for_checkpoint_respawn(
-                suspended_for_approval,
-                suspended_for_user_input,
-                has_assistant_reply,
-            ),
-        }
-    }
-
-    fn should_signal_background(self) -> bool {
-        matches!(self, Self::JsonRpcSpawn)
-    }
-}
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 
 struct SessionCloseFlags {
     assistant_reply: Option<String>,
     suspended_for_approval: Option<String>,
     suspended_for_user_input: bool,
+}
+
+impl SessionCloseFlags {
+    fn outcome(&self, jsonrpc_spawn: bool) -> SessionCloseOutcome {
+        let has_reply = self.assistant_reply.is_some();
+        let approval = self.suspended_for_approval.is_some();
+        let user_input = self.suspended_for_user_input;
+        match (jsonrpc_spawn, has_reply, approval, user_input) {
+            (true, true, false, false) => SessionCloseOutcome::JsonRpcSpawnComplete,
+            (true, false, false, false) => SessionCloseOutcome::JsonRpcSpawnCompleteEmpty,
+            (true, false, true, false) => SessionCloseOutcome::JsonRpcSpawnSuspended,
+            (false, true, false, false) => SessionCloseOutcome::CheckpointRespawnComplete,
+            (false, true, false, true) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
+            (false, false, true, false) => SessionCloseOutcome::CheckpointRespawnSuspended,
+            (false, false, false, true) => {
+                SessionCloseOutcome::CheckpointRespawnSuspendedUserInput
+            }
+            // Defensive fallback — multiple flags should never be set.
+            _ => SessionCloseOutcome::SpawnExecuteError,
+        }
+    }
 }
 
 fn session_close_flags_from_turn_outcome(
@@ -1648,21 +1576,17 @@ impl GatewayExecutionService {
         agent_id: &str,
         source_agent_id: Option<&str>,
         close_flags: SessionCloseFlags,
-        close_origin: CloseOrigin,
+        jsonrpc_spawn: bool,
         consumed_checkpoint_turn_id: Option<String>,
     ) -> anyhow::Result<SpawnResult> {
+        let close_outcome = close_flags.outcome(jsonrpc_spawn);
+        let is_suspended = close_outcome.is_suspended();
+        let close_reason = close_outcome.as_str();
         let SessionCloseFlags {
             assistant_reply,
             suspended_for_approval,
             suspended_for_user_input,
         } = close_flags;
-        let is_suspended = suspended_for_approval.is_some()
-            || suspended_for_user_input;
-        let close_reason = close_origin.make_close_reason(
-            suspended_for_approval.is_some(),
-            suspended_for_user_input,
-            assistant_reply.is_some(),
-        ).as_str();
         let digest_turn_count = runtime.turn_counter;
         let gw_dir = self.config.agents_dir.join(".gateway");
 
@@ -1674,15 +1598,15 @@ impl GatewayExecutionService {
                 agent_id,
             );
         }
-        if close_origin == CloseOrigin::JsonRpcSpawn {
+        if jsonrpc_spawn {
             if let Some(store) = self.gateway_store.as_ref() {
-                if close_reason == "jsonrpc_spawn_complete_empty" {
+                if close_outcome.is_completed_empty() {
                     if let Ok(tool_count) =
                         store.count_execution_traces_for_session(&session_id)
                     {
                         if let Some(draft) =
                             crate::runtime::operator_activity::classify_session_lifecycle(
-                                close_reason,
+                                close_outcome,
                                 tool_count.min(u32::MAX as u64) as u32,
                             )
                         {
@@ -1724,7 +1648,7 @@ impl GatewayExecutionService {
                 }
             }
         }
-        runtime.close_session(close_reason)?;
+        runtime.close_session(close_outcome)?;
         {
             let root_id = crate::runtime::live_digest::base_session_id(&session_id).to_string();
             let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
@@ -1743,7 +1667,7 @@ impl GatewayExecutionService {
                 self.hook_executor.dispatch_async(ctx);
             }
         }
-        if close_origin == CloseOrigin::JsonRpcSpawn && !is_suspended {
+        if jsonrpc_spawn && !is_suspended {
             if let Err(e) = crate::runtime::checkpoint::prune_checkpoints(
                 self.config.as_ref(),
                 &session_id,
@@ -1826,7 +1750,7 @@ impl GatewayExecutionService {
             session_id,
             assistant_reply,
             workflow_note,
-            should_signal_background: close_origin.should_signal_background(),
+            should_signal_background: jsonrpc_spawn,
             artifacts,
             files,
             shared_knowledge,
@@ -2546,7 +2470,7 @@ impl GatewayExecutionService {
                                 None,
                                 None,
                             );
-                            let _ = r.finish_session("script_exec_complete", Some(output));
+                            let _ = r.finish_session(SessionCloseOutcome::ScriptExecComplete, Some(output));
                         }
                         script_causal_event(
                             self.gateway_store.as_deref(),
@@ -2593,7 +2517,7 @@ impl GatewayExecutionService {
                                 None,
                                 None,
                             );
-                            let _ = r.finish_session("script_exec_failed", None);
+                            let _ = r.finish_session(SessionCloseOutcome::ScriptExecFailed, None);
                         }
                         script_causal_event(
                             self.gateway_store.as_deref(),
@@ -2850,7 +2774,7 @@ impl GatewayExecutionService {
                 agent_id,
                 source_agent_id,
                 close_flags,
-                CloseOrigin::JsonRpcSpawn,
+                true,
                 consumed_checkpoint_turn_id,
             ).await
         })
@@ -3246,7 +3170,7 @@ impl GatewayExecutionService {
             agent_id,
             source_agent_id,
             close_flags,
-            CloseOrigin::CheckpointRespawn,
+            false,
             Some(checkpoint.turn_id.clone()),
         ).await
     }
@@ -4128,41 +4052,55 @@ mod tests {
     }
 
     #[test]
-    fn session_close_reason_jsonrpc_mapping_is_closed_and_stable() {
+    fn session_close_flags_jsonrpc_mapping_is_closed_and_stable() {
+        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input| {
+            SessionCloseFlags {
+                assistant_reply,
+                suspended_for_approval,
+                suspended_for_user_input,
+            }
+        };
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(true, false, false).as_str(),
+            flags(None, Some("apr-1".into()), false).outcome(true).as_str(),
             "jsonrpc_spawn_suspended_approval"
         );
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(false, true, false).as_str(),
+            flags(None, None, true).outcome(true).as_str(),
             "jsonrpc_spawn_suspended_user_input"
         );
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(false, false, true).as_str(),
+            flags(Some("ok".into()), None, false).outcome(true).as_str(),
             "jsonrpc_spawn_complete"
         );
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(false, false, false).as_str(),
+            flags(None, None, false).outcome(true).as_str(),
             "jsonrpc_spawn_complete_empty"
         );
     }
 
     #[test]
-    fn session_close_reason_checkpoint_mapping_is_closed_and_stable() {
+    fn session_close_flags_checkpoint_mapping_is_closed_and_stable() {
+        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input| {
+            SessionCloseFlags {
+                assistant_reply,
+                suspended_for_approval,
+                suspended_for_user_input,
+            }
+        };
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(true, false, false).as_str(),
+            flags(None, Some("apr-1".into()), false).outcome(false).as_str(),
             "checkpoint_respawn_suspended"
         );
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(false, true, false).as_str(),
+            flags(None, None, true).outcome(false).as_str(),
             "checkpoint_respawn_suspended_user_input"
         );
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(false, false, true).as_str(),
+            flags(Some("ok".into()), None, false).outcome(false).as_str(),
             "checkpoint_respawn_complete"
         );
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(false, false, false).as_str(),
+            flags(None, None, false).outcome(false).as_str(),
             "checkpoint_respawn_complete_empty"
         );
     }

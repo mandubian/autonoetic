@@ -6,6 +6,7 @@ use autonoetic_gateway::llm::{
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -152,7 +153,7 @@ capabilities: []
         .execute_with_history(&mut history)
         .await
         .expect("execute should succeed");
-    runtime.close_session("integration test complete")?;
+    runtime.close_session(SessionCloseOutcome::ExecuteLoopComplete)?;
 
     let digest_path = gateway_dir
         .join("sessions")
@@ -173,7 +174,7 @@ capabilities: []
         "expected session summary: {digest}"
     );
     assert!(
-        digest.contains("integration test complete"),
+        digest.contains("execute_loop_complete"),
         "expected close reason in summary"
     );
 

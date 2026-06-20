@@ -862,10 +862,10 @@ categories are correct. The enum also covers resumable suspension states
 the documentation should distinguish terminal termination from checkpoint
 suspension. `execute_loop()` now exits through a single helper
 (`finalize_execute_loop_result`) that maps all `TurnOutcome` variants plus
-fatal errors to a closed termination reason set; unit tests pin that mapping.
-`execution.rs` spawn/respawn close reasons are mapped through a closed enum
-(`SessionCloseReason`) with unit tests, and CLI `agent run`/interactive close
-paths are likewise pinned via `CliSessionCloseReason`.
+fatal errors to a closed `SessionCloseOutcome` set; unit tests pin that mapping.
+Spawn/respawn and CLI `agent run`/interactive close paths use the same
+`SessionCloseOutcome` enum, so all mechanical session close reasons are
+consolidated in one typed location.
 
 Tests: `constitution_rights_mid_bucket.rs` (10) + `constitution_right_ri_0_6.rs` (3) + lifecycle/execute-loop termination unit mapping tests.
 
