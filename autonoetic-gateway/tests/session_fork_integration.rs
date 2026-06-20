@@ -6,7 +6,7 @@ use autonoetic_gateway::runtime::checkpoint::{
     SessionCheckpoint, SessionFork, YieldReason,
 };
 use autonoetic_gateway::runtime::content_store::ContentStore;
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_types::config::GatewayConfig;
 use tempfile::tempdir;
 
@@ -29,7 +29,7 @@ fn test_checkpoint(
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,

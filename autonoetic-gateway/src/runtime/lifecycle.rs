@@ -647,8 +647,6 @@ impl AgentExecutor {
             decided_by: None,
             decision_reason: None,
             approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,

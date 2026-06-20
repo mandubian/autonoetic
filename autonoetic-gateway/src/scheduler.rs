@@ -16,7 +16,6 @@ use autonoetic_types::causal_chain::CausalEventRecord;
 pub mod agent_outcome;
 pub mod approval;
 pub mod approval_hardening;
-pub mod approval_similarity;
 pub mod cron_parser;
 pub mod decision;
 pub mod eval_runner;

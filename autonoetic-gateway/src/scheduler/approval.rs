@@ -13,6 +13,7 @@ use autonoetic_types::background::{
     ScheduledAction,
 };
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::plan_frame::PlanStatus;
 use std::sync::Arc;
 
 /// Determine the required approval level for a given action based on config.
@@ -253,6 +254,82 @@ pub fn apply_decision(
                         );
                     }
                 }
+            }
+        }
+    }
+
+    // ── 1b. PlanFrame side-effects ─────────────────────────────────────
+    if let ScheduledAction::PlanFrame { plan_id, version, envelope } = &decision.action {
+        use autonoetic_types::session_timeline::TimelineRefs;
+        let plan_status = match decision.status {
+            ApprovalStatus::Approved => PlanStatus::Approved,
+            _ => PlanStatus::Cancelled,
+        };
+        if let Err(e) = store.update_plan_frame_status(
+            plan_id,
+            *version,
+            plan_status,
+            Some(&decision.decided_by),
+            Some(&decision.decided_at),
+        ) {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                error = %e,
+                "Failed to update plan frame status"
+            );
+        }
+
+        if decision.status == ApprovalStatus::Approved {
+            // Materialize the declared envelope as session approval grants.
+            if let Some(root_sid) = &decision.root_session_id {
+                let _ = crate::runtime::session_envelope::materialize_envelope(
+                    store,
+                    root_sid,
+                    envelope,
+                    &decision.decided_by,
+                    &decision.request_id,
+                );
+
+                // Propose/lock the session envelope (declared or discovered).
+                if let Ok(Some(plan)) = store.load_plan_frame_revision(plan_id, *version) {
+                    let _ = crate::runtime::session_envelope::propose_plan_envelope_on_approval(
+                        store,
+                        &plan,
+                        &decision.decided_by,
+                    );
+                }
+            }
+
+            // Canonical plan-approval timeline event.
+            let (principal, role) = crate::runtime::session_timeline::decider_seat(&decision.decided_by,
+            );
+            let refs = TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                approval_request_id: Some(decision.request_id.clone()),
+                ..Default::default()
+            };
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                decision.root_session_id.clone().unwrap_or_else(|| decision.session_id.clone()),
+                decision.session_id.clone(),
+                None,
+                &principal,
+                &role,
+                "plan.approved",
+                None,
+                Some(serde_json::json!({
+                    "plan_id": plan_id,
+                    "version": version,
+                    "approved_by": decision.decided_by,
+                })),
+                refs,
+            );
+            if let Err(e) = store.create_live_digest_event(&event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    "plan.approved timeline emit failed"
+                );
             }
         }
     }
@@ -987,6 +1064,9 @@ fn should_notify_parent_session(decision: &ApprovalDecision) -> bool {
 }
 
 fn should_resume_waiting_session(decision: &ApprovalDecision) -> bool {
+    if matches!(decision.action, ScheduledAction::PlanFrame { .. }) {
+        return false;
+    }
     !(decision.workflow_id.is_some() && decision.task_id.is_some())
 }
 
@@ -1432,8 +1512,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1466,8 +1544,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: level,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1546,8 +1622,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1610,8 +1684,6 @@ mod tests {
             decided_at: None,
             decided_by: None,
             decision_reason: None,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1841,8 +1913,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1932,8 +2002,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -2133,8 +2201,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Admin,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -2206,8 +2272,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,

@@ -5,7 +5,7 @@
 //! LoopGuard correctly classifies permission vs validation errors.
 
 use autonoetic_gateway::policy::PolicyEngine;
-use autonoetic_gateway::runtime::guard::{LoopGuard, LoopGuardState};
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
@@ -381,7 +381,7 @@ fn test_loop_guard_snapshot_restore_preserves_failure_counts() {
     guard.register_failure("web_fetch", "{}", Some(&ToolErrorType::Permission));
     guard.register_failure("sandbox_exec", "{}", None);
 
-    let state: LoopGuardState = guard.snapshot();
+    let state: LoopGuard = guard.snapshot();
     let restored = LoopGuard::restore(state);
 
     assert_eq!(

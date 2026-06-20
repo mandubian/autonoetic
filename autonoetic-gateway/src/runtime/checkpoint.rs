@@ -15,7 +15,7 @@
 
 use crate::llm::Message;
 use crate::runtime::compression::CompressionMetadata;
-use crate::runtime::guard::LoopGuardState;
+use crate::runtime::guard::LoopGuard;
 use autonoetic_types::config::GatewayConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -131,7 +131,7 @@ pub struct SessionCheckpoint {
     /// Current turn number.
     pub turn_counter: u64,
     /// Loop guard state (failure counts, progress tracking).
-    pub loop_guard_state: LoopGuardState,
+    pub loop_guard_state: LoopGuard,
     /// Session runtime state (Normal or Degraded).
     #[serde(default)]
     pub session_state: autonoetic_types::agent::SessionState,
@@ -738,7 +738,7 @@ mod tests {
         let checkpoint = SessionCheckpoint {
             history: vec![Message::user("hello")],
             turn_counter: 1,
-            loop_guard_state: LoopGuardState {
+            loop_guard_state: LoopGuard {
                 max_loops_without_progress: 10,
                 max_tool_failures: 5,
                 max_consecutive_same_progress: 0,
@@ -798,7 +798,7 @@ mod tests {
         let c1 = SessionCheckpoint {
             history: vec![],
             turn_counter: 1,
-            loop_guard_state: LoopGuardState {
+            loop_guard_state: LoopGuard {
                 max_loops_without_progress: 10,
                 max_tool_failures: 5,
                 max_consecutive_same_progress: 0,
@@ -866,7 +866,7 @@ mod tests {
             let checkpoint = SessionCheckpoint {
                 history: vec![],
                 turn_counter: i,
-                loop_guard_state: LoopGuardState {
+                loop_guard_state: LoopGuard {
                     max_loops_without_progress: 10,
                     max_tool_failures: 5,
                     max_consecutive_same_progress: 0,
@@ -965,7 +965,7 @@ mod tests {
         let checkpoint = SessionCheckpoint {
             history: vec![Message::user("hello")],
             turn_counter: 1,
-            loop_guard_state: LoopGuardState::default(),
+            loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),

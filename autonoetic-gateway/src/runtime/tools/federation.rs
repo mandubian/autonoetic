@@ -230,8 +230,6 @@ impl NativeTool for FederationEscalateTool {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: escalation.code_excerpts.clone(),

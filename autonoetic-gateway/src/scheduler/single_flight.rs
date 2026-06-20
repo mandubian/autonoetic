@@ -539,8 +539,6 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: autonoetic_types::background::ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,

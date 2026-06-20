@@ -1,6 +1,6 @@
 //! Agent Manifest types — the Rust representation of `SKILL.md` frontmatter.
 
-use crate::background::BackgroundPolicy;
+use crate::background::{BackgroundPolicy, GrantTarget};
 use crate::disclosure::DisclosurePolicy;
 use serde::{Deserialize, Serialize};
 
@@ -240,7 +240,7 @@ pub struct RemoteAccessDeclaration {
     /// Declarative network targets for outbound access.
     /// Supports any-host, exact host, host suffix, host+port, and URL prefix rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub targets: Vec<RemoteAccessTarget>,
+    pub targets: Vec<GrantTarget>,
     /// Optional language-detector allowlist for import scanning.
     /// Empty means all registered language detectors are enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -303,23 +303,6 @@ pub enum RemoteAccessApprovalMode {
     Required,
     /// Remote execution can auto-proceed when coarse capability allows network use.
     Preapproved,
-}
-
-/// Typed target declarations for `remote_access`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum RemoteAccessTarget {
-    /// Match any outbound host/URL target.
-    Any,
-    /// Exact hostname match, e.g. `"api.github.com"`.
-    ExactHost(String),
-    /// Matches any subdomain of the suffix, e.g. `"*.github.com"`.
-    HostSuffix(String),
-    /// Exact host + port, e.g. `{"host":"api.github.com","port":443}`.
-    HostAndPort { host: String, port: u16 },
-    /// Matches URLs starting with this prefix, e.g.
-    /// `"https://api.github.com/public/"`.
-    UrlPrefix(String),
 }
 
 /// Per-agent context compression configuration (opt-in via SKILL.md).

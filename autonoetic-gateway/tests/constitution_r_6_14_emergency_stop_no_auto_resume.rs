@@ -4,14 +4,14 @@ mod support;
 
 use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{save_checkpoint, SessionCheckpoint, YieldReason};
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::GatewayExecutionService;
 
 fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
     SessionCheckpoint {
         history: vec![Message::user("hello")],
         turn_counter: 1,
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 5,
             max_tool_failures: 5,
             max_consecutive_same_progress: 1,

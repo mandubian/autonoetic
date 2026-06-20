@@ -106,8 +106,6 @@ fn discover_observed_hosts_includes_approved_network_actions() -> anyhow::Result
         decided_at: None,
         decided_by: None,
         decision_reason: None,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,

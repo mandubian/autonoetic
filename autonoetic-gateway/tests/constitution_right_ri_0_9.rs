@@ -12,7 +12,7 @@ use autonoetic_gateway::llm::{
     CompletionRequest, CompletionResponse, LlmDriver, Message, StopReason, TokenUsage,
 };
 use autonoetic_gateway::runtime::checkpoint::{save_checkpoint, SessionCheckpoint, YieldReason};
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -51,7 +51,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
             Message::user("hello".to_string()),
         ],
         turn_counter: 1,
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 5,
             max_tool_failures: 5,
             max_consecutive_same_progress: 1,

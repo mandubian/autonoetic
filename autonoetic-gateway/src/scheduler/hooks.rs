@@ -735,6 +735,7 @@ fn validate_callback_url(
     let port = parsed.port_or_known_default();
     let host_and_port = port.map(|p| format!("{}:{p}", host.to_ascii_lowercase()));
     let allowed = allowlist.iter().any(|target| match target {
+        autonoetic_types::background::GrantTarget::Any => true,
         autonoetic_types::background::GrantTarget::UrlPrefix(_) => target.matches(url),
         autonoetic_types::background::GrantTarget::HostAndPort { .. } => host_and_port
             .as_deref()

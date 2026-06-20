@@ -289,6 +289,17 @@ pub enum ScheduledAction {
         #[serde(default)]
         proposed_by_session: Option<String>,
     },
+    /// Approval subject only: a PlanFrame proposed by an agent. Not executed by
+    /// the scheduler; once approved, the gateway updates the plan status and
+    /// materializes its declared capability envelope as session approval grants.
+    PlanFrame {
+        plan_id: String,
+        version: u32,
+        /// Declared capability envelope for the plan. Used to materialize
+        /// session approval grants on approval.
+        #[serde(default)]
+        envelope: Vec<super::capability::Capability>,
+    },
 }
 
 impl ScheduledAction {
@@ -305,6 +316,7 @@ impl ScheduledAction {
                 | Self::LayerMount { .. }
                 | Self::RevisionPromote { .. }
                 | Self::WikiProposal { .. }
+                | Self::PlanFrame { .. }
         )
     }
 
@@ -327,7 +339,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => true,
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => true,
         }
     }
 
@@ -365,6 +378,7 @@ impl ScheduledAction {
             Self::LayerMount { .. } => "layer_mount",
             Self::RevisionPromote { .. } => "revision_promote",
             Self::WikiProposal { .. } => "wiki_propose",
+            Self::PlanFrame { .. } => "plan_frame",
         }
     }
 
@@ -383,7 +397,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => None,
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => None,
         }
     }
 
@@ -406,7 +421,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => {}
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => {}
         }
         self
     }
@@ -638,10 +654,6 @@ pub struct ApprovalRequest {
     /// Defaults to Operator. Set by the gateway based on config escalation rules.
     #[serde(default)]
     pub approval_level: ApprovalLevel,
-    #[serde(default)]
-    pub similar_to_request_id: Option<String>,
-    #[serde(default)]
-    pub similarity_score: Option<f64>,
     #[serde(default)]
     pub min_dwell_ms: Option<i64>,
     #[serde(default)]
@@ -939,6 +951,8 @@ impl GrantScope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum GrantTarget {
+    /// Match any outbound host/URL target.
+    Any,
     /// Exact hostname match, e.g. `"api.github.com"`.
     ExactHost(String),
     /// Matches any subdomain of the suffix, e.g. `"*.github.com"` matches
@@ -954,6 +968,7 @@ pub enum GrantTarget {
 impl GrantTarget {
     pub fn kind_str(&self) -> &'static str {
         match self {
+            Self::Any => "any",
             Self::ExactHost(_) => "exact_host",
             Self::HostSuffix(_) => "host_suffix",
             Self::HostAndPort { .. } => "host_and_port",
@@ -965,6 +980,7 @@ impl GrantTarget {
     /// by this grant target.
     pub fn matches(&self, request_target: &str) -> bool {
         match self {
+            Self::Any => true,
             Self::ExactHost(host) => request_target.eq_ignore_ascii_case(host),
             Self::HostSuffix(suffix) => {
                 let suffix = suffix.trim_start_matches("*.");

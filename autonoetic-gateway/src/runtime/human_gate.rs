@@ -8,6 +8,7 @@
 //!
 //! See <docs/design/human-gate-unification-plan.md> for the full design.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -438,6 +439,86 @@ impl GateService {
     // WikiProposal pipeline
     // -----------------------------------------------------------------------
 
+    fn jaccard<T: std::hash::Hash + Eq>(a: &HashSet<T>, b: &HashSet<T>) -> f64 {
+        if a.is_empty() && b.is_empty() {
+            return 1.0;
+        }
+        let intersection = a.intersection(b).count() as f64;
+        let union = a.union(b).count() as f64;
+        if union == 0.0 {
+            0.0
+        } else {
+            intersection / union
+        }
+    }
+
+    /// Inline Jaccard duplicate detection for wiki proposals. Replaces the
+    /// deleted scheduler/approval_similarity.rs helper, which was only kept
+    /// alive for this advisory warning.
+    fn find_similar_wiki_proposals(
+        new_action: &ScheduledAction,
+        candidates: &[ApprovalRequest],
+        limit: usize,
+        threshold: f64,
+    ) -> Vec<(String, f64)> {
+        let ScheduledAction::WikiProposal {
+            content: new_content,
+            title: new_title,
+            tags: new_tags,
+            ..
+        } = new_action
+        else {
+            return Vec::new();
+        };
+        let new_content_set: HashSet<&str> = new_content.split_whitespace().collect();
+        let new_title_set: HashSet<&str> = new_title.split_whitespace().collect();
+        let new_tags_set: HashSet<&str> = new_tags.iter().map(|s| s.as_str()).collect();
+
+        let mut scored: Vec<(String, f64)> = candidates
+            .iter()
+            .filter_map(|c| {
+                if let ScheduledAction::WikiProposal {
+                    content,
+                    title,
+                    tags,
+                    ..
+                } = &c.action
+                {
+                    let content_sim = Self::jaccard(
+                        &new_content_set,
+                        &content.split_whitespace().collect::<HashSet<&str>>(),
+                    );
+                    let title_sim = Self::jaccard(
+                        &new_title_set,
+                        &title.split_whitespace().collect::<HashSet<&str>>(),
+                    );
+                    let tags_sim = if new_tags_set.is_empty() && tags.is_empty() {
+                        1.0
+                    } else {
+                        Self::jaccard(
+                            &new_tags_set,
+                            &tags.iter().map(|s| s.as_str()).collect::<HashSet<&str>>(),
+                        )
+                    };
+                    let score = 0.5 * content_sim + 0.3 * title_sim + 0.2 * tags_sim;
+                    if score >= threshold {
+                        Some((c.request_id.clone(), score))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(limit);
+        scored
+    }
+
     fn check_wiki_proposal(&self, req: &GateRequest<'_>) -> Result<GateResult> {
         let GateKind::WikiProposal {
             page_id,
@@ -511,40 +592,17 @@ impl GateService {
             }
             if cfg.wiki_proposal.duplicate_detection_enabled {
                 if let Ok(recent) = self.store.get_pending_approvals() {
-                    let new_req = autonoetic_types::background::ApprovalRequest {
-                        request_id: gate_id.clone(),
-                        agent_id: req.manifest.agent.id.clone(),
-                        session_id: req.session_id.unwrap_or("unknown").to_string(),
-                        action: action.clone(),
-                        created_at: String::new(),
-                        reason: None,
-                        evidence_ref: None,
-                        root_session_id: None,
-                        workflow_id: None,
-                        task_id: None,
-                        status: None,
-                        decided_at: None,
-                        decided_by: None,
-                        decision_reason: None,
-                        approval_level: autonoetic_types::background::ApprovalLevel::Operator,
-                        similar_to_request_id: None,
-                        similarity_score: None,
-                        code_excerpts: None,
-                        risk_summary: None,
-                        confirm_phrase: None,
-                        min_dwell_ms: None,
-                    };
-                    let similar = crate::scheduler::approval_similarity::find_similar_approvals(
-                        &new_req,
+                    let similar = Self::find_similar_wiki_proposals(
+                        &action,
                         &recent,
                         3,
                         cfg.wiki_proposal.duplicate_threshold,
                     );
-                    for s in &similar {
+                    for (request_id, score) in &similar {
                         quality_warnings.push(format!(
                             "Similar to existing proposal {} (score {:.0}%)",
-                            s.request_id,
-                            s.score * 100.0
+                            request_id,
+                            score * 100.0
                         ));
                     }
                 }
@@ -841,8 +899,6 @@ impl GateService {
                     crate::scheduler::approval::resolve_approval_level(cfg, action)
                 })
                 .unwrap_or(ApprovalLevel::Operator),
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -894,8 +950,6 @@ impl GateService {
                 evidence_ref: None,
                 decision_reason: None,
                 approval_level: ApprovalLevel::Operator,
-                similar_to_request_id: None,
-                similarity_score: None,
                 min_dwell_ms: None,
                 confirm_phrase: None,
             code_excerpts: None,
@@ -1117,8 +1171,6 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1151,8 +1203,6 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1332,8 +1382,6 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1398,8 +1446,6 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,

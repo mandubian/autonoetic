@@ -39,6 +39,7 @@ pub fn classify_approval_risk(action: &ScheduledAction) -> ApprovalRisk {
         ScheduledAction::ProfileShare { .. } => ApprovalRisk::Standard,
         ScheduledAction::WriteFile { .. } => ApprovalRisk::Standard,
         ScheduledAction::WikiProposal { .. } => ApprovalRisk::Standard,
+        ScheduledAction::PlanFrame { .. } => ApprovalRisk::Standard,
     }
 }
 
@@ -167,8 +168,6 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: Default::default(),
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,

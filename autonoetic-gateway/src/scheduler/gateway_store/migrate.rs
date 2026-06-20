@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 54;
+const SCHEMA_VERSION_LATEST: i64 = 55;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -539,7 +539,39 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_promotion_pre_authorization_v52(conn)?;
     apply_agent_suspension_v53(conn)?;
     apply_fork_lineage_v54(conn)?;
+    apply_drop_approval_similarity_v55(conn)?;
 
+    Ok(())
+}
+
+fn apply_drop_approval_similarity_v55(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 55 {
+        return Ok(());
+    }
+
+    for col in &["similar_to_request_id", "similarity_score"] {
+        let col_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('approvals') WHERE name = ?1",
+            [*col],
+            |row| row.get(0),
+        )?;
+        if col_count > 0 {
+            conn.execute(
+                &format!("ALTER TABLE approvals DROP COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![55_i64, "drop_approval_similarity", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 

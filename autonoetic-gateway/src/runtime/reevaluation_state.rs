@@ -156,6 +156,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::WikiProposal { .. } => anyhow::bail!(
             "WikiProposal is not directly executable; it is materialized by the gateway on operator approval"
         ),
+        ScheduledAction::PlanFrame { .. } => anyhow::bail!(
+            "PlanFrame is not directly executable; it is approved through the standard approval system"
+        ),
     }
 }
 

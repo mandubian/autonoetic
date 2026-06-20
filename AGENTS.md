@@ -114,7 +114,7 @@ agents/                  Agent bundles (SKILL.md manifests)
 1. Add the variant to `ScheduledAction` in `autonoetic-types/src/background.rs`
 2. Update **all** construction sites and match arms — grep for `ScheduledAction::`
 3. If it requires approval, wire it into `scheduler/approval.rs` and `scheduler/decision.rs`
-4. Update `LoopGuardState` if the checkpoint format changes
+4. Update `LoopGuard` if the checkpoint format changes
 
 ### Approval system
 Five layers of approval dedup (checked in order):
@@ -125,7 +125,6 @@ Five layers of approval dedup (checked in order):
 5. **Approval flood cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`
 
 Additional approval features:
-- **Similarity scoring**: on creation, Jaccard similarity over command tokens (70%) + hosts (30%) against recent same-agent approvals. Stored as `similar_to_request_id` + `similarity_score`.
 - **Grant revocation**: `gateway grants revoke --root-session <id> --host X` without emergency stop; emits `grant_revocation` causal event.
 - **Continuation HMAC**: signed with `continuation_key` (or derived from `node_id`); verified on resume; action-equality check vs stored approval.
 - **Continuation cleanup**: on resume, reject/cancel/withdraw, gateway startup reaper, emergency stop, task cancellation.
@@ -144,7 +143,7 @@ Two trip conditions, independent:
 
 Both are configurable via `loop_guard:` in `config-template.yaml`.
 
-When modifying `LoopGuardState`, update all checkpoint construction sites (grep `LoopGuardState {`).
+When modifying `LoopGuard`, update all checkpoint construction sites (grep `loop_guard_state: `).
 
 ## Testing
 

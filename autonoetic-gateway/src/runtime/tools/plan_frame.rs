@@ -155,6 +155,54 @@ fn parse_capability_envelope_input(
         .collect()
 }
 
+/// Deterministic approval request ID for a specific plan revision.
+/// This lets the plan-frame tools and `apply_decision` address the same row
+/// without adding a foreign-key column to `plan_frames`.
+pub fn plan_approval_request_id(plan_id: &str, version: u32) -> String {
+    format!("apr-plan-{plan_id}-v{version}")
+}
+
+/// Create the canonical `ApprovalRequest` for a plan revision.
+/// The approval row lives in the standard `approvals` table; the plan content
+/// remains in `plan_frames`.
+fn create_plan_approval_request(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    plan: &PlanFrame,
+    manifest: &AgentManifest,
+    session_id: &str,
+) -> anyhow::Result<String> {
+    use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+    let request_id = plan_approval_request_id(&plan.plan_id, plan.version);
+    let root_session_id = session_id.split('/').next().unwrap_or(session_id).to_string();
+    let mut req = ApprovalRequest {
+        request_id: request_id.clone(),
+        agent_id: manifest.agent.id.clone(),
+        session_id: session_id.to_string(),
+        action: ScheduledAction::PlanFrame {
+            plan_id: plan.plan_id.clone(),
+            version: plan.version,
+            envelope: plan.capability_envelope.clone(),
+        },
+        created_at: now_rfc3339(),
+        reason: plan.reason.clone(),
+        evidence_ref: None,
+        root_session_id: Some(root_session_id),
+        workflow_id: Some(plan.workflow_id.clone()),
+        task_id: None,
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        approval_level: ApprovalLevel::Operator,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+    };
+    store.create_approval(&mut req)?;
+    Ok(request_id)
+}
+
 pub struct PlanFrameProposeTool;
 
 impl NativeTool for PlanFrameProposeTool {
@@ -365,6 +413,17 @@ impl NativeTool for PlanFrameProposeTool {
         };
 
         store.save_plan_frame(&plan)?;
+
+        // Unify plan approval with the standard ApprovalRequest system (#565).
+        // The plan content stays in `plan_frames`; the gate lives in `approvals`.
+        if let Err(e) = create_plan_approval_request(&store, &plan, manifest, session_id) {
+            tracing::warn!(
+                target: "plan_frame",
+                error = %e,
+                plan_id = %plan.plan_id,
+                "failed to create plan approval request"
+            );
+        }
 
         // Canonical timeline: a plan proposal is an `attention` gate (#363 P1).
         {
@@ -681,80 +740,68 @@ impl NativeTool for PlanFrameApproveTool {
             return Ok(ToolError::conflict(format!("Plan is in '{}' status; only awaiting_approval plans can be approved", plan.status.as_str()), Some("Ensure the plan is in AwaitingApproval status before approving.")).with_code("plan_wrong_status").to_error_response());
         }
 
-        let now = now_rfc3339();
+        let Some(config) = config else {
+            return Ok(ToolError::execution("Gateway config not available", Some("Ensure the gateway configuration is loaded and valid.")).with_code("gateway_config_unavailable").to_error_response());
+        };
+
         let approver = args.approved_by.unwrap_or_else(|| manifest.agent.id.clone());
+        let request_id = plan_approval_request_id(&plan.plan_id, plan.version);
 
-        store.update_plan_frame_status(
-            &plan.plan_id,
-            plan.version,
-            PlanStatus::Approved,
-            Some(&approver),
-            Some(&now),
-        )?;
+        // Route through the standard approval decision path (#565). This calls
+        // `apply_decision`, which updates the plan status and materializes the
+        // declared capability envelope as session approval grants.
+        let decision = match crate::scheduler::approval::approve_request(
+            config,
+            Some(&store),
+            &request_id,
+            &approver,
+            None,
+            None,
+            None,
+            None,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(ToolError::execution(
+                    format!("Plan approval failed: {e}"),
+                    Some("The approval request may no longer be pending or the decider lacks authorization."),
+                ).with_code("plan_approval_failed").to_error_response());
+            }
+        };
 
-        // Canonical timeline: the plan gate closes (#363 P1), authored by the
-        // approver (Operator seat for a human, the agent's seat otherwise).
-        {
-            use autonoetic_types::session_timeline::TimelineRefs;
-            let (principal, role) = crate::runtime::session_timeline::decider_seat(&approver);
-            let refs = TimelineRefs {
-                plan_id: Some(plan.plan_id.clone()),
-                ..Default::default()
-            };
-            let event = crate::runtime::session_timeline::build_timeline_event(
-                plan.root_session_id.clone(),
-                plan.root_session_id.clone(),
-                None,
-                &principal,
-                &role,
-                "plan.approved",
-                None,
-                Some(serde_json::json!({
+        let now = now_rfc3339();
+
+        // `apply_decision` already materialized grants; re-run the pure
+        // count path to surface `grants_materialized` in the tool response.
+        // The grant insertion is idempotent, so this is safe.
+        let grants_materialized = materialize_plan_grants(&store,
+            Some(config),
+            &plan,
+            &decision.decided_by,
+            &now,
+        );
+
+        if let Err(e) = crate::scheduler::workflow_store::append_workflow_event(
+            config,
+            Some(&store),
+            &autonoetic_types::workflow::WorkflowEventRecord {
+                event_id: {
+                    let bytes = uuid::Uuid::new_v4();
+                    format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
+                },
+                workflow_id: plan.workflow_id.clone(),
+                task_id: None,
+                event_type: "planframe.approved".to_string(),
+                agent_id: Some(manifest.agent.id.clone()),
+                payload: serde_json::json!({
                     "plan_id": plan.plan_id,
                     "version": plan.version,
-                    "approved_by": approver,
-                })),
-                refs,
-            );
-            if let Err(e) = store.create_live_digest_event(&event) {
-                tracing::debug!(target: "session_timeline", error = %e, "plan.approved timeline emit failed");
-            }
-        }
-
-        // Pillar C: materialize the plan's declared network envelope as a
-        // session approval grant. Best-effort — never blocks the approval.
-        let grants_materialized = materialize_plan_grants(&store, config, &plan, &approver, &now);
-
-        // Session envelope proposal (best-effort; operator locks via session.envelope.lock).
-        if let Err(e) = crate::runtime::session_envelope::propose_plan_envelope_on_approval(
-            &store,
-            &plan,
-            &approver,
+                    "grants_materialized": grants_materialized,
+                }),
+                occurred_at: now,
+            },
         ) {
-            tracing::debug!(target: "session_envelope", error = %e, plan_id = %plan.plan_id, "envelope proposal after plan approve failed");
-        }
-
-        if let Some(config) = config {
-            crate::scheduler::workflow_store::append_workflow_event(
-                config,
-                Some(&store),
-                &autonoetic_types::workflow::WorkflowEventRecord {
-                    event_id: {
-                        let bytes = uuid::Uuid::new_v4();
-                        format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
-                    },
-                    workflow_id: plan.workflow_id.clone(),
-                    task_id: None,
-                    event_type: "planframe.approved".to_string(),
-                    agent_id: Some(manifest.agent.id.clone()),
-                    payload: serde_json::json!({
-                        "plan_id": plan.plan_id,
-                        "version": plan.version,
-                        "grants_materialized": grants_materialized,
-                    }),
-                    occurred_at: now,
-                },
-            )?;
+            tracing::debug!(target: "plan_frame", error = %e, "planframe.approved workflow event failed");
         }
 
         Ok(serde_json::to_string(&serde_json::json!({
@@ -1048,6 +1095,37 @@ impl NativeTool for PlanFrameAmendTool {
         };
 
         store.save_plan_frame(&new_revision)?;
+
+        // Keep the approval request aligned with the latest revision (#565).
+        // Cosmetic amendments that inherit approval need no new gate. Envelope
+        // changes (or amendments on a still-pending revision) open a new gate
+        // for the new revision and cancel any still-pending gate for the old
+        // revision without changing the old revision's plan status.
+        if !inherit {
+            let session_id = _session_id.unwrap_or(&current.root_session_id);
+            if current.status == PlanStatus::AwaitingApproval {
+                let old_request_id = plan_approval_request_id(&current.plan_id, old_version);
+                let _ = store.cancel_approval(
+                    &old_request_id,
+                    &manifest.agent.id,
+                    &now_rfc3339(),
+                );
+            }
+            if let Err(e) = create_plan_approval_request(
+                &store,
+                &new_revision,
+                manifest,
+                session_id,
+            ) {
+                tracing::warn!(
+                    target: "plan_frame",
+                    error = %e,
+                    plan_id = %new_revision.plan_id,
+                    version = %new_revision.version,
+                    "failed to create plan approval request after amend"
+                );
+            }
+        }
 
         // Pillar C: revoke the prior approved plan's grants ONLY when the
         // envelope actually expanded. The condition is tighter than

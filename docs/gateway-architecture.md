@@ -141,7 +141,6 @@ autonoetic-gateway/src/
 │   ├── scheduler.rs -> ../scheduler.rs  # Legacy redirect (the real file is at src/scheduler.rs)
 │   ├── approval.rs                #   Approval resolution (level matching, approve/reject)
 │   ├── approval_hardening.rs      #   Approval durability hardening
-│   ├── approval_similarity.rs     #   Jaccard similarity for approval dedup
 │   ├── decision.rs                #   should_wake() — when to wake background agents
 │   ├── runner.rs                  #   handle_due_wake() — launch background agent turns
 │   ├── signal.rs                  #   Signal polling and delivery
@@ -151,7 +150,7 @@ autonoetic-gateway/src/
 │   ├── workflow_causal.rs         #   Workflow causal event integration
 │   ├── fast_scheduler.rs          #   High-frequency tick for time-sensitive work
 │   ├── eval_runner.rs             #   Evaluation suite execution
-│   ├── plan_frame_ops.rs          #   Plan frame operations
+│   ├── plan_frame_ops.rs          #   Plan frame queries (pending plans)
 │   ├── session_envelope_ops.rs    #   Session envelope operations
 │   ├── reclamation.rs             #   Garbage collection (blobs, revisions, memories)
 │   ├── system_agents.rs           #   System agent cron reconciliation
@@ -410,6 +409,16 @@ ToolCallProcessor detects action requires approval
   │
   ├─ Check 5-layer dedup chain (see above)
   │
+<<<<<<< HEAD
+       └─ If new approval needed:
+            │
+            ├─ 1. GATEWAY PERSISTS
+            │     ├─ Create ApprovalRequest in SQLite
+            │     └─ Save TurnContinuation (HMAC-signed, includes:
+            │           history, pending tool, remaining tools, loop guard state)
+            │
+            ├─ 2. TURN SUSPENDS
+=======
   └─ If new approval needed:
        │
        ├─ 1. GATEWAY PERSISTS
@@ -419,6 +428,7 @@ ToolCallProcessor detects action requires approval
        │           history, pending tool, remaining tools, loop guard state)
        │
        ├─ 2. TURN SUSPENDS
+>>>>>>> origin/main
        │     ├─ Checkpoint session with YieldReason::ApprovalRequired
        │     └─ Return TurnOutcome::Suspended
        │
@@ -680,7 +690,7 @@ Filter strategies:
 |---|---|
 | **`lifecycle.rs` is 4336 lines** | The main reasoning loop has grown very large. Contains context assembly, LLM dispatch, tool processing orchestration, budget tracking, checkpoint logic, and turn outcome handling. Would benefit from splitting into smaller modules. |
 | **`tool_call_processor.rs` is 1799 lines** | Combined dispatch + approval detection + cache logic. Approval-flow branching logic is tightly coupled with tool execution. |
-| **`approval.rs` (scheduler) is 2596 lines** | The approval resolution logic is dense, combining level resolution, approve/reject/cancel, grant management, similarity scoring, and notification dispatch. |
+| **`approval.rs` (scheduler) is 2596 lines** | The approval resolution logic is dense, combining level resolution, approve/reject/cancel, grant management, and notification dispatch. |
 | **`router.rs` is 4631 lines** | Single-file dispatch for 40+ JSON-RPC methods. Growing unbounded — every new JSON-RPC endpoint adds to this file. |
 | **GatewayStore diverging schema** | 39 submodules with overlapping concerns. For example, `notifications.rs`, `messages.rs`, `gate_messages.rs` are closely related but separate. |
 | **Two approval file sets** | Approval logic lives in `runtime/tools/approval.rs` (agent-facing tools) and `scheduler/approval.rs` (operator-facing resolution). The boundary is clean but both need awareness of the approval schema. |
