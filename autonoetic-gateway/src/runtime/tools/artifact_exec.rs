@@ -476,65 +476,100 @@ impl NativeTool for ArtifactExecTool {
             let concrete_targets = normalize_targets(&detected_patterns);
             let coverage = classify_network_coverage(&detected_patterns, concrete_targets.clone());
 
-            match &coverage {
+            // Pre-check: exec cache for concrete targets
+            let mut pre_validated = false;
+            let fingerprint_for_backfill: Option<String> = match &coverage {
                 NetworkCoverage::Concrete { targets } => {
-                    let targets = targets.clone();
-                    let fingerprint = compute_fingerprint(
-                        &manifest.agent.id,
-                        &targets,
-                        &artifact_code,
-                        Some(&bundle.artifact_canonical_digest),
-                        &manifest.capabilities,                    );
-
-                    if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                        if let Some(entry) = cache.find(&fingerprint) {
-                            tracing::info!(
-                                target: "artifact_exec",
-                                fingerprint = %fingerprint,
-                                "Cache hit: skipping approval"
-                            );
-                            let _ = cache.update_last_used(&fingerprint);
-                            approval_validated_for_command = true;
+                    if let Some(gw_dir) = gateway_dir {
+                        let fingerprint = compute_fingerprint(
+                            &manifest.agent.id,
+                            targets,
+                            &artifact_code,
+                            Some(&bundle.artifact_canonical_digest),
+                            &manifest.capabilities,
+                        );
+                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                            if let Some(entry) = cache.find(&fingerprint) {
+                                tracing::info!(
+                                    target: "artifact_exec",
+                                    fingerprint = %fingerprint,
+                                    "Cache hit: skipping approval"
+                                );
+                                let _ = cache.update_last_used(&fingerprint);
+                                pre_validated = true;
+                            }
                         }
+                        Some(fingerprint)
+                    } else {
+                        None
                     }
+                }
+                _ => None,
+            };
 
-                    if !approval_validated_for_command {
-                        if let (Some(_cfg), Some(gw_store), Some(sid)) =
-                            (config, &gateway_store, session_id)
-                        {
-                            let root_sid = crate::runtime::content_store::root_session_id(sid);
-                            if !targets.is_empty() {
-                                if let Ok(approved) =
-                                    gw_store.get_approved_approvals_for_root(root_sid)
-                                {
-                                    if crate::runtime::tools::sandbox::approved_requests_cover_targets(
-                                        &approved,
-                                        &targets,
-                                        agent_dir,
-                                        gateway_dir,
-                                    ) {
-                                        tracing::info!(
-                                            target: "artifact_exec",
-                                            targets = ?targets,
-                                            "Approved request covers targets"
-                                        );
-                                        approval_validated_for_command = true;
+            if pre_validated {
+                approval_validated_for_command = true;
+            } else if let Some(cfg) = config {
+                let summary = artifact_exec_approval_summary_line(
+                    &manifest.agent.id,
+                    &args.artifact_ref,
+                    &entrypoint,
+                    &command,
+                    args.intent.as_deref(),
+                );
+                let remote_hint_suffix =
+                    approval_remote_operator_suffix(&concrete_targets, &detected_patterns);
+                let action = ScheduledAction::SandboxExec {
+                    command: command.clone(),
+                    dependencies: None,
+                    requires_approval: true,
+                    evidence_ref: None,
+                    detected_hosts: Some(concrete_targets.clone()),
+                };
+                let reason = artifact_exec_approval_operator_reason(
+                    &args.artifact_ref,
+                    &artifact_id,
+                    &entrypoint,
+                    &command,
+                    args.intent.as_deref(),
+                    &remote_analysis.summary,
+                    &remote_hint_suffix,
+                    &detected_patterns,
+                );
 
+                if let Some(store) = &gateway_store {
+                    let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                    let gate_result = gate.check(
+                        crate::runtime::human_gate::GateRequest {
+                            kind: crate::runtime::human_gate::GateKind::Approval {
+                                action: action.clone(),
+                                targets: concrete_targets.clone(),
+                                match_strategy: crate::runtime::human_gate::MatchStrategy::SubstituteCommand,
+                            },
+                            manifest,
+                            session_id,
+                            run_context,
+                            config: Some(cfg),
+                            reason: reason.clone(),
+                            summary: summary.clone(),
+                            approval_ref: None,
+                            pre_validated,
+                            turn_id: None,
+                        },
+                    )?;
+                    match gate_result {
+                        crate::runtime::human_gate::GateResult::Cleared { source, .. } => {
+                            if source == crate::runtime::human_gate::ClearanceSource::SessionGrant {
+                                if let Some(fp) = fingerprint_for_backfill {
+                                    if let Some(gw_dir) = gateway_dir {
                                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                                            if cache.find(&fingerprint).is_none() {
+                                            if cache.find(&fp).is_none() {
                                                 let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                                                    fingerprint: fingerprint.clone(),
+                                                    fingerprint: fp,
                                                     agent_id: manifest.agent.id.clone(),
-                                                    remote_targets: targets.clone(),
+                                                    remote_targets: concrete_targets.clone(),
                                                     code_content: artifact_code.clone(),
-                                                    approval_request_id: approved
-                                                        .iter()
-                                                        .find(|r| matches!(
-                                                            r.action,
-                                                            ScheduledAction::SandboxExec { .. }
-                                                        ))
-                                                        .map(|r| r.request_id.clone())
-                                                        .unwrap_or_default(),
+                                                    approval_request_id: String::new(),
                                                     approved_at: chrono::Utc::now().to_rfc3339(),
                                                     approved_by: "operator".to_string(),
                                                     last_used_at: chrono::Utc::now().to_rfc3339(),
@@ -545,263 +580,176 @@ impl NativeTool for ArtifactExecTool {
                                     }
                                 }
                             }
+                            approval_validated_for_command = true;
                         }
-                    }
-
-                    if !approval_validated_for_command {
-                        if let (Some(gw_store), Some(sid)) = (&gateway_store, session_id) {
-                            let root_sid = crate::runtime::content_store::root_session_id(sid);
-                            if !targets.is_empty() {
-                                if gw_store.session_grants_cover_targets(&root_sid, &targets) {
-                                    tracing::info!(
-                                        target: "artifact_exec",
-                                        targets = ?targets,
-                                        "Session grant covers targets"
+                        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                            let (cmd, pending_action) = match store.get_approval(&gate_id)? {
+                                Some(pending) => match &pending.action {
+                                    ScheduledAction::SandboxExec { command, .. } => (
+                                        command.clone(),
+                                        pending.action.clone(),
+                                    ),
+                                    _ => (command.clone(), pending.action.clone()),
+                                },
+                                None => (command.clone(), action.clone()),
+                            };
+                            let summary = artifact_exec_approval_summary_line(
+                                &manifest.agent.id,
+                                &args.artifact_ref,
+                                &entrypoint,
+                                &cmd,
+                                args.intent.as_deref(),
+                            );
+                            let approval = build_approval_details(
+                                &autonoetic_types::background::ApprovalRequest {
+                                    request_id: gate_id.clone(),
+                                    agent_id: manifest.agent.id.clone(),
+                                    session_id: session_id.unwrap_or("").to_string(),
+                                    root_session_id: None,
+                                    workflow_id: None,
+                                    task_id: None,
+                                    action: pending_action,
+                                    created_at: String::new(),
+                                    status: None,
+                                    decided_at: None,
+                                    decided_by: None,
+                                    reason: Some(reason),
+                                    evidence_ref: None,
+                                    decision_reason: None,
+                                    approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                    similar_to_request_id: None,
+                                    similarity_score: None,
+                                    min_dwell_ms: None,
+                                    confirm_phrase: None,
+                                    code_excerpts: None,
+                                    risk_summary: None,
+                                },
+                                "artifact_exec",
+                                summary.clone(),
+                                "approval_ref",
+                                serde_json::json!({
+                                    "artifact_ref": args.artifact_ref,
+                                    "artifact_id": artifact_id,
+                                    "entrypoint": entrypoint,
+                                    "args": args.args,
+                                    "intent": args.intent,
+                                    "command": cmd,
+                                    "approval_already_pending": true,
+                                }),
+                            );
+                            return Ok(serde_json::json!({
+                                "ok": false,
+                                "exit_code": null,
+                                "stdout": "",
+                                "stderr": format!(
+                                    "{}\n\nApproval already pending for this session.",
+                                    summary
+                                ),
+                                "approval_required": true,
+                                "approval_already_pending": true,
+                                "suspended": true,
+                                "request_id": gate_id,
+                                "message": format!("Approval {} is already pending.", gate_id),
+                                "approval": approval,
+                            })
+                            .to_string());
+                        }
+                        crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                            // Populate code excerpts + risk summary for operator inspection.
+                            if let Some(gw_dir) = gateway_dir {
+                                let excerpts = crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
+                                let _ = store.set_approval_code_excerpts(
+                                    &gate_id, excerpts.as_deref(), None,
+                                );
+                                let artifact_store = crate::ArtifactStore::new(gw_dir).ok();
+                                let risk_summary = crate::runtime::code_excerpts::build_risk_summary(
+                                    Some(&concrete_targets),
+                                    None,
+                                    &artifact_id,
+                                    artifact_store.as_ref(),
+                                );
+                                if let Some(rs) = risk_summary {
+                                    let _ = store.set_approval_code_excerpts(
+                                        &gate_id, None, Some(&rs),
                                     );
-                                    approval_validated_for_command = true;
                                 }
                             }
-                        }
-                    }
-                }
-                NetworkCoverage::Unresolved => {}
-                NetworkCoverage::None => {}
-            }
 
-            if !approval_validated_for_command {
-                if let Some(cfg) = config {
-                    let sid = session_id.unwrap_or("");
-                    let existing =
-                        crate::scheduler::approval::pending_sandbox_exec_requests_for_session(
-                            cfg,
-                            gateway_store.as_deref(),
-                            sid,
-                        )?;
-                    if !existing.is_empty() {
-                        let primary = &existing[0];
-                        let ids: Vec<String> =
-                            existing.iter().map(|r| r.request_id.clone()).collect();
-                        let summary = artifact_exec_approval_summary_line(
-                            &manifest.agent.id,
-                            &args.artifact_ref,
-                            &entrypoint,
-                            &command,
-                            args.intent.as_deref(),
-                        );
-                        let approval = build_approval_details(
-                            primary,
-                            "artifact_exec",
-                            summary.clone(),
-                            "approval_ref",
-                            serde_json::json!({
-                                "artifact_ref": args.artifact_ref,
-                                "artifact_id": artifact_id,
-                                "entrypoint": entrypoint,
-                                "args": args.args,
-                                "intent": args.intent,
-                                "command": command,
-                                "approval_already_pending": true,
-                            }),
-                        );
-                        return Ok(serde_json::json!({
-                            "ok": false,
-                            "exit_code": null,
-                            "stdout": "",
-                            "stderr": format!(
-                                "{}\n\nApproval already pending for this session.",
-                                summary
-                            ),
-                            "approval_required": true,
-                            "approval_already_pending": true,
-                            "suspended": true,
-                            "request_id": primary.request_id,
-                            "pending_request_ids": ids,
-                            "message": format!("Approval {} is already pending.", primary.request_id),
-                            "approval": approval,
-                        })
-                        .to_string());
-                    }
-                }
-
-                if let Some(cfg) = config {
-                    let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                    let summary = artifact_exec_approval_summary_line(
-                        &manifest.agent.id,
-                        &args.artifact_ref,
-                        &entrypoint,
-                        &command,
-                        args.intent.as_deref(),
-                    );
-                    let remote_hint_suffix =
-                        approval_remote_operator_suffix(&concrete_targets, &detected_patterns);
-                    let action = ScheduledAction::SandboxExec {
-                        command: command.clone(),
-                        dependencies: None,
-                        requires_approval: true,
-                        evidence_ref: None,
-                        detected_hosts: Some(concrete_targets.clone()),
-                    };
-                    let approval_workflow_id = {
-                        let sid = session_id.unwrap_or("");
-                        let root = crate::runtime::content_store::root_session_id(sid);
-                        crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root)
-                            .ok()
-                            .flatten()
-                    };
-                    let sid = session_id.unwrap_or("");
-                    let root_session_id = crate::runtime::content_store::root_session_id(sid);
-                    let mut request = ApprovalRequest {
-                        request_id: request_id.clone(),
-                        agent_id: manifest.agent.id.clone(),
-                        session_id: sid.to_string(),
-                        root_session_id: Some(root_session_id.to_string()),
-                        action: action.clone(),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        status: None,
-                        decided_at: None,
-                        decided_by: None,
-                        reason: Some(artifact_exec_approval_operator_reason(
-                            &args.artifact_ref,
-                            &artifact_id,
-                            &entrypoint,
-                            &command,
-                            args.intent.as_deref(),
-                            &remote_analysis.summary,
-                            &remote_hint_suffix,
-                            &detected_patterns,
-                        )),
-                        evidence_ref: None,
-                        workflow_id: approval_workflow_id.clone(),
-                        decision_reason: None,
-                        approval_level: crate::scheduler::approval::resolve_approval_level(
-                            cfg, &action,
-                        ),
-                        task_id: match (&approval_workflow_id, session_id) {
-                            (Some(wf_id), Some(sid)) => {
-                                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, sid)
-                                    .ok()
-                                    .flatten()
-                            }
-                            _ => None,
-                        },
-                        similar_to_request_id: None,
-                        similarity_score: None,
-                        min_dwell_ms: None,
-                        confirm_phrase: None,
-            code_excerpts: None,
-                        risk_summary: None,
-                    };
-                    // Populate code excerpts + risk summary for operator inspection.
-                    if let Some(gw_dir) = gateway_dir {
-                        request.code_excerpts =
-                            crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
-                        let artifact_store = crate::ArtifactStore::new(gw_dir).ok();
-                        request.risk_summary =
-                            crate::runtime::code_excerpts::build_risk_summary(
-                                Some(&concrete_targets),
-                                None,
-                                &artifact_id,
-                                artifact_store.as_ref(),
+                            let approval = build_approval_details(
+                                &autonoetic_types::background::ApprovalRequest {
+                                    request_id: gate_id.clone(),
+                                    agent_id: manifest.agent.id.clone(),
+                                    session_id: session_id.unwrap_or("").to_string(),
+                                    root_session_id: None,
+                                    workflow_id: None,
+                                    task_id: None,
+                                    action: action.clone(),
+                                    created_at: String::new(),
+                                    status: None,
+                                    decided_at: None,
+                                    decided_by: None,
+                                    reason: Some(reason),
+                                    evidence_ref: None,
+                                    decision_reason: None,
+                                    approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                    similar_to_request_id: None,
+                                    similarity_score: None,
+                                    min_dwell_ms: None,
+                                    confirm_phrase: None,
+                                    code_excerpts: None,
+                                    risk_summary: None,
+                                },
+                                "artifact_exec",
+                                summary.clone(),
+                                "approval_ref",
+                                serde_json::json!({
+                                    "artifact_ref": args.artifact_ref,
+                                    "artifact_id": artifact_id,
+                                    "entrypoint": entrypoint,
+                                    "args": args.args,
+                                    "intent": args.intent,
+                                    "command": command,
+                                    "remote_access_detected": true,
+                                    "detected_patterns": detected_patterns,
+                                    "normalized_targets": concrete_targets,
+                                }),
                             );
-                    }
-                    if let Some(store) = &gateway_store {
-                        store.create_approval(&mut request)?;
-                    } else {
-                        return Ok(ToolError::resource("GatewayStore missing; cannot persist approval request", None::<String>).to_error_response());
-                    }
-
-                    let approval = build_approval_details(
-                        &request,
-                        "artifact_exec",
-                        summary,
-                        "approval_ref",
-                        serde_json::json!({
-                            "artifact_ref": args.artifact_ref,
-                            "artifact_id": artifact_id,
-                            "entrypoint": entrypoint,
-                            "args": args.args,
-                            "intent": args.intent,
-                            "command": command,
-                            "remote_access_detected": true,
-                            "detected_patterns": detected_patterns,
-                            "normalized_targets": concrete_targets,
-                        }),
-                    );
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "exit_code": null,
-                        "stdout": "",
-                        "stderr": format!(
-                            "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute artifact code that may reach the network/APIs.",
-                            approval["summary"].as_str().unwrap_or("Artifact exec pending operator approval."),
-                            format!("{}{}", remote_analysis.summary, remote_hint_suffix)
-                        ),
-                        "approval_required": true,
-                        "request_id": request_id,
-                        "suspended": true,
-                        "message": format!("Execution suspended pending operator approval ({}).", request_id),
-                        "approval": approval
-                    })
-                    .to_string());
-                }
-
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "exit_code": null,
-                    "stdout": "",
-                    "stderr": format!(
-                        "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute artifact code that may reach the network/APIs.",
-                        artifact_exec_approval_summary_line(
-                            &manifest.agent.id,
-                            &args.artifact_ref,
-                            &entrypoint,
-                            &command,
-                            args.intent.as_deref(),
-                        ),
-                        format!(
-                            "{}{}",
-                            remote_analysis.summary,
-                            approval_remote_operator_suffix(&concrete_targets, &detected_patterns)
-                        )
-                    ),
-                    "approval_required": true,
-                    "suspended": true,
-                    "approval": {
-                        "kind": "artifact_exec",
-                        "reason": artifact_exec_approval_operator_reason(
-                            &args.artifact_ref,
-                            &artifact_id,
-                            &entrypoint,
-                            &command,
-                            args.intent.as_deref(),
-                            &remote_analysis.summary,
-                            &approval_remote_operator_suffix(&concrete_targets, &detected_patterns),
-                            &detected_patterns,
-                        ),
-                        "summary": artifact_exec_approval_summary_line(
-                            &manifest.agent.id,
-                            &args.artifact_ref,
-                            &entrypoint,
-                            &command,
-                            args.intent.as_deref(),
-                        ),
-                        "requested_by_agent_id": manifest.agent.id,
-                        "session_id": session_id.unwrap_or(""),
-                        "retry_field": "approval_ref",
-                        "subject": {
-                            "artifact_ref": args.artifact_ref,
-                            "artifact_id": artifact_id,
-                            "entrypoint": entrypoint,
-                            "args": args.args,
-                            "intent": args.intent,
-                            "command": command,
-                            "remote_access_detected": true,
-                            "detected_patterns": detected_patterns,
-                            "normalized_targets": concrete_targets,
+                            return serde_json::to_string(&serde_json::json!({
+                                "ok": false,
+                                "exit_code": null,
+                                "stdout": "",
+                                "stderr": format!(
+                                    "{}\n\nTechnical: Remote access scan: {}. Operator approval required to execute artifact code that may reach the network/APIs.",
+                                    approval["summary"].as_str().unwrap_or("Artifact exec pending operator approval."),
+                                    format!("{}{}", remote_analysis.summary, remote_hint_suffix)
+                                ),
+                                "approval_required": true,
+                                "request_id": gate_id,
+                                "suspended": true,
+                                "message": format!("Execution suspended pending operator approval ({}).", gate_id),
+                                "approval": approval
+                            }))
+                            .map_err(Into::into);
+                        }
+                        other => {
+                            return Err(anyhow::anyhow!(
+                                "Unexpected gate result for artifact.exec: {:?}",
+                                other
+                            ));
                         }
                     }
-                })
-                .to_string());
+                } else {
+                    return Ok(ToolError::resource(
+                        "GatewayStore missing; cannot persist artifact.exec approval request",
+                        None::<String>,
+                    )
+                    .to_error_response());
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Remote access approval required but GatewayConfig is not available \
+                     to enforce the approval gate."
+                ));
             }
         }
 

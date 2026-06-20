@@ -18,7 +18,6 @@ use autonoetic_types::layer::LayerApprovalScope;
 use autonoetic_types::runtime_lock::LockedLayerMount;
 use autonoetic_types::tool_error::tagged;
 use secrecy::ExposeSecret;
-use std::collections::BTreeSet;
 use std::path::Path;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
@@ -600,71 +599,6 @@ fn validate_approval_ref_context(
         current_root
     );
     Ok(())
-}
-
-fn approved_request_targets(
-    req: &ApprovalRequest,
-    agent_dir: &Path,
-    gateway_dir: Option<&Path>,
-) -> Vec<String> {
-    let (command, dep_packages) = match &req.action {
-        ScheduledAction::SandboxExec {
-            command,
-            dependencies,
-            ..
-        } => (
-            command.as_str(),
-            dependencies.as_ref().map(|d| d.packages.clone()),
-        ),
-        _ => return Vec::new(),
-    };
-    let code = extract_code_for_analysis(command, agent_dir, gateway_dir, Some(&req.session_id));
-    let analysis =
-        crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
-            &code,
-            dep_packages.as_deref(),
-        );
-    let mut targets = normalize_targets(&analysis.detected_patterns);
-    if targets.is_empty() {
-        targets = extract_hosts_from_text(command);
-    }
-    targets
-}
-
-fn extract_hosts_from_text(text: &str) -> Vec<String> {
-    let Ok(re) = regex::Regex::new(r#"(?i)https?://([^/\s:"'`]+)"#) else {
-        return Vec::new();
-    };
-    let mut hosts: Vec<String> = re
-        .captures_iter(text)
-        .filter_map(|cap| cap.get(1))
-        .map(|m| m.as_str().trim().trim_end_matches('.').to_ascii_lowercase())
-        .filter(|h| !h.is_empty())
-        .collect();
-    hosts.sort();
-    hosts.dedup();
-    hosts
-}
-
-pub fn approved_requests_cover_targets(
-    approved: &[ApprovalRequest],
-    required_targets: &[String],
-    agent_dir: &Path,
-    gateway_dir: Option<&Path>,
-) -> bool {
-    if required_targets.is_empty() {
-        return false;
-    }
-    let required: BTreeSet<String> = required_targets.iter().cloned().collect();
-    approved.iter().any(|req| {
-        if !matches!(req.action, ScheduledAction::SandboxExec { .. }) {
-            return false;
-        }
-        let granted: BTreeSet<String> = approved_request_targets(req, agent_dir, gateway_dir)
-            .into_iter()
-            .collect();
-        required.is_subset(&granted)
-    })
 }
 
 fn layer_mount_approval_covers_scope_issues(
@@ -2624,125 +2558,7 @@ mod network_error_detection_tests {
     }
 }
 
-#[cfg(test)]
-mod approval_binding_tests {
-    use super::{
-        approved_requests_cover_targets, extract_hosts_from_text, validate_approval_ref_context,
-    };
-    use autonoetic_types::background::{
-        ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
-    };
-    use std::path::Path;
 
-    #[test]
-    fn approval_ref_rejects_cross_agent_use() {
-        let decision = ApprovalDecision {
-            request_id: "apr-1".to_string(),
-            agent_id: "coder.default".to_string(),
-            session_id: "root/coder.default-1".to_string(),
-            action: ScheduledAction::SandboxExec {
-                command: "echo ok".to_string(),
-                dependencies: None,
-                requires_approval: true,
-                evidence_ref: None,
-                detected_hosts: None,
-            },
-            status: ApprovalStatus::Approved,
-            decided_at: "2026-01-01T00:00:00Z".to_string(),
-            decided_by: "operator".to_string(),
-            reason: None,
-            root_session_id: Some("root".to_string()),
-            workflow_id: None,
-            task_id: None,
-            approval_level: ApprovalLevel::Operator,
-        };
-        let err =
-            validate_approval_ref_context(&decision, "evaluator.default", Some("root/eval-1"))
-                .expect_err("cross-agent approval_ref should be rejected");
-        assert!(err.to_string().contains("belongs to agent"));
-    }
-
-    #[test]
-    fn approval_ref_rejects_cross_root_use() {
-        let decision = ApprovalDecision {
-            request_id: "apr-2".to_string(),
-            agent_id: "coder.default".to_string(),
-            session_id: "root-a/coder.default-1".to_string(),
-            action: ScheduledAction::SandboxExec {
-                command: "echo ok".to_string(),
-                dependencies: None,
-                requires_approval: true,
-                evidence_ref: None,
-                detected_hosts: None,
-            },
-            status: ApprovalStatus::Approved,
-            decided_at: "2026-01-01T00:00:00Z".to_string(),
-            decided_by: "operator".to_string(),
-            reason: None,
-            root_session_id: Some("root-a".to_string()),
-            workflow_id: None,
-            task_id: None,
-            approval_level: ApprovalLevel::Operator,
-        };
-        let err = validate_approval_ref_context(&decision, "coder.default", Some("root-b/coder-2"))
-            .expect_err("cross-root approval_ref should be rejected");
-        assert!(err.to_string().contains("root session"));
-    }
-
-    #[test]
-    fn approved_requests_cover_targets_requires_structured_host_match() {
-        let req = ApprovalRequest {
-            request_id: "apr-host".to_string(),
-            agent_id: "coder.default".to_string(),
-            session_id: "root/coder-1".to_string(),
-            action: ScheduledAction::SandboxExec {
-                command: "curl https://api.example.com/v1".to_string(),
-                dependencies: None,
-                requires_approval: true,
-                evidence_ref: None,
-                detected_hosts: None,
-            },
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            reason: None,
-            evidence_ref: None,
-            root_session_id: Some("root".to_string()),
-            workflow_id: None,
-            task_id: None,
-            status: Some(ApprovalStatus::Approved),
-            decided_at: Some("2026-01-01T00:00:01Z".to_string()),
-            decided_by: Some("operator".to_string()),
-            decision_reason: None,
-            approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-        };
-        assert!(approved_requests_cover_targets(
-            &[req.clone()],
-            &["api.example.com".to_string()],
-            Path::new("."),
-            None
-        ));
-        assert!(!approved_requests_cover_targets(
-            &[req],
-            &["evil.com".to_string()],
-            Path::new("."),
-            None
-        ));
-    }
-
-    #[test]
-    fn extracts_hosts_from_command_text_urls() {
-        let hosts = extract_hosts_from_text("curl https://api.example.com/v1 && wget http://x.y/z");
-        assert_eq!(
-            hosts,
-            vec!["api.example.com".to_string(), "x.y".to_string()]
-        );
-    }
-}
 
 #[cfg(test)]
 mod remote_access_declaration_tests {

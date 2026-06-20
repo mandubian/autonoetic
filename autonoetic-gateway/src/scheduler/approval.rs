@@ -105,26 +105,6 @@ pub fn pending_approval_requests_for_root(
         .collect())
 }
 
-/// Pending [`ScheduledAction::SandboxExec`] approvals for an exact `session_id` (e.g. child
-/// delegation path), oldest first. Used to stop repeated `sandbox.exec` calls from minting many
-/// `apr-*` rows while an approval is still open.
-pub fn pending_sandbox_exec_requests_for_session(
-    config: &GatewayConfig,
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    session_id: &str,
-) -> anyhow::Result<Vec<ApprovalRequest>> {
-    if session_id.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut v: Vec<ApprovalRequest> = load_approval_requests(config, gateway_store)?
-        .into_iter()
-        .filter(|r| r.session_id == session_id)
-        .filter(|r| matches!(r.action, ScheduledAction::SandboxExec { .. }))
-        .collect();
-    v.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-    Ok(v)
-}
-
 /// Pending approvals of any kind for an exact `session_id`, oldest first.
 /// Used to stop repeated calls from minting many `apr-*` rows while an approval is still open.
 pub fn pending_approval_requests_for_session(
@@ -1648,96 +1628,6 @@ mod tests {
             super::pending_approval_requests_for_root(&cfg, Some(&store), "root-a").unwrap();
         assert_eq!(for_a.len(), 1);
         assert_eq!(for_a[0].request_id, "apr-a");
-    }
-
-    #[test]
-    fn pending_sandbox_exec_requests_for_session_filters_and_sorts() {
-        let dir = tempdir().unwrap();
-        let agents_dir = dir.path().join("agents");
-        let gateway_dir = agents_dir.join(".gateway");
-        std::fs::create_dir_all(&gateway_dir).unwrap();
-        let cfg = GatewayConfig {
-            agents_dir: agents_dir.clone(),
-            ..Default::default()
-        };
-        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-
-        let req = |id: &str, created: &str| ApprovalRequest {
-            request_id: id.to_string(),
-            agent_id: "evaluator.default".to_string(),
-            session_id: "sess/evaluator-1".to_string(),
-            action: ScheduledAction::SandboxExec {
-                command: "python3 x".to_string(),
-                dependencies: None,
-                requires_approval: true,
-                evidence_ref: None,
-                detected_hosts: None,
-            },
-            approval_level: ApprovalLevel::Operator,
-            created_at: created.to_string(),
-            reason: None,
-            evidence_ref: None,
-            workflow_id: None,
-            task_id: None,
-            root_session_id: None,
-            status: None,
-            decided_at: None,
-            decided_by: None,
-            decision_reason: None,
-            similar_to_request_id: None,
-            similarity_score: None,
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-        };
-        store
-            .create_approval(&mut req("apr-second", "2020-01-02T00:00:00Z"))
-            .unwrap();
-        store
-            .create_approval(&mut req("apr-first", "2020-01-01T00:00:00Z"))
-            .unwrap();
-        // Install-style request same session — must not appear in sandbox-only list
-        let mut install = ApprovalRequest {
-            request_id: "apr-install".to_string(),
-            agent_id: "b".to_string(),
-            session_id: "sess/evaluator-1".to_string(),
-            action: ScheduledAction::AgentInstall {
-                agent_id: "x".to_string(),
-                summary: "s".to_string(),
-                requested_by_agent_id: "y".to_string(),
-                install_fingerprint: "fp".to_string(),
-                payload: None,
-            },
-            created_at: "2019-01-01T00:00:00Z".to_string(),
-            reason: None,
-            evidence_ref: None,
-            workflow_id: None,
-            task_id: None,
-            root_session_id: None,
-            status: None,
-            decided_at: None,
-            decided_by: None,
-            decision_reason: None,
-            approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-        };
-        store.create_approval(&mut install).unwrap();
-
-        let list = super::pending_sandbox_exec_requests_for_session(
-            &cfg,
-            Some(&store),
-            "sess/evaluator-1",
-        )
-        .unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].request_id, "apr-first");
-        assert_eq!(list[1].request_id, "apr-second");
     }
 
     #[test]
