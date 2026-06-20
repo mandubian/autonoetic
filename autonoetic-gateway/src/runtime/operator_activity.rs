@@ -158,10 +158,10 @@ pub fn classify_tool_activity(
 }
 
 pub fn classify_session_lifecycle(
-    close_reason: &str,
+    outcome: autonoetic_types::session_outcome::SessionCloseOutcome,
     tool_steps_in_ingest: u32,
 ) -> Option<OperatorActivityDraft> {
-    if close_reason != "jsonrpc_spawn_complete_empty" || tool_steps_in_ingest == 0 {
+    if !outcome.is_completed_empty() || !outcome.is_jsonrpc_spawn() || tool_steps_in_ingest == 0 {
         return None;
     }
     Some(OperatorActivityDraft {

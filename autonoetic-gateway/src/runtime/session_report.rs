@@ -6,6 +6,7 @@
 
 use crate::log_redaction::redact_text_for_logs;
 use crate::runtime::live_digest::{base_session_id, session_depth};
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -692,12 +693,13 @@ impl SessionReportWriter {
 
     pub fn finish_session(
         &mut self,
-        reason: &str,
+        outcome: SessionCloseOutcome,
         latest_assistant_output: Option<&str>,
     ) -> anyhow::Result<()> {
         self.update_state_and_finalize(|state| {
             let now = chrono::Utc::now().to_rfc3339();
-            let status = status_from_close_reason(reason);
+            let status = status_from_close_reason(outcome.as_str());
+            let reason = outcome.as_str();
             state.status = status.to_string();
             state.ended_at = Some(now.clone());
             let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
@@ -3459,7 +3461,7 @@ mod tests {
             )
             .unwrap();
         writer
-            .finish_session("session suspended awaiting approval", None)
+            .finish_session(SessionCloseOutcome::ExecuteLoopSuspendedApproval, None)
             .unwrap();
 
         let session_dir = gateway_dir.join("sessions").join("root");
@@ -3488,7 +3490,7 @@ mod tests {
         writer.start_session("Initial task").unwrap();
         writer.start_turn(Some("turn-1")).unwrap();
         writer
-            .finish_session("jsonrpc_spawn_complete", Some("done"))
+            .finish_session(SessionCloseOutcome::JsonRpcSpawnComplete, Some("done"))
             .unwrap();
 
         writer.start_session("stray reopen").unwrap();

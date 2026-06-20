@@ -1212,7 +1212,9 @@ impl NativeTool for WorkflowForceCompleteTool {
                     if has_digest {
                         if let Ok(digest) = std::fs::read_to_string(session_dir.join("digest.md")) {
                             if digest.contains("Session summary")
-                                || digest.contains("jsonrpc_spawn_complete")
+                                || digest.contains(
+                                    autonoetic_types::session_outcome::SessionCloseOutcome::JsonRpcSpawnComplete.as_str(),
+                                )
                             {
                                 session_completed = true;
                                 evidence

@@ -6,6 +6,7 @@ use autonoetic_gateway::llm::{
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -148,7 +149,7 @@ capabilities: []
     ];
 
     let _ = runtime.execute_with_history(&mut history).await?;
-    runtime.close_session("structured session report integration complete")?;
+    runtime.close_session(SessionCloseOutcome::ExecuteLoopComplete)?;
 
     let session_dir = gateway_dir.join("sessions").join("session-report-a");
     let live = std::fs::read_to_string(session_dir.join("session_overview.md"))?;

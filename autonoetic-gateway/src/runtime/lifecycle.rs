@@ -29,6 +29,7 @@ use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware};
 use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
 use autonoetic_types::config::{GatewayConfig, TrajectoryConfig};
 use autonoetic_types::disclosure::DisclosurePolicy;
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -71,33 +72,19 @@ pub enum TurnOutcome {
     Escalated { escalation_request_id: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExecuteLoopTermination {
-    AgentRequestedExit,
-    SuspendedForApproval,
-    SuspendedForUserInput,
-    SuspendedForHumanEscalation,
-    FatalError,
-}
-
-impl ExecuteLoopTermination {
-    fn close_reason(self) -> &'static str {
-        match self {
-            Self::AgentRequestedExit => "execute_loop_complete",
-            Self::SuspendedForApproval => "execute_loop_suspended",
-            Self::SuspendedForUserInput => "execute_loop_suspended_user_input",
-            Self::SuspendedForHumanEscalation => "execute_loop_escalated",
-            Self::FatalError => "execute_loop_error",
+/// Map a `TurnOutcome` to the close reason used by the direct
+/// `execute_with_history` / `execute_loop` path.
+pub fn session_close_outcome_from_turn_outcome(
+    outcome: &TurnOutcome,
+) -> SessionCloseOutcome {
+    match outcome {
+        TurnOutcome::Completed(Some(_)) => SessionCloseOutcome::ExecuteLoopComplete,
+        TurnOutcome::Completed(None) => SessionCloseOutcome::ExecuteLoopComplete,
+        TurnOutcome::Suspended { .. } => SessionCloseOutcome::ExecuteLoopSuspendedApproval,
+        TurnOutcome::SuspendedUserInput { .. } => {
+            SessionCloseOutcome::ExecuteLoopSuspendedUserInput
         }
-    }
-
-    fn from_turn_outcome(outcome: &TurnOutcome) -> Self {
-        match outcome {
-            TurnOutcome::Completed(_) => Self::AgentRequestedExit,
-            TurnOutcome::Suspended { .. } => Self::SuspendedForApproval,
-            TurnOutcome::SuspendedUserInput { .. } => Self::SuspendedForUserInput,
-            TurnOutcome::Escalated { .. } => Self::SuspendedForHumanEscalation,
-        }
+        TurnOutcome::Escalated { .. } => SessionCloseOutcome::ExecuteLoopEscalated,
     }
 }
 
@@ -656,11 +643,12 @@ impl AgentExecutor {
         Ok(request_id)
     }
 
-    pub fn close_session(&mut self, reason: &str) -> anyhow::Result<()> {
+    pub fn close_session(&mut self, outcome: SessionCloseOutcome) -> anyhow::Result<()> {
         if !self.session_started {
             return Ok(());
         }
         let session_id = self.ensure_session_id();
+        let reason = outcome.as_str();
         persist_reevaluation_state(&self.agent_dir, |state| {
             state.last_outcome = Some(reason.to_string());
         })?;
@@ -691,9 +679,9 @@ impl AgentExecutor {
 
                 if let Some(gs) = self.gateway_store.as_ref() {
                     let ended_at = chrono::Utc::now().to_rfc3339();
-                    let status = if reason.contains("suspended") {
+                    let status = if outcome.is_suspended() {
                         "suspended"
-                    } else if reason.contains("error") {
+                    } else if outcome.is_error() {
                         "failed"
                     } else {
                         "completed"
@@ -705,7 +693,7 @@ impl AgentExecutor {
             }
         }
 
-        if !reason.contains("suspended") {
+        if !outcome.is_suspended() {
             if let Some(gs) = self.gateway_store.as_ref() {
                 let root_sid = crate::runtime::content_store::root_session_id(&session_id);
                 if let Err(e) = gs.delete_session_grants(&root_sid) {
@@ -731,7 +719,7 @@ impl AgentExecutor {
                     .rev()
                     .find(|m| matches!(m.role, crate::llm::Role::Assistant))
                     .map(|m| m.content.as_str());
-                let _ = g.finish_session(reason, latest_assistant);
+                let _ = g.finish_session(outcome, latest_assistant);
             }
         }
         let mut tracer = SessionTracer::new(&self.agent_dir, &self.manifest.agent.id, &session_id)?;
@@ -739,7 +727,7 @@ impl AgentExecutor {
 
         // Attempt workflow completion when root session closes normally.
         let is_root = crate::runtime::content_store::root_session_id(&session_id) == session_id;
-        if !reason.contains("suspended") && is_root {
+        if outcome.is_completed() && is_root {
             if let Some(cfg) = self.config.as_deref() {
                 if let Err(e) = crate::scheduler::workflow_store::try_complete_workflow(
                     cfg,
@@ -1053,12 +1041,12 @@ impl AgentExecutor {
             Ok(outcome) => {
                 // Suspension outcomes already have checkpoints; this helper is the
                 // single exit path for execute_loop-level session termination.
-                let termination = ExecuteLoopTermination::from_turn_outcome(&outcome);
-                let _ = self.close_session(termination.close_reason());
+                let close_outcome = session_close_outcome_from_turn_outcome(&outcome);
+                let _ = self.close_session(close_outcome);
                 Ok(())
             }
             Err(e) => {
-                let _ = self.close_session(ExecuteLoopTermination::FatalError.close_reason());
+                let _ = self.close_session(SessionCloseOutcome::ExecuteLoopError);
                 Err(e)
             }
         }
@@ -4325,36 +4313,37 @@ mod tests {
     }
 
     #[test]
-    fn execute_loop_termination_maps_every_turn_outcome_variant() {
-        let completed = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Completed(None));
-        let suspended = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Suspended {
+    fn execute_loop_close_outcome_maps_every_turn_outcome_variant() {
+        let completed =
+            session_close_outcome_from_turn_outcome(&TurnOutcome::Completed(None));
+        let suspended = session_close_outcome_from_turn_outcome(&TurnOutcome::Suspended {
             approval_request_id: "apr-1".to_string(),
         });
         let user_input =
-            ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::SuspendedUserInput {
+            session_close_outcome_from_turn_outcome(&TurnOutcome::SuspendedUserInput {
                 interaction_id: "ui-1".to_string(),
             });
-        let escalated = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Escalated {
+        let escalated = session_close_outcome_from_turn_outcome(&TurnOutcome::Escalated {
             escalation_request_id: "esc-1".to_string(),
         });
 
-        assert_eq!(completed, ExecuteLoopTermination::AgentRequestedExit);
-        assert_eq!(suspended, ExecuteLoopTermination::SuspendedForApproval);
-        assert_eq!(user_input, ExecuteLoopTermination::SuspendedForUserInput);
+        assert_eq!(completed, SessionCloseOutcome::ExecuteLoopComplete);
+        assert_eq!(suspended, SessionCloseOutcome::ExecuteLoopSuspendedApproval);
         assert_eq!(
-            escalated,
-            ExecuteLoopTermination::SuspendedForHumanEscalation
+            user_input,
+            SessionCloseOutcome::ExecuteLoopSuspendedUserInput
         );
+        assert_eq!(escalated, SessionCloseOutcome::ExecuteLoopEscalated);
     }
 
     #[test]
-    fn execute_loop_termination_reason_tags_are_closed_and_stable() {
+    fn execute_loop_close_outcome_tags_are_closed_and_stable() {
         let reasons = vec![
-            ExecuteLoopTermination::AgentRequestedExit.close_reason(),
-            ExecuteLoopTermination::SuspendedForApproval.close_reason(),
-            ExecuteLoopTermination::SuspendedForUserInput.close_reason(),
-            ExecuteLoopTermination::SuspendedForHumanEscalation.close_reason(),
-            ExecuteLoopTermination::FatalError.close_reason(),
+            SessionCloseOutcome::ExecuteLoopComplete.as_str(),
+            SessionCloseOutcome::ExecuteLoopSuspendedApproval.as_str(),
+            SessionCloseOutcome::ExecuteLoopSuspendedUserInput.as_str(),
+            SessionCloseOutcome::ExecuteLoopEscalated.as_str(),
+            SessionCloseOutcome::ExecuteLoopError.as_str(),
         ];
         assert_eq!(
             reasons,

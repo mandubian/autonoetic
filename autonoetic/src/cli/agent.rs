@@ -12,6 +12,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, Runti
 use autonoetic_types::agent_revision::PromotionKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// LLM configuration for template rendering
@@ -1346,43 +1347,18 @@ pub fn load_agent_runtime_context(
     Ok((loaded.manifest, loaded.instructions, loaded.dir))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CliSessionCloseReason {
-    HeadlessComplete,
-    HeadlessCompleteEmpty,
-    HeadlessSuspendedApproval,
-    HeadlessSuspendedUserInput,
-    HeadlessEscalated,
-    HeadlessError,
-    InteractiveError,
-    InteractiveExit,
-}
-
-impl CliSessionCloseReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::HeadlessComplete => "headless_complete",
-            Self::HeadlessCompleteEmpty => "headless_complete_empty",
-            Self::HeadlessSuspendedApproval => "headless_suspended",
-            Self::HeadlessSuspendedUserInput => "headless_suspended_user_input",
-            Self::HeadlessEscalated => "headless_escalated",
-            Self::HeadlessError => "headless_error",
-            Self::InteractiveError => "interactive_error",
-            Self::InteractiveExit => "interactive_exit",
+fn session_close_outcome_from_headless_turn_outcome(
+    outcome: &autonoetic_gateway::runtime::lifecycle::TurnOutcome,
+) -> SessionCloseOutcome {
+    use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
+    match outcome {
+        TurnOutcome::Completed(Some(_)) => SessionCloseOutcome::HeadlessComplete,
+        TurnOutcome::Completed(None) => SessionCloseOutcome::HeadlessCompleteEmpty,
+        TurnOutcome::Suspended { .. } => SessionCloseOutcome::HeadlessSuspendedApproval,
+        TurnOutcome::SuspendedUserInput { .. } => {
+            SessionCloseOutcome::HeadlessSuspendedUserInput
         }
-    }
-
-    fn for_headless_turn_outcome(
-        outcome: &autonoetic_gateway::runtime::lifecycle::TurnOutcome,
-    ) -> Self {
-        use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
-        match outcome {
-            TurnOutcome::Completed(Some(_)) => Self::HeadlessComplete,
-            TurnOutcome::Completed(None) => Self::HeadlessCompleteEmpty,
-            TurnOutcome::Suspended { .. } => Self::HeadlessSuspendedApproval,
-            TurnOutcome::SuspendedUserInput { .. } => Self::HeadlessSuspendedUserInput,
-            TurnOutcome::Escalated { .. } => Self::HeadlessEscalated,
-        }
+        TurnOutcome::Escalated { .. } => SessionCloseOutcome::HeadlessEscalated,
     }
 }
 
@@ -1473,11 +1449,11 @@ pub async fn run_agent_with_runtime_with_driver(
                 }
             }
             runtime.close_session(
-                CliSessionCloseReason::for_headless_turn_outcome(&outcome).as_str(),
+                session_close_outcome_from_headless_turn_outcome(&outcome),
             )?;
         }
         Err(e) => {
-            let _ = runtime.close_session(CliSessionCloseReason::HeadlessError.as_str());
+            let _ = runtime.close_session(SessionCloseOutcome::HeadlessError);
             return Err(e);
         }
     }
@@ -1554,7 +1530,7 @@ pub async fn run_interactive_session(
                 stdout.flush().await?;
             }
             Err(e) => {
-                let _ = runtime.close_session(CliSessionCloseReason::InteractiveError.as_str());
+                let _ = runtime.close_session(SessionCloseOutcome::InteractiveError);
                 return Err(e);
             }
         };
@@ -1630,12 +1606,12 @@ pub async fn run_interactive_session(
                 stdout.flush().await?;
             }
             Err(e) => {
-                let _ = runtime.close_session(CliSessionCloseReason::InteractiveError.as_str());
+                let _ = runtime.close_session(SessionCloseOutcome::InteractiveError);
                 return Err(e);
             }
         };
     }
-    runtime.close_session(CliSessionCloseReason::InteractiveExit.as_str())?;
+    runtime.close_session(SessionCloseOutcome::InteractiveExit)?;
     Ok(())
 }
 
@@ -2293,23 +2269,23 @@ mod tests {
     }
 
     #[test]
-    fn cli_session_close_reason_headless_mapping_is_closed_and_stable() {
+    fn cli_session_close_outcome_headless_mapping_is_closed_and_stable() {
         use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
 
-        let completed = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Completed(
-            Some("ok".to_string()),
-        ));
+        let completed = session_close_outcome_from_headless_turn_outcome(
+            &TurnOutcome::Completed(Some("ok".to_string())),
+        );
         let completed_empty =
-            CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Completed(None));
-        let suspended = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Suspended {
+            session_close_outcome_from_headless_turn_outcome(&TurnOutcome::Completed(None));
+        let suspended = session_close_outcome_from_headless_turn_outcome(&TurnOutcome::Suspended {
             approval_request_id: "apr-1".to_string(),
         });
-        let suspended_user = CliSessionCloseReason::for_headless_turn_outcome(
+        let suspended_user = session_close_outcome_from_headless_turn_outcome(
             &TurnOutcome::SuspendedUserInput {
                 interaction_id: "ui-1".to_string(),
             },
         );
-        let escalated = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Escalated {
+        let escalated = session_close_outcome_from_headless_turn_outcome(&TurnOutcome::Escalated {
             escalation_request_id: "esc-1".to_string(),
         });
 
@@ -2321,13 +2297,13 @@ mod tests {
     }
 
     #[test]
-    fn cli_session_close_reason_interactive_tags_are_stable() {
+    fn cli_session_close_outcome_interactive_tags_are_stable() {
         assert_eq!(
-            CliSessionCloseReason::InteractiveError.as_str(),
+            SessionCloseOutcome::InteractiveError.as_str(),
             "interactive_error"
         );
         assert_eq!(
-            CliSessionCloseReason::InteractiveExit.as_str(),
+            SessionCloseOutcome::InteractiveExit.as_str(),
             "interactive_exit"
         );
     }

@@ -209,6 +209,144 @@ impl SessionOutcome {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SessionCloseOutcome — unified, closed close-reason enum
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Mechanical outcome that caused a session to close.
+///
+/// This enum replaces the four previously scattered close-reason enums
+/// (`SessionCloseReason`, `ExecuteLoopTermination`, `CloseOrigin`,
+/// `CliSessionCloseReason`) with a single closed set of variants.  The
+/// `as_str()` tags are frozen: they are written into persisted session
+/// reports, transcripts, tracer logs, reevaluation state, and digest files,
+/// so changing them would break backward compatibility with on-disk data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCloseOutcome {
+    // Spawn-time execution failure.  Used when `execute_with_history` panics
+    // or returns an error before a normal turn outcome can be produced.
+    SpawnExecuteError,
+
+    // JSON-RPC `agent_spawn` / `event.ingest` outcomes.
+    JsonRpcSpawnComplete,
+    JsonRpcSpawnCompleteEmpty,
+    JsonRpcSpawnSuspendedApproval,
+    JsonRpcSpawnSuspendedUserInput,
+
+    // Checkpoint-resume (`sessions.resume`) outcomes.
+    CheckpointRespawnComplete,
+    CheckpointRespawnCompleteEmpty,
+    CheckpointRespawnSuspendedApproval,
+    CheckpointRespawnSuspendedUserInput,
+
+    // Direct `AgentExecutor::execute_loop` / `execute_with_history` outcomes.
+    ExecuteLoopComplete,
+    ExecuteLoopSuspendedApproval,
+    ExecuteLoopSuspendedUserInput,
+    ExecuteLoopEscalated,
+    ExecuteLoopError,
+
+    // CLI `autonoetic agent run --headless` outcomes.
+    HeadlessComplete,
+    HeadlessCompleteEmpty,
+    HeadlessSuspendedApproval,
+    HeadlessSuspendedUserInput,
+    HeadlessEscalated,
+    HeadlessError,
+
+    // CLI `autonoetic agent run --interactive` outcomes.
+    InteractiveError,
+    InteractiveExit,
+
+    // Script-mode agent execution outcomes.
+    ScriptExecComplete,
+    ScriptExecFailed,
+}
+
+impl SessionCloseOutcome {
+    /// Stable snake-case tag written to all persisted close-reason sinks.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SpawnExecuteError => "spawn_execute_error",
+            Self::JsonRpcSpawnComplete => "jsonrpc_spawn_complete",
+            Self::JsonRpcSpawnCompleteEmpty => "jsonrpc_spawn_complete_empty",
+            Self::JsonRpcSpawnSuspendedApproval => "jsonrpc_spawn_suspended_approval",
+            Self::JsonRpcSpawnSuspendedUserInput => "jsonrpc_spawn_suspended_user_input",
+            Self::CheckpointRespawnComplete => "checkpoint_respawn_complete",
+            Self::CheckpointRespawnCompleteEmpty => "checkpoint_respawn_complete_empty",
+            Self::CheckpointRespawnSuspendedApproval => "checkpoint_respawn_suspended",
+            Self::CheckpointRespawnSuspendedUserInput => "checkpoint_respawn_suspended_user_input",
+            Self::ExecuteLoopComplete => "execute_loop_complete",
+            Self::ExecuteLoopSuspendedApproval => "execute_loop_suspended",
+            Self::ExecuteLoopSuspendedUserInput => "execute_loop_suspended_user_input",
+            Self::ExecuteLoopEscalated => "execute_loop_escalated",
+            Self::ExecuteLoopError => "execute_loop_error",
+            Self::HeadlessComplete => "headless_complete",
+            Self::HeadlessCompleteEmpty => "headless_complete_empty",
+            Self::HeadlessSuspendedApproval => "headless_suspended",
+            Self::HeadlessSuspendedUserInput => "headless_suspended_user_input",
+            Self::HeadlessEscalated => "headless_escalated",
+            Self::HeadlessError => "headless_error",
+            Self::InteractiveError => "interactive_error",
+            Self::InteractiveExit => "interactive_exit",
+            Self::ScriptExecComplete => "script_exec_complete",
+            Self::ScriptExecFailed => "script_exec_failed",
+        }
+    }
+
+    /// Outcomes that leave the session resumable (approval / user-input
+    /// suspension).  Escalation is **not** included: it is treated as a
+    /// terminal close so the session report reflects the escalation boundary.
+    pub fn is_suspended(&self) -> bool {
+        matches!(
+            self,
+            Self::JsonRpcSpawnSuspendedApproval
+                | Self::JsonRpcSpawnSuspendedUserInput
+                | Self::CheckpointRespawnSuspendedApproval
+                | Self::CheckpointRespawnSuspendedUserInput
+                | Self::ExecuteLoopSuspendedApproval
+                | Self::ExecuteLoopSuspendedUserInput
+                | Self::HeadlessSuspendedApproval
+                | Self::HeadlessSuspendedUserInput
+        )
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(
+            self,
+            Self::SpawnExecuteError
+                | Self::ExecuteLoopError
+                | Self::HeadlessError
+                | Self::InteractiveError
+                | Self::ScriptExecFailed
+        )
+    }
+
+    pub fn is_completed(&self) -> bool {
+        !self.is_suspended() && !self.is_error()
+    }
+
+    pub fn is_completed_empty(&self) -> bool {
+        matches!(
+            self,
+            Self::JsonRpcSpawnCompleteEmpty
+                | Self::CheckpointRespawnCompleteEmpty
+                | Self::HeadlessCompleteEmpty
+        )
+    }
+
+    pub fn is_jsonrpc_spawn(&self) -> bool {
+        matches!(
+            self,
+            Self::JsonRpcSpawnComplete
+                | Self::JsonRpcSpawnCompleteEmpty
+                | Self::JsonRpcSpawnSuspendedApproval
+                | Self::JsonRpcSpawnSuspendedUserInput
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -333,6 +471,96 @@ mod tests {
         let outcome = fixture(Completion::Achieved, Some(OperatorThumb::Up));
         let json = serde_json::to_string(&outcome).unwrap();
         let back: SessionOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(outcome, back);
+    }
+
+    // ── SessionCloseOutcome stability ─────────────────────────────────
+
+    #[test]
+    fn session_close_outcome_tags_are_stable() {
+        assert_eq!(SessionCloseOutcome::SpawnExecuteError.as_str(), "spawn_execute_error");
+        assert_eq!(SessionCloseOutcome::JsonRpcSpawnComplete.as_str(), "jsonrpc_spawn_complete");
+        assert_eq!(
+            SessionCloseOutcome::JsonRpcSpawnCompleteEmpty.as_str(),
+            "jsonrpc_spawn_complete_empty"
+        );
+        assert_eq!(
+            SessionCloseOutcome::JsonRpcSpawnSuspendedApproval.as_str(),
+            "jsonrpc_spawn_suspended_approval"
+        );
+        assert_eq!(
+            SessionCloseOutcome::JsonRpcSpawnSuspendedUserInput.as_str(),
+            "jsonrpc_spawn_suspended_user_input"
+        );
+        assert_eq!(SessionCloseOutcome::CheckpointRespawnComplete.as_str(), "checkpoint_respawn_complete");
+        assert_eq!(
+            SessionCloseOutcome::CheckpointRespawnCompleteEmpty.as_str(),
+            "checkpoint_respawn_complete_empty"
+        );
+        assert_eq!(
+            SessionCloseOutcome::CheckpointRespawnSuspendedApproval.as_str(),
+            "checkpoint_respawn_suspended"
+        );
+        assert_eq!(
+            SessionCloseOutcome::CheckpointRespawnSuspendedUserInput.as_str(),
+            "checkpoint_respawn_suspended_user_input"
+        );
+        assert_eq!(SessionCloseOutcome::ExecuteLoopComplete.as_str(), "execute_loop_complete");
+        assert_eq!(
+            SessionCloseOutcome::ExecuteLoopSuspendedApproval.as_str(),
+            "execute_loop_suspended"
+        );
+        assert_eq!(
+            SessionCloseOutcome::ExecuteLoopSuspendedUserInput.as_str(),
+            "execute_loop_suspended_user_input"
+        );
+        assert_eq!(SessionCloseOutcome::ExecuteLoopEscalated.as_str(), "execute_loop_escalated");
+        assert_eq!(SessionCloseOutcome::ExecuteLoopError.as_str(), "execute_loop_error");
+        assert_eq!(SessionCloseOutcome::HeadlessComplete.as_str(), "headless_complete");
+        assert_eq!(SessionCloseOutcome::HeadlessCompleteEmpty.as_str(), "headless_complete_empty");
+        assert_eq!(SessionCloseOutcome::HeadlessSuspendedApproval.as_str(), "headless_suspended");
+        assert_eq!(
+            SessionCloseOutcome::HeadlessSuspendedUserInput.as_str(),
+            "headless_suspended_user_input"
+        );
+        assert_eq!(SessionCloseOutcome::HeadlessEscalated.as_str(), "headless_escalated");
+        assert_eq!(SessionCloseOutcome::HeadlessError.as_str(), "headless_error");
+        assert_eq!(SessionCloseOutcome::InteractiveError.as_str(), "interactive_error");
+        assert_eq!(SessionCloseOutcome::InteractiveExit.as_str(), "interactive_exit");
+        assert_eq!(SessionCloseOutcome::ScriptExecComplete.as_str(), "script_exec_complete");
+        assert_eq!(SessionCloseOutcome::ScriptExecFailed.as_str(), "script_exec_failed");
+    }
+
+    #[test]
+    fn session_close_outcome_classifies_categories() {
+        assert!(SessionCloseOutcome::JsonRpcSpawnSuspendedApproval.is_suspended());
+        assert!(SessionCloseOutcome::HeadlessSuspendedUserInput.is_suspended());
+        assert!(!SessionCloseOutcome::ExecuteLoopEscalated.is_suspended());
+        assert!(!SessionCloseOutcome::InteractiveExit.is_suspended());
+
+        assert!(SessionCloseOutcome::SpawnExecuteError.is_error());
+        assert!(SessionCloseOutcome::HeadlessError.is_error());
+        assert!(SessionCloseOutcome::ScriptExecFailed.is_error());
+        assert!(!SessionCloseOutcome::JsonRpcSpawnComplete.is_error());
+
+        assert!(SessionCloseOutcome::JsonRpcSpawnComplete.is_completed());
+        assert!(SessionCloseOutcome::InteractiveExit.is_completed());
+        assert!(SessionCloseOutcome::ScriptExecComplete.is_completed());
+        assert!(!SessionCloseOutcome::ExecuteLoopError.is_completed());
+        assert!(!SessionCloseOutcome::HeadlessSuspendedApproval.is_completed());
+
+        assert!(SessionCloseOutcome::JsonRpcSpawnCompleteEmpty.is_completed_empty());
+        assert!(!SessionCloseOutcome::JsonRpcSpawnComplete.is_completed_empty());
+
+        assert!(SessionCloseOutcome::JsonRpcSpawnComplete.is_jsonrpc_spawn());
+        assert!(!SessionCloseOutcome::CheckpointRespawnComplete.is_jsonrpc_spawn());
+    }
+
+    #[test]
+    fn session_close_outcome_serde_round_trips() {
+        let outcome = SessionCloseOutcome::JsonRpcSpawnCompleteEmpty;
+        let json = serde_json::to_string(&outcome).unwrap();
+        let back: SessionCloseOutcome = serde_json::from_str(&json).unwrap();
         assert_eq!(outcome, back);
     }
 }
