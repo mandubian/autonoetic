@@ -53,6 +53,11 @@ struct SpawnAgentArgs {
     /// specific credential_id, overriding runtime.lock resolution for the child.
     #[serde(default)]
     credential_bindings: Vec<autonoetic_types::runtime_lock::LockedCredentialMount>,
+    /// Optional specific revision_id to execute. When provided, the child runs
+    /// from that revision directory directly, bypassing alias resolution.
+    /// Used for smoke-testing Candidate revisions before promotion.
+    #[serde(default)]
+    revision_id: Option<String>,
 }
 
 /// Keeps a workflow task's `updated_at` fresh while synchronous `agent.spawn` blocks.
@@ -178,7 +183,8 @@ the single join already does that."
                             "required": ["service", "credential_id"]
                         },
                         "description": "Bind specific credentials to the child agent. Overrides runtime.lock service-level resolution."
-                    }
+                    },
+                    "revision_id": { "type": "string", "description": "Optional specific revision_id to execute. Bypasses alias resolution and runs the candidate revision directly. Used for smoke-testing before promotion." }
                 },
                 "required": ["agent_id", "message"],
                 "additionalProperties": false
@@ -503,6 +509,43 @@ the single join already does that."
         let ts = Utc::now().to_rfc3339();
         let spawn_reason_preview: String = kickoff_message.chars().take(200).collect();
         let persist_result: anyhow::Result<String> = (|| {
+            // Build a single metadata value that is persisted on the TaskRun and
+            // forwarded to the queued task. This ensures the smoke-test gate can
+            // verify the task after it completes, even when the caller supplied
+            // no metadata or non-object metadata.
+            let mut spawn_metadata = match args.metadata.clone() {
+                Some(serde_json::Value::Object(mut obj)) => {
+                    if let Some(ref rev_id) = args.revision_id {
+                        obj.insert(
+                            "_autonoetic_spawn_revision_id".to_string(),
+                            serde_json::json!(rev_id),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                }
+                Some(other) => {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("_original_metadata".to_string(), other);
+                    if let Some(ref rev_id) = args.revision_id {
+                        obj.insert(
+                            "_autonoetic_spawn_revision_id".to_string(),
+                            serde_json::json!(rev_id),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                }
+                None => {
+                    let mut obj = serde_json::Map::new();
+                    if let Some(ref rev_id) = args.revision_id {
+                        obj.insert(
+                            "_autonoetic_spawn_revision_id".to_string(),
+                            serde_json::json!(rev_id),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                }
+            };
+
             let task = TaskRun {
                 task_id: task_id.clone(),
                 workflow_id: workflow_id.clone(),
@@ -516,7 +559,7 @@ the single join already does that."
                 result_summary: None,
                 join_group: None,
                 message: Some(kickoff_message.clone()),
-                metadata: args.metadata.clone(),
+                metadata: Some(spawn_metadata.clone()),
                 retry_count: 0,
                 last_failure_class: None,
                 retry_policy: crate::scheduler::workflow_store::retry_policy_from_metadata(
@@ -597,7 +640,7 @@ the single join already does that."
                 child_session_id: child_delegation_path.clone(),
                 parent_session_id: resolved_session_id.clone(),
                 source_agent_id: source_agent_id.clone(),
-                metadata: args.metadata.clone(),
+                metadata: Some(spawn_metadata),
                 join_group: args.join_group,
                 blocks_planner: true,
                 enqueued_at: Utc::now().to_rfc3339(),
@@ -616,7 +659,7 @@ the single join already does that."
                 None,
             );
 
-            serde_json::to_string(&serde_json::json!({
+            let mut resp = serde_json::json!({
                 "ok": true,
                 "accepted": true,
                 "status": "queued",
@@ -625,7 +668,12 @@ the single join already does that."
                 "agent_id": target_agent_id,
                 "session_id": child_delegation_path,
                 "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
-            }))
+            });
+            if let Some(rev_id) = args.revision_id {
+                resp["revision_id"] = serde_json::json!(rev_id);
+                resp["smoke_test"] = serde_json::json!(true);
+            }
+            serde_json::to_string(&resp)
             .map_err(Into::into)
         })();
 

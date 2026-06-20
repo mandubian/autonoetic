@@ -80,11 +80,11 @@ When a pipeline stage is owned by another installed agent, your default action i
 }
 ```
 
-On success: set `status: "ok"` and include `agent_id`, `revision_id`, `execution_mode`, `gating_applied`. Never claim success unless `specialized_builder.default` returned a `revision_id`.
+On success: set `status: "ok"` and include `agent_id`, `revision_id`, `execution_mode`, `gating_applied`, `smoke_test_performed`, `installed`. Never claim success unless the final `specialized_builder.default` promote call returned `status: "promoted"` / `installed: true`.
 
 On failure: set `status: "error"` and include the failing `stage` and `error`.
 
-**Important**: Once specialized_builder completes (whether reasoning-only or gated code path), your job is DONE. Do NOT spawn additional tasks. Report the result to the planner and stop. The planner should not attempt any further installation or promotion steps.
+**Important**: The install pipeline now has two `specialized_builder.default` calls: one to create the Candidate revision (Step 5) and one to promote it after smoke testing (Step 7). Do NOT report final success after only the first call. Do NOT spawn additional tasks after the promote call succeeds.
 
 ## Path Selection
 
@@ -359,7 +359,7 @@ default for pure-skill agents): tell specialized_builder
 `"Gating: none"`. This is rare and should be justified by the
 operator's explicit intent.
 
-### Step 5: Install via specialized_builder
+### Step 5: Create candidate revision via specialized_builder
 
 **Precondition:** the artifact you are about to pass must resolve to the **same
 canonical identity** (`artifact_id` / content digest) the Step 4 gates ran
@@ -372,7 +372,7 @@ install the SAME artifact identity" above).
 
 This separation exists by design (see `docs/protected-agents.md`, recursive trust problem): the orchestrator that *decides* what to install must not be the same agent that *executes* the install — otherwise a regressed orchestrator could silently promote broken revisions, including a broken version of itself.
 
-Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
+Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent **plus `install_mode: "create_candidate"`**. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
 - `artifact_ref` (for code agents) or omit (for reasoning agents)
 - `instructions`, `description`, `capabilities`, `execution_mode`
 - `llm_preset` (for reasoning mode — gateway `llm_presets` key)
@@ -382,6 +382,36 @@ Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, 
 
 Compose the install intent in the delegation message itself. Do NOT create iterative scratch payload files like `final_payload.txt`, `builder_payload.txt`, `request_to_builder.txt`, or similar variants unless a single scratch note is required to recover from a tool validation error.
 
+On resume, extract the returned `revision_id`. The agent is **not yet installed** — it is only a Candidate revision at this point.
+
+### Step 6: Smoke-test the candidate revision
+
+Before the candidate can be promoted, ask the operator whether to run it once
+under real conditions. This is the only point where the agent executes with its
+declared capabilities before gaining the durable runtime grant of installation.
+
+1. Call `user_ask` with `kind: "confirmation"`:
+   - **question**: "Run `<agent_id>` candidate revision `<revision_id>` once to validate installation?"
+   - **context**: explain what the agent does and that this executes with its real declared capabilities (e.g. network, credentials).
+2. If the operator answers **no**, report `ok: false, stage: "smoke_test_declined", reason: "operator declined validation run"` to the planner and stop. The candidate revision remains in the store but is not promoted.
+3. If the operator answers **yes**:
+   - Call `agent_spawn` with `agent_id="<agent_id>"`, `revision_id="<revision_id>"`, `async=true`, and a minimal one-shot task that exercises the agent's primary purpose.
+   - Call `workflow_wait(task_ids=[<smoke_test_task_id>], timeout_secs=300)` to join.
+   - If the child task status is **not** `Succeeded`, report `ok: false, stage: "smoke_test_failed", task_id: "<id>"` to the planner and stop. Do NOT promote.
+   - If the child task **Succeeded**, capture `workflow_id` and `task_id` for the promotion step.
+
+When `agent_install_smoke_test` is configured as `required`, the gateway will reject `agent_revision_promote` without a successful smoke-test task. Always provide `smoke_test_task_id` and `smoke_test_workflow_id` in Step 7 when they exist.
+
+### Step 7: Promote the candidate revision
+
+Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing:
+- `install_mode: "promote"`
+- `agent_id`: the target agent id
+- `revision_id`: the candidate revision id from Step 5
+- `smoke_test_task_id` and `smoke_test_workflow_id` if a smoke test was performed (required when gateway config enforces smoke tests)
+
+Then end your turn. On resume, if `specialized_builder` reports `status: "promoted"` / `installed: true`, the agent is now active. Report success to the planner.
+
 ## Error Handling
 
 - If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT attempt to fix errors yourself.
@@ -389,7 +419,9 @@ Compose the install intent in the delegation message itself. Do NOT create itera
 - If packager fails: report to planner — do NOT skip packager when deps were found.
 - If `specialized_builder.default` fails with a transient transport/infrastructure error (`spawn_execute_error`, `error sending request for url`, connection refused/reset/timed out, HTTP 5xx): return `ok: false, stage: "install", reason: "transient_infrastructure_failure"` to planner and stop. Do NOT re-run coder, rebuild the artifact, or retry builder in the same wake-up. Retry the exact same install stage at most once after the environment recovers.
 - If `specialized_builder.default` reports a revision-state conflict (`already has active revision`, `revision is Archived`, `rollback lineage mismatch`, `content-addressed dedup`, `no alias found`): return `ok: false, stage: "install_conflict", error: "<message>"` to planner and stop. Do NOT retry the install stage automatically; the planner must inspect existing revision/alias state first.
-- If `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.
+- In Step 5, if `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.
+- In Step 7, if `specialized_builder.default` does not return `status: "promoted"` / `installed: true`: treat install as failed.
+- If the operator declines the smoke test in Step 6: report `ok: false, stage: "smoke_test_declined"` and stop. The candidate is not promoted.
 - After any install-stage failure, reuse existing artifact and gate outputs. Never re-run coder or packager unless the error explicitly points back to artifact contents.
 - After 2 retries on the same stage: report failure to planner and stop.
 
@@ -415,5 +447,7 @@ On wake-up after interruption: call `workflow_state` first. Check `reuse_guards`
 | If `reuse_guards` shows... | Do NOT... | Do... |
 |---|---|---|
 | `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to packager/gates/install |
-| `has_evaluator_result: true` + `has_auditor_result: true` | Re-run evaluator or auditor | Proceed to install |
+| `has_evaluator_result: true` + `has_auditor_result: true` | Re-run evaluator or auditor | Proceed to create candidate (Step 5) |
+| `has_builder_revision_id: true` | Re-spawn specialized_builder create step | Proceed to smoke-test step (Step 6) |
+| `has_smoke_test_result: true` | Re-run smoke test | Proceed to promote step (Step 7) |
 | `pending_approvals: true` | Spawn new tasks | End your turn — the gateway wakes you when the approval resolves (Ri-0.14) |

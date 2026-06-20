@@ -375,6 +375,30 @@ impl AgentRepository {
         gateway_store: Option<&GatewayStore>,
         home_node_id: &str,
     ) -> anyhow::Result<(AgentRef, AgentRevisionRecord, SessionAgentBinding)> {
+        self.resolve_and_pin_session_with_revision(
+            session_id,
+            root_session_id,
+            target,
+            None,
+            gateway_store,
+            home_node_id,
+        )
+    }
+
+    /// Resolve and pin a session to a specific revision.
+    ///
+    /// If `revision_id` is `Some`, the target is resolved to an agent_id but the
+    /// supplied revision is used directly. This allows smoke-testing a Candidate
+    /// revision before it is promoted to the active alias.
+    pub fn resolve_and_pin_session_with_revision(
+        &self,
+        session_id: &str,
+        root_session_id: &str,
+        target: &str,
+        revision_id: Option<&str>,
+        gateway_store: Option<&GatewayStore>,
+        home_node_id: &str,
+    ) -> anyhow::Result<(AgentRef, AgentRevisionRecord, SessionAgentBinding)> {
         if let Some(gs) = gateway_store {
             if let Some(existing) = gs.get_session_agent_binding(session_id)? {
                 let rev = gs
@@ -392,7 +416,40 @@ impl AgentRepository {
             }
         }
 
-        let (agent_ref, rev) = self.resolve_agent(target, gateway_store)?;
+        let (agent_ref, rev) = if let Some(rev_id) = revision_id {
+            let Some(gs) = gateway_store else {
+                anyhow::bail!("GatewayStore is required for revision-based resolution");
+            };
+
+            // Resolve the caller's target to the underlying agent_id. For aliases,
+            // use the alias record when one exists; otherwise fall back to the raw
+            // alias id (this allows smoke-testing a Candidate revision before it
+            // has been promoted to an active alias). Explicit refs already carry
+            // the agent id directly.
+            let agent_id = match parse_agent_target(target) {
+                Some(ParsedAgentTarget::AliasId(alias_id)) => gs
+                    .resolve_alias(&alias_id)?
+                    .map(|a| a.agent_id)
+                    .unwrap_or(alias_id),
+                Some(ParsedAgentTarget::ExplicitRef { agent_id, .. }) => agent_id,
+                None => target.to_string(),
+            };
+
+            let rev = match gs.get_agent_revision(rev_id)? {
+                Some(r) => r,
+                None => anyhow::bail!("Revision '{}' not found in store", rev_id),
+            };
+            anyhow::ensure!(
+                rev.agent_id == agent_id,
+                "Revision '{}' belongs to agent '{}', not '{}'",
+                rev_id,
+                rev.agent_id,
+                agent_id
+            );
+            (AgentRef::new(agent_id, rev_id.to_string()), rev)
+        } else {
+            self.resolve_agent(target, gateway_store)?
+        };
 
         // No-new-session gate: a suspended agent must not start a *new* session,
         // regardless of how it was addressed (alias OR explicit `agent@rev_…`

@@ -2376,6 +2376,13 @@ struct RevisionPromoteArgs {
     /// Required when `force = true`.
     #[serde(default)]
     force_reason: Option<String>,
+    /// Task id of a successful smoke-test run for this candidate revision.
+    /// Required when `agent_install_smoke_test` is `required` for new agents.
+    #[serde(default)]
+    smoke_test_task_id: Option<String>,
+    /// Workflow id containing the smoke-test task.
+    #[serde(default)]
+    smoke_test_workflow_id: Option<String>,
 }
 
 pub struct AgentRevisionPromoteTool;
@@ -2426,7 +2433,9 @@ do not re-issue."
                     "required_eval_run_id": { "type": "string", "description": "Optional: if provided, promotion requires this eval run to have passed for the target revision" },
                     "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (R++2). Pass it on retry to bypass the gate." },
                     "force": { "type": "boolean", "description": "Optional: bypass the promotion safety governor (issue #25). Requires `force_reason`; emits a `governor.override` causal event." },
-                    "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." }
+                    "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." },
+                    "smoke_test_task_id": { "type": "string", "description": "Optional: task id of a successful smoke-test run for this candidate revision. Required when agent_install_smoke_test is 'required' for new agents." },
+                    "smoke_test_workflow_id": { "type": "string", "description": "Optional: workflow id containing the smoke-test task. Required alongside smoke_test_task_id when agent_install_smoke_test is 'required'." }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -3456,6 +3465,66 @@ do not re-issue."
             }
         }
 
+        // Smoke-test gate for new agent installation.
+        // When configured as `required`, a brand-new agent (no existing alias) must
+        // have been executed at least once via agent_spawn with revision_id.
+        let smoke_test_required = config
+            .map(|c| c.agent_install_smoke_test)
+            .unwrap_or_default()
+            == autonoetic_types::config::AgentInstallSmokeTestMode::Required;
+        let is_new_agent = gateway_store.resolve_alias(&args.agent_id)?.is_none();
+        if smoke_test_required && is_new_agent {
+            let Some(workflow_id) = args.smoke_test_workflow_id.as_deref() else {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_required",
+                    "message": format!(
+                        "Agent '{}' is new and agent_install_smoke_test is 'required'. \
+                         Provide smoke_test_workflow_id and smoke_test_task_id from a successful smoke-test run.",
+                        args.agent_id
+                    ),
+                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...), wait for success, then retry promotion with smoke_test_workflow_id and smoke_test_task_id.",
+                })
+                .to_string());
+            };
+            let Some(task_id) = args.smoke_test_task_id.as_deref() else {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_required",
+                    "message": format!(
+                        "Agent '{}' is new and agent_install_smoke_test is 'required'. \
+                         Provide smoke_test_task_id from a successful smoke-test run.",
+                        args.agent_id
+                    ),
+                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...), wait for success, then retry promotion with smoke_test_workflow_id and smoke_test_task_id.",
+                })
+                .to_string());
+            };
+            if let Err(e) = verify_smoke_test_task(
+                config.unwrap(),
+                &gateway_store,
+                workflow_id,
+                task_id,
+                &args.agent_id,
+                &args.revision_id,
+            ) {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_failed_or_mismatched",
+                    "message": format!(
+                        "Smoke-test evidence for new agent '{}' is missing or invalid: {}",
+                        args.agent_id,
+                        e
+                    ),
+                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...) and confirm the task succeeds, then retry promotion with the correct workflow_id and task_id.",
+                })
+                .to_string());
+            }
+        }
+
         let promotion_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "prom-",
             &format!(
@@ -3959,6 +4028,62 @@ fn approval_execution_context(
 ///       if it has, a fresh promote attempt must produce a new approval
 ///       against the new baseline (otherwise an unrelated revision flip
 ///       between approval-mint and retry could let unacknowledged caps through).
+/// Verify that a smoke-test task ran the candidate revision successfully.
+///
+/// Returns `Ok(())` if the task exists, reached `Succeeded` status, and its
+/// metadata records `_autonoetic_spawn_revision_id` matching the target revision.
+fn verify_smoke_test_task(
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    workflow_id: &str,
+    task_id: &str,
+    agent_id: &str,
+    revision_id: &str,
+) -> anyhow::Result<()> {
+    let task = crate::scheduler::workflow_store::load_task_run(config, Some(gateway_store), workflow_id, task_id)?
+        .ok_or_else(|| anyhow::anyhow!("Smoke-test task '{}' not found in workflow '{}'", task_id, workflow_id))?;
+
+    if task.agent_id != agent_id {
+        anyhow::bail!(
+            "Smoke-test task '{}' targeted agent '{}', not '{}'",
+            task_id,
+            task.agent_id,
+            agent_id
+        );
+    }
+
+    if !matches!(
+        task.status,
+        autonoetic_types::workflow::TaskRunStatus::Succeeded
+    ) {
+        anyhow::bail!(
+            "Smoke-test task '{}' did not succeed (status: {:?}). The candidate revision cannot be promoted.",
+            task_id,
+            task.status
+        );
+    }
+
+    let spawned_revision_id = task
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("_autonoetic_spawn_revision_id"))
+        .and_then(|v| v.as_str());
+
+    match spawned_revision_id {
+        Some(rid) if rid == revision_id => Ok(()),
+        Some(rid) => anyhow::bail!(
+            "Smoke-test task '{}' ran revision '{}', not '{}'",
+            task_id,
+            rid,
+            revision_id
+        ),
+        None => anyhow::bail!(
+            "Smoke-test task '{}' is not tagged with a candidate revision id",
+            task_id
+        ),
+    }
+}
+
 fn check_revision_promote_approval(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     approval_ref: &str,

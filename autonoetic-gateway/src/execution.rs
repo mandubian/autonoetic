@@ -2184,9 +2184,45 @@ impl GatewayExecutionService {
         // Spawn-time credential bindings that override runtime.lock resolution.
         credential_bindings: &[autonoetic_types::runtime_lock::LockedCredentialMount],
     ) -> anyhow::Result<SpawnResult> {
+        self.spawn_agent_revision_once(
+            agent_id,
+            None,
+            message,
+            session_id,
+            source_agent_id,
+            is_message,
+            _ingest_event_type,
+            metadata,
+            workflow_id,
+            task_id,
+            artifact_id,
+            credential_bindings,
+        )
+        .await
+    }
+
+    pub async fn spawn_agent_revision_once(
+        &self,
+        agent_id: &str,
+        revision_id: Option<&str>,
+        message: &str,
+        session_id: &str,
+        source_agent_id: Option<&str>,
+        is_message: bool,
+        _ingest_event_type: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+        // Workflow / task context for turn continuation saves on approval suspension.
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+        // Artifact ID whose layers should be auto-mounted in the child's sandbox.
+        artifact_id: Option<&str>,
+        // Spawn-time credential bindings that override runtime.lock resolution.
+        credential_bindings: &[autonoetic_types::runtime_lock::LockedCredentialMount],
+    ) -> anyhow::Result<SpawnResult> {
         let span = tracing::info_span!(
-            "spawn_agent_once",
+            "spawn_agent_revision_once",
             agent_id = agent_id,
+            revision_id = ?revision_id,
             session_id = session_id
         );
         let _enter = span.enter();
@@ -2288,10 +2324,11 @@ impl GatewayExecutionService {
                     agent_id
                 );
             };
-            let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session(
+            let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session_with_revision(
                 session_id,
                 session_id, // root_session_id = session_id for single sessions
                 agent_id,
+                revision_id,
                 Some(gs.as_ref()),
                 &default_gateway_host_id(),
             )?;
