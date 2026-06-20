@@ -948,6 +948,7 @@ pub fn update_task_run_status(
             .as_deref()
             .unwrap_or("workflow_task_cancelled");
         let _ = crate::scheduler::approval::cancel_pending_approval_for_workflow_task(
+            config,
             store,
             task_id,
             "gateway",

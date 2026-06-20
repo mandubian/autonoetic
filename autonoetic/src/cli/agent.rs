@@ -2303,7 +2303,6 @@ mod tests {
             CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Completed(None));
         let suspended = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Suspended {
             approval_request_id: "apr-1".to_string(),
-            continuation: None,
         });
         let suspended_user = CliSessionCloseReason::for_headless_turn_outcome(
             &TurnOutcome::SuspendedUserInput {
