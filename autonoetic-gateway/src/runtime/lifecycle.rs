@@ -80,7 +80,7 @@ pub fn session_close_outcome_from_turn_outcome(
     match outcome {
         TurnOutcome::Completed(Some(_)) => SessionCloseOutcome::ExecuteLoopComplete,
         TurnOutcome::Completed(None) => SessionCloseOutcome::ExecuteLoopComplete,
-        TurnOutcome::Suspended { .. } => SessionCloseOutcome::ExecuteLoopSuspendedApproval,
+        TurnOutcome::Suspended { .. } => SessionCloseOutcome::ExecuteLoopSuspended,
         TurnOutcome::SuspendedUserInput { .. } => {
             SessionCloseOutcome::ExecuteLoopSuspendedUserInput
         }
@@ -4328,7 +4328,7 @@ mod tests {
         });
 
         assert_eq!(completed, SessionCloseOutcome::ExecuteLoopComplete);
-        assert_eq!(suspended, SessionCloseOutcome::ExecuteLoopSuspendedApproval);
+        assert_eq!(suspended, SessionCloseOutcome::ExecuteLoopSuspended);
         assert_eq!(
             user_input,
             SessionCloseOutcome::ExecuteLoopSuspendedUserInput
@@ -4340,7 +4340,7 @@ mod tests {
     fn execute_loop_close_outcome_tags_are_closed_and_stable() {
         let reasons = vec![
             SessionCloseOutcome::ExecuteLoopComplete.as_str(),
-            SessionCloseOutcome::ExecuteLoopSuspendedApproval.as_str(),
+            SessionCloseOutcome::ExecuteLoopSuspended.as_str(),
             SessionCloseOutcome::ExecuteLoopSuspendedUserInput.as_str(),
             SessionCloseOutcome::ExecuteLoopEscalated.as_str(),
             SessionCloseOutcome::ExecuteLoopError.as_str(),

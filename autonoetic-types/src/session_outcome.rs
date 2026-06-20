@@ -230,18 +230,18 @@ pub enum SessionCloseOutcome {
     // JSON-RPC `agent_spawn` / `event.ingest` outcomes.
     JsonRpcSpawnComplete,
     JsonRpcSpawnCompleteEmpty,
-    JsonRpcSpawnSuspendedApproval,
+    JsonRpcSpawnSuspended,
     JsonRpcSpawnSuspendedUserInput,
 
     // Checkpoint-resume (`sessions.resume`) outcomes.
     CheckpointRespawnComplete,
     CheckpointRespawnCompleteEmpty,
-    CheckpointRespawnSuspendedApproval,
+    CheckpointRespawnSuspended,
     CheckpointRespawnSuspendedUserInput,
 
     // Direct `AgentExecutor::execute_loop` / `execute_with_history` outcomes.
     ExecuteLoopComplete,
-    ExecuteLoopSuspendedApproval,
+    ExecuteLoopSuspended,
     ExecuteLoopSuspendedUserInput,
     ExecuteLoopEscalated,
     ExecuteLoopError,
@@ -249,7 +249,7 @@ pub enum SessionCloseOutcome {
     // CLI `autonoetic agent run --headless` outcomes.
     HeadlessComplete,
     HeadlessCompleteEmpty,
-    HeadlessSuspendedApproval,
+    HeadlessSuspended,
     HeadlessSuspendedUserInput,
     HeadlessEscalated,
     HeadlessError,
@@ -270,20 +270,20 @@ impl SessionCloseOutcome {
             Self::SpawnExecuteError => "spawn_execute_error",
             Self::JsonRpcSpawnComplete => "jsonrpc_spawn_complete",
             Self::JsonRpcSpawnCompleteEmpty => "jsonrpc_spawn_complete_empty",
-            Self::JsonRpcSpawnSuspendedApproval => "jsonrpc_spawn_suspended_approval",
+            Self::JsonRpcSpawnSuspended => "jsonrpc_spawn_suspended_approval",
             Self::JsonRpcSpawnSuspendedUserInput => "jsonrpc_spawn_suspended_user_input",
             Self::CheckpointRespawnComplete => "checkpoint_respawn_complete",
             Self::CheckpointRespawnCompleteEmpty => "checkpoint_respawn_complete_empty",
-            Self::CheckpointRespawnSuspendedApproval => "checkpoint_respawn_suspended",
+            Self::CheckpointRespawnSuspended => "checkpoint_respawn_suspended",
             Self::CheckpointRespawnSuspendedUserInput => "checkpoint_respawn_suspended_user_input",
             Self::ExecuteLoopComplete => "execute_loop_complete",
-            Self::ExecuteLoopSuspendedApproval => "execute_loop_suspended",
+            Self::ExecuteLoopSuspended => "execute_loop_suspended",
             Self::ExecuteLoopSuspendedUserInput => "execute_loop_suspended_user_input",
             Self::ExecuteLoopEscalated => "execute_loop_escalated",
             Self::ExecuteLoopError => "execute_loop_error",
             Self::HeadlessComplete => "headless_complete",
             Self::HeadlessCompleteEmpty => "headless_complete_empty",
-            Self::HeadlessSuspendedApproval => "headless_suspended",
+            Self::HeadlessSuspended => "headless_suspended",
             Self::HeadlessSuspendedUserInput => "headless_suspended_user_input",
             Self::HeadlessEscalated => "headless_escalated",
             Self::HeadlessError => "headless_error",
@@ -300,13 +300,13 @@ impl SessionCloseOutcome {
     pub fn is_suspended(&self) -> bool {
         matches!(
             self,
-            Self::JsonRpcSpawnSuspendedApproval
+            Self::JsonRpcSpawnSuspended
                 | Self::JsonRpcSpawnSuspendedUserInput
-                | Self::CheckpointRespawnSuspendedApproval
+                | Self::CheckpointRespawnSuspended
                 | Self::CheckpointRespawnSuspendedUserInput
-                | Self::ExecuteLoopSuspendedApproval
+                | Self::ExecuteLoopSuspended
                 | Self::ExecuteLoopSuspendedUserInput
-                | Self::HeadlessSuspendedApproval
+                | Self::HeadlessSuspended
                 | Self::HeadlessSuspendedUserInput
         )
     }
@@ -340,7 +340,7 @@ impl SessionCloseOutcome {
             self,
             Self::JsonRpcSpawnComplete
                 | Self::JsonRpcSpawnCompleteEmpty
-                | Self::JsonRpcSpawnSuspendedApproval
+                | Self::JsonRpcSpawnSuspended
                 | Self::JsonRpcSpawnSuspendedUserInput
         )
     }
@@ -485,7 +485,7 @@ mod tests {
             "jsonrpc_spawn_complete_empty"
         );
         assert_eq!(
-            SessionCloseOutcome::JsonRpcSpawnSuspendedApproval.as_str(),
+            SessionCloseOutcome::JsonRpcSpawnSuspended.as_str(),
             "jsonrpc_spawn_suspended_approval"
         );
         assert_eq!(
@@ -498,7 +498,7 @@ mod tests {
             "checkpoint_respawn_complete_empty"
         );
         assert_eq!(
-            SessionCloseOutcome::CheckpointRespawnSuspendedApproval.as_str(),
+            SessionCloseOutcome::CheckpointRespawnSuspended.as_str(),
             "checkpoint_respawn_suspended"
         );
         assert_eq!(
@@ -507,7 +507,7 @@ mod tests {
         );
         assert_eq!(SessionCloseOutcome::ExecuteLoopComplete.as_str(), "execute_loop_complete");
         assert_eq!(
-            SessionCloseOutcome::ExecuteLoopSuspendedApproval.as_str(),
+            SessionCloseOutcome::ExecuteLoopSuspended.as_str(),
             "execute_loop_suspended"
         );
         assert_eq!(
@@ -518,11 +518,7 @@ mod tests {
         assert_eq!(SessionCloseOutcome::ExecuteLoopError.as_str(), "execute_loop_error");
         assert_eq!(SessionCloseOutcome::HeadlessComplete.as_str(), "headless_complete");
         assert_eq!(SessionCloseOutcome::HeadlessCompleteEmpty.as_str(), "headless_complete_empty");
-        assert_eq!(SessionCloseOutcome::HeadlessSuspendedApproval.as_str(), "headless_suspended");
-        assert_eq!(
-            SessionCloseOutcome::HeadlessSuspendedUserInput.as_str(),
-            "headless_suspended_user_input"
-        );
+        assert_eq!(SessionCloseOutcome::HeadlessSuspended.as_str(), "headless_suspended");
         assert_eq!(SessionCloseOutcome::HeadlessEscalated.as_str(), "headless_escalated");
         assert_eq!(SessionCloseOutcome::HeadlessError.as_str(), "headless_error");
         assert_eq!(SessionCloseOutcome::InteractiveError.as_str(), "interactive_error");
@@ -533,7 +529,7 @@ mod tests {
 
     #[test]
     fn session_close_outcome_classifies_categories() {
-        assert!(SessionCloseOutcome::JsonRpcSpawnSuspendedApproval.is_suspended());
+        assert!(SessionCloseOutcome::JsonRpcSpawnSuspended.is_suspended());
         assert!(SessionCloseOutcome::HeadlessSuspendedUserInput.is_suspended());
         assert!(!SessionCloseOutcome::ExecuteLoopEscalated.is_suspended());
         assert!(!SessionCloseOutcome::InteractiveExit.is_suspended());
@@ -547,7 +543,7 @@ mod tests {
         assert!(SessionCloseOutcome::InteractiveExit.is_completed());
         assert!(SessionCloseOutcome::ScriptExecComplete.is_completed());
         assert!(!SessionCloseOutcome::ExecuteLoopError.is_completed());
-        assert!(!SessionCloseOutcome::HeadlessSuspendedApproval.is_completed());
+        assert!(!SessionCloseOutcome::HeadlessSuspended.is_completed());
 
         assert!(SessionCloseOutcome::JsonRpcSpawnCompleteEmpty.is_completed_empty());
         assert!(!SessionCloseOutcome::JsonRpcSpawnComplete.is_completed_empty());

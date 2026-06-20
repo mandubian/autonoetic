@@ -1354,7 +1354,7 @@ fn session_close_outcome_from_headless_turn_outcome(
     match outcome {
         TurnOutcome::Completed(Some(_)) => SessionCloseOutcome::HeadlessComplete,
         TurnOutcome::Completed(None) => SessionCloseOutcome::HeadlessCompleteEmpty,
-        TurnOutcome::Suspended { .. } => SessionCloseOutcome::HeadlessSuspendedApproval,
+        TurnOutcome::Suspended { .. } => SessionCloseOutcome::HeadlessSuspended,
         TurnOutcome::SuspendedUserInput { .. } => {
             SessionCloseOutcome::HeadlessSuspendedUserInput
         }

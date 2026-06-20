@@ -112,11 +112,10 @@ impl SessionCloseFlags {
         match (jsonrpc_spawn, has_reply, approval, user_input) {
             (true, true, false, false) => SessionCloseOutcome::JsonRpcSpawnComplete,
             (true, false, false, false) => SessionCloseOutcome::JsonRpcSpawnCompleteEmpty,
-            (true, false, true, false) => SessionCloseOutcome::JsonRpcSpawnSuspendedApproval,
-            (true, false, false, true) => SessionCloseOutcome::JsonRpcSpawnSuspendedUserInput,
+            (true, false, true, false) => SessionCloseOutcome::JsonRpcSpawnSuspended,
             (false, true, false, false) => SessionCloseOutcome::CheckpointRespawnComplete,
-            (false, false, false, false) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
-            (false, false, true, false) => SessionCloseOutcome::CheckpointRespawnSuspendedApproval,
+            (false, true, false, true) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
+            (false, false, true, false) => SessionCloseOutcome::CheckpointRespawnSuspended,
             (false, false, false, true) => {
                 SessionCloseOutcome::CheckpointRespawnSuspendedUserInput
             }

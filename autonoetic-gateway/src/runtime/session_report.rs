@@ -3461,7 +3461,7 @@ mod tests {
             )
             .unwrap();
         writer
-            .finish_session(SessionCloseOutcome::ExecuteLoopSuspendedApproval, None)
+            .finish_session(SessionCloseOutcome::ExecuteLoopSuspended, None)
             .unwrap();
 
         let session_dir = gateway_dir.join("sessions").join("root");
