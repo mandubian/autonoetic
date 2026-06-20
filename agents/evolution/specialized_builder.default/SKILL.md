@@ -235,13 +235,13 @@ audits also installs from the same bundle.
 
 ### Required: Capabilities
 
-**The gateway automatically analyzes executable behavior to detect required capabilities.** If your `capabilities` don't match what the artifact/runtime behavior actually uses, the install will be REJECTED.
+**The gateway automatically analyzes executable behavior to detect required capabilities and the hosts your code actually calls.** If your `capabilities` don't match what the artifact/runtime behavior actually uses, the install will be REJECTED.
 
 **CRITICAL: Capability format requires specific fields.** Use this exact structure:
 
 ```json
 "capabilities": [
-  {"type": "NetworkAccess", "hosts": ["*"]},
+  {"type": "NetworkAccess", "hosts": ["api.example.com", "geocoding-api.example.com"]},
   {"type": "CodeExecution"},
   {"type": "ReadAccess", "scopes": ["*"]},
   {"type": "WriteAccess", "scopes": ["self.*"]}
@@ -250,32 +250,39 @@ audits also installs from the same bundle.
 
 | Capability | Required Fields | Example |
 |---|---|---|
-| `NetworkAccess` | `hosts` (array) | `{"type": "NetworkAccess", "hosts": ["*"]}` |
+| `NetworkAccess` | `hosts` (array) | `{"type": "NetworkAccess", "hosts": ["api.example.com"]}` |
 | `CodeExecution` | none | `{"type": "CodeExecution"}` |
 | `ReadAccess` | `scopes` (array) | `{"type": "ReadAccess", "scopes": ["*"]}` |
 | `WriteAccess` | `scopes` (array) | `{"type": "WriteAccess", "scopes": ["self.*"]}` |
 | `SandboxFunctions` | none | `{"type": "SandboxFunctions"}` |
 
-**Common mistake:** `{"type": "NetworkAccess"}` WITHOUT `"hosts"` will FAIL validation. You MUST include `"hosts": ["*"]`.
+**NetworkAccess hosts MUST be specific.** The gateway rejects revisions whose code contacts hosts not listed in the capability.
+
+- Scan the artifact source for URL literals (`https://...`, `http://...`) and extract hostnames.
+- Declare each hostname without path or scheme: `api.open-meteo.com`, not `https://api.open-meteo.com/v1/forecast`.
+- Wildcard `{"type": "NetworkAccess", "hosts": ["*"]}` is only allowed for genuine open-web agents (e.g., researcher, web-search) that cannot enumerate hosts. Include a brief justification in the agent description when using it.
+
+**Common mistake:** `{"type": "NetworkAccess"}` WITHOUT `"hosts"` will FAIL validation. You MUST include `"hosts"` with a concrete host list.
 
 **Capability Detection Rules:**
 
 | Executable Pattern | Required Capability |
 |--------------|---------------------|
-| `urllib`, `requests`, `httpx`, `fetch()`, `http://`, `https://` | `NetworkAccess` |
+| `urllib`, `requests`, `httpx`, `fetch()`, `http://`, `https://` | `NetworkAccess` with specific hosts |
 | `with open(`, `pathlib.Path(`, `fs.readFile`, `.read_text()` | `ReadAccess` |
 | `os.remove`, `fs.unlink`, `os.makedirs`, `.write_text()` | `WriteAccess` |
 | `subprocess.run`, `os.system`, `shell=True`, `exec(` | `CodeExecution` |
 
-**If capabilities are missing, you'll get an error like:**
+**If capabilities are missing or hosts are too broad, you'll get an error like:**
 ```
-Capability mismatch: code requires NetworkAccess but it was not declared in capabilities.
-Add these capabilities to your install request.
+Capability mismatch: code requires NetworkAccess to api.open-meteo.com but it was not declared in capabilities.
+Declared hosts: []  Detected hosts: ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
+Add these hosts to your NetworkAccess capability.
 ```
 
 **How to determine required capabilities:**
 1. Inspect the artifact and the source files you're about to install
-2. Check for network calls → add `NetworkAccess`
+2. Check for network calls → add `NetworkAccess` with the exact hostnames found in the code
 3. Check for file reads → add `ReadAccess`
 4. Check for file writes → add `WriteAccess`
 5. Check for subprocess calls → add `CodeExecution`

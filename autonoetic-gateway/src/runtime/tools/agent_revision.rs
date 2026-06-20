@@ -1,6 +1,7 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::remote_access::{extract_host_from_url_literal, RemoteAccessAnalyzer};
 use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{
     AgentIO, AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, Middleware, ScriptInputMode,
@@ -1389,6 +1390,107 @@ fn capability_oneof_schema() -> serde_json::Value {
 
 pub struct AgentRevisionCreateFromIntentTool;
 
+/// Check whether a declared NetworkAccess host pattern covers a detected host.
+fn capability_host_allows(declared: &str, host: &str) -> bool {
+    let declared = declared.trim().to_ascii_lowercase();
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if declared == "*" {
+        return true;
+    }
+    if declared.is_empty() || host.is_empty() {
+        return false;
+    }
+    if host == declared {
+        return true;
+    }
+    if !declared.contains('*') {
+        return host.ends_with(&format!(".{}", declared));
+    }
+    wildcard_match(&declared, &host)
+}
+
+/// Validate that declared `Capability::NetworkAccess.hosts` cover the actual
+/// network targets detected in the artifact source. Returns an error string
+/// listing undeclared hosts if the contract is violated.
+fn validate_network_access_hosts(
+    capabilities: &[Capability],
+    file_map: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let declared_patterns: Vec<String> = capabilities
+        .iter()
+        .filter_map(|cap| match cap {
+            Capability::NetworkAccess { hosts } => Some(hosts.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    if declared_patterns.iter().any(|h| h.trim() == "*") {
+        return Ok(());
+    }
+
+    let mut detected_hosts: BTreeSet<String> = BTreeSet::new();
+    for (path, bytes) in file_map {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        if !matches!(
+            ext,
+            "py" | "js" | "ts" | "rs" | "go" | "java" | "kt" | "swift" | "c" | "cpp" | "h"
+                | "sh" | "bash" | "yaml" | "yml" | "json" | "toml"
+        ) {
+            continue;
+        }
+        let Ok(code) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        for pattern in &analysis.detected_patterns {
+            match pattern.category.as_str() {
+                "url_literal" => {
+                    if let Some(host) = extract_host_from_url_literal(&pattern.pattern) {
+                        if !host.is_empty()
+                            && host != "localhost"
+                            && !host.ends_with(".localhost")
+                        {
+                            detected_hosts.insert(host);
+                        }
+                    }
+                }
+                "ip_address" => {
+                    let host = pattern.pattern.trim().to_ascii_lowercase();
+                    if !host.is_empty() && !host.starts_with("127.") && host != "0.0.0.0" {
+                        detected_hosts.insert(host);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let undeclared: Vec<String> = detected_hosts
+        .iter()
+        .filter(|host| {
+            !declared_patterns
+                .iter()
+                .any(|declared| capability_host_allows(declared, host))
+        })
+        .cloned()
+        .collect();
+
+    if undeclared.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "NetworkAccess capability hosts do not cover all network targets detected in the artifact. \
+             Undeclared hosts: {:?}. \
+             Add these hosts to the NetworkAccess capability, or use hosts: [\"*\"] only for genuine open-web agents.",
+            undeclared
+        ))
+    }
+}
+
 impl NativeTool for AgentRevisionCreateFromIntentTool {
     fn name(&self) -> &'static str {
         "agent_revision_create_from_intent"
@@ -1744,6 +1846,10 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 has_layers,
                 resolved_script_entry.as_deref(),
             );
+
+            if let Err(reason) = validate_network_access_hosts(&args.capabilities, &file_map) {
+                return Ok(ToolError::validation(reason, None::<String>).to_error_response());
+            }
 
             (
                 resolved_mode,
@@ -4467,6 +4573,172 @@ mod capability_lenient_deser_tests {
     }
 
     #[test]
+    fn create_from_intent_rejects_undeclared_network_host() {
+        use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        let session_id = "sess-network-check";
+
+        let code = b"#!/usr/bin/env python3\nimport urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1/forecast')\n";
+        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
+        let handle = content_store.write(code).unwrap();
+        content_store
+            .register_name(session_id, "main.py", &handle)
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+        let inputs = vec!["main.py".to_string()];
+        let entrypoints = vec!["main.py".to_string()];
+        let bundle = artifact_store
+            .build(&inputs, Some(&entrypoints), None, session_id)
+            .unwrap();
+
+        let gateway_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let artifact_ref = "ar.networkcheck01".to_string();
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: artifact_ref.clone(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: session_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "specialized-builder.test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let manifest = test_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = AgentRevisionCreateFromIntentTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "weather-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Fetch weather data",
+                    "instructions": "# Weather Agent",
+                    "execution_mode": "script",
+                    "script_entry": "main.py",
+                    "capabilities": [
+                        {"type": "NetworkAccess", "hosts": ["wrong.host.com"]}
+                    ]
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gateway_store.clone()),
+                None,
+            )
+            .unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response_json.get("ok").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        let message = response_json
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        assert!(
+            message.contains("api.open-meteo.com"),
+            "message should mention undeclared host: {message}"
+        );
+        assert!(
+            message.contains("Undeclared hosts"),
+            "message should mention undeclared hosts: {message}"
+        );
+    }
+
+    #[test]
+    fn create_from_intent_accepts_declared_network_hosts() {
+        use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        let session_id = "sess-network-ok";
+
+        let code = b"#!/usr/bin/env python3\nimport urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1/forecast')\n";
+        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
+        let handle = content_store.write(code).unwrap();
+        content_store
+            .register_name(session_id, "main.py", &handle)
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+        let inputs = vec!["main.py".to_string()];
+        let entrypoints = vec!["main.py".to_string()];
+        let bundle = artifact_store
+            .build(&inputs, Some(&entrypoints), None, session_id)
+            .unwrap();
+
+        let gateway_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let artifact_ref = "ar.networkok01".to_string();
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: artifact_ref.clone(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: session_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "specialized-builder.test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let manifest = test_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = AgentRevisionCreateFromIntentTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "weather-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Fetch weather data",
+                    "instructions": "# Weather Agent",
+                    "execution_mode": "script",
+                    "script_entry": "main.py",
+                    "capabilities": [
+                        {"type": "NetworkAccess", "hosts": ["api.open-meteo.com"]}
+                    ]
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gateway_store.clone()),
+                None,
+            )
+            .unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response_json.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn duplicate_create_from_intent_request_coalesces_when_install_reservation_exists() {
         use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
         use tempfile::tempdir;
@@ -4690,5 +4962,98 @@ mod capability_schema_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod network_access_host_validation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn capability_host_allows_exact_match() {
+        assert!(capability_host_allows("api.example.com", "api.example.com"));
+        assert!(!capability_host_allows("api.example.com", "other.example.com"));
+    }
+
+    #[test]
+    fn capability_host_allows_bare_domain_covers_subdomains() {
+        assert!(capability_host_allows("example.com", "example.com"));
+        assert!(capability_host_allows("example.com", "api.example.com"));
+        assert!(capability_host_allows("example.com", "deep.api.example.com"));
+        assert!(!capability_host_allows("example.com", "otherexample.com"));
+    }
+
+    #[test]
+    fn capability_host_allows_wildcard_subdomain() {
+        assert!(capability_host_allows("*.example.com", "api.example.com"));
+        assert!(!capability_host_allows("*.example.com", "example.com"));
+    }
+
+    #[test]
+    fn capability_host_allows_universal_wildcard() {
+        assert!(capability_host_allows("*", "anything.example.com"));
+    }
+
+    #[test]
+    fn validate_network_access_hosts_accepts_exact_match() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["api.open-meteo.com".to_string()],
+        }];
+        assert!(validate_network_access_hosts(&caps, &file_map).is_ok());
+    }
+
+    #[test]
+    fn validate_network_access_hosts_rejects_undeclared_host() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["other.example.com".to_string()],
+        }];
+        let err = validate_network_access_hosts(
+            &caps,
+            &file_map,
+        )
+        .unwrap_err();
+        assert!(err.contains("api.open-meteo.com"));
+        assert!(err.contains("Undeclared hosts"));
+    }
+
+    #[test]
+    fn validate_network_access_hosts_allows_wildcard() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        assert!(validate_network_access_hosts(&caps, &file_map).is_ok());
+    }
+
+    #[test]
+    fn validate_network_access_hosts_ignores_non_source_files() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "data.bin".to_string(),
+            b"https://api.open-meteo.com/v1".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["other.example.com".to_string()],
+        }];
+        assert!(validate_network_access_hosts(
+            &caps,
+            &file_map,
+        )
+        .is_ok());
     }
 }

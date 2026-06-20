@@ -349,7 +349,9 @@ fn normalize_declared_pattern(s: &str) -> String {
     s.trim().to_ascii_lowercase()
 }
 
-fn extract_host_from_url_literal(url: &str) -> Option<String> {
+/// Extract the host component from a URL literal string (e.g. `https://api.example.com/v1`
+/// → `api.example.com`). Returns None for unparseable URLs.
+pub fn extract_host_from_url_literal(url: &str) -> Option<String> {
     let re = Regex::new(r"(?i)^[a-z]+://([^/:]+)").ok()?;
     let captures = re.captures(url)?;
     let host = captures.get(1)?.as_str().trim_end_matches('.');
