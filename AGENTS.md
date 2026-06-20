@@ -176,3 +176,20 @@ SDKs live outside the Rust workspace:
 - `docs/remote-access-approval.md` — Static analysis detection, approval flow diagram
 - `docs/credential-management.md` — Credential vault, `credential_env` injection, CLI credential commands
 - `docs/AGENTS.md` — Agent roles, SKILL.md format, capabilities (user-facing, not dev instructions)
+
+## Anchored Summary — Post-decision Bookkeeping (PR #562) in progress
+
+Working in worktree: `../autonoetic.worktrees/post-decision-bookkeeping` on branch `refactor/post-decision-bookkeeping`
+
+**Done**:
+- `apply_decision` defined — single fan-out for all post-decision side-effects (session grants, escalation resolve, reeval/background state, signal write, wiki timeline, causal event, task unblock)
+- `DecisionContext` struct for pre-computed metadata (wiki_materialized_meta)
+- `resume_session_after_approval` deleted (~286 lines, including 130-line string ladder) — replaced by `notify_session_of_decision` with simplified message format
+- `emit_wiki_timeline_event` deleted — replaced by `emit_wiki_decision_event` emitting normalized `wiki.decision` event with `decision: "approved"|"rejected"|"cancelled"|"withdrawn"` field
+- All 5 entry points route through `apply_decision`: approve, reject, cancel, cancel-for-task, withdraw(tool)
+- Side-effects stripped from `decide_request_with_options` and `cancel_approval_request` (moved to `apply_decision`)
+- Policy decisions documented in `apply_decision` docstring (agent withdrawal, cancellation, escalation, wiki, causal events)
+- `cancel_approval_request` made `pub(crate)` for tool use
+- 1355 tests pass (2 pre-existing unrelated failures in `agent_adapter_wrapper_integration`)
+
+**Next**: Create PR and merge. Then proceed to #563 (collapse approval dedup onto GateService) or #566 (extract pre_turn_checks/handle_tool_batch).

@@ -843,6 +843,7 @@ pub async fn reap_orphaned_sessions(
                 );
                 if was_awaiting_approval {
                     let _ = crate::scheduler::approval::cancel_pending_approval_for_workflow_task(
+                        &config,
                         Some(store.as_ref()),
                         &task.task_id,
                         "gateway",
