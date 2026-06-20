@@ -417,14 +417,28 @@ impl AgentRepository {
         }
 
         let (agent_ref, rev) = if let Some(rev_id) = revision_id {
+            let Some(gs) = gateway_store else {
+                anyhow::bail!("GatewayStore is required for revision-based resolution");
+            };
+
+            // Resolve the caller's target to the underlying agent_id. For aliases,
+            // use the alias record when one exists; otherwise fall back to the raw
+            // alias id (this allows smoke-testing a Candidate revision before it
+            // has been promoted to an active alias). Explicit refs already carry
+            // the agent id directly.
             let agent_id = match parse_agent_target(target) {
-                Some(ParsedAgentTarget::AliasId(alias_id)) => alias_id,
+                Some(ParsedAgentTarget::AliasId(alias_id)) => gs
+                    .resolve_alias(&alias_id)?
+                    .map(|a| a.agent_id)
+                    .unwrap_or(alias_id),
                 Some(ParsedAgentTarget::ExplicitRef { agent_id, .. }) => agent_id,
                 None => target.to_string(),
             };
-            let rev = gateway_store
-                .and_then(|gs| gs.get_agent_revision(rev_id).ok().flatten())
-                .ok_or_else(|| anyhow::anyhow!("Revision '{}' not found in store", rev_id))?;
+
+            let rev = match gs.get_agent_revision(rev_id)? {
+                Some(r) => r,
+                None => anyhow::bail!("Revision '{}' not found in store", rev_id),
+            };
             anyhow::ensure!(
                 rev.agent_id == agent_id,
                 "Revision '{}' belongs to agent '{}', not '{}'",

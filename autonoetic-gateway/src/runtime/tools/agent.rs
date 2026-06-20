@@ -509,6 +509,43 @@ the single join already does that."
         let ts = Utc::now().to_rfc3339();
         let spawn_reason_preview: String = kickoff_message.chars().take(200).collect();
         let persist_result: anyhow::Result<String> = (|| {
+            // Build a single metadata value that is persisted on the TaskRun and
+            // forwarded to the queued task. This ensures the smoke-test gate can
+            // verify the task after it completes, even when the caller supplied
+            // no metadata or non-object metadata.
+            let mut spawn_metadata = match args.metadata.clone() {
+                Some(serde_json::Value::Object(mut obj)) => {
+                    if let Some(ref rev_id) = args.revision_id {
+                        obj.insert(
+                            "_autonoetic_spawn_revision_id".to_string(),
+                            serde_json::json!(rev_id),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                }
+                Some(other) => {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("_original_metadata".to_string(), other);
+                    if let Some(ref rev_id) = args.revision_id {
+                        obj.insert(
+                            "_autonoetic_spawn_revision_id".to_string(),
+                            serde_json::json!(rev_id),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                }
+                None => {
+                    let mut obj = serde_json::Map::new();
+                    if let Some(ref rev_id) = args.revision_id {
+                        obj.insert(
+                            "_autonoetic_spawn_revision_id".to_string(),
+                            serde_json::json!(rev_id),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                }
+            };
+
             let task = TaskRun {
                 task_id: task_id.clone(),
                 workflow_id: workflow_id.clone(),
@@ -522,7 +559,7 @@ the single join already does that."
                 result_summary: None,
                 join_group: None,
                 message: Some(kickoff_message.clone()),
-                metadata: args.metadata.clone(),
+                metadata: Some(spawn_metadata.clone()),
                 retry_count: 0,
                 last_failure_class: None,
                 retry_policy: crate::scheduler::workflow_store::retry_policy_from_metadata(
@@ -595,15 +632,6 @@ the single join already does that."
             // tokio runtime when called from within an already-running agent context.
             // The scheduler's `process_queued_workflow_tasks` picks up queued tasks
             // and runs them on dedicated tokio tasks.
-            let mut spawn_metadata = args.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
-            if let Some(ref rev_id) = args.revision_id {
-                if let Some(obj) = spawn_metadata.as_object_mut() {
-                    obj.insert(
-                        "_autonoetic_spawn_revision_id".to_string(),
-                        serde_json::json!(rev_id),
-                    );
-                }
-            }
             let queued = autonoetic_types::workflow::QueuedTaskRun {
                 task_id: task_id.clone(),
                 workflow_id: workflow_id.clone(),
