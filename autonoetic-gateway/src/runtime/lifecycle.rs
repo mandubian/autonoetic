@@ -645,12 +645,12 @@ impl AgentExecutor {
             status: None,
             decided_at: None,
             decided_by: None,
-                    decision_reason: None,
-                    approval_level: autonoetic_types::background::ApprovalLevel::Operator,
-                    min_dwell_ms: None,
-                    confirm_phrase: None,
-                    code_excerpts: None,
-                    risk_summary: None,
+            decision_reason: None,
+            approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
         };
         store.create_approval(&mut request)?;
         Ok(request_id)

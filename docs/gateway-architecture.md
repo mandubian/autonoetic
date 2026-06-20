@@ -690,7 +690,7 @@ Filter strategies:
 |---|---|
 | **`lifecycle.rs` is 4336 lines** | The main reasoning loop has grown very large. Contains context assembly, LLM dispatch, tool processing orchestration, budget tracking, checkpoint logic, and turn outcome handling. Would benefit from splitting into smaller modules. |
 | **`tool_call_processor.rs` is 1799 lines** | Combined dispatch + approval detection + cache logic. Approval-flow branching logic is tightly coupled with tool execution. |
-| **`approval.rs` (scheduler) is 2596 lines** | The approval resolution logic is dense, combining level resolution, approve/reject/cancel, grant management, similarity scoring, and notification dispatch. |
+| **`approval.rs` (scheduler) is 2596 lines** | The approval resolution logic is dense, combining level resolution, approve/reject/cancel, grant management, and notification dispatch. |
 | **`router.rs` is 4631 lines** | Single-file dispatch for 40+ JSON-RPC methods. Growing unbounded — every new JSON-RPC endpoint adds to this file. |
 | **GatewayStore diverging schema** | 39 submodules with overlapping concerns. For example, `notifications.rs`, `messages.rs`, `gate_messages.rs` are closely related but separate. |
 | **Two approval file sets** | Approval logic lives in `runtime/tools/approval.rs` (agent-facing tools) and `scheduler/approval.rs` (operator-facing resolution). The boundary is clean but both need awareness of the approval schema. |
