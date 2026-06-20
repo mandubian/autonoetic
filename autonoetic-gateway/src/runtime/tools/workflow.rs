@@ -1035,9 +1035,6 @@ impl NativeTool for WorkflowCancelTaskTool {
             .to_error_response());
         }
 
-        // Delete any saved continuation file.
-        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
-
         // Mark as Cancelled (triggers join condition check).
         crate::scheduler::workflow_store::update_task_run_status(
             config,

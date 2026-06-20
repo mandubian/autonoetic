@@ -11,8 +11,6 @@
 use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 
-use crate::runtime::continuation;
-
 use autonoetic_types::causal_chain::CausalEventRecord;
 
 pub mod agent_outcome;
@@ -413,19 +411,23 @@ async fn check_approval_timeouts(
                 continue;
             }
 
-            // Check the continuation file's `suspended_at` timestamp.
-            let cont = crate::runtime::continuation::load_continuation(&config, &task.task_id)
-                .ok()
-                .flatten();
-            let suspended_at = cont.as_ref().and_then(|c| {
-                chrono::DateTime::parse_from_rfc3339(&c.suspended_at)
+            // Read `suspended_at` from the session checkpoint (supersedes continuation).
+            let sid = &task.session_id;
+            let suspended_at: Option<chrono::DateTime<chrono::Utc>> = {
+                let cp = crate::runtime::checkpoint::load_latest_checkpoint(&config, sid)
                     .ok()
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-            });
+                    .flatten();
+                cp.and_then(|cp| {
+                    let ts = cp.suspended_at?;
+                    chrono::DateTime::parse_from_rfc3339(&ts).ok().map(|dt| dt.with_timezone(&chrono::Utc))
+                })
+            };
 
             let timed_out = match suspended_at {
-                Some(ts) => (now - ts).num_seconds() as u64 > timeout_secs,
-                None => false, // no continuation → not managed by new model
+                // Use signed comparison to avoid u64 wraparound on clock skew
+                // or tampered timestamps that produce a negative duration.
+                Some(ts) => (now - ts).num_seconds() > timeout_secs as i64,
+                None => false,
             };
 
             if timed_out {
@@ -479,18 +481,25 @@ async fn check_approval_timeouts(
                 let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
 
                 // Record timeout in session report so overview stays consistent.
-                if let Some(ref c) = cont {
-                    let gateway_dir = config.agents_dir.join(".gateway");
-                    if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
-                        &gateway_dir,
-                        &task.session_id,
-                        &task.agent_id,
-                    ) {
-                        let _ = report.record_approval_resolved(
-                            &c.approval_request_id,
-                            "timed_out",
-                            &format!("Approval timed out after {}s (continuation preserved)", timeout_secs),
-                        );
+                if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(&config, &task.session_id) {
+                    let approval_request_id = match &cp.yield_reason {
+                        crate::runtime::checkpoint::YieldReason::ApprovalRequired { approval_request_id } =>
+                            Some(approval_request_id.clone()),
+                        _ => None,
+                    };
+                    if let Some(ref rid) = approval_request_id {
+                        let gateway_dir = config.agents_dir.join(".gateway");
+                        if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
+                            &gateway_dir,
+                            &task.session_id,
+                            &task.agent_id,
+                        ) {
+                            let _ = report.record_approval_resolved(
+                                rid,
+                                "timed_out",
+                                &format!("Approval timed out after {}s (checkpoint preserved)", timeout_secs),
+                            );
+                        }
                     }
                 }
             }
@@ -1400,12 +1409,13 @@ async fn spawn_task_execution(
             if let Some(ref request_id) = spawn_result.suspended_for_approval {
                 let summary = format!("awaiting approval {}", request_id);
 
-                // Load continuation to get approval details (tool name, etc.)
-                let approval_metadata = continuation::load_continuation(&cfg, &t_id)
+                // Load checkpoint to get approval details (tool name, etc.)
+                let approval_metadata = crate::runtime::checkpoint::load_latest_checkpoint(&cfg, &session_id)
                     .ok()
                     .flatten()
-                    .and_then(|cont| {
-                        let tool_name = cont.pending_tool_call.tool_name.clone();
+                    .and_then(|cp| {
+                        let pending = cp.pending_tool_state?;
+                        let tool_name = pending.pending_tool_call.tool_name.clone();
                         // Derive approval kind from tool name
                         let kind = if tool_name.contains("sandbox") {
                             "sandbox".to_string()
@@ -1415,19 +1425,26 @@ async fn spawn_task_execution(
                             "tool_execution".to_string()
                         };
                         // Try to extract reason from approval_response
-                        let reason = serde_json::from_str::<serde_json::Value>(
-                            &cont.pending_tool_call.approval_response,
-                        )
-                        .ok()
-                        .and_then(|v| {
-                            v.get("approval")
-                                .and_then(|a| a.get("reason"))
-                                .and_then(|r| r.as_str())
-                                .map(String::from)
+                        let reason = pending.pending_tool_call.approval_response.as_ref().and_then(|resp| {
+                            serde_json::from_str::<serde_json::Value>(resp)
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("approval")
+                                        .and_then(|a| a.get("reason"))
+                                        .and_then(|r| r.as_str())
+                                        .map(String::from)
+                                })
                         });
 
+                        // Extract request_id from the yield reason
+                        let request_id = match &cp.yield_reason {
+                            crate::runtime::checkpoint::YieldReason::ApprovalRequired { approval_request_id } =>
+                                Some(approval_request_id.clone()),
+                            _ => None,
+                        }?;
+
                         Some(workflow_store::ApprovalMetadata {
-                            request_id: cont.approval_request_id,
+                            request_id,
                             kind,
                             reason,
                         })

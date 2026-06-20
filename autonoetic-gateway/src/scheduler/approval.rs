@@ -645,10 +645,6 @@ pub fn reject_request(
     // Unblock the task in the workflow (marks as Failed)
     unblock_task_on_approval(config, gateway_store, &decision);
 
-    if let Some(ref task_id) = decision.task_id {
-        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
-    }
-
     // Emit wiki.rejected timeline event for wiki proposals.
     emit_wiki_timeline_event(gateway_store, &decision, "wiki.rejected", Some(&decision.decided_by));
 
@@ -673,10 +669,6 @@ pub fn cancel_request(
 
     // Unblock workflow task if bound
     unblock_task_on_approval(config, gateway_store, &decision);
-
-    if let Some(ref task_id) = decision.task_id {
-        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
-    }
 
     // Emit wiki.rejected timeline event for cancelled wiki proposals.
     emit_wiki_timeline_event(gateway_store, &decision, "wiki.rejected", Some(cancelled_by));

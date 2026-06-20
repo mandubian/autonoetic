@@ -228,12 +228,6 @@ impl NativeTool for ApprovalWithdrawTool {
                     &chrono::Utc::now().to_rfc3339(),
                 )?;
 
-                if let Some(ref task_id) = task_id_copy {
-                    if let Some(cfg) = _config {
-                        let _ = crate::runtime::continuation::delete_continuation(cfg, task_id);
-                    }
-                }
-
                 if matches!(r.action, autonoetic_types::background::ScheduledAction::WikiProposal { .. }) {
                     let role = crate::runtime::session_timeline::derive_role(&r.agent_id);
                     let principal = autonoetic_types::principal::Principal::agent(r.agent_id.clone());

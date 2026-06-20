@@ -4,6 +4,13 @@
 //! that can restore an agent session from hibernation, budget exhaustion, max turns,
 //! crash recovery, and approval suspension.
 //!
+//! # Integrity
+//!
+//! Checkpoint files are HMAC-SHA256 signed using a per-gateway key derived from
+//! `GatewayConfig::continuation_key` (or `node_id` as fallback). On load, the
+//! signature is verified before the payload is deserialized. Tampered files are
+//! rejected with an error.
+//!
 //! Storage: `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json`
 
 use crate::llm::Message;
@@ -248,6 +255,45 @@ impl SessionCheckpoint {
 }
 
 // ---------------------------------------------------------------------------
+// HMAC integrity
+// ---------------------------------------------------------------------------
+
+/// Resolve the HMAC key for checkpoint signing.  Uses the explicit
+/// `continuation_key` config value when set, otherwise derives a key from
+/// `node_id`.  **Warning:** the `node_id`-derived default is not a secret and
+/// only provides detection of accidental corruption, not protection against a
+/// local attacker who can read the config.  Production deployments should set
+/// `continuation_key` to a high-entropy secret.
+pub fn checkpoint_hmac_key(config: &GatewayConfig) -> String {
+    config
+        .continuation_key
+        .clone()
+        .unwrap_or_else(|| format!("autonoetic-checkpoint-{}", config.node_id))
+}
+
+/// Produce a deterministic JSON representation.  `serde_json` with sorted keys
+/// ensures the same struct always serialises to the same bytes.
+pub fn canonical_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
+    let mut buf =
+        serde_json::Serializer::with_formatter(Vec::new(), serde_json::ser::CompactFormatter);
+    serde::Serialize::serialize(value, &mut buf)?;
+    let v: serde_json::Value = serde_json::from_slice(&buf.into_inner())?;
+    let sorted = serde_json::to_string(&v)?;
+    Ok(sorted)
+}
+
+/// HMAC-signed envelope wrapping a serialised `SessionCheckpoint` payload.
+/// All checkpoints are signed — not just approval ones — to provide a uniform
+/// integrity guarantee.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedCheckpoint {
+    /// Canonical-JSON serialised `SessionCheckpoint`.
+    pub payload_json: String,
+    /// HMAC-SHA256 hex digest over `payload_json` bytes using the gateway key.
+    pub hmac_hex: String,
+}
+
+// ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
 
@@ -285,7 +331,8 @@ pub fn sanitize_path_component(s: &str) -> String {
         .collect::<String>()
 }
 
-/// Persist a `SessionCheckpoint` for the given session and turn.
+/// Persist a `SessionCheckpoint` for the given session and turn, wrapped in an
+/// HMAC-signed envelope.
 pub fn save_checkpoint(
     config: &GatewayConfig,
     checkpoint: &SessionCheckpoint,
@@ -293,7 +340,16 @@ pub fn save_checkpoint(
     let dir = checkpoints_dir(config).join(sanitize_path_component(&checkpoint.session_id));
     std::fs::create_dir_all(&dir)?;
     let path = checkpoint_path(config, &checkpoint.session_id, &checkpoint.turn_id);
-    let json = serde_json::to_string_pretty(checkpoint)?;
+
+    let payload_json = canonical_json(checkpoint)?;
+    let key = checkpoint_hmac_key(config);
+    let hmac_hex = crate::server::ofp::hmac_sign(&key, payload_json.as_bytes());
+
+    let envelope = SignedCheckpoint {
+        payload_json,
+        hmac_hex,
+    };
+    let json = serde_json::to_string_pretty(&envelope)?;
     std::fs::write(&path, json)?;
     tracing::debug!(
         target: "checkpoint",
@@ -301,12 +357,40 @@ pub fn save_checkpoint(
         turn_id = %checkpoint.turn_id,
         yield_reason = ?checkpoint.yield_reason,
         path = %path.display(),
-        "Saved session checkpoint"
+        "Saved signed session checkpoint"
     );
     Ok(())
 }
 
-/// Load a specific checkpoint by session and turn ID.
+/// Error returned when a checkpoint file fails HMAC integrity verification.
+/// Used to distinguish tamper-detection errors from ordinary I/O or parse
+/// failures.
+#[derive(Debug)]
+pub struct CheckpointIntegrityError {
+    pub session_id: String,
+    pub turn_id: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for CheckpointIntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "checkpoint integrity violation for session '{}' turn '{}': {}",
+            self.session_id, self.turn_id, self.message
+        )
+    }
+}
+
+impl std::error::Error for CheckpointIntegrityError {}
+
+/// Returns `true` if the error is a `CheckpointIntegrityError` (HMAC
+/// mismatch / tamper detection).
+pub fn is_integrity_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CheckpointIntegrityError>().is_some()
+}
+
+/// Load a specific checkpoint by session and turn ID, verifying HMAC integrity.
 pub fn load_checkpoint(
     config: &GatewayConfig,
     session_id: &str,
@@ -317,8 +401,60 @@ pub fn load_checkpoint(
         return Ok(None);
     }
     let json = std::fs::read_to_string(&path)?;
+
+    // Try signed envelope format first.
+    if let Ok(envelope) = serde_json::from_str::<SignedCheckpoint>(&json) {
+        let key = checkpoint_hmac_key(config);
+        if !crate::server::ofp::hmac_verify(
+            &key,
+            envelope.payload_json.as_bytes(),
+            &envelope.hmac_hex,
+        ) {
+            return Err(CheckpointIntegrityError {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                message: "HMAC mismatch".to_string(),
+            }
+            .into());
+        }
+        let checkpoint: SessionCheckpoint =
+            serde_json::from_str(&envelope.payload_json)?;
+        return Ok(Some(checkpoint));
+    }
+
+    // Legacy unsigned format — try direct deserialization.
+    // This path exists for cleanup; new checkpoints are always signed.
     let checkpoint: SessionCheckpoint = serde_json::from_str(&json)?;
     Ok(Some(checkpoint))
+}
+
+/// Verify HMAC and deserialize a checkpoint from raw JSON, handling both
+/// the signed envelope format and the legacy unsigned format.
+///
+/// Tampered checkpoints are rejected; `None` is returned for files that
+/// fail both signed and legacy deserialization (e.g. corrupt/truncated).
+fn verify_and_deserialize_checkpoint(
+    config: &GatewayConfig,
+    json: &str,
+) -> Option<SessionCheckpoint> {
+    // Signed envelope format — verify HMAC before trusting payload.
+    if let Ok(envelope) = serde_json::from_str::<SignedCheckpoint>(json) {
+        let key = checkpoint_hmac_key(config);
+        if !crate::server::ofp::hmac_verify(
+            &key,
+            envelope.payload_json.as_bytes(),
+            &envelope.hmac_hex,
+        ) {
+            tracing::warn!(
+                target: "checkpoint",
+                "HMAC verification failed during scan — skipping tampered checkpoint"
+            );
+            return None;
+        }
+        return serde_json::from_str(&envelope.payload_json).ok();
+    }
+    // Legacy unsigned format
+    serde_json::from_str::<SessionCheckpoint>(json).ok()
 }
 
 /// Load the latest checkpoint for a session (highest turn number).
@@ -340,7 +476,7 @@ pub fn load_latest_checkpoint(
             continue;
         }
         let json = std::fs::read_to_string(entry.path())?;
-        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             let turn = checkpoint.turn_counter;
             match &latest {
                 None => latest = Some((turn, checkpoint)),
@@ -423,7 +559,7 @@ pub fn prune_checkpoints(
             continue;
         }
         let json = std::fs::read_to_string(&path)?;
-        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             checkpoints.push((checkpoint.turn_counter, path));
         }
     }
@@ -460,7 +596,7 @@ pub fn list_checkpoints(config: &GatewayConfig, session_id: &str) -> anyhow::Res
             continue;
         }
         let json = std::fs::read_to_string(entry.path())?;
-        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             checkpoints.push((checkpoint.turn_counter, checkpoint.turn_id));
         }
     }
@@ -816,5 +952,74 @@ mod tests {
             let decoded: YieldReason = serde_json::from_str(&json).unwrap();
             assert_eq!(reason, decoded);
         }
+    }
+
+    #[test]
+    fn test_checkpoint_hmac_tamper_rejection() {
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+        let session_id = "session-tamper";
+        let turn_id = "turn-001";
+
+        // Build and save a checkpoint.
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuardState::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+        };
+        save_checkpoint(&config, &checkpoint).expect("should save");
+
+        // --- load_checkpoint rejects tampered payload ---
+        let path = checkpoint_path(&config, session_id, turn_id);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&original).expect("saved as signed envelope");
+        // Tamper: replace hmac_hex with garbage so verification fails.
+        envelope["hmac_hex"] = serde_json::json!("deadbeef00".repeat(8));
+        std::fs::write(&path, serde_json::to_string(&envelope).unwrap())
+            .expect("write tampered file");
+
+        let result = load_checkpoint(&config, session_id, turn_id);
+        assert!(
+            result.is_err(),
+            "tampered checkpoint should be rejected by load_checkpoint"
+        );
+        assert!(
+            is_integrity_error(&result.unwrap_err()),
+            "error should be CheckpointIntegrityError"
+        );
+
+        // --- load_latest_checkpoint skips tampered file ---
+        let latest = load_latest_checkpoint(&config, session_id).unwrap();
+        assert!(
+            latest.is_none(),
+            "tampered checkpoint should be skipped by load_latest_checkpoint"
+        );
     }
 }
