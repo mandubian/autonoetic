@@ -14,7 +14,7 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::active_execution_registry::{
     ActiveExecutionRegistry, NativeToolRunContext,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::runtime::trajectory_monitor::TrajectoryMonitor;
@@ -59,13 +59,13 @@ fn test_manifest() -> AgentManifest {
     }
 }
 
-fn quiet_guard_state() -> LoopGuardState {
-    LoopGuardState::default()
+fn quiet_guard_state() -> LoopGuard {
+    LoopGuard::default()
 }
 
 fn drive_to_diverging(
     mon: &mut TrajectoryMonitor,
-    state: &mut LoopGuardState,
+    state: &mut LoopGuard,
 ) -> autonoetic_gateway::runtime::trajectory_monitor::TickResult {
     state.current_loops = 4;
     let _ = mon.tick(4, &[], None, &state);

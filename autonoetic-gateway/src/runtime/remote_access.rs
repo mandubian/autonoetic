@@ -1100,7 +1100,7 @@ import axios from "axios";
 "#;
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+            targets: vec![autonoetic_types::background::GrantTarget::Any],
             enabled_languages: vec![RemoteAccessLanguage::Python],
             python_imports: vec!["requests".to_string()],
             js_imports: vec!["axios".to_string()],
@@ -1554,7 +1554,7 @@ mymod.do_thing()
         ];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+            targets: vec![autonoetic_types::background::GrantTarget::Any],
             enabled_languages: vec![],
             python_imports: vec!["requests".to_string()],
             js_imports: vec![],
@@ -1578,7 +1578,7 @@ mymod.do_thing()
         }];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+            targets: vec![autonoetic_types::background::GrantTarget::Any],
             enabled_languages: vec![],
             python_imports: vec![],
             js_imports: vec![],
@@ -1617,7 +1617,7 @@ mymod.do_thing()
         ];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+            targets: vec![autonoetic_types::background::GrantTarget::Any],
             enabled_languages: vec![
                 RemoteAccessLanguage::Javascript,
                 RemoteAccessLanguage::Rust,
@@ -1648,7 +1648,7 @@ mymod.do_thing()
         }];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::ExactHost(
+            targets: vec![autonoetic_types::background::GrantTarget::ExactHost(
                 "api.example.com".to_string(),
             )],
             enabled_languages: vec![],
@@ -1674,7 +1674,7 @@ mymod.do_thing()
         }];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::ExactHost(
+            targets: vec![autonoetic_types::background::GrantTarget::ExactHost(
                 "api.other.com".to_string(),
             )],
             enabled_languages: vec![],
@@ -1705,7 +1705,7 @@ mymod.do_thing()
         }];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::HostSuffix(
+            targets: vec![autonoetic_types::background::GrantTarget::HostSuffix(
                 "*.example.com".to_string(),
             )],
             enabled_languages: vec![],
@@ -1734,7 +1734,7 @@ mymod.do_thing()
         }];
         let declaration = autonoetic_types::agent::RemoteAccessDeclaration {
             approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-            targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+            targets: vec![autonoetic_types::background::GrantTarget::Any],
             enabled_languages: vec![],
             python_imports: vec![],
             js_imports: vec![],

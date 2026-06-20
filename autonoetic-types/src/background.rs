@@ -639,10 +639,6 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub approval_level: ApprovalLevel,
     #[serde(default)]
-    pub similar_to_request_id: Option<String>,
-    #[serde(default)]
-    pub similarity_score: Option<f64>,
-    #[serde(default)]
     pub min_dwell_ms: Option<i64>,
     #[serde(default)]
     pub confirm_phrase: Option<String>,
@@ -939,6 +935,8 @@ impl GrantScope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum GrantTarget {
+    /// Match any outbound host/URL target.
+    Any,
     /// Exact hostname match, e.g. `"api.github.com"`.
     ExactHost(String),
     /// Matches any subdomain of the suffix, e.g. `"*.github.com"` matches
@@ -954,6 +952,7 @@ pub enum GrantTarget {
 impl GrantTarget {
     pub fn kind_str(&self) -> &'static str {
         match self {
+            Self::Any => "any",
             Self::ExactHost(_) => "exact_host",
             Self::HostSuffix(_) => "host_suffix",
             Self::HostAndPort { .. } => "host_and_port",
@@ -965,6 +964,7 @@ impl GrantTarget {
     /// by this grant target.
     pub fn matches(&self, request_target: &str) -> bool {
         match self {
+            Self::Any => true,
             Self::ExactHost(host) => request_target.eq_ignore_ascii_case(host),
             Self::HostSuffix(suffix) => {
                 let suffix = suffix.trim_start_matches("*.");

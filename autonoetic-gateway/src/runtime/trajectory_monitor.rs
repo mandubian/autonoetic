@@ -23,7 +23,7 @@ use super::trajectory_health::{
     aggregate, signals_from_loop_guard, DivergenceSignal, DivergenceSignalKind, SignalSeverity,
     TrajectoryHealth,
 };
-use crate::runtime::guard::LoopGuardState;
+use crate::runtime::guard::LoopGuard;
 
 /// Observation of one tool call this turn, used by entropy and stall
 /// signals. Lightweight on purpose — the monitor never stores arguments,
@@ -119,7 +119,7 @@ impl TrajectoryMonitor {
         turn_counter: u64,
         observations: &[ToolObservation],
         context_utilization: Option<f32>,
-        guard_state: &LoopGuardState,
+        guard_state: &LoopGuard,
     ) -> TickResult {
         if !self.config.enabled {
             return TickResult {
@@ -444,8 +444,8 @@ mod tests {
         c
     }
 
-    fn quiet_guard_state() -> LoopGuardState {
-        LoopGuardState::default()
+    fn quiet_guard_state() -> LoopGuard {
+        LoopGuard::default()
     }
 
     // ── Master switch / no-op behavior ──────────────────────────────────

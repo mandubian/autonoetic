@@ -274,7 +274,7 @@ fn test_session_snapshot_fork() {
     use autonoetic_gateway::runtime::checkpoint::{
         save_checkpoint, SessionCheckpoint, SessionFork, YieldReason,
     };
-    use autonoetic_gateway::runtime::guard::LoopGuardState;
+    use autonoetic_gateway::runtime::guard::LoopGuard;
     use autonoetic_types::config::GatewayConfig;
 
     let workspace = TestWorkspace::new().unwrap();
@@ -297,7 +297,7 @@ fn test_session_snapshot_fork() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,

@@ -1222,7 +1222,7 @@ impl GatewayExecutionService {
         use crate::runtime::checkpoint::{
             load_latest_checkpoint, save_checkpoint, SessionCheckpoint, YieldReason,
         };
-        use crate::runtime::guard::LoopGuardState;
+        use crate::runtime::guard::LoopGuard;
         use crate::scheduler::gateway_store::EmergencyStopRecord;
 
         let store = self
@@ -1553,7 +1553,7 @@ impl GatewayExecutionService {
             SessionCheckpoint {
                 history: vec![],
                 turn_counter: 0,
-                loop_guard_state: LoopGuardState {
+                loop_guard_state: LoopGuard {
                     max_loops_without_progress: 32,
                     max_tool_failures: 5,
                     max_consecutive_same_progress: 0,

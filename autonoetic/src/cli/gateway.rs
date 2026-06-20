@@ -365,18 +365,11 @@ pub async fn handle_gateway_approvals(
                     other => format!("{}", other.kind()),
                 };
                 println!(
-                    "{:<38} {:<20} {:<14} {}{}",
+                    "{:<38} {:<20} {:<14} {}",
                     approval.request_id,
                     approval.agent_id,
                     approval.action.kind(),
-                    details,
-                    if let (Some(ref sim_id), Some(ref score)) =
-                        (approval.similar_to_request_id, approval.similarity_score)
-                    {
-                        format!(" ~{} ({:.0}%)", &sim_id[..sim_id.len().min(12)], score * 100.0)
-                    } else {
-                        String::new()
-                    }
+                    details
                 );
             }
         }
@@ -535,21 +528,6 @@ pub async fn handle_gateway_approvals(
                             );
                         }
                         other => println!("\nAction: {}", other.kind()),
-                    }
-
-                    if let (Some(ref sim_id), Some(ref score)) =
-                        (a.similar_to_request_id, a.similarity_score)
-                    {
-                        println!("\nSimilar to: ~{} ({:.0}%)", sim_id, score * 100.0);
-                        let sim_approval = gateway_store.get_approval(sim_id)?;
-                        if let Some(sa) = &sim_approval {
-                            let status_str = sa.status.as_ref().map(|s| match s {
-                                autonoetic_types::background::ApprovalStatus::Approved => "approved",
-                                autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
-                                autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
-                            }).unwrap_or("pending");
-                            println!("  Similar approval was: {}", status_str);
-                        }
                     }
 
                     if let Some(dwell) = a.min_dwell_ms {
@@ -762,6 +740,7 @@ pub async fn handle_gateway_grants(
                     "ID", "SESSION", "AGENT", "SCOPE", "EXPIRES", "TARGETS");
                 for g in &grants {
                     let targets_str: Vec<String> = g.targets.iter().map(|t| match t {
+                        autonoetic_types::background::GrantTarget::Any => "*".to_string(),
                         autonoetic_types::background::GrantTarget::ExactHost(h) => h.clone(),
                         autonoetic_types::background::GrantTarget::HostSuffix(s) => format!("*.{}", s),
                         autonoetic_types::background::GrantTarget::HostAndPort { host, port } => format!("{}:{}", host, port),

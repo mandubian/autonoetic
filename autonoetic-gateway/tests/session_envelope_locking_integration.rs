@@ -151,8 +151,6 @@ fn approval_timeline_gets_expansion_hint_for_observed_host() -> anyhow::Result<(
         decided_at: None,
         decided_by: None,
         decision_reason: None,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,

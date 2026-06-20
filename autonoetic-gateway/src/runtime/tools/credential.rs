@@ -2277,8 +2277,6 @@ fn execute_steps(
                             crate::scheduler::approval::resolve_approval_level(c, &approval_action)
                         })
                         .unwrap_or(ApprovalLevel::Operator),
-                    similar_to_request_id: None,
-                    similarity_score: None,
                     min_dwell_ms: None,
                     confirm_phrase: None,
             code_excerpts: None,

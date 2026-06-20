@@ -35,7 +35,7 @@ fn declared_patterns_cover_known_signals() {
     ];
     let decl = RemoteAccessDeclaration {
         approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-        targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+        targets: vec![autonoetic_types::background::GrantTarget::Any],
         enabled_languages: vec![],
         python_imports: vec!["requests".to_string()],
         js_imports: vec![],
@@ -60,7 +60,7 @@ fn undeclared_patterns_fail_shut() {
     }];
     let decl = RemoteAccessDeclaration {
         approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-        targets: vec![autonoetic_types::agent::RemoteAccessTarget::Any],
+        targets: vec![autonoetic_types::background::GrantTarget::Any],
         enabled_languages: vec![],
         python_imports: vec![],
         js_imports: vec![],
@@ -86,7 +86,7 @@ fn undeclared_remote_target_fails_shut() {
     }];
     let decl = RemoteAccessDeclaration {
         approval_mode: autonoetic_types::agent::RemoteAccessApprovalMode::Required,
-        targets: vec![autonoetic_types::agent::RemoteAccessTarget::ExactHost(
+        targets: vec![autonoetic_types::background::GrantTarget::ExactHost(
             "api.other.com".to_string(),
         )],
         enabled_languages: vec![],

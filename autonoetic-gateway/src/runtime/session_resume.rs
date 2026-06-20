@@ -139,7 +139,7 @@ mod session_resume_tests {
         use crate::runtime::checkpoint::{
             PendingToolCall, PendingToolState, SessionCheckpoint, YieldReason,
         };
-        use crate::runtime::guard::LoopGuardState;
+        use crate::runtime::guard::LoopGuard;
         let pts = PendingToolState {
             completed_tool_results: vec![],
             pending_tool_call: PendingToolCall {
@@ -153,7 +153,7 @@ mod session_resume_tests {
         let cp = SessionCheckpoint {
             history: vec![],
             turn_counter: 0,
-            loop_guard_state: LoopGuardState {
+            loop_guard_state: LoopGuard {
                 max_loops_without_progress: 1,
                 max_tool_failures: 5,
                 max_consecutive_same_progress: 0,

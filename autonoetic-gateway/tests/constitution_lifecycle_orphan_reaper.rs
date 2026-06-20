@@ -352,8 +352,6 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
         decided_at: None,
         decided_by: None,
         decision_reason: None,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,

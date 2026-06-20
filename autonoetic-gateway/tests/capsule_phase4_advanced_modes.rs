@@ -7,7 +7,7 @@ use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
     list_checkpoints, save_checkpoint, SessionCheckpoint, YieldReason,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
@@ -235,7 +235,7 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,
@@ -622,7 +622,7 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,

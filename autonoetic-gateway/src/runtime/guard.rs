@@ -35,7 +35,7 @@ use autonoetic_types::tool_error::ToolErrorType;
 /// Why the loop guard tripped, set by `register_progress` / `check_loop` and
 /// surfaced through [`LoopGuard::last_trip_reason`] so the caller can emit
 /// a structured causal event before propagating the trip as an error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoopGuardTripReason {
     /// Trip condition #1 — `current_loops >= max_loops_without_progress`.
     NoMeaningfulProgress { cycles: u32 },
@@ -100,41 +100,53 @@ impl LoopGuardTripReason {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoopGuard {
-    max_loops_without_progress: u32,
-    max_tool_failures: u32,
-    max_consecutive_same_progress: u32,
-    max_child_failures: u32,
+    pub max_loops_without_progress: u32,
+    pub max_tool_failures: u32,
+    pub max_consecutive_same_progress: u32,
+    pub max_child_failures: u32,
     /// Trip condition #3 — recent-call window cap.
-    max_window_size: usize,
+    #[serde(default = "default_rotation_window_size")]
+    pub max_window_size: usize,
     /// Trip condition #3 — minimum distinct fingerprints required to clear.
-    max_distinct_floor: usize,
+    #[serde(default = "default_rotation_distinct_floor")]
+    pub max_distinct_floor: usize,
     /// Trip condition #5 — consecutive identical read-only roster reads that
     /// trigger the fast-path `RedundantRosterPolling` trip. 0 disables it.
-    roster_repeat_floor: u32,
+    #[serde(default = "default_roster_repeat_floor")]
+    pub roster_repeat_floor: u32,
     /// Trip condition #6 — consecutive LLM transport/endpoint failures. Unlike
     /// tool failures, these are not per-tool: they count any failed LLM API
     /// call (HTTP error, timeout, connection refused). When this reaches
     /// `max_llm_failures`, the guard trips to prevent expensive retry spirals.
-    llm_failure_count: u32,
-    max_llm_failures: u32,
+    #[serde(default)]
+    pub llm_failure_count: u32,
+    #[serde(default = "default_max_llm_failures")]
+    pub max_llm_failures: u32,
     /// From gateway config — max loop resets attributable to each tool name.
-    progress_budget_tools: HashMap<String, u32>,
+    #[serde(default)]
+    pub progress_budget_tools: HashMap<String, u32>,
     /// How many times each budgeted tool has reset `current_loops` this session.
-    progress_budget_used: HashMap<String, u32>,
-    current_loops: u32,
-    tool_failure_counts: std::collections::HashMap<String, u32>,
-    last_progress_fingerprint: Option<(String, u64)>,
-    consecutive_progress_count: u32,
-    child_failure_count: u32,
+    #[serde(default)]
+    pub progress_budget_used: HashMap<String, u32>,
+    pub current_loops: u32,
+    #[serde(default)]
+    pub tool_failure_counts: std::collections::HashMap<String, u32>,
+    pub last_progress_fingerprint: Option<(String, u64)>,
+    pub consecutive_progress_count: u32,
+    pub child_failure_count: u32,
     /// Sliding window of fingerprint hashes for the last
     /// `max_window_size` successful tool calls. Used by trip condition #3
     /// (rotating-polling detector).
-    recent_fingerprints: VecDeque<u64>,
+    #[serde(default)]
+    pub recent_fingerprints: VecDeque<u64>,
     /// Trip reason recorded when any condition fires. Cleared on construction
     /// and never reset — once a guard has tripped, subsequent calls are
     /// errors. `last_trip_reason` exposes this for causal-event emission.
-    trip_reason: Option<LoopGuardTripReason>,
+    /// Not present in legacy `LoopGuard` snapshots; defaulted to `None`.
+    #[serde(default)]
+    pub trip_reason: Option<LoopGuardTripReason>,
 }
 
 impl LoopGuard {
@@ -412,47 +424,35 @@ impl LoopGuard {
         self.last_progress_fingerprint = Some(fp);
     }
 
-    pub fn snapshot(&self) -> LoopGuardState {
-        LoopGuardState {
-            max_loops_without_progress: self.max_loops_without_progress,
-            max_tool_failures: self.max_tool_failures,
-            max_consecutive_same_progress: self.max_consecutive_same_progress,
-            max_child_failures: self.max_child_failures,
-            max_window_size: self.max_window_size,
-            max_distinct_floor: self.max_distinct_floor,
-            roster_repeat_floor: self.roster_repeat_floor,
-            max_llm_failures: self.max_llm_failures,
-            progress_budget_tools: self.progress_budget_tools.clone(),
-            progress_budget_used: self.progress_budget_used.clone(),
-            current_loops: self.current_loops,
-            tool_failure_counts: self.tool_failure_counts.clone(),
-            last_progress_fingerprint: self.last_progress_fingerprint.clone(),
-            consecutive_progress_count: self.consecutive_progress_count,
-            child_failure_count: self.child_failure_count,
-            llm_failure_count: self.llm_failure_count,
-            recent_fingerprints: self.recent_fingerprints.iter().copied().collect(),
-        }
+    pub fn snapshot(&self) -> LoopGuard {
+        self.clone()
     }
 
-    pub fn restore(state: LoopGuardState) -> Self {
+    pub fn restore(state: LoopGuard) -> Self {
+        state
+    }
+}
+
+impl Default for LoopGuard {
+    fn default() -> Self {
         Self {
-            max_loops_without_progress: state.max_loops_without_progress,
-            max_tool_failures: state.max_tool_failures,
-            max_consecutive_same_progress: state.max_consecutive_same_progress,
-            max_child_failures: state.max_child_failures,
-            max_window_size: state.max_window_size,
-            max_distinct_floor: state.max_distinct_floor,
-            roster_repeat_floor: state.roster_repeat_floor,
-            max_llm_failures: state.max_llm_failures,
-            progress_budget_tools: state.progress_budget_tools,
-            progress_budget_used: state.progress_budget_used,
-            current_loops: state.current_loops,
-            tool_failure_counts: state.tool_failure_counts,
-            last_progress_fingerprint: state.last_progress_fingerprint,
-            consecutive_progress_count: state.consecutive_progress_count,
-            child_failure_count: state.child_failure_count,
-            llm_failure_count: state.llm_failure_count,
-            recent_fingerprints: state.recent_fingerprints.into_iter().collect(),
+            max_loops_without_progress: 10,
+            max_tool_failures: 8,
+            max_consecutive_same_progress: 1,
+            max_child_failures: 5,
+            max_window_size: default_rotation_window_size(),
+            max_distinct_floor: default_rotation_distinct_floor(),
+            roster_repeat_floor: default_roster_repeat_floor(),
+            llm_failure_count: 0,
+            max_llm_failures: default_max_llm_failures(),
+            progress_budget_tools: HashMap::new(),
+            progress_budget_used: HashMap::new(),
+            current_loops: 0,
+            tool_failure_counts: std::collections::HashMap::new(),
+            last_progress_fingerprint: None,
+            consecutive_progress_count: 0,
+            child_failure_count: 0,
+            recent_fingerprints: VecDeque::new(),
             trip_reason: None,
         }
     }
@@ -563,71 +563,6 @@ fn compute_fingerprint(tool_name: &str, arguments: &str) -> (String, u64) {
     tool_name.hash(&mut hasher);
     arguments.hash(&mut hasher);
     (tool_name.to_string(), hasher.finish())
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LoopGuardState {
-    pub max_loops_without_progress: u32,
-    pub max_tool_failures: u32,
-    pub max_consecutive_same_progress: u32,
-    pub max_child_failures: u32,
-    /// Rotating-polling detector window (issue #287). Legacy checkpoints
-    /// without this field default to the current build's window size, so
-    /// they keep working without redumping.
-    #[serde(default = "default_rotation_window_size")]
-    pub max_window_size: usize,
-    /// Rotating-polling detector distinct-count floor (issue #287).
-    #[serde(default = "default_rotation_distinct_floor")]
-    pub max_distinct_floor: usize,
-    /// Redundant-roster-polling fast-path floor. Legacy checkpoints without
-    /// this field default to the current build's floor.
-    #[serde(default = "default_roster_repeat_floor")]
-    pub roster_repeat_floor: u32,
-    /// Max consecutive LLM failures before the guard trips. Legacy
-    /// checkpoints without this field default to 3.
-    #[serde(default = "default_max_llm_failures")]
-    pub max_llm_failures: u32,
-    #[serde(default)]
-    pub progress_budget_tools: HashMap<String, u32>,
-    #[serde(default)]
-    pub progress_budget_used: HashMap<String, u32>,
-    pub current_loops: u32,
-    pub tool_failure_counts: std::collections::HashMap<String, u32>,
-    pub last_progress_fingerprint: Option<(String, u64)>,
-    pub consecutive_progress_count: u32,
-    pub child_failure_count: u32,
-    /// Consecutive LLM endpoint failures (reset to 0 on success).
-    #[serde(default)]
-    pub llm_failure_count: u32,
-    /// Sliding window of recent successful-call fingerprints. Legacy
-    /// checkpoints come back with an empty window; this is safe because
-    /// the rotating-polling detector only trips once the window fills.
-    #[serde(default)]
-    pub recent_fingerprints: Vec<u64>,
-}
-
-impl Default for LoopGuardState {
-    fn default() -> Self {
-        Self {
-            max_loops_without_progress: 10,
-            max_tool_failures: 8,
-            max_consecutive_same_progress: 1,
-            max_child_failures: 5,
-            max_window_size: default_rotation_window_size(),
-            max_distinct_floor: default_rotation_distinct_floor(),
-            roster_repeat_floor: default_roster_repeat_floor(),
-            max_llm_failures: default_max_llm_failures(),
-            progress_budget_tools: HashMap::new(),
-            progress_budget_used: HashMap::new(),
-            current_loops: 0,
-            tool_failure_counts: std::collections::HashMap::new(),
-            last_progress_fingerprint: None,
-            consecutive_progress_count: 0,
-            child_failure_count: 0,
-            llm_failure_count: 0,
-            recent_fingerprints: Vec::new(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1134,9 +1069,8 @@ mod tests {
         );
     }
 
-    /// LoopGuardState roundtrip with the new fields: legacy snapshots
-    /// (without the new fields in JSON) must restore cleanly via serde
-    /// defaults.
+    /// LoopGuard roundtrip with legacy snapshots (without the newer fields in
+    /// JSON) must restore cleanly via serde defaults.
     #[test]
     fn legacy_loop_guard_state_roundtrips_with_defaults() {
         let legacy_json = r#"{
@@ -1150,7 +1084,7 @@ mod tests {
             "consecutive_progress_count": 0,
             "child_failure_count": 0
         }"#;
-        let state: LoopGuardState =
+        let state: LoopGuard =
             serde_json::from_str(legacy_json).expect("legacy snapshot must parse");
         assert_eq!(state.max_window_size, default_rotation_window_size());
         assert_eq!(state.max_distinct_floor, default_rotation_distinct_floor());

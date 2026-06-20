@@ -7,7 +7,7 @@ use autonoetic_gateway::runtime::checkpoint::{
     delete_checkpoint, list_checkpoints, load_checkpoint, load_latest_checkpoint,
     prune_checkpoints, save_checkpoint, SessionCheckpoint, SessionFork, YieldReason,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_types::config::GatewayConfig;
 
 /// Helper to create a test config with temp directory.
@@ -18,8 +18,8 @@ fn test_config(temp: &tempfile::TempDir) -> GatewayConfig {
     }
 }
 
-fn default_guard_state() -> LoopGuardState {
-    LoopGuardState {
+fn default_guard_state() -> LoopGuard {
+    LoopGuard {
         max_loops_without_progress: 10,
         max_tool_failures: 5,
         max_consecutive_same_progress: 2,

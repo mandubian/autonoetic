@@ -6,13 +6,13 @@ use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
     list_checkpoints, prune_checkpoints, save_checkpoint, SessionCheckpoint, YieldReason,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 
 fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
     SessionCheckpoint {
         history: vec![Message::user(format!("turn-{turn}"))],
         turn_counter: turn,
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 5,
             max_tool_failures: 5,
             max_consecutive_same_progress: 1,

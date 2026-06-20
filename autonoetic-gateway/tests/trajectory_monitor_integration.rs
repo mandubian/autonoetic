@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::runtime::trajectory_health::{
     build_event_payload, DivergenceSignalKind, SignalSeverity, TrajectoryHealth,
 };
@@ -19,8 +19,8 @@ fn cfg() -> TrajectoryConfig {
     TrajectoryConfig::default()
 }
 
-fn quiet_guard_state() -> LoopGuardState {
-    LoopGuardState::default()
+fn quiet_guard_state() -> LoopGuard {
+    LoopGuard::default()
 }
 
 #[test]

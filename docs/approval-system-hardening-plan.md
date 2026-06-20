@@ -173,18 +173,23 @@ enum GrantTarget {
 
 ### 3.1 Approval similarity & diff
 
-- On approval creation, compute a similarity score against the N most recent approvals for the same agent (same root session and globally).
-- Similarity signal surface: in `approvals list`, annotate with `~apr-xxxx (92%)` when a near-match exists. In `approvals show`, print a unified diff of command/target differences and summarize recent decisions on similar approvals ("3 rejected, 1 approved in last hour").
-- Similarity is defined over the `ScheduledAction` structural fields, not raw text, so whitespace/comments do not defeat it.
+> **Removed (#565).** The similarity score was write-only: nothing consumed
+> `similar_to_request_id` / `similarity_score` for sandbox-exec approvals.
+> Only wiki proposals used the computation for an advisory warning, and that
+> small Jaccard check is now inlined in `human_gate.rs`. The dedicated module
+> `approval_similarity.rs` and the `approvals` table columns were deleted.
+
+- ~~On approval creation, compute a similarity score against the N most recent approvals for the same agent (same root session and globally).~~
+- ~~Similarity signal surface: in `approvals list`, annotate with `~apr-xxxx (92%)` when a near-match exists. In `approvals show`, print a unified diff of command/target differences and summarize recent decisions on similar approvals ("3 rejected, 1 approved in last hour").~~
+- ~~Similarity is defined over the `ScheduledAction` structural fields, not raw text, so whitespace/comments do not defeat it.~~
 
 **Files.**
-- New `autonoetic-gateway/src/scheduler/approval_similarity.rs`.
-- `approval.rs` — wire into creation path to record a `similar_to` column.
-- CLI — render diff.
+- ~~New `autonoetic-gateway/src/scheduler/approval_similarity.rs`.~~
+- ~~`approval.rs` — wire into creation path to record a `similar_to` column.~~
+- ~~CLI — render diff.~~
 
 **Acceptance.**
-- [ ] Near-identical resubmissions surface a similarity annotation.
-- [ ] Diff shown on `approvals show`.
+- [x] Removed: module deleted, columns dropped, no remaining references.
 
 ### 3.2 Operator revocation
 

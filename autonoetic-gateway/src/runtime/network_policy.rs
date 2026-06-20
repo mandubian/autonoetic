@@ -1,6 +1,7 @@
 use autonoetic_types::agent::{
-    AgentManifest, RemoteAccessApprovalMode, RemoteAccessDeclaration, RemoteAccessTarget,
+    AgentManifest, RemoteAccessApprovalMode, RemoteAccessDeclaration,
 };
+use autonoetic_types::background::GrantTarget;
 use autonoetic_types::capability::Capability;
 use std::path::Path;
 
@@ -52,52 +53,6 @@ fn normalize_host(host: &str) -> String {
     host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
-fn target_matches(target: &RemoteAccessTarget, request_target: &str) -> bool {
-    match target {
-        RemoteAccessTarget::Any => true,
-        RemoteAccessTarget::ExactHost(host) => request_target.eq_ignore_ascii_case(host),
-        RemoteAccessTarget::HostSuffix(suffix) => {
-            let suffix = suffix.trim_start_matches("*.");
-            let request = request_target.to_ascii_lowercase();
-            let suffix = suffix.to_ascii_lowercase();
-            if request == suffix {
-                return true;
-            }
-            request.ends_with(&format!(".{}", suffix))
-        }
-        RemoteAccessTarget::HostAndPort { host, port } => {
-            let expected = format!("{}:{}", host.to_ascii_lowercase(), port);
-            request_target.eq_ignore_ascii_case(&expected)
-        }
-        RemoteAccessTarget::UrlPrefix(prefix) => {
-            fn lower_authority(url: &str) -> std::borrow::Cow<'_, str> {
-                let scheme_end = url.find("://").map(|p| p + 3).unwrap_or(0);
-                let rest = &url[scheme_end..];
-                if let Some(pos) = rest.find('/') {
-                    let authority = &rest[..pos];
-                    let path = &rest[pos..];
-                    if authority.chars().any(|c| c.is_ascii_uppercase()) {
-                        format!(
-                            "{}{}{}",
-                            &url[..scheme_end].to_ascii_lowercase(),
-                            authority.to_ascii_lowercase(),
-                            path
-                        )
-                        .into()
-                    } else {
-                        std::borrow::Cow::Borrowed(url)
-                    }
-                } else {
-                    url.to_ascii_lowercase().into()
-                }
-            }
-            let norm_req = lower_authority(request_target);
-            let norm_pre = lower_authority(prefix);
-            norm_req.starts_with(&*norm_pre)
-        }
-    }
-}
-
 /// Returns true when the declaration allows the provided host/URL target.
 pub fn declaration_allows_target(
     declaration: &RemoteAccessDeclaration,
@@ -133,7 +88,7 @@ pub fn declaration_allows_target(
     declaration.targets.iter().any(|target| {
         candidates
             .iter()
-            .any(|candidate| target_matches(target, candidate))
+            .any(|candidate| target.matches(candidate))
     })
 }
 
@@ -253,7 +208,7 @@ mod tests {
     fn declaration_target_exact_host_matches() {
         let decl = RemoteAccessDeclaration {
             approval_mode: RemoteAccessApprovalMode::Required,
-            targets: vec![RemoteAccessTarget::ExactHost("api.example.com".to_string())],
+            targets: vec![GrantTarget::ExactHost("api.example.com".to_string())],
             enabled_languages: vec![],
             python_imports: vec![],
             js_imports: vec![],
@@ -279,7 +234,7 @@ mod tests {
     fn declaration_target_url_prefix_matches() {
         let decl = RemoteAccessDeclaration {
             approval_mode: RemoteAccessApprovalMode::Required,
-            targets: vec![RemoteAccessTarget::UrlPrefix(
+            targets: vec![GrantTarget::UrlPrefix(
                 "https://api.example.com/public/".to_string(),
             )],
             enabled_languages: vec![],
@@ -307,7 +262,7 @@ mod tests {
     fn declaration_target_any_matches_anything() {
         let decl = RemoteAccessDeclaration {
             approval_mode: RemoteAccessApprovalMode::Required,
-            targets: vec![RemoteAccessTarget::Any],
+            targets: vec![GrantTarget::Any],
             enabled_languages: vec![],
             python_imports: vec![],
             js_imports: vec![],

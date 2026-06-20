@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::guard::LoopGuardState;
+use crate::runtime::guard::LoopGuard;
 
 /// Causal-chain category used by every divergence event.
 pub const DIVERGENCE_CATEGORY: &str = "divergence";
@@ -283,7 +283,7 @@ pub fn classify_pressure(kind: DivergenceSignalKind, current: f32) -> Option<Div
 ///
 /// Returns an empty vec when nothing crosses the warn threshold — that
 /// translates to `TrajectoryHealth::Healthy` after [`aggregate`].
-pub fn signals_from_loop_guard(state: &LoopGuardState) -> Vec<DivergenceSignal> {
+pub fn signals_from_loop_guard(state: &LoopGuard) -> Vec<DivergenceSignal> {
     let mut signals = Vec::new();
 
     if let Some(s) = loop_pressure_signal(state) {
@@ -299,7 +299,7 @@ pub fn signals_from_loop_guard(state: &LoopGuardState) -> Vec<DivergenceSignal> 
     signals
 }
 
-fn loop_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
+fn loop_pressure_signal(state: &LoopGuard) -> Option<DivergenceSignal> {
     if state.max_loops_without_progress == 0 {
         return None;
     }
@@ -312,7 +312,7 @@ fn loop_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
     })
 }
 
-fn failure_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
+fn failure_pressure_signal(state: &LoopGuard) -> Option<DivergenceSignal> {
     if state.max_tool_failures == 0 {
         return None;
     }
@@ -329,7 +329,7 @@ fn failure_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
     })
 }
 
-fn child_failure_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
+fn child_failure_pressure_signal(state: &LoopGuard) -> Option<DivergenceSignal> {
     if state.max_child_failures == 0 {
         return None;
     }
@@ -478,8 +478,8 @@ mod tests {
 
     // ── LoopGuard bridge ────────────────────────────────────────────────
 
-    fn state_with(loops: u32, max_loops: u32, child_failures: u32, max_children: u32) -> LoopGuardState {
-        LoopGuardState {
+    fn state_with(loops: u32, max_loops: u32, child_failures: u32, max_children: u32) -> LoopGuard {
+        LoopGuard {
             max_loops_without_progress: max_loops,
             max_child_failures: max_children,
             current_loops: loops,

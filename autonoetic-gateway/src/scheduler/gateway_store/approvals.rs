@@ -45,9 +45,9 @@ impl GatewayStore {
             "INSERT INTO approvals (
                 request_id, agent_id, session_id, root_session_id, workflow_id, task_id,
                 action_type, action_payload, reason, evidence_ref, status, created_at,
-                approval_level, similar_to_request_id, similarity_score,
+                approval_level,
                 min_dwell_ms, confirm_phrase, code_excerpts, risk_summary
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 request.request_id,
                 request.agent_id,
@@ -62,8 +62,6 @@ impl GatewayStore {
                 "pending",
                 request.created_at,
                 serde_json::to_string(&request.approval_level)?,
-                request.similar_to_request_id,
-                request.similarity_score,
                 request.min_dwell_ms,
                 request.confirm_phrase,
                 code_excerpts_json,
@@ -115,7 +113,7 @@ impl GatewayStore {
         request_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         conn.query_row(
-            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, similar_to_request_id, similarity_score, min_dwell_ms, confirm_phrase, code_excerpts, risk_summary FROM approvals WHERE request_id = ?1",
+            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, min_dwell_ms, confirm_phrase, code_excerpts, risk_summary FROM approvals WHERE request_id = ?1",
             params![request_id],
             |row| {
                 let action_payload: String = row.get(3)?;
@@ -131,8 +129,8 @@ impl GatewayStore {
                 })?;
                 let level_str: String = row.get(13)?;
                 let approval_level: ApprovalLevel = serde_json::from_str(&level_str).unwrap_or(ApprovalLevel::Operator);
-                let code_excerpts_json: Option<String> = row.get(19)?;
-                let risk_summary_json: Option<String> = row.get(20)?;
+                let code_excerpts_json: Option<String> = row.get(17)?;
+                let risk_summary_json: Option<String> = row.get(18)?;
                 let code_excerpts = code_excerpts_json
                     .and_then(|s| serde_json::from_str::<Vec<autonoetic_types::background::CodeExcerpt>>(&s).ok());
                 let risk_summary = risk_summary_json
@@ -153,10 +151,8 @@ impl GatewayStore {
                     evidence_ref: row.get(12)?,
                     decision_reason: row.get(14)?,
                     approval_level,
-                    similar_to_request_id: row.get(15)?,
-                    similarity_score: row.get(16)?,
-                    min_dwell_ms: row.get(17)?,
-                    confirm_phrase: row.get(18)?,
+                    min_dwell_ms: row.get(15)?,
+                    confirm_phrase: row.get(16)?,
                     code_excerpts,
                     risk_summary,
                 })
@@ -1131,8 +1127,6 @@ mod decided_by_kind_tests {
             decided_at: None,
             decided_by: None,
             decision_reason: None,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1262,8 +1256,6 @@ mod decided_by_kind_tests {
             decided_at: None,
             decided_by: None,
             decision_reason: None,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
@@ -1330,8 +1322,6 @@ mod decided_by_kind_tests {
             decided_at: None,
             decided_by: None,
             decision_reason: None,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
