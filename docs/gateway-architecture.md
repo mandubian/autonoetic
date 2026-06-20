@@ -150,7 +150,7 @@ autonoetic-gateway/src/
 │   ├── workflow_causal.rs         #   Workflow causal event integration
 │   ├── fast_scheduler.rs          #   High-frequency tick for time-sensitive work
 │   ├── eval_runner.rs             #   Evaluation suite execution
-│   ├── plan_frame_ops.rs          #   Plan frame operations
+│   ├── plan_frame_ops.rs          #   Plan frame queries (pending plans)
 │   ├── session_envelope_ops.rs    #   Session envelope operations
 │   ├── reclamation.rs             #   Garbage collection (blobs, revisions, memories)
 │   ├── system_agents.rs           #   System agent cron reconciliation
@@ -409,6 +409,7 @@ ToolCallProcessor detects action requires approval
   │
   ├─ Check 5-layer dedup chain (see above)
   │
+<<<<<<< HEAD
        └─ If new approval needed:
             │
             ├─ 1. GATEWAY PERSISTS
@@ -417,6 +418,17 @@ ToolCallProcessor detects action requires approval
             │           history, pending tool, remaining tools, loop guard state)
             │
             ├─ 2. TURN SUSPENDS
+=======
+  └─ If new approval needed:
+       │
+       ├─ 1. GATEWAY PERSISTS
+       │     ├─ Create ApprovalRequest in SQLite
+       │     ├─ Compute similarity score (Jaccard vs recent same-agent)
+       │     └─ Save TurnContinuation (HMAC-signed, includes:
+       │           history, pending tool, remaining tools, loop guard state)
+       │
+       ├─ 2. TURN SUSPENDS
+>>>>>>> origin/main
        │     ├─ Checkpoint session with YieldReason::ApprovalRequired
        │     └─ Return TurnOutcome::Suspended
        │
