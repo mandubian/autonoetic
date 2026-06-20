@@ -2143,14 +2143,6 @@ pub fn apply_emergency_stop_to_workflow(
             continue;
         }
         let _ = release_task_claim(config, store, workflow_id, &task.task_id);
-        if let Err(e) = crate::runtime::continuation::delete_continuation(config, &task.task_id) {
-            tracing::debug!(
-                target: "workflow",
-                task_id = %task.task_id,
-                error = %e,
-                "continuation delete during emergency stop (may be absent)"
-            );
-        }
 
         task.status = TaskRunStatus::Aborted;
         task.updated_at = now_rfc3339();

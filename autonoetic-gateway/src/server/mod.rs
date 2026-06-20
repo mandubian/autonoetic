@@ -130,23 +130,8 @@ impl GatewayServer {
             }
         }
 
-        // Reap orphaned continuation files from crash/restart
-        match crate::runtime::continuation::reap_orphaned_continuations(
-            &self.config,
-            &gateway_store,
-        ) {
-            Ok(n) if n > 0 => tracing::info!(
-                target: "gateway",
-                "Reaped {} orphaned continuation file(s)",
-                n
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                target: "gateway",
-                error = %e,
-                "Continuation reaper failed"
-            ),
-        }
+        // Continuation files are obsolete — all suspension state is now captured
+        // in enriched checkpoints.  No reclamation needed.
 
         // Reconcile system agents (create cron jobs if missing)
         let reconcile_results =

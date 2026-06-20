@@ -51,16 +51,12 @@ pub enum TurnOutcome {
     /// producing any text.
     Completed(Option<String>),
 
-    /// The turn was suspended at an approval boundary.  The `TurnContinuation`
-    /// has already been saved to disk by `execute_with_history`; the caller
-    /// (typically `spawn_task_execution`) should set the task to
+    /// The turn was suspended at an approval boundary.  The enriched checkpoint
+    /// has already been saved; the caller should set the task to
     /// `AwaitingApproval` and release the tokio task / claim — no resources
     /// need to be held while waiting for the operator.
     Suspended {
         approval_request_id: String,
-        /// The full continuation, when suspension happened mid-tool batch.
-        /// `None` means a non-tool approval boundary (e.g. max-turn continuation gate).
-        continuation: Option<Box<crate::runtime::continuation::TurnContinuation>>,
     },
 
     /// The turn was suspended because a user interaction is pending.
@@ -248,7 +244,7 @@ pub struct AgentExecutor {
     /// Probed context windows for local OpenAI-compatible model servers.
     pub local_model_context_cache: Option<Arc<LocalModelContextCache>>,
     pub gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
-    /// Workflow / task context used to populate `TurnContinuation` on suspension.
+    /// Workflow / task context for enriched checkpoint on suspension.
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
     /// SHA-256 of runtime.lock content, captured at session start for reproducibility.
@@ -1127,7 +1123,6 @@ impl AgentExecutor {
                     );
                     return Ok(TurnOutcome::Suspended {
                         approval_request_id: request_id,
-                        continuation: None,
                     });
                 }
             }
@@ -2660,9 +2655,7 @@ impl AgentExecutor {
                     });
 
                     if let Some((pending_call_id, request_id, approval_response)) = approval_info {
-                        // Build a TurnContinuation and save it, then suspend.
                         let completed_results = results[..results.len() - 1].to_vec();
-                        // Tool calls that did NOT run because they came after the approval gate.
                         let remaining_calls = response.tool_calls[results.len()..].to_vec();
 
                         let pending_tc = response
@@ -2675,14 +2668,14 @@ impl AgentExecutor {
                             Some(store) => {
                                 let approval = store.get_approval(&request_id).map_err(|e| {
                                     anyhow::anyhow!(
-                                        "failed to fetch approval {} while saving continuation: {}",
+                                        "failed to fetch approval {} while saving checkpoint: {}",
                                         request_id,
                                         e
                                     )
                                 })?;
                                 let approval = approval.ok_or_else(|| {
                                     anyhow::anyhow!(
-                                        "missing approval {} while saving continuation",
+                                        "missing approval {} while saving checkpoint",
                                         request_id
                                     )
                                 })?;
@@ -2691,64 +2684,46 @@ impl AgentExecutor {
                             None => None,
                         };
 
-                        let continuation = crate::runtime::continuation::TurnContinuation {
-                            history: history.clone(), // snapshot BEFORE assistant_msg
-                            assistant_message: assistant_msg,
+                        let pending_tool_state = PendingToolState {
                             completed_tool_results: completed_results,
-                            pending_tool_call:
-                                crate::runtime::continuation::PendingApprovalToolCall {
-                                    call_id: pending_call_id,
-                                    tool_name: pending_tc.name.clone(),
-                                    arguments: pending_tc.arguments.clone(),
-                                    approval_response,
-                                },
+                            pending_tool_call: PendingToolCall {
+                                call_id: pending_call_id,
+                                tool_name: pending_tc.name.clone(),
+                                arguments: pending_tc.arguments.clone(),
+                                approval_response: Some(approval_response),
+                            },
                             remaining_tool_calls: remaining_calls,
-                            approval_request_id: request_id.clone(),
-                            pending_action,
-                            workflow_id: self.workflow_id.clone(),
-                            task_id: self.task_id.clone(),
-                            session_id: session_id.clone(),
-                            turn_id: turn_id.clone(),
-                            suspended_at: chrono::Utc::now().to_rfc3339(),
-                            loop_guard_state: self.guard.snapshot(),
-                            session_state: self.session_state,
-                            tool_tier_escalated: self.tool_tier_escalated,
-                            discovered_tools: self.discovered_tools.clone(),
                         };
 
-                        // Persist continuation to disk when we have a task_id and config.
-                        if let (Some(task_id), Some(config)) =
-                            (self.task_id.as_deref(), self.config.as_deref())
-                        {
-                            crate::runtime::continuation::save_continuation(
-                                config,
-                                task_id,
-                                &continuation,
-                            )?;
-                        }
-
-                        tracing::info!(
-                            target: "continuation",
-                            agent_id = %self.manifest.agent.id,
-                            session_id = %session_id,
-                            approval_request_id = %request_id,
-                            "Turn suspended at approval boundary; continuation saved"
-                        );
-
-                        // Also save a checkpoint for general respawn capability
-                        let _ = self.save_yield_checkpoint(
+                        // Build enriched checkpoint with all suspension state.
+                        let mut cp = self.build_checkpoint(
                             history,
                             &turn_id,
                             YieldReason::ApprovalRequired {
                                 approval_request_id: request_id.clone(),
                             },
-                            None,
+                            Some(pending_tool_state),
                         );
+                        cp.assistant_message = Some(assistant_msg);
+                        cp.pending_action = pending_action;
+                        cp.suspended_at = Some(chrono::Utc::now().to_rfc3339());
+
+                        if let Some(config) = self.config.as_ref() {
+                            if let Err(e) = save_checkpoint(config, &cp) {
+                                tracing::warn!(
+                                    target: "checkpoint",
+                                    session_id = %session_id,
+                                    turn_id = %turn_id,
+                                    approval_request_id = %request_id,
+                                    error = %e,
+                                    "Failed to save enriched approval checkpoint"
+                                );
+                            }
+                        }
 
                         let _ = tracer.end_digest_turn();
                         return Ok(TurnOutcome::Suspended {
                             approval_request_id: request_id,
-                            continuation: Some(Box::new(continuation)),
                         });
                     }
 
@@ -4069,14 +4044,7 @@ mod tests {
         let request_id = match second {
             TurnOutcome::Suspended {
                 approval_request_id,
-                continuation,
-            } => {
-                assert!(
-                    continuation.is_none(),
-                    "max-turn suspension should not require tool continuation"
-                );
-                approval_request_id
-            }
+            } => approval_request_id,
             other => panic!("expected Suspended, got {:?}", other),
         };
         assert!(request_id.starts_with("apr-"));
@@ -4294,7 +4262,6 @@ mod tests {
         let completed = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Completed(None));
         let suspended = ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::Suspended {
             approval_request_id: "apr-1".to_string(),
-            continuation: None,
         });
         let user_input =
             ExecuteLoopTermination::from_turn_outcome(&TurnOutcome::SuspendedUserInput {
