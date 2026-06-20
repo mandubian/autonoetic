@@ -2,7 +2,7 @@
 //!
 //! Manages Wake -> Context Assembly -> Reasoning -> Act -> Hibernate.
 
-use crate::llm::{CompletionRequest, LlmDriver, Message, StopReason, ToolDefinition};
+use crate::llm::{CompletionRequest, LlmDriver, Message, StopReason, ToolCall, ToolDefinition};
 use crate::policy::PolicyEngine;
 use crate::runtime::artifact::extract_artifacts_from_text;
 use crate::runtime::checkpoint::{
@@ -277,6 +277,9 @@ pub struct AgentExecutor {
     pub artifact_id: Option<String>,
     /// Previous turn's Ri-0.6 capability snapshot for narrowing checks.
     pub(crate) ri_0_6_previous_snapshot: Option<crate::runtime::tool_dispatch::Ri06CapabilitySnapshot>,
+
+    /// Whether the Ri-0.6 capability snapshot check has already run this session.
+    pub(crate) ri_0_6_snapshot_checked: bool,
     /// Cross-agent persona text loaded from `persona.md`. Injected into every
     /// agent's system prompt between the foundation and agent-specific instructions.
     pub persona: Option<String>,
@@ -380,6 +383,7 @@ impl AgentExecutor {
             user_id: None,
             artifact_id: None,
             ri_0_6_previous_snapshot: None,
+            ri_0_6_snapshot_checked: false,
             persona: None,
             overflow_recovery: false,
             extended_instructions: None,
@@ -849,6 +853,24 @@ impl AgentExecutor {
         }
         cp
     }
+    /// Save a yield checkpoint and return the original error.
+    ///
+    /// Centralises the recurring `save_yield_checkpoint` + `return Err(e)` pattern.
+    /// Save a yield checkpoint and return the original error.
+    ///
+    /// Centralises the recurring `save_yield_checkpoint` + `return Err(e)` pattern.
+    fn save_and_yield(
+        &self,
+        history: &[Message],
+        turn_id: &str,
+        reason: YieldReason,
+        pending: Option<PendingToolState>,
+        err: anyhow::Error,
+    ) -> anyhow::Error {
+        let _ = self.save_yield_checkpoint(history, turn_id, reason, pending);
+        err
+    }
+
 
     /// When an Ri-0.9 last-word gateway notice was injected this wake and the
     /// turn completes, persist `session.last_word_response` referencing the notice
@@ -1381,7 +1403,7 @@ impl AgentExecutor {
         let max_empty_other_retries = max_other_empty_retries();
         let mut empty_other_retries_used = 0usize;
         let mut digest_turn_active = false;
-        let mut ri_0_6_snapshot_checked = false;
+        self.ri_0_6_snapshot_checked = false;
         let root_session_id = crate::runtime::content_store::root_session_id(&session_id);
         let allow_unpriced_budget = self.manifest.capabilities.iter().any(|c| {
             matches!(
@@ -1391,195 +1413,10 @@ impl AgentExecutor {
         });
 
         loop {
-            // Loop guard check — save checkpoint before propagating max-turns error.
-            // When the guard trips, emit a `loop_guard.tripped` causal event with
-            // the structured trip reason (issue #287) so the divergence sentinel
-            // and operators can see *why* the session terminated, not just that
-            // it did.
-            if let Err(e) = self.guard.check_loop() {
-                if let (Some(reason), Some(store)) =
-                    (self.guard.last_trip_reason(), self.gateway_store.as_ref())
-                {
-                    // Attribute the trip to its constitutional clause (a
-                    // principle *or* a right, via the enforcement register) in
-                    // addition to the rule ID, so the detection loop can
-                    // correlate breaches by clause, not just by rule string
-                    // (#302).
-                    let payload = serde_json::json!({
-                        "reason": reason.code(),
-                        "detail": format!("{:?}", reason),
-                        "rule_id": reason.rule_id(),
-                        "clause": crate::enforcement_register::clause_of_rule(reason.rule_id()),
-                    });
-                    let session_id_for_event =
-                        self.session_id.clone().unwrap_or_default();
-                    let event = autonoetic_types::causal_chain::CausalEventRecord {
-                        event_id: format!("loopguard-{}", uuid::Uuid::new_v4()),
-                        agent_id: self.manifest.agent.id.clone(),
-                        session_id: session_id_for_event,
-                        turn_id: Some(turn_id.clone()),
-                        event_seq: 0,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        category: "loop_guard".to_string(),
-                        action: "tripped".to_string(),
-                        status: "active".to_string(),
-                        // Attribute the trip to the rule whose text actually
-                        // describes it (P-7.5 failure budget / P-7.7 no
-                        // successful result / P-7.19 no semantic progress /
-                        // P-7.20 child-failure budget), not a blanket P-7.7.
-                        enforced_rules: vec![reason.rule_id().to_string()],
-                        target: None,
-                        payload: Some(payload.to_string()),
-                        payload_ref: None,
-                        evidence_ref: None,
-                        reason: Some(reason.code().to_string()),
-                    };
-                    if let Err(err) = store.create_causal_event(&event) {
-                        tracing::warn!(
-                            target: "loop_guard",
-                            error = %err,
-                            "failed to emit loop_guard.tripped causal event"
-                        );
-                    }
-
-                    // Also surface it on the canonical timeline so the room shows
-                    // *why* the session was terminated, carrying the rule ID as a
-                    // first-class ref (was causal-only — invisible in the room).
-                    let sid = self.session_id.clone().unwrap_or_default();
-                    let root = crate::runtime::content_store::root_session_id(&sid).to_string();
-                    let principal =
-                        autonoetic_types::principal::Principal::agent(self.manifest.agent.id.clone());
-                    let role = crate::runtime::session_timeline::derive_role(&self.manifest.agent.id);
-                    let tl = crate::runtime::session_timeline::build_timeline_event(
-                        root,
-                        sid,
-                        Some(turn_id.clone()),
-                        &principal,
-                        &role,
-                        "guard.tripped",
-                        None, // base_altitude ⇒ Error
-                        Some(serde_json::json!({
-                            "reason": reason.code(),
-                            "rule_id": reason.rule_id(),
-                        })),
-                        autonoetic_types::session_timeline::TimelineRefs {
-                            enforced_rules: vec![reason.rule_id().to_string()],
-                            ..Default::default()
-                        },
-                    );
-                    if let Err(err) = store.create_live_digest_event(&tl) {
-                        tracing::debug!(target: "session_timeline", error = %err, "guard.tripped timeline emit failed");
-                    }
-                }
-                let _ =
-                    self.save_yield_checkpoint(history, &turn_id, YieldReason::MaxTurnsReached, None);
-                return Err(e);
+            if let Some(outcome) = self.pre_turn_checks(history, &turn_id).await? {
+                return Ok(outcome);
             }
 
-            if self.session_state == autonoetic_types::agent::SessionState::Normal
-                && self.guard.is_sub_trip_warning()
-            {
-                self.session_state = autonoetic_types::agent::SessionState::Degraded;
-                if let Some(store) = self.gateway_store.as_ref() {
-                    let session_id_for_event = self.session_id.clone().unwrap_or_default();
-                    let event = autonoetic_types::causal_chain::CausalEventRecord {
-                        event_id: format!("subtrip-{}", uuid::Uuid::new_v4()),
-                        agent_id: self.manifest.agent.id.clone(),
-                        session_id: session_id_for_event,
-                        turn_id: None,
-                        event_seq: 0,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        category: "session".to_string(),
-                        action: "session.degraded".to_string(),
-                        status: "active".to_string(),
-                        enforced_rules: vec!["P-7.18".to_string()],
-                        target: None,
-                        payload: Some(serde_json::json!({"reason": "loop_guard_sub_trip_warning"}).to_string()),
-                        payload_ref: None,
-                        evidence_ref: None,
-                        reason: Some("loop_guard_sub_trip_warning".to_string()),
-                    };
-                    let _ = store.create_causal_event(&event);
-                }
-                if let Some(ds) = self.degraded_sessions.as_ref() {
-                    ds.lock().await.insert(session_id.clone());
-                }
-            }
-
-            if let Some(ds) = self.degraded_sessions.as_ref() {
-                let set = ds.lock().await;
-                let in_set = set.contains(&session_id)
-                    || set.contains(crate::runtime::content_store::root_session_id(&session_id));
-                if in_set && self.session_state == autonoetic_types::agent::SessionState::Normal {
-                    self.session_state = autonoetic_types::agent::SessionState::Degraded;
-                } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
-                    self.session_state = autonoetic_types::agent::SessionState::Normal;
-                }
-            }
-
-            if !ri_0_6_snapshot_checked {
-                if let Err(e) = self.check_ri_0_6_turn_snapshot(&session_id, &turn_id) {
-                    let _ = self.save_yield_checkpoint(
-                        history,
-                        &turn_id,
-                        YieldReason::Error(e.to_string()),
-                        None,
-                    );
-                    return Err(e);
-                }
-                ri_0_6_snapshot_checked = true;
-            }
-
-            // Budget check — save checkpoint before propagating budget-exhausted error
-            if let Some(budget) = self.session_budget.as_ref() {
-                if let Err(e) = budget.check_pre_llm(&session_id) {
-                    let _ = self.save_yield_checkpoint(
-                        history,
-                        &turn_id,
-                        YieldReason::BudgetExhausted,
-                        None,
-                    );
-                    return Err(e);
-                }
-            }
-
-            // Root session tree budget check (R+4 / P-6.21)
-            if let Some(root_budget) = self.root_session_budget.as_ref() {
-                if let Err(e) = root_budget.check_pre_llm(root_session_id) {
-                    let _ = self.save_yield_checkpoint(
-                        history,
-                        &turn_id,
-                        YieldReason::BudgetExhausted,
-                        None,
-                    );
-                    return Err(e);
-                }
-            }
-
-            // Emergency-stop pre-flight: if the root session has been
-            // emergency-stopped (by operator, security policy, or budget
-            // circuit breaker), terminate this loop immediately instead of
-            // spending another LLM turn. The external abort (AbortHandle) may
-            // not have reached this task yet, so this cooperative check closes
-            // the race window.
-            if let Some(store) = self.gateway_store.as_ref() {
-                if let Ok(stops) = store.list_emergency_stops_for_root_session(root_session_id) {
-                    if !stops.is_empty() {
-                        let _ = self.save_yield_checkpoint(
-                            history,
-                            &turn_id,
-                            YieldReason::EmergencyStop {
-                                stop_id: stops[0].stop_id.clone(),
-                            },
-                            None,
-                        );
-                        anyhow::bail!(
-                            "emergency_stop: root session '{}' was emergency-stopped",
-                            root_session_id
-                        );
-                    }
-                }
-            }
 
             if !digest_turn_active {
                 tracer.start_digest_turn()?;
@@ -2204,19 +2041,17 @@ impl AgentExecutor {
                     .enforce_cost_catalog_preflight(&actual_model, allow_unpriced_budget)
                     .await
                 {
-                    let _ =
-                        self.save_yield_checkpoint(history, &turn_id, YieldReason::BudgetExhausted, None);
-                    return Err(e);
+                    return Err(self.save_and_yield(history, &turn_id, YieldReason::BudgetExhausted, None, e));
                 }
                 if let Some(root_budget) = self.root_session_budget.as_ref() {
                     if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
-                        let _ = self.save_yield_checkpoint(
+                        return Err(self.save_and_yield(
                             history,
                             &turn_id,
                             YieldReason::BudgetExhausted,
                             None,
-                        );
-                        return Err(e);
+                            e,
+                        ));
                     }
                 }
                 let response = self.llm.complete(&req).await;
@@ -2254,23 +2089,23 @@ impl AgentExecutor {
                                 .enforce_cost_catalog_preflight(fb_model, allow_unpriced_budget)
                                 .await
                             {
-                                let _ = self.save_yield_checkpoint(
+                                return Err(self.save_and_yield(
                                     history,
                                     &turn_id,
                                     YieldReason::BudgetExhausted,
                                     None,
-                                );
-                                return Err(e);
+                                    e,
+                                ));
                             }
                             if let Some(root_budget) = self.root_session_budget.as_ref() {
                                 if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
-                                    let _ = self.save_yield_checkpoint(
+                                    return Err(self.save_and_yield(
                                         history,
                                         &turn_id,
                                         YieldReason::BudgetExhausted,
                                         None,
-                                    );
-                                    return Err(e);
+                                        e,
+                                    ));
                                 }
                             }
                             match self.llm.complete(&fallback_req).await {
@@ -2346,13 +2181,13 @@ impl AgentExecutor {
                         estimated_cost_usd,
                         allow_unpriced_budget,
                     ) {
-                        let _ = self.save_yield_checkpoint(
+                        return Err(self.save_and_yield(
                             history,
                             &turn_id,
                             YieldReason::BudgetExhausted,
                             None,
-                        );
-                        return Err(e);
+                            e,
+                        ));
                     }
                 }
             }
@@ -2366,13 +2201,13 @@ impl AgentExecutor {
                         estimated_cost_usd,
                         allow_unpriced_budget,
                     ) {
-                        let _ = self.save_yield_checkpoint(
+                        return Err(self.save_and_yield(
                             history,
                             &turn_id,
                             YieldReason::BudgetExhausted,
                             None,
-                        );
-                        return Err(e);
+                            e,
+                        ));
                     }
                 }
             }
@@ -2515,596 +2350,28 @@ impl AgentExecutor {
 
             match response.stop_reason {
                 StopReason::ToolUse => {
-                    // Keep the assistant message aside — we only push it to history
-                    // if no suspension occurs (continuation reconstruction re-injects it).
                     let mut assistant_msg = Message::assistant(response.text.clone());
                     assistant_msg.reasoning_content = response.reasoning_content.clone();
                     assistant_msg.reasoning_details = response.reasoning_details.clone();
-
                     assistant_msg.tool_calls = response.tool_calls.clone();
 
-                    if let Some(budget) = self.session_budget.as_ref() {
-                        if let Err(e) = budget
-                            .reserve_tool_invocations(&session_id, response.tool_calls.len() as u64)
-                        {
-                            let _ = self.save_yield_checkpoint(
-                                history,
-                                &turn_id,
-                                YieldReason::BudgetExhausted,
-                                None,
-                            );
-                            return Err(e);
-                        }
-                    }
-
-                    if let Some(root_budget) = self.root_session_budget.as_ref() {
-                        let root =
-                            crate::runtime::content_store::root_session_id(&session_id).to_string();
-                        if let Err(e) = root_budget
-                            .reserve_tool_invocations(&root, response.tool_calls.len() as u64)
-                        {
-                            let _ = self.save_yield_checkpoint(
-                                history,
-                                &turn_id,
-                                YieldReason::BudgetExhausted,
-                                None,
-                            );
-                            return Err(e);
-                        }
-                    }
-
-                    let tool_run_ctx = self.session_id.as_ref().map(|sid| {
-                        crate::runtime::active_execution_registry::NativeToolRunContext {
-                            registry: self
-                                .active_executions
-                                .clone()
-                                .unwrap_or_else(
-                                    crate::runtime::active_execution_registry::ActiveExecutionRegistry::new,
-                                ),
-                            root_session_id: crate::runtime::live_digest::base_session_id(sid)
-                                .to_string(),
-                            workflow_id: self.workflow_id.clone(),
-                            task_id: self.task_id.clone(),
-                            session_id: sid.clone(),
-                            agent_id: self.manifest.agent.id.clone(),
-                            live_digest: self.live_digest.clone(),
-                            live_report: self.live_report.clone(),
-                            user_id: self.user_id.clone(),
-                            artifact_id: self.artifact_id.clone(),
-                            sentinel_suppress_target: Some(self.suppress_until_turn.clone()),
-                            discovered_tools: Some(self.discovered_tools_writer.clone()),
-                            wake_hint: None,
-                            wake_hints_map: None,
-                        }
-                    });
-                    let mut processor = ToolCallProcessor::new(
-                        &mut mcp_runtime,
-                        &self.registry,
-                        &self.manifest,
-                        &mut disclosure_state,
-                        secret_store.as_mut(),
-                        self.config.as_deref(),
-                        self.gateway_store.clone(),
-                        tool_run_ctx,
-                    )
-                    .with_session_context(self.session_id.clone(), Some(turn_id.clone()))
-                    .with_session_state(self.session_state);
-
-                    let (_had_any_success, results) = processor
-                        .process_tool_calls(
-                            &response.tool_calls,
+                    if let Some(outcome) = self
+                        .handle_tool_batch(
+                            response.tool_calls,
+                            history,
+                            &turn_id,
+                            &mut tracer,
+                            &mut mcp_runtime,
+                            &mut disclosure_state,
+                            secret_store.as_mut(),
                             &active_agent_dir,
-                            self.gateway_dir.as_deref(),
-                            &mut tracer,
+                            assistant_msg,
+                            &mut digest_turn_active,
                         )
-                        .await?;
-
-                    // Progressive tool disclosure: if the agent used any Specialized-tier
-                    // tool, escalate the session so subsequent turns see all tiers.
-                    if !self.tool_tier_escalated {
-                        for (_id, tool_name, _result) in &results {
-                            if matches!(
-                                crate::runtime::prompt_budget::tool_tier(tool_name),
-                                autonoetic_types::agent::ToolTier::Specialized,
-                            ) {
-                                self.tool_tier_escalated = true;
-                                tracing::info!(
-                                    target: "autonoetic::tool_disclosure",
-                                    tool = %tool_name,
-                                    "Session escalated to all tool tiers"
-                                );
-                                break;
-                            }
-                        }
-                    }
-
-                    // Drain discovered tools from the writer (written by tool_discover).
+                        .await?
                     {
-                        let mut writer = self.discovered_tools_writer.lock().unwrap_or_else(|e| e.into_inner());
-                        if !writer.is_empty() {
-                            let count = writer.len();
-                            self.discovered_tools.extend(writer.drain());
-                            tracing::info!(
-                                target: "autonoetic::tool_discover",
-                                count,
-                                total = self.discovered_tools.len(),
-                                "Discovered tools merged into session surface"
-                            );
-                        }
+                        return Ok(outcome);
                     }
-
-                    // Check whether the last executed tool call requires approval.
-                    // `process_tool_calls` already stops after the first approval-required result,
-                    // so if any approval is pending it is always the last entry in `results`.
-                    let approval_info = results.last().and_then(|(id, _name, result_json)| {
-                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
-                        if parsed
-                            .get("approval_required")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            let request_id = parsed
-                                .get("request_id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .unwrap_or_default();
-                            Some((id.clone(), request_id, result_json.clone()))
-                        } else {
-                            None
-                        }
-                    });
-
-                    if let Some((pending_call_id, request_id, approval_response)) = approval_info {
-                        let completed_results = results[..results.len() - 1].to_vec();
-                        let remaining_calls = response.tool_calls[results.len()..].to_vec();
-
-                        let pending_tc = response
-                            .tool_calls
-                            .iter()
-                            .find(|tc| tc.id == pending_call_id)
-                            .expect("pending call id must match a tool call in the response");
-
-                        let pending_action = match self.gateway_store.as_ref() {
-                            Some(store) => {
-                                let approval = store.get_approval(&request_id).map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "failed to fetch approval {} while saving checkpoint: {}",
-                                        request_id,
-                                        e
-                                    )
-                                })?;
-                                let approval = approval.ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "missing approval {} while saving checkpoint",
-                                        request_id
-                                    )
-                                })?;
-                                Some(approval.action)
-                            }
-                            None => None,
-                        };
-
-                        let pending_tool_state = PendingToolState {
-                            completed_tool_results: completed_results,
-                            pending_tool_call: PendingToolCall {
-                                call_id: pending_call_id,
-                                tool_name: pending_tc.name.clone(),
-                                arguments: pending_tc.arguments.clone(),
-                                approval_response: Some(approval_response),
-                            },
-                            remaining_tool_calls: remaining_calls,
-                        };
-
-                        // Build enriched checkpoint with all suspension state.
-                        let mut cp = self.build_checkpoint(
-                            history,
-                            &turn_id,
-                            YieldReason::ApprovalRequired {
-                                approval_request_id: request_id.clone(),
-                            },
-                            Some(pending_tool_state),
-                        );
-                        cp.assistant_message = Some(assistant_msg);
-                        cp.pending_action = pending_action;
-                        cp.suspended_at = Some(chrono::Utc::now().to_rfc3339());
-
-                        if let Some(config) = self.config.as_ref() {
-                            if let Err(e) = save_checkpoint(config, &cp) {
-                                tracing::warn!(
-                                    target: "checkpoint",
-                                    session_id = %session_id,
-                                    turn_id = %turn_id,
-                                    approval_request_id = %request_id,
-                                    error = %e,
-                                    "Failed to save enriched approval checkpoint"
-                                );
-                            }
-                        }
-
-                        let _ = tracer.end_digest_turn();
-                        return Ok(TurnOutcome::Suspended {
-                            approval_request_id: request_id,
-                        });
-                    }
-
-                    // Check whether the last executed tool call requires user interaction.
-                    let interaction_info = results.last().and_then(|(id, _name, result_json)| {
-                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
-                        if parsed
-                            .get("interaction_required")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            let interaction_id = parsed
-                                .get("interaction_id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .unwrap_or_default();
-                            Some((id.clone(), interaction_id))
-                        } else {
-                            None
-                        }
-                    });
-
-                    if let Some((pending_call_id, interaction_id)) = interaction_info {
-                        // User interaction required — persist assistant prefix + completed tool
-                        // results, then checkpoint (pending `user.ask` has no result until resume).
-                        let completed_results = results[..results.len() - 1].to_vec();
-                        let remaining_calls = response.tool_calls[results.len()..].to_vec();
-
-                        let pending_tc = response
-                            .tool_calls
-                            .iter()
-                            .find(|tc| tc.id == pending_call_id)
-                            .expect("pending user interaction call id must match a tool call");
-
-                        history.push(assistant_msg);
-                        for (id, name, result) in &completed_results {
-                            history.push(Message::tool_result(
-                                id.clone(),
-                                name.clone(),
-                                result.clone(),
-                            ));
-                        }
-
-                        let pending_tool_state = Some(PendingToolState {
-                            completed_tool_results: completed_results.clone(),
-                            pending_tool_call: PendingToolCall {
-                                call_id: pending_call_id.clone(),
-                                tool_name: pending_tc.name.clone(),
-                                arguments: pending_tc.arguments.clone(),
-                                approval_response: None,
-                            },
-                            remaining_tool_calls: remaining_calls.clone(),
-                        });
-
-                        let _ = self.save_yield_checkpoint(
-                            history,
-                            &turn_id,
-                            YieldReason::UserInputRequired {
-                                interaction_id: interaction_id.clone(),
-                            },
-                            pending_tool_state,
-                        );
-
-                        tracing::info!(
-                            target: "user_interaction",
-                            agent_id = %self.manifest.agent.id,
-                            session_id = %session_id,
-                            interaction_id = %interaction_id,
-                            pending_call_id = %pending_call_id,
-                            "Turn suspended at user interaction boundary"
-                        );
-
-                        // Return SuspendedUserInput — the checkpoint has been saved
-                        // with YieldReason::UserInputRequired. The resume happens via
-                        // checkpoint loading + answer injection. Unlike Completed(None),
-                        // this outcome signals to the caller that the session is blocked
-                        // on user input (not "done").
-                        let _ = tracer.end_digest_turn();
-                        return Ok(TurnOutcome::SuspendedUserInput {
-                            interaction_id: interaction_id.clone(),
-                        });
-                    }
-
-                    // Check whether the last executed tool call requires human escalation.
-                    let escalation_info = results.last().and_then(|(_id, _name, result_json)| {
-                        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
-                        if parsed
-                            .get("escalation_required")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            let request_id = parsed
-                                .get("request_id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                                .unwrap_or_default();
-                            Some(request_id)
-                        } else {
-                            None
-                        }
-                    });
-
-                    if let Some(request_id) = escalation_info {
-                        let _ = self.save_yield_checkpoint(
-                            history,
-                            &turn_id,
-                            YieldReason::HumanEscalation {
-                                escalation_request_id: request_id.clone(),
-                            },
-                            None,
-                        );
-
-                        tracing::info!(
-                            target: "escalation",
-                            agent_id = %self.manifest.agent.id,
-                            session_id = %session_id,
-                            escalation_request_id = %request_id,
-                            "Turn suspended for human escalation"
-                        );
-
-                        let _ = tracer.end_digest_turn();
-                        return Ok(TurnOutcome::Escalated {
-                            escalation_request_id: request_id,
-                        });
-                    }
-
-                    // No approval or interaction required — commit assistant message + tool results to history.
-                    history.push(assistant_msg);
-                    for (id, _name, result) in &results {
-                        history.push(Message::tool_result(
-                            id.clone(),
-                            _name.clone(),
-                            result.clone(),
-                        ));
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
-                            if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
-                                let error_type = parsed.get("error_type")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| match s {
-                                        "validation" => Some(autonoetic_types::tool_error::ToolErrorType::Validation),
-                                        "permission" => Some(autonoetic_types::tool_error::ToolErrorType::Permission),
-                                        "resource" => Some(autonoetic_types::tool_error::ToolErrorType::Resource),
-                                        "execution" => Some(autonoetic_types::tool_error::ToolErrorType::Execution),
-                                        "fatal" => Some(autonoetic_types::tool_error::ToolErrorType::Fatal),
-                                        "conflict" => Some(autonoetic_types::tool_error::ToolErrorType::Conflict),
-                                        "quota_exceeded" => Some(autonoetic_types::tool_error::ToolErrorType::QuotaExceeded),
-                                        "not_found" => Some(autonoetic_types::tool_error::ToolErrorType::NotFound),
-                                        "timeout" => Some(autonoetic_types::tool_error::ToolErrorType::Timeout),
-                                        _ => None,
-                                    });
-                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
-                                {
-                                    self.guard.register_failure(
-                                        &tc.name,
-                                        &tc.arguments,
-                                        error_type.as_ref(),
-                                    );
-                                }
-                            } else if tool_result_counts_as_progress(result) {
-                                if let Some(tc) = response.tool_calls.iter().find(|tc| tc.id == *id)
-                                {
-                                    // Suppress progress reset for stagnant
-                                    // no-op polls (e.g. workflow_wait that
-                                    // returned "still running" after 0s). These
-                                    // carry no new information and should
-                                    // advance the no-progress counter instead
-                                    // of resetting it (issue: polling churn).
-                                    if crate::runtime::tool_dispatch::is_stagnant_poll(
-                                        &tc.name,
-                                        result,
-                                    ) {
-                                        continue;
-                                    }
-                                    // Tools may opt into terminal-progress
-                                    // semantics by stamping
-                                    // `side_effect_state: "committed"` in
-                                    // their result (P-5.14 / P-6.26).
-                                    // Terminal events clear the
-                                    // rotating-polling window — a real
-                                    // side effect just landed, so any
-                                    // prior monotony is stale (issue #287).
-                                    let terminal = parsed
-                                        .get("side_effect_state")
-                                        .and_then(|v| v.as_str())
-                                        == Some("committed");
-                                    if terminal {
-                                        self.guard
-                                            .register_progress_terminal(&tc.name, &tc.arguments);
-                                    } else {
-                                        self.guard
-                                            .register_progress(&tc.name, &tc.arguments);
-                                    }
-                                }
-                            }
-                            if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {
-                                self.guard.register_child_failure();
-                            }
-                        }
-                    }
-
-                    // ── Trajectory Monitor ──────────────────────────────────────
-                    // After guard updates, recompute health and emit divergence
-                    // events on level transitions.
-                    {
-                        use crate::runtime::trajectory_monitor::fingerprint_tool_call;
-                        use crate::runtime::trajectory_health::{
-                            build_event_payload, DIVERGENCE_CATEGORY,
-                        };
-                        use autonoetic_types::causal_chain::EntryStatus;
-
-                        let observations: Vec<ToolObservation> = results
-                            .iter()
-                            .filter_map(|(id, _name, result)| {
-                                let tc = response.tool_calls.iter().find(|tc| tc.id == *id)?;
-                                let fp = fingerprint_tool_call(&tc.name, &tc.arguments);
-                                let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
-                                let failed = parsed.as_ref().map_or(false, |v| {
-                                    // Primary: ok:false
-                                    if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
-                                        return true;
-                                    }
-                                    // Secondary: non-zero exit code (sandbox tools)
-                                    if let Some(code) = v.get("exit_code").and_then(|c| c.as_i64()) {
-                                        return code != 0;
-                                    }
-                                    false
-                                });
-                                Some(ToolObservation {
-                                    fingerprint: fp,
-                                    failed,
-                                })
-                            })
-                            .collect();
-
-                        let result = self.trajectory_monitor.tick(
-                            self.turn_counter,
-                            &observations,
-                            self.last_context_utilization,
-                            &self.guard.snapshot(),
-                        );
-
-                        if result.level_changed {
-                            if let Some(payload) = build_event_payload(&result.health) {
-                                let action = result.health.causal_action().unwrap_or("observed");
-                                if let Err(e) = tracer.log_event(
-                                    DIVERGENCE_CATEGORY,
-                                    action,
-                                    EntryStatus::Success,
-                                    Some(payload),
-                                ) {
-                                    tracing::warn!(
-                                        target: "autonoetic::trajectory",
-                                        error = %e,
-                                        level = %result.health.level_str(),
-                                        "Failed to log divergence event"
-                                    );
-                                }
-                            }
-
-                            // ── P2: Planner messaging & operator escalation ──────
-                            use crate::runtime::trajectory_health::TrajectoryHealth;
-                            use std::sync::atomic::Ordering;
-
-                            let suppressed =
-                                self.turn_counter < self.suppress_until_turn.load(Ordering::Relaxed);
-                            let cfg = self.config.as_ref();
-
-                            match &result.health {
-                                TrajectoryHealth::Diverging { .. }
-                                | TrajectoryHealth::Critical { .. }
-                                    if !suppressed =>
-                                {
-                                    if let Some(store) = self.gateway_store.as_ref() {
-                                        let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
-                                        Self::send_divergence_notice(
-                                            store,
-                                            &root_sid,
-                                            self.turn_counter,
-                                            &self.manifest.agent.id,
-                                            result.health.level_str(),
-                                            &self.suppress_until_turn,
-                                            cfg.map(|c| c.trajectory.notify_planner).unwrap_or(true),
-                                        );
-
-                                        // The Sentinel is a participant in the room, not
-                                        // chrome: its intervention lands on the canonical
-                                        // timeline under the Sentinel seat (#363 P1, RFC §3.2).
-                                        let is_critical =
-                                            matches!(result.health, TrajectoryHealth::Critical { .. });
-                                        let principal =
-                                            autonoetic_types::principal::Principal::agent("sentinel");
-                                        let event = crate::runtime::session_timeline::build_timeline_event(
-                                            root_sid.clone(),
-                                            session_id.to_string(),
-                                            Some(turn_id.clone()),
-                                            &principal,
-                                            &autonoetic_types::session_timeline::SessionRole::Sentinel,
-                                            "divergence.intervention",
-                                            Some(if is_critical {
-                                                autonoetic_types::session_timeline::Altitude::Error
-                                            } else {
-                                                autonoetic_types::session_timeline::Altitude::Attention
-                                            }),
-                                            Some(serde_json::json!({
-                                                "monitored_agent": self.manifest.agent.id,
-                                                "level": result.health.level_str(),
-                                                "turn": self.turn_counter,
-                                            })),
-                                            autonoetic_types::session_timeline::TimelineRefs::default(),
-                                        );
-                                        if let Err(e) = store.create_live_digest_event(&event) {
-                                            tracing::debug!(target: "session_timeline", error = %e, "divergence timeline emit failed");
-                                        }
-                                    }
-
-                                    // Critical also escalates to the operator via the
-                                    // user_interactions channel (per #241 spec — a
-                                    // non-blocking notification, not a gate). We also
-                                    // keep the causal event for durable audit.
-                                    if matches!(result.health, TrajectoryHealth::Critical { .. }) {
-                                        let notify_operator = cfg
-                                            .map(|c| c.trajectory.notify_operator)
-                                            .unwrap_or(true);
-                                        if notify_operator {
-                                            if let Err(e) = tracer.log_event(
-                                                "operator_alert",
-                                                "critical_divergence",
-                                                EntryStatus::Success,
-                                                Some(serde_json::json!({
-                                                    "level": "critical",
-                                                    "turn": self.turn_counter,
-                                                    "agent_id": self.manifest.agent.id,
-                                                    "message": "Trajectory divergence has reached critical level. Review divergence.* events in the causal chain.",
-                                                })),
-                                            ) {
-                                                tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to log operator_alert event");
-                                            }
-
-                                            if let Some(store) = self.gateway_store.as_ref() {
-                                                let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
-                                                let interaction = build_critical_divergence_interaction(
-                                                    &session_id,
-                                                    root_sid,
-                                                    &self.manifest.agent.id,
-                                                    self.turn_counter,
-                                                    result.health.signals(),
-                                                    self.workflow_id.clone(),
-                                                    self.task_id.clone(),
-                                                );
-                                                if let Err(e) = store.create_user_interaction(&interaction) {
-                                                    tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to create critical_divergence user_interaction");
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    // Keep the transcript index current for live diagnostics such as
-                    // session_peek while a child agent is still tool-stepping.
-                    if let Some(gateway_dir) = self.gateway_dir.as_ref() {
-                        if let Err(e) = persist_history_to_content_store(
-                            &self.agent_dir,
-                            &session_id,
-                            history,
-                            gateway_dir,
-                            &mut tracer,
-                            &disclosure_state,
-                            self.gateway_store.as_deref(),
-                            Some(&self.manifest.agent.id),
-                            self.session_started_at.as_deref(),
-                        ) {
-                            tracing::warn!("Failed to persist history after tool batch: {}", e);
-                        }
-                    }
-
-                    let _ = tracer.end_digest_turn();
-                    digest_turn_active = false;
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
                     if !response.text.trim().is_empty() {
@@ -3255,6 +2522,808 @@ impl AgentExecutor {
         let outcome = Ok(TurnOutcome::Completed(reply));
         self.last_history = history.clone();
         outcome
+    }
+
+    /// Runs before each LLM call. Returns `Ok(None)` if the turn should
+    /// proceed. If a gate trips (budget exhausted, emergency stop, max turns,
+    /// etc.) the helper saves a yield checkpoint and returns the error so the
+    /// caller can propagate it.
+    pub async fn pre_turn_checks(
+        &mut self,
+        history: &mut Vec<Message>,
+        turn_id: &str,
+    ) -> anyhow::Result<Option<TurnOutcome>> {
+        let session_id = self.ensure_session_id();
+        let root_session_id = crate::runtime::content_store::root_session_id(&session_id);
+            // Loop guard check — save checkpoint before propagating max-turns error.
+            // When the guard trips, emit a `loop_guard.tripped` causal event with
+            // the structured trip reason (issue #287) so the divergence sentinel
+            // and operators can see *why* the session terminated, not just that
+            // it did.
+            if let Err(e) = self.guard.check_loop() {
+                if let (Some(reason), Some(store)) =
+                    (self.guard.last_trip_reason(), self.gateway_store.as_ref())
+                {
+                    // Attribute the trip to its constitutional clause (a
+                    // principle *or* a right, via the enforcement register) in
+                    // addition to the rule ID, so the detection loop can
+                    // correlate breaches by clause, not just by rule string
+                    // (#302).
+                    let payload = serde_json::json!({
+                        "reason": reason.code(),
+                        "detail": format!("{:?}", reason),
+                        "rule_id": reason.rule_id(),
+                        "clause": crate::enforcement_register::clause_of_rule(reason.rule_id()),
+                    });
+                    let session_id_for_event =
+                        self.session_id.clone().unwrap_or_default();
+                    let event = autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: format!("loopguard-{}", uuid::Uuid::new_v4()),
+                        agent_id: self.manifest.agent.id.clone(),
+                        session_id: session_id_for_event,
+                        turn_id: Some(turn_id.to_string()),
+                        event_seq: 0,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "loop_guard".to_string(),
+                        action: "tripped".to_string(),
+                        status: "active".to_string(),
+                        // Attribute the trip to the rule whose text actually
+                        // describes it (P-7.5 failure budget / P-7.7 no
+                        // successful result / P-7.19 no semantic progress /
+                        // P-7.20 child-failure budget), not a blanket P-7.7.
+                        enforced_rules: vec![reason.rule_id().to_string()],
+                        target: None,
+                        payload: Some(payload.to_string()),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: Some(reason.code().to_string()),
+                    };
+                    if let Err(err) = store.create_causal_event(&event) {
+                        tracing::warn!(
+                            target: "loop_guard",
+                            error = %err,
+                            "failed to emit loop_guard.tripped causal event"
+                        );
+                    }
+
+                    // Also surface it on the canonical timeline so the room shows
+                    // *why* the session was terminated, carrying the rule ID as a
+                    // first-class ref (was causal-only — invisible in the room).
+                    let sid = self.session_id.clone().unwrap_or_default();
+                    let root = crate::runtime::content_store::root_session_id(&sid).to_string();
+                    let principal =
+                        autonoetic_types::principal::Principal::agent(self.manifest.agent.id.clone());
+                    let role = crate::runtime::session_timeline::derive_role(&self.manifest.agent.id);
+                    let tl = crate::runtime::session_timeline::build_timeline_event(
+                        root,
+                        sid,
+                        Some(turn_id.to_string()),
+                        &principal,
+                        &role,
+                        "guard.tripped",
+                        None, // base_altitude ⇒ Error
+                        Some(serde_json::json!({
+                            "reason": reason.code(),
+                            "rule_id": reason.rule_id(),
+                        })),
+                        autonoetic_types::session_timeline::TimelineRefs {
+                            enforced_rules: vec![reason.rule_id().to_string()],
+                            ..Default::default()
+                        },
+                    );
+                    if let Err(err) = store.create_live_digest_event(&tl) {
+                        tracing::debug!(target: "session_timeline", error = %err, "guard.tripped timeline emit failed");
+                    }
+                }
+                return Err(self.save_and_yield(history, turn_id, YieldReason::MaxTurnsReached, None, e));
+            }
+
+            if self.session_state == autonoetic_types::agent::SessionState::Normal
+                && self.guard.is_sub_trip_warning()
+            {
+                self.session_state = autonoetic_types::agent::SessionState::Degraded;
+                if let Some(store) = self.gateway_store.as_ref() {
+                    let session_id_for_event = self.session_id.clone().unwrap_or_default();
+                    let event = autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: format!("subtrip-{}", uuid::Uuid::new_v4()),
+                        agent_id: self.manifest.agent.id.clone(),
+                        session_id: session_id_for_event,
+                        turn_id: None,
+                        event_seq: 0,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "session".to_string(),
+                        action: "session.degraded".to_string(),
+                        status: "active".to_string(),
+                        enforced_rules: vec!["P-7.18".to_string()],
+                        target: None,
+                        payload: Some(serde_json::json!({"reason": "loop_guard_sub_trip_warning"}).to_string()),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: Some("loop_guard_sub_trip_warning".to_string()),
+                    };
+                    let _ = store.create_causal_event(&event);
+                }
+                if let Some(ds) = self.degraded_sessions.as_ref() {
+                    ds.lock().await.insert(session_id.clone());
+                }
+            }
+
+            if let Some(ds) = self.degraded_sessions.as_ref() {
+                let set = ds.lock().await;
+                let in_set = set.contains(&session_id)
+                    || set.contains(crate::runtime::content_store::root_session_id(&session_id));
+                if in_set && self.session_state == autonoetic_types::agent::SessionState::Normal {
+                    self.session_state = autonoetic_types::agent::SessionState::Degraded;
+                } else if !in_set && self.session_state == autonoetic_types::agent::SessionState::Degraded {
+                    self.session_state = autonoetic_types::agent::SessionState::Normal;
+                }
+            }
+
+            if !self.ri_0_6_snapshot_checked {
+                if let Err(e) = self.check_ri_0_6_turn_snapshot(&session_id, turn_id) {
+                    return Err(self.save_and_yield(
+                        history,
+                        turn_id,
+                        YieldReason::Error(e.to_string()),
+                        None,
+                        e,
+                    ));
+                }
+                self.ri_0_6_snapshot_checked = true;
+            }
+
+            // Budget check — save checkpoint before propagating budget-exhausted error
+            if let Some(budget) = self.session_budget.as_ref() {
+                if let Err(e) = budget.check_pre_llm(&session_id) {
+                    return Err(self.save_and_yield(
+                        history,
+                        turn_id,
+                        YieldReason::BudgetExhausted,
+                        None,
+                        e,
+                    ));
+                }
+            }
+
+            // Root session tree budget check (R+4 / P-6.21)
+            if let Some(root_budget) = self.root_session_budget.as_ref() {
+                if let Err(e) = root_budget.check_pre_llm(root_session_id) {
+                    return Err(self.save_and_yield(
+                        history,
+                        turn_id,
+                        YieldReason::BudgetExhausted,
+                        None,
+                        e,
+                    ));
+                }
+            }
+
+            // Emergency-stop pre-flight: if the root session has been
+            // emergency-stopped (by operator, security policy, or budget
+            // circuit breaker), terminate this loop immediately instead of
+            // spending another LLM turn. The external abort (AbortHandle) may
+            // not have reached this task yet, so this cooperative check closes
+            // the race window.
+            if let Some(store) = self.gateway_store.as_ref() {
+                if let Ok(stops) = store.list_emergency_stops_for_root_session(root_session_id) {
+                    if !stops.is_empty() {
+                        return Err(self.save_and_yield(
+                            history,
+                            turn_id,
+                            YieldReason::EmergencyStop {
+                                stop_id: stops[0].stop_id.clone(),
+                            },
+                            None,
+                            anyhow::anyhow!(
+                                "emergency_stop: root session '{}' was emergency-stopped",
+                                root_session_id
+                            ),
+                        ));
+                    }
+                }
+            }
+
+        Ok(None)
+    }
+
+    /// Processes a batch of tool calls from the LLM. Returns `Some(TurnOutcome)`
+    /// if the turn should suspend (approval/user-input/escalation), or `None`
+    /// if the batch completed and the loop should continue.
+    pub async fn handle_tool_batch(
+        &mut self,
+        tool_calls: Vec<ToolCall>,
+        history: &mut Vec<Message>,
+        turn_id: &str,
+        tracer: &mut SessionTracer,
+        mcp_runtime: &mut McpToolRuntime,
+        disclosure_state: &mut DisclosureState,
+        secret_store: Option<&mut SecretStoreRuntime>,
+        active_agent_dir: &std::path::Path,
+        assistant_msg: Message,
+        digest_turn_active: &mut bool,
+    ) -> anyhow::Result<Option<TurnOutcome>> {
+        let session_id = self.ensure_session_id();
+            if let Some(budget) = self.session_budget.as_ref() {
+                if let Err(e) = budget
+                    .reserve_tool_invocations(&session_id, tool_calls.len() as u64)
+                {
+                    return Err(self.save_and_yield(
+                        history,
+                        turn_id,
+                        YieldReason::BudgetExhausted,
+                        None,
+                        e,
+                    ));
+                }
+            }
+
+            if let Some(root_budget) = self.root_session_budget.as_ref() {
+                let root =
+                    crate::runtime::content_store::root_session_id(&session_id).to_string();
+                if let Err(e) = root_budget
+                    .reserve_tool_invocations(&root, tool_calls.len() as u64)
+                {
+                    return Err(self.save_and_yield(
+                        history,
+                        turn_id,
+                        YieldReason::BudgetExhausted,
+                        None,
+                        e,
+                    ));
+                }
+            }
+
+            let tool_run_ctx = self.session_id.as_ref().map(|sid| {
+                crate::runtime::active_execution_registry::NativeToolRunContext {
+                    registry: self
+                        .active_executions
+                        .clone()
+                        .unwrap_or_else(
+                            crate::runtime::active_execution_registry::ActiveExecutionRegistry::new,
+                        ),
+                    root_session_id: crate::runtime::live_digest::base_session_id(sid)
+                        .to_string(),
+                    workflow_id: self.workflow_id.clone(),
+                    task_id: self.task_id.clone(),
+                    session_id: sid.clone(),
+                    agent_id: self.manifest.agent.id.clone(),
+                    live_digest: self.live_digest.clone(),
+                    live_report: self.live_report.clone(),
+                    user_id: self.user_id.clone(),
+                    artifact_id: self.artifact_id.clone(),
+                    sentinel_suppress_target: Some(self.suppress_until_turn.clone()),
+                    discovered_tools: Some(self.discovered_tools_writer.clone()),
+                    wake_hint: None,
+                    wake_hints_map: None,
+                }
+            });
+            let mut processor = ToolCallProcessor::new(
+                mcp_runtime,
+                &self.registry,
+                &self.manifest,
+                disclosure_state,
+                secret_store,
+                self.config.as_deref(),
+                self.gateway_store.clone(),
+                tool_run_ctx,
+            )
+            .with_session_context(self.session_id.clone(), Some(turn_id.to_string()))
+            .with_session_state(self.session_state);
+
+            let (_had_any_success, results) = processor
+                .process_tool_calls(
+                    &tool_calls,
+                    &active_agent_dir,
+                    self.gateway_dir.as_deref(),
+                    tracer,
+                )
+                .await?;
+
+            // Progressive tool disclosure: if the agent used any Specialized-tier
+            // tool, escalate the session so subsequent turns see all tiers.
+            if !self.tool_tier_escalated {
+                for (_id, tool_name, _result) in &results {
+                    if matches!(
+                        crate::runtime::prompt_budget::tool_tier(tool_name),
+                        autonoetic_types::agent::ToolTier::Specialized,
+                    ) {
+                        self.tool_tier_escalated = true;
+                        tracing::info!(
+                            target: "autonoetic::tool_disclosure",
+                            tool = %tool_name,
+                            "Session escalated to all tool tiers"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            // Drain discovered tools from the writer (written by tool_discover).
+            {
+                let mut writer = self.discovered_tools_writer.lock().unwrap_or_else(|e| e.into_inner());
+                if !writer.is_empty() {
+                    let count = writer.len();
+                    self.discovered_tools.extend(writer.drain());
+                    tracing::info!(
+                        target: "autonoetic::tool_discover",
+                        count,
+                        total = self.discovered_tools.len(),
+                        "Discovered tools merged into session surface"
+                    );
+                }
+            }
+
+            // Check whether the last executed tool call requires approval.
+            // `process_tool_calls` already stops after the first approval-required result,
+            // so if any approval is pending it is always the last entry in `results`.
+            let approval_info = results.last().and_then(|(id, _name, result_json)| {
+                let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                if parsed
+                    .get("approval_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let request_id = parsed
+                        .get("request_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    Some((id.clone(), request_id, result_json.clone()))
+                } else {
+                    None
+                }
+            });
+
+            if let Some((pending_call_id, request_id, approval_response)) = approval_info {
+                let completed_results = results[..results.len() - 1].to_vec();
+                let remaining_calls = tool_calls[results.len()..].to_vec();
+
+                let pending_tc = tool_calls
+                    .iter()
+                    .find(|tc| tc.id == pending_call_id)
+                    .expect("pending call id must match a tool call in the response");
+
+                let pending_action = match self.gateway_store.as_ref() {
+                    Some(store) => {
+                        let approval = store.get_approval(&request_id).map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to fetch approval {} while saving checkpoint: {}",
+                                request_id,
+                                e
+                            )
+                        })?;
+                        let approval = approval.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "missing approval {} while saving checkpoint",
+                                request_id
+                            )
+                        })?;
+                        Some(approval.action)
+                    }
+                    None => None,
+                };
+
+                let pending_tool_state = PendingToolState {
+                    completed_tool_results: completed_results,
+                    pending_tool_call: PendingToolCall {
+                        call_id: pending_call_id,
+                        tool_name: pending_tc.name.clone(),
+                        arguments: pending_tc.arguments.clone(),
+                        approval_response: Some(approval_response),
+                    },
+                    remaining_tool_calls: remaining_calls,
+                };
+
+                // Build enriched checkpoint with all suspension state.
+                let mut cp = self.build_checkpoint(
+                    history,
+                    turn_id,
+                    YieldReason::ApprovalRequired {
+                        approval_request_id: request_id.clone(),
+                    },
+                    Some(pending_tool_state),
+                );
+                cp.assistant_message = Some(assistant_msg);
+                cp.pending_action = pending_action;
+                cp.suspended_at = Some(chrono::Utc::now().to_rfc3339());
+
+                if let Some(config) = self.config.as_ref() {
+                    if let Err(e) = save_checkpoint(config, &cp) {
+                        tracing::warn!(
+                            target: "checkpoint",
+                            session_id = %session_id,
+                            turn_id = %turn_id,
+                            approval_request_id = %request_id,
+                            error = %e,
+                            "Failed to save enriched approval checkpoint"
+                        );
+                    }
+                }
+
+                let _ = tracer.end_digest_turn();
+                return Ok(Some(TurnOutcome::Suspended {
+                    approval_request_id: request_id,
+                }));
+            }
+
+            // Check whether the last executed tool call requires user interaction.
+            let interaction_info = results.last().and_then(|(id, _name, result_json)| {
+                let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                if parsed
+                    .get("interaction_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let interaction_id = parsed
+                        .get("interaction_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    Some((id.clone(), interaction_id))
+                } else {
+                    None
+                }
+            });
+
+            if let Some((pending_call_id, interaction_id)) = interaction_info {
+                // User interaction required — persist assistant prefix + completed tool
+                // results, then checkpoint (pending `user.ask` has no result until resume).
+                let completed_results = results[..results.len() - 1].to_vec();
+                let remaining_calls = tool_calls[results.len()..].to_vec();
+
+                let pending_tc = tool_calls
+                    .iter()
+                    .find(|tc| tc.id == pending_call_id)
+                    .expect("pending user interaction call id must match a tool call");
+
+                history.push(assistant_msg);
+                for (id, name, result) in &completed_results {
+                    history.push(Message::tool_result(
+                        id.clone(),
+                        name.clone(),
+                        result.clone(),
+                    ));
+                }
+
+                let pending_tool_state = Some(PendingToolState {
+                    completed_tool_results: completed_results.clone(),
+                    pending_tool_call: PendingToolCall {
+                        call_id: pending_call_id.clone(),
+                        tool_name: pending_tc.name.clone(),
+                        arguments: pending_tc.arguments.clone(),
+                        approval_response: None,
+                    },
+                    remaining_tool_calls: remaining_calls.clone(),
+                });
+
+                let _ = self.save_yield_checkpoint(
+                    history,
+                    turn_id,
+                    YieldReason::UserInputRequired {
+                        interaction_id: interaction_id.clone(),
+                    },
+                    pending_tool_state,
+                );
+
+                tracing::info!(
+                    target: "user_interaction",
+                    agent_id = %self.manifest.agent.id,
+                    session_id = %session_id,
+                    interaction_id = %interaction_id,
+                    pending_call_id = %pending_call_id,
+                    "Turn suspended at user interaction boundary"
+                );
+
+                // Return SuspendedUserInput — the checkpoint has been saved
+                // with YieldReason::UserInputRequired. The resume happens via
+                // checkpoint loading + answer injection. Unlike Completed(None),
+                // this outcome signals to the caller that the session is blocked
+                // on user input (not "done").
+                let _ = tracer.end_digest_turn();
+                return Ok(Some(TurnOutcome::SuspendedUserInput {
+                    interaction_id: interaction_id.clone(),
+                }));
+            }
+
+            // Check whether the last executed tool call requires human escalation.
+            let escalation_info = results.last().and_then(|(_id, _name, result_json)| {
+                let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                if parsed
+                    .get("escalation_required")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let request_id = parsed
+                        .get("request_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    Some(request_id)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(request_id) = escalation_info {
+                let _ = self.save_yield_checkpoint(
+                    history,
+                    turn_id,
+                    YieldReason::HumanEscalation {
+                        escalation_request_id: request_id.clone(),
+                    },
+                    None,
+                );
+
+                tracing::info!(
+                    target: "escalation",
+                    agent_id = %self.manifest.agent.id,
+                    session_id = %session_id,
+                    escalation_request_id = %request_id,
+                    "Turn suspended for human escalation"
+                );
+
+                let _ = tracer.end_digest_turn();
+                return Ok(Some(TurnOutcome::Escalated {
+                    escalation_request_id: request_id,
+                }));
+            }
+
+            // No approval or interaction required — commit assistant message + tool results to history.
+            history.push(assistant_msg);
+            for (id, _name, result) in &results {
+                history.push(Message::tool_result(
+                    id.clone(),
+                    _name.clone(),
+                    result.clone(),
+                ));
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+                    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
+                        let error_type = parsed.get("error_type")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| match s {
+                                "validation" => Some(autonoetic_types::tool_error::ToolErrorType::Validation),
+                                "permission" => Some(autonoetic_types::tool_error::ToolErrorType::Permission),
+                                "resource" => Some(autonoetic_types::tool_error::ToolErrorType::Resource),
+                                "execution" => Some(autonoetic_types::tool_error::ToolErrorType::Execution),
+                                "fatal" => Some(autonoetic_types::tool_error::ToolErrorType::Fatal),
+                                "conflict" => Some(autonoetic_types::tool_error::ToolErrorType::Conflict),
+                                "quota_exceeded" => Some(autonoetic_types::tool_error::ToolErrorType::QuotaExceeded),
+                                "not_found" => Some(autonoetic_types::tool_error::ToolErrorType::NotFound),
+                                "timeout" => Some(autonoetic_types::tool_error::ToolErrorType::Timeout),
+                                _ => None,
+                            });
+                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
+                        {
+                            self.guard.register_failure(
+                                &tc.name,
+                                &tc.arguments,
+                                error_type.as_ref(),
+                            );
+                        }
+                    } else if tool_result_counts_as_progress(result) {
+                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
+                        {
+                            // Suppress progress reset for stagnant
+                            // no-op polls (e.g. workflow_wait that
+                            // returned "still running" after 0s). These
+                            // carry no new information and should
+                            // advance the no-progress counter instead
+                            // of resetting it (issue: polling churn).
+                            if crate::runtime::tool_dispatch::is_stagnant_poll(
+                                &tc.name,
+                                result,
+                            ) {
+                                continue;
+                            }
+                            // Tools may opt into terminal-progress
+                            // semantics by stamping
+                            // `side_effect_state: "committed"` in
+                            // their result (P-5.14 / P-6.26).
+                            // Terminal events clear the
+                            // rotating-polling window — a real
+                            // side effect just landed, so any
+                            // prior monotony is stale (issue #287).
+                            let terminal = parsed
+                                .get("side_effect_state")
+                                .and_then(|v| v.as_str())
+                                == Some("committed");
+                            if terminal {
+                                self.guard
+                                    .register_progress_terminal(&tc.name, &tc.arguments);
+                            } else {
+                                self.guard
+                                    .register_progress(&tc.name, &tc.arguments);
+                            }
+                        }
+                    }
+                    if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {
+                        self.guard.register_child_failure();
+                    }
+                }
+            }
+
+            // ── Trajectory Monitor ──────────────────────────────────────
+            // After guard updates, recompute health and emit divergence
+            // events on level transitions.
+            {
+                use crate::runtime::trajectory_monitor::fingerprint_tool_call;
+                use crate::runtime::trajectory_health::{
+                    build_event_payload, DIVERGENCE_CATEGORY,
+                };
+                use autonoetic_types::causal_chain::EntryStatus;
+
+                let observations: Vec<ToolObservation> = results
+                    .iter()
+                    .filter_map(|(id, _name, result)| {
+                        let tc = tool_calls.iter().find(|tc| tc.id == *id)?;
+                        let fp = fingerprint_tool_call(&tc.name, &tc.arguments);
+                        let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
+                        let failed = parsed.as_ref().map_or(false, |v| {
+                            // Primary: ok:false
+                            if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+                                return true;
+                            }
+                            // Secondary: non-zero exit code (sandbox tools)
+                            if let Some(code) = v.get("exit_code").and_then(|c| c.as_i64()) {
+                                return code != 0;
+                            }
+                            false
+                        });
+                        Some(ToolObservation {
+                            fingerprint: fp,
+                            failed,
+                        })
+                    })
+                    .collect();
+
+                let result = self.trajectory_monitor.tick(
+                    self.turn_counter,
+                    &observations,
+                    self.last_context_utilization,
+                    &self.guard.snapshot(),
+                );
+
+                if result.level_changed {
+                    if let Some(payload) = build_event_payload(&result.health) {
+                        let action = result.health.causal_action().unwrap_or("observed");
+                        if let Err(e) = tracer.log_event(
+                            DIVERGENCE_CATEGORY,
+                            action,
+                            EntryStatus::Success,
+                            Some(payload),
+                        ) {
+                            tracing::warn!(
+                                target: "autonoetic::trajectory",
+                                error = %e,
+                                level = %result.health.level_str(),
+                                "Failed to log divergence event"
+                            );
+                        }
+                    }
+
+                    // ── P2: Planner messaging & operator escalation ──────
+                    use crate::runtime::trajectory_health::TrajectoryHealth;
+                    use std::sync::atomic::Ordering;
+
+                    let suppressed =
+                        self.turn_counter < self.suppress_until_turn.load(Ordering::Relaxed);
+                    let cfg = self.config.as_ref();
+
+                    match &result.health {
+                        TrajectoryHealth::Diverging { .. }
+                        | TrajectoryHealth::Critical { .. }
+                            if !suppressed =>
+                        {
+                            if let Some(store) = self.gateway_store.as_ref() {
+                                let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
+                                Self::send_divergence_notice(
+                                    store,
+                                    &root_sid,
+                                    self.turn_counter,
+                                    &self.manifest.agent.id,
+                                    result.health.level_str(),
+                                    &self.suppress_until_turn,
+                                    cfg.map(|c| c.trajectory.notify_planner).unwrap_or(true),
+                                );
+
+                                // The Sentinel is a participant in the room, not
+                                // chrome: its intervention lands on the canonical
+                                // timeline under the Sentinel seat (#363 P1, RFC §3.2).
+                                let is_critical =
+                                    matches!(result.health, TrajectoryHealth::Critical { .. });
+                                let principal =
+                                    autonoetic_types::principal::Principal::agent("sentinel");
+                                let event = crate::runtime::session_timeline::build_timeline_event(
+                                    root_sid.clone(),
+                                    session_id.to_string(),
+                                    Some(turn_id.to_string()),
+                                    &principal,
+                                    &autonoetic_types::session_timeline::SessionRole::Sentinel,
+                                    "divergence.intervention",
+                                    Some(if is_critical {
+                                        autonoetic_types::session_timeline::Altitude::Error
+                                    } else {
+                                        autonoetic_types::session_timeline::Altitude::Attention
+                                    }),
+                                    Some(serde_json::json!({
+                                        "monitored_agent": self.manifest.agent.id,
+                                        "level": result.health.level_str(),
+                                        "turn": self.turn_counter,
+                                    })),
+                                    autonoetic_types::session_timeline::TimelineRefs::default(),
+                                );
+                                if let Err(e) = store.create_live_digest_event(&event) {
+                                    tracing::debug!(target: "session_timeline", error = %e, "divergence timeline emit failed");
+                                }
+                            }
+
+                            // Critical also escalates to the operator via the
+                            // user_interactions channel (per #241 spec — a
+                            // non-blocking notification, not a gate). We also
+                            // keep the causal event for durable audit.
+                            if matches!(result.health, TrajectoryHealth::Critical { .. }) {
+                                let notify_operator = cfg
+                                    .map(|c| c.trajectory.notify_operator)
+                                    .unwrap_or(true);
+                                if notify_operator {
+                                    if let Err(e) = tracer.log_event(
+                                        "operator_alert",
+                                        "critical_divergence",
+                                        EntryStatus::Success,
+                                        Some(serde_json::json!({
+                                            "level": "critical",
+                                            "turn": self.turn_counter,
+                                            "agent_id": self.manifest.agent.id,
+                                            "message": "Trajectory divergence has reached critical level. Review divergence.* events in the causal chain.",
+                                        })),
+                                    ) {
+                                        tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to log operator_alert event");
+                                    }
+
+                                    if let Some(store) = self.gateway_store.as_ref() {
+                                        let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
+                                        let interaction = build_critical_divergence_interaction(
+                                            &session_id,
+                                            root_sid,
+                                            &self.manifest.agent.id,
+                                            self.turn_counter,
+                                            result.health.signals(),
+                                            self.workflow_id.clone(),
+                                            self.task_id.clone(),
+                                        );
+                                        if let Err(e) = store.create_user_interaction(&interaction) {
+                                            tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to create critical_divergence user_interaction");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Keep the transcript index current for live diagnostics such as
+            // session_peek while a child agent is still tool-stepping.
+            if let Some(gateway_dir) = self.gateway_dir.as_ref() {
+                if let Err(e) = persist_history_to_content_store(
+                    &self.agent_dir,
+                    &session_id,
+                    history,
+                    gateway_dir,
+                    tracer,
+                    &disclosure_state,
+                    self.gateway_store.as_deref(),
+                    Some(&self.manifest.agent.id),
+                    self.session_started_at.as_deref(),
+                ) {
+                    tracing::warn!("Failed to persist history after tool batch: {}", e);
+                }
+            }
+
+            let _ = tracer.end_digest_turn();
+            *digest_turn_active = false;
+            return Ok(None);
     }
 
     /// Send a divergence notice to the root planner if not suppressed.
