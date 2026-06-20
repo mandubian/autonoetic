@@ -260,8 +260,10 @@ capabilities:
 ### NetworkAccess (requires `hosts` field)
 ```json
 {"type": "NetworkAccess", "hosts": ["api.example.com"]}
-{"type": "NetworkAccess", "hosts": ["*"]}  // Allow all hosts
+{"type": "NetworkAccess", "hosts": ["*"]}  // Only for genuine open-web agents (e.g. researcher, web-search)
 ```
+
+Prefer concrete hosts. During `agent_revision_create_from_intent`, the gateway statically analyzes the artifact source and rejects the revision if the code contacts hosts not listed in the capability. Use `hosts: ["*"]` only when the agent cannot enumerate its targets upfront (e.g., a researcher that follows arbitrary URLs).
 
 ### SandboxFunctions (for MCP tools)
 ```json

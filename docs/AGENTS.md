@@ -407,7 +407,7 @@ It takes no arguments, reports only your own self and the public constitution, a
 | Tool | Signature | Description |
 |------|-----------|-------------|
 | `agent_revision_create` | `(artifact_ref: string, agent_id: string, ...) → revision` | Low-level strict artifact path (expects manifest/lock already present in artifact) |
-| `agent_revision_create_from_intent` | `(agent_id, artifact_ref, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock` |
+| `agent_revision_create_from_intent` | `(agent_id, artifact_ref, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock`. Declared `NetworkAccess.hosts` are validated against URL literals detected in the artifact source. |
 | `agent_revision_schema` | `() → schema` | Return install contract ownership split, required fields, and canonical examples |
 | `agent_revision_list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
 | `agent_revision_inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |

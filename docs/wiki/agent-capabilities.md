@@ -19,7 +19,16 @@ Every agent declares its required capabilities in the SKILL.md frontmatter. The 
 | `ToolInvoke` | `allowed: [string]` | Tool access by prefix (e.g., `web.*`, `sandbox.*`) |
 | `ReadAccess` | `scopes: [string]` | Read access to content, memory, knowledge |
 | `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge |
-| `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts |
+| `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts. The gateway validates declared hosts against URL literals detected in the artifact source during revision creation. |
+
+## Host Validation
+
+When creating a revision via `agent_revision_create_from_intent`, the gateway extracts hosts from URL literals (e.g. `https://api.example.com/...`) and IP addresses found in the artifact source files. The revision is rejected if any detected host is not covered by the declared `NetworkAccess.hosts` list.
+
+- Declare the exact hostnames your code calls.
+- A bare domain like `example.com` covers itself and all subdomains.
+- `*.example.com` covers subdomains but not `example.com` itself.
+- Use `hosts: ["*"]` only for genuine open-web agents that cannot enumerate targets upfront (e.g. researcher, web-search).
 | `CodeExecution` | `patterns: [string]` | Execute scripts/commands in sandbox |
 | `AgentSpawn` | `max_children: number` | Create child agent sessions |
 | `AgentMessage` | `patterns: [string]` | Send messages to other agents |
