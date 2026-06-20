@@ -424,7 +424,9 @@ async fn check_approval_timeouts(
             };
 
             let timed_out = match suspended_at {
-                Some(ts) => (now - ts).num_seconds() as u64 > timeout_secs,
+                // Use signed comparison to avoid u64 wraparound on clock skew
+                // or tampered timestamps that produce a negative duration.
+                Some(ts) => (now - ts).num_seconds() > timeout_secs as i64,
                 None => false,
             };
 

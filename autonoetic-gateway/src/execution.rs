@@ -36,12 +36,23 @@ use tokio::sync::{Mutex, Semaphore};
 /// then append a user message confirming the approval.  This fixes the
 /// LLM-dependent relay bug where the model ignores the text-only hint and
 /// retries without `approval_ref`, causing redundant approval requests.
-fn inject_approval_ref_into_history(history: &mut Vec<Message>, approval_ref: &str) {
+fn inject_approval_ref_into_history(
+    history: &mut Vec<Message>,
+    approval_ref: &str,
+    target_call_id: Option<&str>,
+) {
     // Walk history backwards to find the last assistant message with tool_calls.
     for msg in history.iter_mut().rev() {
         if matches!(msg.role, crate::llm::Role::Assistant) && !msg.tool_calls.is_empty() {
-            // Inject approval_ref into the last tool call's arguments.
-            if let Some(tc) = msg.tool_calls.last_mut() {
+            // When a target call_id is provided (enriched checkpoint), inject
+            // into that specific tool call.  Otherwise fall back to the last
+            // one in the batch (legacy / non-enriched path).
+            let tc = if let Some(id) = target_call_id {
+                msg.tool_calls.iter_mut().find(|tc| tc.id == id)
+            } else {
+                msg.tool_calls.last_mut()
+            };
+            if let Some(tc) = tc {
                 match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
                     Ok(mut args_val) => {
                         if let Some(obj) = args_val.as_object_mut() {
@@ -1918,6 +1929,25 @@ impl GatewayExecutionService {
                     );
                 }
                 Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                    // TOCTOU action-equality check: the action stored in the
+                    // checkpoint must structurally match the action in the
+                    // approval row.  This prevents substitution attacks where
+                    // the approval row is swapped between suspend and resume.
+                    if let Some(ref cp_action) = checkpoint.pending_action {
+                        if cp_action != &req.action {
+                            tracing::error!(
+                                target: "checkpoint",
+                                session_id = %session_id,
+                                approval_request_id = %rid,
+                                "Action mismatch between checkpoint and approval row — possible substitution attack"
+                            );
+                            anyhow::bail!(
+                                "checkpoint action mismatch: the action stored in the checkpoint does not match the approved action (session '{}')",
+                                session_id
+                            );
+                        }
+                    }
+
                     tracing::info!(
                         target: "checkpoint",
                         agent_id = %runtime.manifest.agent.id,
@@ -1940,13 +1970,19 @@ impl GatewayExecutionService {
                     }
                     checkpoint.restore_into(runtime);
                     let mut history = checkpoint.history.clone();
+                    // Extract the specific call_id that was blocked by the
+                    // approval gate, so we can target it precisely.
+                    let target_call_id = checkpoint
+                        .pending_tool_state
+                        .as_ref()
+                        .map(|pts| pts.pending_tool_call.call_id.as_str());
                     // For enriched checkpoints the assistant message was saved
                     // separately; push it back so inject_approval_ref can find
                     // the tool calls and mark them with approval_ref.
                     if let Some(ref am) = checkpoint.assistant_message {
                         history.push(am.clone());
                     }
-                    inject_approval_ref_into_history(&mut history, rid);
+                    inject_approval_ref_into_history(&mut history, rid, target_call_id);
                     let initial_msg = checkpoint.initial_user_message();
                     let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
                     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
@@ -4151,7 +4187,7 @@ mod tests {
             },
         ];
 
-        inject_approval_ref_into_history(&mut history, "apr-abc123");
+        inject_approval_ref_into_history(&mut history, "apr-abc123", None);
 
         // The assistant message's tool call should now have approval_ref.
         let assistant_msg = &history[1];
@@ -4186,7 +4222,7 @@ mod tests {
             },
         ];
 
-        inject_approval_ref_into_history(&mut history, "apr-new");
+        inject_approval_ref_into_history(&mut history, "apr-new", None);
 
         let tc = &history[0].tool_calls[0];
         let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap();

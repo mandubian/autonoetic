@@ -428,11 +428,29 @@ pub fn load_checkpoint(
     Ok(Some(checkpoint))
 }
 
-/// Try to deserialize a checkpoint from JSON, handling both the signed envelope
-/// format and the legacy unsigned format.
-fn deserialize_checkpoint_from_json(json: &str) -> Option<SessionCheckpoint> {
-    // New signed envelope format
+/// Verify HMAC and deserialize a checkpoint from raw JSON, handling both
+/// the signed envelope format and the legacy unsigned format.
+///
+/// Tampered checkpoints are rejected; `None` is returned for files that
+/// fail both signed and legacy deserialization (e.g. corrupt/truncated).
+fn verify_and_deserialize_checkpoint(
+    config: &GatewayConfig,
+    json: &str,
+) -> Option<SessionCheckpoint> {
+    // Signed envelope format — verify HMAC before trusting payload.
     if let Ok(envelope) = serde_json::from_str::<SignedCheckpoint>(json) {
+        let key = checkpoint_hmac_key(config);
+        if !crate::server::ofp::hmac_verify(
+            &key,
+            envelope.payload_json.as_bytes(),
+            &envelope.hmac_hex,
+        ) {
+            tracing::warn!(
+                target: "checkpoint",
+                "HMAC verification failed during scan — skipping tampered checkpoint"
+            );
+            return None;
+        }
         return serde_json::from_str(&envelope.payload_json).ok();
     }
     // Legacy unsigned format
@@ -458,7 +476,7 @@ pub fn load_latest_checkpoint(
             continue;
         }
         let json = std::fs::read_to_string(entry.path())?;
-        if let Some(checkpoint) = deserialize_checkpoint_from_json(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             let turn = checkpoint.turn_counter;
             match &latest {
                 None => latest = Some((turn, checkpoint)),
@@ -541,7 +559,7 @@ pub fn prune_checkpoints(
             continue;
         }
         let json = std::fs::read_to_string(&path)?;
-        if let Some(checkpoint) = deserialize_checkpoint_from_json(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             checkpoints.push((checkpoint.turn_counter, path));
         }
     }
@@ -578,7 +596,7 @@ pub fn list_checkpoints(config: &GatewayConfig, session_id: &str) -> anyhow::Res
             continue;
         }
         let json = std::fs::read_to_string(entry.path())?;
-        if let Some(checkpoint) = deserialize_checkpoint_from_json(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             checkpoints.push((checkpoint.turn_counter, checkpoint.turn_id));
         }
     }
@@ -934,5 +952,74 @@ mod tests {
             let decoded: YieldReason = serde_json::from_str(&json).unwrap();
             assert_eq!(reason, decoded);
         }
+    }
+
+    #[test]
+    fn test_checkpoint_hmac_tamper_rejection() {
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+        let session_id = "session-tamper";
+        let turn_id = "turn-001";
+
+        // Build and save a checkpoint.
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuardState::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+        };
+        save_checkpoint(&config, &checkpoint).expect("should save");
+
+        // --- load_checkpoint rejects tampered payload ---
+        let path = checkpoint_path(&config, session_id, turn_id);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&original).expect("saved as signed envelope");
+        // Tamper: replace hmac_hex with garbage so verification fails.
+        envelope["hmac_hex"] = serde_json::json!("deadbeef00".repeat(8));
+        std::fs::write(&path, serde_json::to_string(&envelope).unwrap())
+            .expect("write tampered file");
+
+        let result = load_checkpoint(&config, session_id, turn_id);
+        assert!(
+            result.is_err(),
+            "tampered checkpoint should be rejected by load_checkpoint"
+        );
+        assert!(
+            is_integrity_error(&result.unwrap_err()),
+            "error should be CheckpointIntegrityError"
+        );
+
+        // --- load_latest_checkpoint skips tampered file ---
+        let latest = load_latest_checkpoint(&config, session_id).unwrap();
+        assert!(
+            latest.is_none(),
+            "tampered checkpoint should be skipped by load_latest_checkpoint"
+        );
     }
 }
