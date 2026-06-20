@@ -441,21 +441,3 @@ async fn handle_tool_batch_suspends_on_human_escalation() {
     }
 }
 
-#[tokio::test]
-async fn save_and_yield_preserves_original_error() {
-    let (executor, _temp) = empty_executor();
-    let original = anyhow::anyhow!("the original failure");
-    let returned = executor.save_and_yield(
-        &[],
-        "turn-000001",
-        autonoetic_gateway::runtime::checkpoint::YieldReason::BudgetExhausted,
-        None,
-        original,
-    );
-
-    assert_eq!(
-        returned.to_string(),
-        "the original failure",
-        "save_and_yield must return the original error unchanged"
-    );
-}

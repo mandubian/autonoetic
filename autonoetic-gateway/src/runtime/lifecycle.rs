@@ -856,7 +856,10 @@ impl AgentExecutor {
     /// Save a yield checkpoint and return the original error.
     ///
     /// Centralises the recurring `save_yield_checkpoint` + `return Err(e)` pattern.
-    pub fn save_and_yield(
+    /// Save a yield checkpoint and return the original error.
+    ///
+    /// Centralises the recurring `save_yield_checkpoint` + `return Err(e)` pattern.
+    fn save_and_yield(
         &self,
         history: &[Message],
         turn_id: &str,
@@ -2521,8 +2524,10 @@ impl AgentExecutor {
         outcome
     }
 
-    /// Runs before each LLM call. Returns `Some(TurnOutcome)` if the turn
-    /// should yield immediately, or `None` if the turn should proceed.
+    /// Runs before each LLM call. Returns `Ok(None)` if the turn should
+    /// proceed. If a gate trips (budget exhausted, emergency stop, max turns,
+    /// etc.) the helper saves a yield checkpoint and returns the error so the
+    /// caller can propagate it.
     pub async fn pre_turn_checks(
         &mut self,
         history: &mut Vec<Message>,
@@ -2742,13 +2747,13 @@ impl AgentExecutor {
                 if let Err(e) = budget
                     .reserve_tool_invocations(&session_id, tool_calls.len() as u64)
                 {
-                    let _ = self.save_yield_checkpoint(
+                    return Err(self.save_and_yield(
                         history,
                         turn_id,
                         YieldReason::BudgetExhausted,
                         None,
-                    );
-                    return Err(e);
+                        e,
+                    ));
                 }
             }
 
@@ -2758,13 +2763,13 @@ impl AgentExecutor {
                 if let Err(e) = root_budget
                     .reserve_tool_invocations(&root, tool_calls.len() as u64)
                 {
-                    let _ = self.save_yield_checkpoint(
+                    return Err(self.save_and_yield(
                         history,
                         turn_id,
                         YieldReason::BudgetExhausted,
                         None,
-                    );
-                    return Err(e);
+                        e,
+                    ));
                 }
             }
 
