@@ -331,6 +331,12 @@ code_analysis:
 #     for zero-capability agents.
 # require_operator_approval_for_new_agents: true
 # allow_zero_capability_direct_promote: true
+#
+#   agent_install_smoke_test (default ask): smoke-test gate for new agent
+#     installation. ask ⇒ agent-factory asks the operator before running the
+#     candidate revision once. required ⇒ promotion requires a passed smoke-test
+#     task. skip ⇒ no smoke-test gate.
+# agent_install_smoke_test: ask
 
 # ── Session Budget (optional per-session resource limits) ─────────────
 # Uncomment to cap LLM rounds, tool calls, tokens, or wall-clock time.

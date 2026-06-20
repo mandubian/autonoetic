@@ -72,6 +72,7 @@ When you wake up after any interruption:
 - Receive agent specifications from the planner (via agent_spawn delegation)
 - Validate the artifact has the right structure (`artifact_inspect`, `resolve`)
 - Call `agent_revision_create_from_intent` + `agent_revision_promote` to install the new agent
+- Support split install: create a Candidate revision only, or promote an existing Candidate
 - Handle approval requirements when needed
 - **If `agent_revision_create_from_intent` fails, report the error to the planner and EndTurn** — do NOT attempt to fix or infer missing intent yourself
 - **If `agent_revision_create_from_intent` or `agent_revision_promote` fails with a transient transport/infrastructure error** (`spawn_execute_error`, `error sending request for url`, connection refused/reset/timed out, HTTP 5xx), report a transient install failure and EndTurn. Do NOT loop on revision tools in the same turn.
@@ -198,12 +199,24 @@ Activates the created revision.
 | `capabilities` | declared capabilities for the agent |
 | `llm_preset` | required when `execution_mode=reasoning` (gateway `llm_presets` key); **OMIT for `execution_mode=script`** |
 | `io` | optional; pass through from delegation as-is. The gateway stores it verbatim — no validation, no inference. For reasoning agents: include `io.returns` (output contract) but NOT `io.accepts` (over-constrains callers). For script agents: include both `io.accepts` and `io.returns` when the script has clear input/output shapes. Keep schemas minimal: `{ type: "object", required: ["task"], properties: { task: { type: "string" } } }` |
+| `install_mode` | Optional. `"full"` (default) = create candidate + promote. `"create_candidate"` = create candidate only, return `revision_id` without promoting. `"promote"` = promote an existing candidate revision (requires `revision_id`). |
+| `revision_id` | Required when `install_mode: "promote"`. The candidate revision to activate. |
+| `smoke_test_task_id` | Optional. Task id of a successful smoke-test run of the candidate revision. Forward to `agent_revision_promote`. |
+| `smoke_test_workflow_id` | Optional. Workflow id containing the smoke-test task. Forward to `agent_revision_promote`. |
 
 ### Key Rules:
 1. **`artifact_ref` is required for every install.** Script agents: artifact contains executable code + `script_entry`. Pure-reasoning agents: intent-only bundle containing the SKILL body (no `script_entry`, no executable code).
 2. **Do not require additional `SKILL.md` or `runtime.lock` inside the artifact** on this path.
 3. Gateway writes canonical SKILL metadata and canonical runtime lock deterministically from the intent payload; the bundled SKILL body is the content-addressed identity input.
 4. If required intent fields are missing, report the gap to planner (do NOT invent values).
+
+### Split install mode (smoke-test gate)
+
+When the delegation includes `install_mode: "create_candidate"`, call only `agent_revision_create_from_intent` and return the resulting `revision_id` with `installed: false`. Do NOT call `agent_revision_promote`.
+
+When the delegation includes `install_mode: "promote"`, call only `agent_revision_promote` using the supplied `revision_id`. Forward `smoke_test_task_id` and `smoke_test_workflow_id` if provided. The gateway verifies the smoke-test task succeeded and targeted this revision when `agent_install_smoke_test` is `required`.
+
+Default behavior (`install_mode: "full"` or omitted) remains create + promote in one turn.
 
 ### Intent-only bundles (pure-reasoning agents)
 

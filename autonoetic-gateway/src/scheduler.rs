@@ -1156,6 +1156,11 @@ pub async fn process_queued_workflow_tasks(
         let session_id = queued_task.child_session_id.clone();
         let source_id = queued_task.source_agent_id.clone();
         let metadata = queued_task.metadata.clone();
+        let revision_id = metadata
+            .as_ref()
+            .and_then(|m| m.get("_autonoetic_spawn_revision_id"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
         let wf_id = queued_task.workflow_id.clone();
         let t_id = queued_task.task_id.clone();
         let cfg = config.clone();
@@ -1182,7 +1187,7 @@ pub async fn process_queued_workflow_tasks(
                     tid: tid_for_reg,
                 };
                 spawn_task_execution(
-                    exec, cfg, wf_id, t_id, agent_id, message, session_id, source_id, metadata, cred_bindings,
+                    exec, cfg, wf_id, t_id, agent_id, message, session_id, source_id, metadata, revision_id, cred_bindings,
                 )
                 .await;
             }
@@ -1209,6 +1214,7 @@ async fn spawn_task_execution(
     session_id: String,
     source_id: String,
     metadata: Option<serde_json::Value>,
+    revision_id: Option<String>,
     credential_bindings: Vec<autonoetic_types::runtime_lock::LockedCredentialMount>,
 ) {
     let store = exec.gateway_store();
@@ -1350,21 +1356,40 @@ async fn spawn_task_execution(
         }
     });
 
-    let result = exec
-        .spawn_agent_once(
-            &agent_id,
-            &message,
-            &session_id,
-            Some(&source_id),
-            false,
-            None,
-            metadata.as_ref(),
-            Some(&wf_id),
-            Some(&t_id),
-            None,
-            &credential_bindings,
-        )
-        .await;
+    let result = if let Some(ref rev_id) = revision_id {
+        exec
+            .spawn_agent_revision_once(
+                &agent_id,
+                Some(rev_id.as_str()),
+                &message,
+                &session_id,
+                Some(&source_id),
+                false,
+                None,
+                metadata.as_ref(),
+                Some(&wf_id),
+                Some(&t_id),
+                None,
+                &credential_bindings,
+            )
+            .await
+    } else {
+        exec
+            .spawn_agent_once(
+                &agent_id,
+                &message,
+                &session_id,
+                Some(&source_id),
+                false,
+                None,
+                metadata.as_ref(),
+                Some(&wf_id),
+                Some(&t_id),
+                None,
+                &credential_bindings,
+            )
+            .await
+    };
 
     heartbeat.abort();
     let _ = heartbeat.await;

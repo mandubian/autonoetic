@@ -53,6 +53,11 @@ struct SpawnAgentArgs {
     /// specific credential_id, overriding runtime.lock resolution for the child.
     #[serde(default)]
     credential_bindings: Vec<autonoetic_types::runtime_lock::LockedCredentialMount>,
+    /// Optional specific revision_id to execute. When provided, the child runs
+    /// from that revision directory directly, bypassing alias resolution.
+    /// Used for smoke-testing Candidate revisions before promotion.
+    #[serde(default)]
+    revision_id: Option<String>,
 }
 
 /// Keeps a workflow task's `updated_at` fresh while synchronous `agent.spawn` blocks.
@@ -178,7 +183,8 @@ the single join already does that."
                             "required": ["service", "credential_id"]
                         },
                         "description": "Bind specific credentials to the child agent. Overrides runtime.lock service-level resolution."
-                    }
+                    },
+                    "revision_id": { "type": "string", "description": "Optional specific revision_id to execute. Bypasses alias resolution and runs the candidate revision directly. Used for smoke-testing before promotion." }
                 },
                 "required": ["agent_id", "message"],
                 "additionalProperties": false
@@ -589,6 +595,15 @@ the single join already does that."
             // tokio runtime when called from within an already-running agent context.
             // The scheduler's `process_queued_workflow_tasks` picks up queued tasks
             // and runs them on dedicated tokio tasks.
+            let mut spawn_metadata = args.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
+            if let Some(ref rev_id) = args.revision_id {
+                if let Some(obj) = spawn_metadata.as_object_mut() {
+                    obj.insert(
+                        "_autonoetic_spawn_revision_id".to_string(),
+                        serde_json::json!(rev_id),
+                    );
+                }
+            }
             let queued = autonoetic_types::workflow::QueuedTaskRun {
                 task_id: task_id.clone(),
                 workflow_id: workflow_id.clone(),
@@ -597,7 +612,7 @@ the single join already does that."
                 child_session_id: child_delegation_path.clone(),
                 parent_session_id: resolved_session_id.clone(),
                 source_agent_id: source_agent_id.clone(),
-                metadata: args.metadata.clone(),
+                metadata: Some(spawn_metadata),
                 join_group: args.join_group,
                 blocks_planner: true,
                 enqueued_at: Utc::now().to_rfc3339(),
@@ -616,7 +631,7 @@ the single join already does that."
                 None,
             );
 
-            serde_json::to_string(&serde_json::json!({
+            let mut resp = serde_json::json!({
                 "ok": true,
                 "accepted": true,
                 "status": "queued",
@@ -625,7 +640,12 @@ the single join already does that."
                 "agent_id": target_agent_id,
                 "session_id": child_delegation_path,
                 "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
-            }))
+            });
+            if let Some(rev_id) = args.revision_id {
+                resp["revision_id"] = serde_json::json!(rev_id);
+                resp["smoke_test"] = serde_json::json!(true);
+            }
+            serde_json::to_string(&resp)
             .map_err(Into::into)
         })();
 

@@ -79,6 +79,24 @@ pub enum CapabilityDeltaGateMode {
     Bootstrap,
 }
 
+/// Smoke-test gate mode for new agent installation.
+///
+/// A smoke test runs the candidate revision once before promotion so the
+/// operator can confirm the agent actually executes under real conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInstallSmokeTestMode {
+    /// Ask the operator whether to run a smoke test before promoting.
+    /// If the operator declines or the test fails, the agent is not installed.
+    #[default]
+    Ask,
+    /// Require a successful smoke test for every new agent promotion.
+    /// `agent_revision_promote` will reject the promotion without evidence.
+    Required,
+    /// Skip the smoke-test gate (legacy behavior).
+    Skip,
+}
+
 /// Configuration for schema enforcement on agent.spawn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaEnforcementConfig {
@@ -947,6 +965,15 @@ pub struct GatewayConfig {
     /// already-admitted agent is unaffected either way (gated only on broadening).
     #[serde(default = "default_true")]
     pub require_operator_approval_for_new_agents: bool,
+
+    /// Smoke-test gate for new agent installation.
+    ///
+    /// - `ask` (default): agent-factory asks the operator before running the
+    ///   candidate revision once. Promotion only happens if the test succeeds.
+    /// - `required`: promotion of any new agent requires a passed smoke-test task.
+    /// - `skip`: no smoke-test gate; legacy behavior.
+    #[serde(default)]
+    pub agent_install_smoke_test: AgentInstallSmokeTestMode,
 
     /// Optional per-session budgets (LLM rounds, tools, tokens, wall clock).
     #[serde(default)]
@@ -2776,6 +2803,7 @@ impl Default for GatewayConfig {
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
             allow_zero_capability_direct_promote: true,
             require_operator_approval_for_new_agents: true,
+            agent_install_smoke_test: AgentInstallSmokeTestMode::Ask,
             session_budget: SessionBudgetConfig::default(),
             root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
