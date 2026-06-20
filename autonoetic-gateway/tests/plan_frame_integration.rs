@@ -409,15 +409,21 @@ fn operator_approve_plan_frame_via_scheduler_ops() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].plan_id, plan_id);
 
-    let approved = autonoetic_gateway::scheduler::approve_plan_frame_operator(
+    let approved = autonoetic_gateway::scheduler::approval::approve_request(
         &config,
-        store.as_ref(),
-        &plan_id,
+        Some(store.as_ref()),
+        &format!("apr-plan-{plan_id}-v1"),
         "chat-tui",
+        None,
+        None,
+        None,
+        None,
     )
     .unwrap();
-    assert_eq!(approved.status, PlanStatus::Approved);
-    assert_eq!(approved.approved_by.as_deref(), Some("chat-tui"));
+    assert_eq!(approved.status, autonoetic_types::background::ApprovalStatus::Approved);
+
+    let plan = store.load_plan_frame(&plan_id).unwrap().unwrap();
+    assert_eq!(plan.status, PlanStatus::Approved);
 
     assert!(
         autonoetic_gateway::scheduler::pending_plan_frames_for_root(

@@ -39,6 +39,7 @@ pub fn classify_approval_risk(action: &ScheduledAction) -> ApprovalRisk {
         ScheduledAction::ProfileShare { .. } => ApprovalRisk::Standard,
         ScheduledAction::WriteFile { .. } => ApprovalRisk::Standard,
         ScheduledAction::WikiProposal { .. } => ApprovalRisk::Standard,
+        ScheduledAction::PlanFrame { .. } => ApprovalRisk::Standard,
     }
 }
 

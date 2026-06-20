@@ -8037,6 +8037,22 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             format!("  page_id: {}", clamp_chat_field(page_id)),
             format!("  title: {}", clamp_chat_field(title)),
         ],
+        ScheduledAction::PlanFrame { plan_id, version, envelope } => {
+            let mut v = vec![
+                "type: plan_frame".to_string(),
+                format!("  plan_id: {}", clamp_chat_field(plan_id)),
+                format!("  version: {version}"),
+            ];
+            if !envelope.is_empty() {
+                if let Ok(s) = serde_json::to_string_pretty(envelope) {
+                    v.push("  envelope:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            v
+        }
     }
 }
 
@@ -8285,42 +8301,87 @@ fn approve_plan_frame_in_chat(
     wake_planner: bool,
     tx: Option<&tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>>,
 ) {
-    match autonoetic_gateway::scheduler::approve_plan_frame_operator(
-        config,
-        store,
-        plan_id,
-        "operator",
-    ) {
-        Ok(plan) => {
-            app.pending_plan_ids.retain(|id| id != plan_id);
-            app.pending_plan_summaries.retain(|(id, _)| id != plan_id);
+    let plan = match store.load_plan_frame(plan_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
             app.add_message(
                 MessageRole::System,
-                format!(
-                    "Plan approved: {} — \"{}\" (v{})",
-                    plan.plan_id, plan.title, plan.version
-                ),
+                format!("Plan {plan_id} not found."),
             );
-            if wake_planner {
-                if let Some(tx) = tx {
-                    let wake = plan.execution_wake_hint().unwrap_or_else(|| {
-                        format!(
-                            "[Operator approved plan {}] \"{}\" (v{}) is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list.",
-                            plan.plan_id, plan.title, plan.version
-                        )
-                    });
-                    let id = app.next_id();
-                    app.add_pending(id);
-                    app.add_message(MessageRole::User, wake.clone());
-                    let _ = tx.send((id, ChatOutbound::Chat(wake)));
-                }
-            } else {
+            return;
+        }
+        Err(e) => {
+            app.add_message(
+                MessageRole::System,
+                format!("Failed to load plan {plan_id}: {e}"),
+            );
+            return;
+        }
+    };
+    if plan.status != autonoetic_types::plan_frame::PlanStatus::AwaitingApproval {
+        app.add_message(
+            MessageRole::System,
+            format!(
+                "Plan {plan_id} is in '{}' status; only awaiting_approval plans can be approved.",
+                plan.status.as_str()
+            ),
+        );
+        return;
+    }
+
+    let request_id =
+        autonoetic_gateway::runtime::tools::plan_frame::plan_approval_request_id(
+            plan_id,
+            plan.version,
+        );
+    match autonoetic_gateway::scheduler::approval::approve_request(
+        config,
+        Some(store),
+        &request_id,
+        "operator",
+        None,
+        None,
+        None,
+        None,
+    ) {
+        Ok(_) => match store.load_plan_frame(plan_id) {
+            Ok(Some(plan)) => {
+                app.pending_plan_ids.retain(|id| id != plan_id);
+                app.pending_plan_summaries.retain(|(id, _)| id != plan_id);
                 app.add_message(
                     MessageRole::System,
-                    "Send a message to the planner to continue execution.".to_string(),
+                    format!(
+                        "Plan approved: {} — \"{}\" (v{})",
+                        plan.plan_id, plan.title, plan.version
+                    ),
+                );
+                if wake_planner {
+                    if let Some(tx) = tx {
+                        let wake = plan.execution_wake_hint().unwrap_or_else(|| {
+                            format!(
+                                "[Operator approved plan {}] \"{}\" (v{}) is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list.",
+                                plan.plan_id, plan.title, plan.version
+                            )
+                        });
+                        let id = app.next_id();
+                        app.add_pending(id);
+                        app.add_message(MessageRole::User, wake.clone());
+                        let _ = tx.send((id, ChatOutbound::Chat(wake)));
+                    }
+                } else {
+                    app.add_message(
+                        MessageRole::System,
+                        "Send a message to the planner to continue execution.".to_string(),
+                    );
+                }
+            }
+            _ => {
+                app.add_message(
+                    MessageRole::System,
+                    format!("Plan {plan_id} approved but disappeared from store."),
                 );
             }
-        }
+        },
         Err(e) => {
             app.add_message(
                 MessageRole::System,
@@ -8346,6 +8407,7 @@ fn action_summary(action: &autonoetic_types::background::ScheduledAction) -> &'s
         autonoetic_types::background::ScheduledAction::AgentInstall { .. } => "agent.install",
         autonoetic_types::background::ScheduledAction::ProfileShare { .. } => "profile.share",
         autonoetic_types::background::ScheduledAction::LayerMount { .. } => "layer.mount",
+        autonoetic_types::background::ScheduledAction::PlanFrame { .. } => "plan.frame",
         _ => "other",
     }
 }

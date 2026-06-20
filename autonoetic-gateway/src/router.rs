@@ -1401,19 +1401,52 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match crate::scheduler::approve_plan_frame_operator(
-                    self.config.as_ref(),
-                    store.as_ref(),
+                let plan = match store.load_plan_frame(&params.plan_id) {
+                    Ok(Some(p)) => p,
+                    Ok(None) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("planframes.approve failed: plan not found"),
+                        );
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("planframes.approve failed: {}", e),
+                        );
+                    }
+                };
+                let request_id = crate::runtime::tools::plan_frame::plan_approval_request_id(
                     &params.plan_id,
+                    plan.version,
+                );
+                match crate::scheduler::approval::approve_request(
+                    self.config.as_ref(),
+                    Some(store.as_ref()),
+                    &request_id,
                     &params.approved_by,
+                    None,
+                    None,
+                    None,
+                    None,
                 ) {
-                    Ok(plan) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::to_value(
-                            autonoetic_types::plan_frame::PlanFramesApproveResult { plan },
-                        )
-                        .unwrap_or(serde_json::Value::Null),
-                    ),
+                    Ok(_) => match store.load_plan_frame(&params.plan_id) {
+                        Ok(Some(plan)) => JsonRpcResponse::success(
+                            req.id,
+                            serde_json::to_value(
+                                autonoetic_types::plan_frame::PlanFramesApproveResult { plan },
+                            )
+                            .unwrap_or(serde_json::Value::Null),
+                        ),
+                        _ => JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "planframes.approve failed: plan disappeared after approval"
+                                .to_string(),
+                        ),
+                    },
                     Err(e) => JsonRpcResponse::error(
                         req.id,
                         -32000,

@@ -289,6 +289,17 @@ pub enum ScheduledAction {
         #[serde(default)]
         proposed_by_session: Option<String>,
     },
+    /// Approval subject only: a PlanFrame proposed by an agent. Not executed by
+    /// the scheduler; once approved, the gateway updates the plan status and
+    /// materializes its declared capability envelope as session approval grants.
+    PlanFrame {
+        plan_id: String,
+        version: u32,
+        /// Declared capability envelope for the plan. Used to materialize
+        /// session approval grants on approval.
+        #[serde(default)]
+        envelope: Vec<super::capability::Capability>,
+    },
 }
 
 impl ScheduledAction {
@@ -305,6 +316,7 @@ impl ScheduledAction {
                 | Self::LayerMount { .. }
                 | Self::RevisionPromote { .. }
                 | Self::WikiProposal { .. }
+                | Self::PlanFrame { .. }
         )
     }
 
@@ -327,7 +339,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => true,
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => true,
         }
     }
 
@@ -365,6 +378,7 @@ impl ScheduledAction {
             Self::LayerMount { .. } => "layer_mount",
             Self::RevisionPromote { .. } => "revision_promote",
             Self::WikiProposal { .. } => "wiki_propose",
+            Self::PlanFrame { .. } => "plan_frame",
         }
     }
 
@@ -383,7 +397,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => None,
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => None,
         }
     }
 
@@ -406,7 +421,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => {}
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => {}
         }
         self
     }
