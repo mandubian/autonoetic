@@ -233,7 +233,7 @@ impl NativeTool for ApprovalWithdrawTool {
 
                 let decision = crate::scheduler::approval::cancel_approval_request(
                     cfg,
-                    Some(&store),
+                    Some(store.as_ref()),
                     &args.request_id,
                     &decided_by,
                     Some(reason.to_string()),
@@ -245,7 +245,7 @@ impl NativeTool for ApprovalWithdrawTool {
                 };
                 crate::scheduler::approval::apply_decision(
                     cfg,
-                    Some(&store),
+                    Some(store.as_ref()),
                     &decision,
                     &Default::default(),
                     &context,

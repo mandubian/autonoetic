@@ -311,6 +311,7 @@ pub fn apply_decision(
     // ── 3. Reevaluation state + background state (reject/cancel/withdraw) ──
     if !matches!(decision.status, ApprovalStatus::Approved) {
         let agent_dir = config.agents_dir.join(&decision.agent_id);
+        let is_agent_withdrawal = decision.decided_by.starts_with("agent:");
         crate::runtime::reevaluation_state::persist_reevaluation_state(&agent_dir, |state| {
             state
                 .open_approval_request_ids
@@ -318,8 +319,9 @@ pub fn apply_decision(
             state.pending_scheduled_action = None;
             let outcome_label = match decision.status {
                 ApprovalStatus::Rejected => "approval_rejected",
+                ApprovalStatus::Cancelled if is_agent_withdrawal => "approval_withdrawn",
                 ApprovalStatus::Cancelled => "approval_cancelled",
-                _ => "approval_withdrawn",
+                _ => "approval_cancelled",
             };
             state.last_outcome = Some(outcome_label.to_string());
         })?;
@@ -342,32 +344,30 @@ pub fn apply_decision(
     }
 
     // ── 4. Write resume signal to GatewayStore ─────────────────────────
-    notify_session_of_decision(config, store, decision, context.hook_executor);
+    notify_session_of_decision(store, decision, context.hook_executor);
 
-    // ── 5. Normalized wiki timeline event ──────────────────────────────
-    emit_wiki_decision_event(store, decision);
+    // ── 5. Wiki timeline event (keeps existing event names for consumers) ──
+    emit_wiki_timeline(store, decision);
 
-    // ── 6. Causal event ────────────────────────────────────────────────
-    let causal_logger = match init_gateway_causal_logger(config) {
-        Ok(l) => l,
-        Err(_) => return Ok(()),
-    };
-    let mut trace_session = TraceSession::create_with_session_id(
-        SessionId::from_string(decision.session_id.clone()),
-        Arc::new(causal_logger),
-        gateway_actor_id(),
-        EventScope::Session,
-    );
-    let _ = trace_session.log_completed(
-        "background.approval",
-        Some(decision.status.as_str()),
-        Some(serde_json::json!({
-            "agent_id": decision.agent_id,
-            "request_id": decision.request_id,
-            "decided_by": decision.decided_by,
-            "action_kind": decision.action.kind()
-        })),
-    );
+    // ── 6. Causal event (best-effort — must not block step 7) ──────────
+    if let Ok(causal_logger) = init_gateway_causal_logger(config) {
+        let mut trace_session = TraceSession::create_with_session_id(
+            SessionId::from_string(decision.session_id.clone()),
+            Arc::new(causal_logger),
+            gateway_actor_id(),
+            EventScope::Session,
+        );
+        let _ = trace_session.log_completed(
+            "background.approval",
+            Some(decision.status.as_str()),
+            Some(serde_json::json!({
+                "agent_id": decision.agent_id,
+                "request_id": decision.request_id,
+                "decided_by": decision.decided_by,
+                "action_kind": decision.action.kind()
+            })),
+        );
+    }
 
     // ── 7. Unblock workflow task ──────────────────────────────────────
     unblock_task_on_approval(config, Some(store), decision);
@@ -379,7 +379,6 @@ pub fn apply_decision(
 /// Under the Lawful Gate model, this merely notifies the waiting session —
 /// the agent retries with an `approval_ref`.
 fn notify_session_of_decision(
-    config: &GatewayConfig,
     store: &crate::scheduler::gateway_store::GatewayStore,
     decision: &ApprovalDecision,
     hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
@@ -467,8 +466,10 @@ fn notify_session_of_decision(
     }
 }
 
-/// Emit a normalized `wiki.decision` timeline event for WikiProposal actions.
-fn emit_wiki_decision_event(
+/// Emit a wiki timeline event for WikiProposal actions. Keeps the existing
+/// event names (`wiki.promoted` / `wiki.rejected` / `wiki.withdrawn`) that
+/// consumers in `session_timeline.rs` and `cli/room/render.rs` already handle.
+fn emit_wiki_timeline(
     store: &crate::scheduler::gateway_store::GatewayStore,
     decision: &ApprovalDecision,
 ) {
@@ -476,21 +477,27 @@ fn emit_wiki_decision_event(
         return;
     };
 
-    let decision_label = match decision.status {
-        ApprovalStatus::Approved => "approved",
-        ApprovalStatus::Rejected => "rejected",
-        ApprovalStatus::Cancelled => "cancelled",
+    let is_agent_withdrawal = decision.decided_by.starts_with("agent:");
+    let event_type = match decision.status {
+        ApprovalStatus::Approved => "wiki.promoted",
+        ApprovalStatus::Rejected => "wiki.rejected",
+        ApprovalStatus::Cancelled if is_agent_withdrawal => "wiki.withdrawn",
+        ApprovalStatus::Cancelled => "wiki.rejected",
     };
     let role = crate::runtime::session_timeline::derive_role(&decision.agent_id);
     let principal = autonoetic_types::principal::Principal::agent(decision.agent_id.clone());
     let refs = autonoetic_types::session_timeline::TimelineRefs::default();
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "page_id": page_id,
         "title": title,
-        "decision": decision_label,
         "decided_by": decision.decided_by,
         "reason": decision.reason,
     });
+    if is_agent_withdrawal {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("cancelled_by".into(), serde_json::json!(decision.decided_by));
+        }
+    }
     let event = crate::runtime::session_timeline::build_timeline_event(
         decision
             .root_session_id
@@ -500,13 +507,13 @@ fn emit_wiki_decision_event(
         None,
         &principal,
         &role,
-        "wiki.decision",
+        event_type,
         None,
         Some(payload),
         refs,
     );
     if let Err(e) = store.create_live_digest_event(&event) {
-        tracing::debug!(target: "session_timeline", error = %e, "wiki.decision timeline emit failed");
+        tracing::debug!(target: "session_timeline", error = %e, "{} timeline emit failed", event_type);
     }
 }
 
@@ -1012,6 +1019,29 @@ fn unblock_task_on_approval(
     let (Some(wf_id), Some(t_id)) = (&decision.workflow_id, &decision.task_id) else {
         return;
     };
+
+    // Idempotency guard: if the task is already in a terminal state (e.g.
+    // cancel_pending_approval_for_workflow_task is called after the task was
+    // already marked Cancelled), don't overwrite it.
+    if let Ok(Some(existing)) =
+        super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
+    {
+        use autonoetic_types::workflow::TaskRunStatus;
+        if matches!(
+            existing.status,
+            TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Succeeded
+        ) {
+            tracing::debug!(
+                target: "approval",
+                workflow_id = %wf_id,
+                task_id = %t_id,
+                current_status = ?existing.status,
+                "Task already in terminal state, skipping unblock"
+            );
+            return;
+        }
+    }
+
     let (new_status, approval_event_type) = match decision.status {
         ApprovalStatus::Approved => (
             autonoetic_types::workflow::TaskRunStatus::Runnable,
