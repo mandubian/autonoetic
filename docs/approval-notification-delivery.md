@@ -5,25 +5,26 @@ This document describes how approval outcomes are delivered after an operator ru
 
 ## Summary
 
-Approval resolution is now **path-dependent**:
+Approval resolution is unified:
 
 1. Decision is always persisted in SQLite (`approvals` table).
-2. Workflow-bound requests resume via **turn continuation**, not session notification.
-3. Non-workflow requests still use durable notification delivery.
+2. All post-decision side-effects fan out through `apply_decision`.
+3. Workflow-bound tasks resume from the signed `SessionCheckpoint` stored when the turn suspended.
+4. Non-workflow sessions still use durable notification delivery.
 
 This keeps workflow orchestration deterministic while preserving direct-chat compatibility.
 
 ## Two Delivery Paths
 
-### 1) Workflow-Bound Tasks (continuation model)
+### 1) Workflow-Bound Tasks (checkpoint resume model)
 
 If an approval request has both `workflow_id` and `task_id`:
 
 - Decision is recorded in `approvals`.
-- Workflow task is unblocked (`Runnable` on approve, `Failed` on reject).
+- `apply_decision` updates the workflow task status (`Runnable` on approve, `Failed` on reject).
 - Scheduler picks runnable tasks and re-executes them.
-- Execution loads `TurnContinuation`, executes approved action in the gateway, injects real tool result, and continues the turn.
-- No `approval_resolved` signal is required for the child-task continuation path.
+- Execution loads the `SessionCheckpoint`, executes the approved action in the gateway, injects the real tool result, and continues the turn.
+- No `approval_resolved` signal is required for the child-task checkpoint-resume path.
 - Parent workflow visibility comes from workflow events plus `ChildStateNotification` delivery on child state transitions, not from a separate approval notification row.
 
 ### 2) Non-Workflow Sessions (notification model)
@@ -31,7 +32,7 @@ If an approval request has both `workflow_id` and `task_id`:
 If the request is not workflow-bound:
 
 - Decision is recorded in `approvals`.
-- A durable approval signal is written to `notifications`.
+- `apply_decision` writes a durable approval signal to `notifications`.
 - Gateway-owned consumers/channel clients deliver and acknowledge the signal.
 - This path preserves existing direct-chat continuation behavior.
 
@@ -46,13 +47,14 @@ All approval state is stored in `.gateway/gateway.db`:
 ## Operator Expectations
 
 - Approve/reject is always durable and auditable.
-- Workflow tasks resume from continuation without requiring manual retry prompts.
+- Workflow tasks resume from checkpoint without requiring manual retry prompts.
 - Non-workflow chat sessions still receive durable approval notifications.
 
 ## Notes
 
 - Workflow chat visibility should be read from workflow events, not notification payloads.
 - Approval records remain queryable regardless of which delivery path is used.
+- The single `apply_decision` path is also used for cancel, withdraw, and cancel-for-task.
 
 ## Related Docs
 

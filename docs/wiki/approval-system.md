@@ -34,11 +34,11 @@ Emits a `grant_revocation` causal event.
 
 ## Similarity Scoring
 
-On creation, each approval request is scored against recent same-agent approvals using Jaccard similarity over command tokens (70%) + hosts (30%). Stored as `similar_to_request_id` + `similarity_score`.
+Similarity scoring for sandbox-exec approvals was removed in #565. The score was write-only: nothing consumed it, so the `approval_similarity.rs` module and the `similar_to_request_id` / `similarity_score` columns were deleted. A small Jaccard advisory check for wiki proposals is inlined in `human_gate.rs`.
 
-## Continuation
+## Checkpoint Resume
 
-Approval requests at turn boundaries use continuation: the agent's turn is suspended, and when the operator resolves the approval, the turn resumes. Continuation uses HMAC signing with `continuation_key` (or derived from `node_id`) and verifies action-equality against the stored approval.
+Approval requests at turn boundaries use a signed `SessionCheckpoint`: the agent's turn is suspended, and when the operator resolves the approval, the turn resumes from checkpoint. Checkpoints are HMAC-SHA256 signed with `continuation_key` (or derived from `node_id`) and verify action-equality against the stored approval.
 
 ## When Approvals Are Needed
 

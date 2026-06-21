@@ -606,7 +606,7 @@ Universal execution snapshots saved at every yield point for crash recovery and 
 |--------|---------|--------------|
 | `Hibernation` | EndTurn / StopSequence between turns | Yes |
 | `BudgetExhausted` | Session budget depleted | Yes (after budget reset) |
-| `ApprovalRequired` | Tool needs approval gate | Via turn continuation |
+| `ApprovalRequired` | Tool needs approval gate | Via signed checkpoint |
 | `UserInputRequired` | `user_ask` pending answer | Yes (when answered) |
 | `EmergencyStop` | Operator circuit breaker | **No** (blocks auto-resume) |
 | `MaxTurnsReached` | Loop guard limit | Yes |
@@ -625,51 +625,33 @@ ls .gateway/checkpoints/<session_id>/
 
 Checkpoints are pruned automatically (default: keep last N per session).
 
-### Turn Continuation (Approval-Gated Turns)
+### Turn Suspension (Approval-Gated Turns)
 
-When a tool call requires operator approval, the turn is **suspended to disk** rather than failing or retrying with synthetic prompts. On approval, execution resumes seamlessly with real tool results.
+When a tool call requires operator approval, the turn is **suspended to a signed session checkpoint** rather than failing or retrying with synthetic prompts. On approval, execution resumes seamlessly with real tool results.
 
 #### Suspension Flow
 
 1. Agent requests a privileged tool call (e.g., `agent_revision_promote`, `sandbox_exec` on a new resource)
 2. Gateway evaluates policy → approval required
-3. Gateway saves a `TurnContinuation` to `.gateway/continuations/{task_id}.json`
-4. Gateway checkpoints the session with `YieldReason::ApprovalRequired`
+3. Gateway creates an `ApprovalRequest` in SQLite
+4. Gateway checkpoints the session with `YieldReason::ApprovalRequired` (HMAC-signed)
 5. Turn execution pauses; approval request is emitted
 
-#### Continuation Structure
+#### Checkpoint Structure
 
-```json
-{
-  "task_id": "task-abc",
-  "session_id": "session-123",
-  "turn_id": "turn-042",
-  "history": [...],                           // Full conversation up to suspension
-  "assistant_message": "...",                  // The assistant message containing the tool call
-  "completed_tool_results": [...],             // Results from already-executed tool calls
-  "pending_tool_call": {...},                  // The tool call awaiting approval
-  "remaining_tool_calls": [...],               // Tool calls to execute after approval
-  "approval_request_id": "approval-xyz",
-  "workflow_id": "wf-abc",
-  "suspended_at": "2026-03-15T10:30:00Z",
-  "loop_guard_state": {...}
-}
-```
+Approval suspension is stored as a `SessionCheckpoint` under `.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json`. The checkpoint is HMAC-SHA256 signed and includes the full conversation history, the pending tool call, remaining tool calls in the batch, and loop-guard state.
 
 #### Resume Flow
 
 1. Operator approves (or rejects) the approval request
-2. Gateway loads the continuation from disk
-3. For `sandbox_exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
-4. Gateway executes the approved action (sandbox exec, revision promote, etc.)
-5. Gateway injects the real tool result into conversation history
-6. Gateway executes any remaining tool calls from the original batch
-7. Gateway reconstructs the full history and resumes the reasoning loop
-8. Continuation file is deleted
-
-#### Approval Timeout
-
-The scheduler periodically checks for timed-out approvals. If a continuation's `suspended_at` exceeds the configured timeout, the task is failed, checkpointed, and the continuation file is cleaned up.
+2. Gateway applies the decision through `apply_decision`
+3. The scheduler wakes the session from checkpoint
+4. For `sandbox_exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
+5. Gateway executes the approved action (sandbox exec, revision promote, etc.)
+6. Gateway injects the real tool result into conversation history
+7. Gateway executes any remaining tool calls from the original batch
+8. Gateway resumes the reasoning loop
+9. Checkpoint is cleaned up by the continuation reaper
 
 ### Auto-Resume Behavior
 

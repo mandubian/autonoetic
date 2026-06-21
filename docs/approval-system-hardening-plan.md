@@ -17,13 +17,13 @@ The current approval system is described in `docs/approval-system.md`. The revie
 
 | # | Risk | Severity | Code anchor |
 |---|---|---|---|
-| 1 | TOCTOU between approval decision and continuation resume — continuation file on disk is not cryptographically bound to the approved action | **Critical** | `autonoetic-gateway/src/runtime/continuation.rs` (save/load), `autonoetic-gateway/src/runtime/tools/sandbox.rs:395` (`validate_approval_ref_context`) |
+| 1 | TOCTOU between approval decision and checkpoint resume — checkpoint file on disk is not cryptographically bound to the approved action | **Critical** | `autonoetic-gateway/src/runtime/checkpoint.rs` (save/load), `autonoetic-gateway/src/runtime/tools/sandbox.rs:395` (`validate_approval_ref_context`) |
 | 2 | Session-fork grant leakage — grants keyed only on `root_session_id`, so all children/siblings share them | **High** | `autonoetic-gateway/src/scheduler/gateway_store/approvals.rs:259` (`session_grants_cover_targets`), `migrate.rs:634` (schema v4) |
 | 3 | Host-only matching — no subdomain/port/path scoping. `api.github.com` vs. `api-v2.github.com` re-prompts; grant for a host covers every path | **High** | `autonoetic-gateway/src/scheduler/gateway_store/approvals.rs:259`, `autonoetic-gateway/src/runtime/approved_exec_cache.rs` (`normalize_targets`) |
 | 4 | No approval scope/duration — binary yes/no only; no "this session only" or "for 10 minutes" | **High** | `autonoetic-types/src/background.rs` (`ApprovalRequest`), approval CLI |
 | 5 | No similarity/diff UX — repeated near-identical intents produce independent approvals; approval fatigue | **Medium** | CLI `approvals list/show`, `autonoetic-gateway/src/scheduler/approval.rs` |
 | 6 | No operator-side revocation — only emergency-stop can revoke a granted host | **Medium** | CLI, `approvals.rs` grant CRUD |
-| 7 | Continuation orphan files on withdraw/reject — disk leak | **Medium** | `autonoetic-gateway/src/scheduler/approval.rs` (reject/cancel paths), `continuation.rs::delete_continuation` |
+| 7 | Checkpoint orphan files on withdraw/reject — disk leak | **Medium** | `autonoetic-gateway/src/scheduler/approval.rs` (reject/cancel paths), `checkpoint.rs` reaper |
 | 8 | No analytics / rate visibility — no way to spot approval spam from a single agent | **Medium** | CLI, `approvals.rs` queries |
 | 9 | Doc gaps vs. code behaviour (exact-match, root-scoping, no signing) | **Low** | `docs/separation-of-powers.md`, `docs/approval-system.md` |
 
@@ -35,24 +35,23 @@ The current approval system is described in `docs/approval-system.md`. The revie
 
 ### 1.1 HMAC-sign continuation files
 
-**Problem.** When an approval is pending, the gateway writes a `TurnContinuation` JSON file to `.gateway/continuations/<task_id>.json` (see `autonoetic-gateway/src/runtime/continuation.rs::save_continuation`). On resume, `execute_approved_action` executes the action stored in this file. The file is **not** cryptographically bound to the approval in SQLite, so a local attacker with filesystem access can modify the pending action between operator approval and resume. `validate_approval_ref_context` (`sandbox.rs:395`) checks agent/session identity but does not re-verify that the to-be-executed action matches the approved action.
+**Problem.** When an approval is pending, the gateway writes a signed `SessionCheckpoint` to `.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json` (see `autonoetic-gateway/src/runtime/checkpoint.rs`). On resume, the gateway loads the checkpoint and executes the action stored in the `PendingToolState`. The checkpoint is HMAC-SHA256 signed, so local filesystem tampering is detected before execution. `validate_approval_ref_context` (`sandbox.rs:395`) checks agent/session identity and must still re-verify that the pending action matches the approved action.
 
 **Change.**
-- Derive a per-gateway continuation key (32 bytes) stored in the gateway vault / config-resolved secret. Rotate on operator command.
-- Wrap saved continuations in a `SignedContinuation { payload, hmac_hex }` envelope using HMAC-SHA256 over canonical-JSON-serialized `payload`.
-- On `load_continuation`, verify HMAC before returning. On mismatch: refuse resume, log `background.continuation_tampered` causal event, cancel the approval with reason `integrity_violation`, and surface an operator-visible alert.
-- In `validate_approval_ref_context` (or a new adjacent check), additionally assert that the continuation's stored `ScheduledAction` equals the `ScheduledAction` from the approval row retrieved via `get_approval(approval_ref)`. Use structural equality on the `ScheduledAction` enum, not string-diff on the command.
+- Signed `SessionCheckpoint` files are already HMAC-SHA256 signed with a per-gateway key derived from `GatewayConfig::continuation_key`.
+- On `load_checkpoint`, verify HMAC before returning. On mismatch: refuse resume, log a `background.checkpoint_tampered` causal event, cancel the approval with reason `integrity_violation`, and surface an operator-visible alert.
+- In `validate_approval_ref_context` (or a new adjacent check), additionally assert that the checkpoint's stored `ScheduledAction` equals the `ScheduledAction` from the approval row retrieved via `get_approval(approval_ref)`. Use structural equality on the `ScheduledAction` enum, not string-diff on the command.
 
 **Files.**
-- `autonoetic-gateway/src/runtime/continuation.rs` — envelope struct, `save`/`load` sign/verify, canonical serialization helper.
+- `autonoetic-gateway/src/runtime/checkpoint.rs` — HMAC-signed `SessionCheckpoint` save/load.
 - `autonoetic-gateway/src/runtime/tools/sandbox.rs` — action-equality check at resume.
 - `autonoetic-gateway/src/config.rs` (or equivalent) — key source.
-- `autonoetic-gateway/src/causal_chain.rs` — new `background.continuation_tampered` event kind if not generic.
+- `autonoetic-gateway/src/causal_chain.rs` — new `background.checkpoint_tampered` event kind if not generic.
 
 **Tests.**
 - Unit: tamper payload after save → load returns `Err(IntegrityError)`.
 - Unit: action mismatch between approval row and continuation → resume refused.
-- Integration: extend `turn_continuation_approval_integration.rs` with a tamper case that edits the file between approve and resume.
+- Integration: extend `turn_continuation_approval_integration.rs` with a tamper case that edits the checkpoint file between approve and resume.
 
 **Acceptance.**
 - [ ] HMAC verification failures cannot execute the action.
@@ -205,18 +204,18 @@ enum GrantTarget {
 - [ ] Operator can revoke without emergency-stop.
 - [ ] Audit event recorded.
 
-### 3.3 Continuation cleanup on reject/withdraw
+### 3.3 Checkpoint cleanup on reject/withdraw
 
-- When an approval is rejected or withdrawn, call `delete_continuation(config, task_id)` for the bound task.
-- Add a startup-time reaper that removes continuation files whose referenced approval is in a terminal state (rejected/cancelled) or whose approval row is missing.
+- When an approval is rejected or withdrawn, mark the bound checkpoint for reaping.
+- Add a startup-time reaper that removes checkpoint files whose referenced approval is in a terminal state (rejected/cancelled) or whose approval row is missing.
 
 **Files.**
 - `approval.rs` — reject/withdraw paths.
-- `continuation.rs` — reaper utility.
+- `checkpoint.rs` — reaper utility.
 - Gateway startup — call reaper.
 
 **Acceptance.**
-- [ ] No orphan continuation files after reject/withdraw in tests.
+- [ ] No orphan checkpoint files after reject/withdraw in tests.
 - [ ] Reaper clears pre-existing orphans on startup.
 
 ### 3.4 Approval analytics
@@ -238,7 +237,7 @@ enum GrantTarget {
 Update the following to reflect the new behaviour and the threat model:
 
 - `docs/approval-system.md` — new sections for grant scope, target kinds, expiry, similarity, revocation. Replace "host-only, root-scoped" statements with the new, more precise model.
-- `docs/separation-of-powers.md` — document the integrity guarantees (HMAC'd continuations, action-equality check) and the threat model explicitly (in-scope: malicious agent; out-of-scope: local-filesystem attacker with vault key).
+- `docs/separation-of-powers.md` — document the integrity guarantees (HMAC'd checkpoints, action-equality check) and the threat model explicitly (in-scope: malicious agent; out-of-scope: local-filesystem attacker with vault key).
 - `docs/remote-access-approval.md` — update examples to show target-kind usage.
 - `docs/config-reference.md` — new config knobs (continuation key, retention for grants, default grant scope).
 
