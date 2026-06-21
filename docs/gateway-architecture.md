@@ -433,18 +433,20 @@ ToolCallProcessor detects action requires approval
        │     │         - session approval grant materialization
        │     │         - notification / signal delivery
        │     │         - causal event emission
-       │     ├─ Scheduler wakes session from checkpoint
        │     ├─ Verify checkpoint HMAC
+       │     ├─ Verify checkpoint/approval action-equality
        │     ├─ If sandbox_exec: record session approval grants
-       │     ├─ Execute approved action
+       │     ├─ Inject approval_ref into suspended tool call
+       │     ├─ Resume reasoning loop
+       │     ├─ Agent re-issues tool call with approval_ref; gateway executes it normally
        │     ├─ Inject real tool result into history
        │     ├─ Execute remaining tool calls from original batch
-       │     └─ Resume reasoning loop
+       │     └─ Delete checkpoint after successful resume
        │
-       └─ 4b. REJECTED
-             ├─ Persist rejection → SQLite
-             ├─ apply_decision() notifies agent / fails workflow task
-             └─ Checkpoint is reaped on startup / cancellation
+        └─ 4b. REJECTED
+              ├─ Persist rejection → SQLite
+              ├─ apply_decision() notifies agent / fails workflow task
+              └─ Checkpoint is deleted when the session is cleaned up
 ```
 
 ### 3.5 Background Scheduler Tick

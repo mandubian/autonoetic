@@ -647,11 +647,10 @@ Approval suspension is stored as a `SessionCheckpoint` under `.gateway/checkpoin
 2. Gateway applies the decision through `apply_decision`
 3. The scheduler wakes the session from checkpoint
 4. For `sandbox_exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
-5. Gateway executes the approved action (sandbox exec, revision promote, etc.)
-6. Gateway injects the real tool result into conversation history
+5. Gateway injects `approval_ref` into the suspended tool call and resumes the reasoning loop
+6. The agent re-issues the tool call with `approval_ref`; the gateway executes it normally and injects the real tool result into conversation history
 7. Gateway executes any remaining tool calls from the original batch
-8. Gateway resumes the reasoning loop
-9. Checkpoint is cleaned up by the continuation reaper
+8. Checkpoint is deleted after successful resume
 
 ### Auto-Resume Behavior
 

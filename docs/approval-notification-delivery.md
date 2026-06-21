@@ -23,7 +23,7 @@ If an approval request has both `workflow_id` and `task_id`:
 - Decision is recorded in `approvals`.
 - `apply_decision` updates the workflow task status (`Runnable` on approve, `Failed` on reject).
 - Scheduler picks runnable tasks and re-executes them.
-- Execution loads the `SessionCheckpoint`, executes the approved action in the gateway, injects the real tool result, and continues the turn.
+- Execution loads the `SessionCheckpoint`, verifies checkpoint/approval action-equality, injects `approval_ref` into the suspended tool call, resumes the reasoning loop, and lets the agent re-issue the tool call with `approval_ref`. The gateway executes the tool normally and injects the real result.
 - No `approval_resolved` signal is required for the child-task checkpoint-resume path.
 - Parent workflow visibility comes from workflow events plus `ChildStateNotification` delivery on child state transitions, not from a separate approval notification row.
 
