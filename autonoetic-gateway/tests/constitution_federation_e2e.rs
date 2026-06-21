@@ -19,9 +19,10 @@ use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus}
 use autonoetic_types::artifact::ArtifactKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::principal::PrincipalKind;
+use autonoetic_types::promotion::PromotionRole;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::escalation::{EscalationMessage, EscalationStatus, RoleVerdictSummary};
-use autonoetic_types::promotion::PromotionRole;
+use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -274,17 +275,19 @@ fn record_promotion(
     builder_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
+    session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} check — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -293,10 +296,10 @@ fn record_promotion(
             builder_dir,
             Some(gateway_dir),
             &serde_json::to_string(&args).unwrap(),
-            Some(&format!("session-{role}")),
+            Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion.record should succeed");
@@ -307,6 +310,15 @@ fn record_promotion(
         Some(true),
         "promotion.record should return ok=true, got: {result}"
     );
+}
+
+fn seed_smoke_test_task(
+    config: &GatewayConfig,
+    store: &GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+) -> (String, String) {
+    support::promotion_trace::seed_smoke_test_task(config, store, agent_id, revision_id)
 }
 
 fn try_promote(
@@ -320,10 +332,14 @@ fn try_promote(
     agent_id: &str,
     revision_id: &str,
 ) -> Result<serde_json::Value, String> {
+    let (smoke_wf, smoke_task) =
+        seed_smoke_test_task(config, store.as_ref(), agent_id, revision_id);
     let promote_args = serde_json::json!({
         "agent_id": agent_id,
         "revision_id": revision_id,
         "reason": "integration test",
+        "smoke_test_workflow_id": smoke_wf,
+        "smoke_test_task_id": smoke_task,
     });
     match registry.execute(
         "agent_revision_promote",
@@ -419,25 +435,23 @@ fn setup_test(agent_id: &str, skill_md: &str) -> (TestSetup, String, String, Arc
 
 fn record_federation_role(
     gateway_dir: &Path,
+    gw_store: &GatewayStore,
     artifact_id: &str,
     role: PromotionRole,
     agent_id: &str,
     pass: bool,
 ) {
     let promo_store = PromotionStore::new(gateway_dir).unwrap();
-    let summary = format!("{:?} check — pass={}", role, pass);
-    promo_store
-        .record_promotion(
-            artifact_id.to_string(),
-            None,
-            None,
-            role,
-            agent_id,
-            pass,
-            vec![],
-            Some(summary),
-        )
-        .expect("federation role record should succeed");
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &promo_store,
+        gw_store,
+        artifact_id,
+        role,
+        agent_id,
+        pass,
+        &format!("session-{agent_id}"),
+        None,
+    );
 }
 
 fn create_approved_escalation(
@@ -570,9 +584,11 @@ fn test_federation_positive_path_promote_succeeds_with_approved_escalation() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "static_evaluator",
         true,
+        "session-static_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -584,13 +600,16 @@ fn test_federation_positive_path_promote_succeeds_with_approved_escalation() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::StaticEvaluator,
         "static_evaluator.default",
@@ -598,6 +617,7 @@ fn test_federation_positive_path_promote_succeeds_with_approved_escalation() {
     );
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::UnitTestRunner,
         "unit_test_runner.default",
@@ -651,9 +671,11 @@ fn test_federation_blocks_without_approved_escalation() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "static_evaluator",
         true,
+        "session-static_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -665,13 +687,16 @@ fn test_federation_blocks_without_approved_escalation() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::StaticEvaluator,
         "static_evaluator.default",
@@ -717,9 +742,11 @@ fn test_federation_blocks_with_pending_escalation() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "static_evaluator",
         true,
+        "session-static_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -731,13 +758,16 @@ fn test_federation_blocks_with_pending_escalation() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::StaticEvaluator,
         "static_evaluator.default",
@@ -800,9 +830,11 @@ fn test_federation_blocks_when_role_shares_proposer_identity() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "static_evaluator",
         true,
+        "session-static_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -814,13 +846,16 @@ fn test_federation_blocks_when_role_shares_proposer_identity() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::StaticEvaluator,
         proposer_id,
@@ -873,9 +908,11 @@ fn test_federation_blocks_when_roles_share_identity() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "static_evaluator",
         true,
+        "session-static_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -887,14 +924,17 @@ fn test_federation_blocks_when_roles_share_identity() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let shared_role_id = "dup_agent.default";
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::StaticEvaluator,
         shared_role_id,
@@ -902,6 +942,7 @@ fn test_federation_blocks_when_roles_share_identity() {
     );
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::UnitTestRunner,
         shared_role_id,
@@ -954,9 +995,11 @@ fn test_federation_legacy_regression_promote_without_federation_roles() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -968,9 +1011,11 @@ fn test_federation_legacy_regression_promote_without_federation_roles() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -1014,9 +1059,11 @@ fn test_federation_escalation_rejected_does_not_allow_promotion() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "static_evaluator",
         true,
+        "session-static_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -1028,13 +1075,16 @@ fn test_federation_escalation_rejected_does_not_allow_promotion() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     record_federation_role(
         &s.gateway_dir,
+        store.as_ref(),
         &artifact_id,
         PromotionRole::StaticEvaluator,
         "static_evaluator.default",

@@ -297,17 +297,19 @@ fn record_promotion(
     agent_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
+    session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} test record — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -316,10 +318,10 @@ fn record_promotion(
             agent_dir,
             Some(gateway_dir),
             &serde_json::to_string(&args).unwrap(),
-            Some(&format!("session-{role}")),
+            Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion_record should succeed");
@@ -507,9 +509,11 @@ fn audit_only_promote_succeeds_with_auditor_pass() {
         &f.proposer_dir,
         &f.gateway_dir,
         &f.config,
+        &f.store,
         &f.artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -556,9 +560,11 @@ fn audit_only_promote_fails_with_auditor_record_pass_false() {
         &f.proposer_dir,
         &f.gateway_dir,
         &f.config,
+        &f.store,
         &f.artifact_id,
         "auditor",
         false, // auditor explicitly rejected the install
+        "session-auditor-fail",
     );
 
     let result = try_promote(
@@ -624,6 +630,7 @@ fn audit_only_promote_fails_when_auditor_is_proposer_self_approval() {
             true,
             vec![],
             Some("Self-approval test".to_string()),
+            None,
         )
         .expect("write self-audit record");
 
@@ -675,9 +682,11 @@ fn high_risk_intent_only_artifact_still_requires_full_gate() {
         &f.proposer_dir,
         &f.gateway_dir,
         &f.config,
+        &f.store,
         &f.artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(

@@ -176,11 +176,13 @@ After completing your evaluation, you MUST call `promotion_record` to persist th
 promotion_record({
   "artifact_ref": "ar.example",
   "role": "sealed_evaluator",
-  "pass": <true if evaluator_pass is true, false otherwise>,
-  "findings": [<your findings array>],
+  "execution_trace_id": "<trace id from artifact_exec / sandbox_exec>",
+  "findings": [<your findings array — advisory>],
   "summary": "Artifact ar.example: <your summary>"
 })
 ```
+
+The gateway derives `pass` from `execution_trace_id` (`exit_code=0` → pass). Do not declare success without a trace.
 
 This records the evaluation to the PromotionStore and causal chain.
 

@@ -87,9 +87,9 @@ When auditing an artifact for install, set `auditor_pass: true` only when **all 
 - Declared capabilities match actual code needs
 - Clear instructions, proper error handling, reproducible behavior
 
-Set `auditor_pass: false` when any critical finding exists or security checklist items fail.
+Set `auditor_pass: false` when any **critical** finding exists or security checklist items fail. Only `critical` findings veto promotion; other severities are advisory.
 
-**After completing your audit, call `promotion_record` with the `artifact_ref` you reviewed.** Include the `artifact_ref` in your summary. This is required for the install gate to verify your audit occurred. Record both pass and fail outcomes.
+**After completing your audit, call `promotion_record` with the `artifact_ref` you reviewed.** You set `pass` explicitly for the auditor role. Include the `artifact_ref` in your summary. Record both pass and fail outcomes.
 
 Use this exact argument shape:
 

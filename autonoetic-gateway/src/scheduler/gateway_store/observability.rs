@@ -464,6 +464,46 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_execution_trace(
+        &self,
+        trace_id: &str,
+    ) -> Result<Option<autonoetic_types::causal_chain::ExecutionTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT trace_id, event_id, agent_id, session_id, turn_id, timestamp,
+                tool_name, command, exit_code, stdout, stderr, duration_ms,
+                success, error_type, error_summary, approval_required,
+                approval_request_id, arguments, result
+             FROM execution_traces WHERE trace_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![trace_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(autonoetic_types::causal_chain::ExecutionTraceRecord {
+                trace_id: row.get(0)?,
+                event_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                session_id: row.get(3)?,
+                turn_id: row.get(4)?,
+                timestamp: row.get(5)?,
+                tool_name: row.get(6)?,
+                command: row.get(7)?,
+                exit_code: row.get(8)?,
+                stdout: row.get(9)?,
+                stderr: row.get(10)?,
+                duration_ms: row.get(11)?,
+                success: row.get(12)?,
+                error_type: row.get(13)?,
+                error_summary: row.get(14)?,
+                approval_required: row.get(15)?,
+                approval_request_id: row.get(16)?,
+                arguments: row.get(17)?,
+                result: row.get(18)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn create_execution_trace(
         &self,
         trace: &autonoetic_types::causal_chain::ExecutionTraceRecord,

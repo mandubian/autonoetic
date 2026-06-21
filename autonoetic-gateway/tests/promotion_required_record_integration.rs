@@ -105,20 +105,20 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
     install_deterministic_reply_agent(&agent_dir, agent_id)?;
 
     let gateway_dir = workspace.agents_dir.join(".gateway");
+    let gw_store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
     let store = PromotionStore::new(&gateway_dir)?;
-    store.record_promotion(
-        artifact_id.to_string(),
-        None,
-        None,
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &store,
+        gw_store.as_ref(),
+        artifact_id,
         PromotionRole::SealedEvaluator,
         agent_id,
         true,
-        vec![],
-        Some("pre-recorded sealed_evaluator pass".to_string()),
-    )?;
+        "session-promotion-contract-present",
+        None,
+    );
 
     let config = workspace.gateway_config();
-    let gw_store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
     seed_agent_revision(&gw_store, &config, agent_id, &agent_dir)?;
 
     let execution = GatewayExecutionService::new(config, Some(gw_store));

@@ -3002,6 +3002,21 @@ do not re-issue."
                     .to_error_response(),
                 ));
             }
+            if let Some((code, message)) =
+                crate::runtime::promotion_evidence::verify_stored_execution_traces(
+                    gateway_store.as_ref(),
+                    &record,
+                )?
+            {
+                return Ok(Some(
+                    ToolError::permission(message)
+                        .with_code(&code)
+                        .with_repair_hint(
+                            "Re-run the gate role with a successful execution trace, then retry agent_revision_promote.",
+                        )
+                        .to_error_response(),
+                ));
+            }
             Ok(None)
         };
 

@@ -16,7 +16,7 @@ use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
-use autonoetic_types::promotion::{Finding, PromotionRole};
+use autonoetic_types::promotion::PromotionRole;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -155,33 +155,33 @@ fn make_revision_record(
     }
 }
 
-fn seed_promotion_records(gateway_dir: &std::path::Path, content_digest: &str) {
+fn seed_promotion_records(
+    gateway_dir: &std::path::Path,
+    gw_store: &GatewayStore,
+    content_digest: &str,
+) {
     let store =
         autonoetic_gateway::runtime::promotion_store::PromotionStore::new(gateway_dir).unwrap();
-    store
-        .record_promotion(
-            ARTIFACT_ID.to_string(),
-            None,
-            Some(content_digest.to_string()),
-            PromotionRole::Evaluator,
-            "evaluator.default",
-            true,
-            Vec::<Finding>::new(),
-            None,
-        )
-        .unwrap();
-    store
-        .record_promotion(
-            ARTIFACT_ID.to_string(),
-            None,
-            Some(content_digest.to_string()),
-            PromotionRole::Auditor,
-            "auditor.default",
-            true,
-            Vec::<Finding>::new(),
-            None,
-        )
-        .unwrap();
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &store,
+        gw_store,
+        ARTIFACT_ID,
+        PromotionRole::Evaluator,
+        "evaluator.default",
+        true,
+        "session-smoke-evaluator",
+        Some(content_digest),
+    );
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &store,
+        gw_store,
+        ARTIFACT_ID,
+        PromotionRole::Auditor,
+        "auditor.default",
+        true,
+        "session-smoke-auditor",
+        Some(content_digest),
+    );
 }
 
 struct Harness {
@@ -219,7 +219,7 @@ fn setup_harness(executable: bool, with_credentials: bool, existing_alias: bool)
         ))
         .unwrap();
     if executable {
-        seed_promotion_records(&gateway_dir, &content_digest);
+        seed_promotion_records(&gateway_dir, store.as_ref(), &content_digest);
     }
 
     if existing_alias {

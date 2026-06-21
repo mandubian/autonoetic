@@ -242,17 +242,19 @@ async fn test_promotion_record_full_pass_flow() {
         .expect("content should write");
     assert!(content_handle.starts_with("sha256:"));
 
+    let gw_store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
     let eval_manifest = evaluator_manifest();
     let eval_policy = PolicyEngine::new(eval_manifest.clone());
     let registry = default_registry();
 
-    let eval_args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": "sealed_evaluator",
-        "pass": true,
-        "findings": [],
-        "summary": "All tests passed"
-    });
+    let eval_args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        &artifact_id,
+        "sealed_evaluator",
+        true,
+        "session-eval-test",
+    );
 
     let eval_result = registry
         .execute(
@@ -265,7 +267,7 @@ async fn test_promotion_record_full_pass_flow() {
             Some("session-eval-test"),
             None,
             Some(&config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("evaluator promotion.record should succeed");
@@ -276,13 +278,13 @@ async fn test_promotion_record_full_pass_flow() {
     let audit_manifest = auditor_manifest();
     let audit_policy = PolicyEngine::new(audit_manifest.clone());
 
-    let audit_args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": "auditor",
-        "pass": true,
-        "findings": [],
-        "summary": "Security audit passed"
-    });
+    let audit_args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        &artifact_id,
+        "auditor",
+        true,
+        "session-audit-test",
+    );
 
     let audit_result = registry
         .execute(
@@ -295,7 +297,7 @@ async fn test_promotion_record_full_pass_flow() {
             Some("session-audit-test"),
             None,
             Some(&config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("auditor promotion.record should succeed");
@@ -317,7 +319,6 @@ async fn test_promotion_record_full_pass_flow() {
         "content should be fully promoted"
     );
 
-    let gw_store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
     let b_manifest = builder_manifest();
     let b_policy = PolicyEngine::new(b_manifest.clone());
 
@@ -347,10 +348,18 @@ async fn test_promotion_record_full_pass_flow() {
         .and_then(|v| v.as_str())
         .expect("revision_id in response");
 
+    let (smoke_wf, smoke_task) = support::promotion_trace::seed_smoke_test_task(
+        &config,
+        gw_store.as_ref(),
+        "promotion.test.agent",
+        revision_id,
+    );
     let promote_args = serde_json::json!({
         "agent_id": "promotion.test.agent",
         "revision_id": revision_id,
         "reason": "integration test promote after promotion records",
+        "smoke_test_workflow_id": smoke_wf,
+        "smoke_test_task_id": smoke_task,
     });
     let promote_result = registry
         .execute(
@@ -426,13 +435,15 @@ async fn test_promotion_record_with_artifact_ref() {
     let eval_policy = PolicyEngine::new(eval_manifest.clone());
     let registry = default_registry();
 
-    let eval_args = serde_json::json!({
-        "artifact_ref": ar_ref,
-        "role": "sealed_evaluator",
-        "pass": true,
-        "findings": [],
-        "summary": "All tests passed (ar.* ref)"
-    });
+    let mut eval_args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        &artifact_id,
+        "sealed_evaluator",
+        true,
+        "root-session-ar/evaluator",
+    );
+    eval_args.as_object_mut().unwrap().remove("artifact_id");
+    eval_args["artifact_ref"] = serde_json::json!(ar_ref);
 
     let eval_result = registry
         .execute(
@@ -464,13 +475,16 @@ async fn test_promotion_record_with_artifact_ref() {
     let audit_manifest = auditor_manifest();
     let audit_policy = PolicyEngine::new(audit_manifest.clone());
 
-    let audit_args = serde_json::json!({
-        "artifact_ref": ar_ref,
-        "role": "auditor",
-        "pass": true,
-        "findings": [],
-        "summary": "Security audit passed (ar.* ref)"
-    });
+    let audit_args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        &artifact_id,
+        "auditor",
+        true,
+        "root-session-ar/auditor",
+    );
+    let mut audit_args = audit_args;
+    audit_args.as_object_mut().unwrap().remove("artifact_id");
+    audit_args["artifact_ref"] = serde_json::json!(ar_ref);
 
     let audit_result = registry
         .execute(
@@ -676,13 +690,14 @@ script_entry: main.py
     let manifest = evaluator_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
-    let args = serde_json::json!({
-        "artifact_id": bundle.artifact_id,
-        "role": "sealed_evaluator",
-        "pass": true,
-        "findings": [],
-        "summary": "ok"
-    });
+    let gw_store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        &bundle.artifact_id,
+        "sealed_evaluator",
+        true,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -694,7 +709,7 @@ script_entry: main.py
             Some(session_id),
             None,
             Some(&config),
-            None,
+            Some(gw_store),
             None,
         )
         .expect("promotion.record should succeed");
