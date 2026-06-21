@@ -384,23 +384,27 @@ Compose the install intent in the delegation message itself. Do NOT create itera
 
 On resume, extract the returned `revision_id`. The agent is **not yet installed** — it is only a Candidate revision at this point.
 
-### Step 6: Smoke-test the candidate revision
+### Step 6: Smoke-test the candidate revision (required for capability-bearing agents)
 
-Before the candidate can be promoted, ask the operator whether to run it once
-under real conditions. This is the only point where the agent executes with its
-declared capabilities before gaining the durable runtime grant of installation.
+Before the candidate can be promoted, it **must** execute once under real conditions when it declares `NetworkAccess` or `CodeExecution`. Pure-reasoning agents (no executable capabilities) skip this step.
 
-1. Call `user_ask` with `kind: "confirmation"`:
-   - **question**: "Run `<agent_id>` candidate revision `<revision_id>` once to validate installation?"
-   - **context**: explain what the agent does and that this executes with its real declared capabilities (e.g. network, credentials).
-2. If the operator answers **no**, report `ok: false, stage: "smoke_test_declined", reason: "operator declined validation run"` to the planner and stop. The candidate revision remains in the store but is not promoted.
-3. If the operator answers **yes**:
-   - Call `agent_spawn` with `agent_id="<agent_id>"`, `revision_id="<revision_id>"`, `async=true`, and a minimal one-shot task that exercises the agent's primary purpose.
-   - Call `workflow_wait(task_ids=[<smoke_test_task_id>], timeout_secs=300)` to join.
-   - If the child task status is **not** `Succeeded`, report `ok: false, stage: "smoke_test_failed", task_id: "<id>"` to the planner and stop. Do NOT promote.
-   - If the child task **Succeeded**, capture `workflow_id` and `task_id` for the promotion step.
+The gateway classifies smoke-test involvement mechanically from the candidate's declared capabilities:
 
-When `agent_install_smoke_test` is configured as `required`, the gateway will reject `agent_revision_promote` without a successful smoke-test task. Always provide `smoke_test_task_id` and `smoke_test_workflow_id` in Step 7 when they exist.
+| Classification | When | Operator involvement |
+|---|---|---|
+| **auto_run** | No `credential_services` in `runtime.lock` AND no `WriteAccess` outside `self.*` | Factory proposes a representative input and runs `agent_spawn(revision_id=...)` directly. No `user_ask` unless a tool call needs approval mid-run. |
+| **operator_directed** | Declares `credential_services` OR external `WriteAccess` scopes | Factory proposes input → `user_ask` for confirm/override → `agent_spawn` with that message → capture `smoke_test_input` for promotion. |
+
+**Procedure (all capability-bearing agents):**
+
+1. **Classify** the candidate from its capabilities + `runtime.lock` credentials.
+2. **If operator_directed:** call `user_ask` with the proposed test input; on decline, report `ok: false, stage: "smoke_test_declined"` and stop.
+3. Call `agent_spawn` with `agent_id="<agent_id>"`, `revision_id="<revision_id>"`, `async=true`, and a minimal task exercising the agent's primary purpose.
+4. Call `workflow_wait(task_ids=[<smoke_test_task_id>], timeout_secs=300)`.
+5. If status is not `Succeeded`, report `ok: false, stage: "smoke_test_failed"` and stop — do NOT promote.
+6. Capture `workflow_id`, `task_id`, and (if operator_directed) the confirmed `smoke_test_input`.
+
+The gateway **always** rejects `agent_revision_promote` for new capability-bearing agents without successful smoke-test evidence. Provide `smoke_test_task_id`, `smoke_test_workflow_id`, and `smoke_test_input` (when operator-directed) in Step 7.
 
 ### Step 7: Promote the candidate revision
 
@@ -408,7 +412,8 @@ Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, 
 - `install_mode: "promote"`
 - `agent_id`: the target agent id
 - `revision_id`: the candidate revision id from Step 5
-- `smoke_test_task_id` and `smoke_test_workflow_id` if a smoke test was performed (required when gateway config enforces smoke tests)
+- `smoke_test_task_id` and `smoke_test_workflow_id` when Step 6 ran (required for capability-bearing agents)
+- `smoke_test_input` when the candidate was operator-directed
 
 Then end your turn. On resume, if `specialized_builder` reports `status: "promoted"` / `installed: true`, the agent is now active. Report success to the planner.
 

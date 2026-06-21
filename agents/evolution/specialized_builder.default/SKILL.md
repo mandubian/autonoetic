@@ -214,7 +214,7 @@ Activates the created revision.
 
 When the delegation includes `install_mode: "create_candidate"`, call only `agent_revision_create_from_intent` and return the resulting `revision_id` with `installed: false`. Do NOT call `agent_revision_promote`.
 
-When the delegation includes `install_mode: "promote"`, call only `agent_revision_promote` using the supplied `revision_id`. Forward `smoke_test_task_id` and `smoke_test_workflow_id` if provided. The gateway verifies the smoke-test task succeeded and targeted this revision when `agent_install_smoke_test` is `required`.
+When the delegation includes `install_mode: "promote"`, call only `agent_revision_promote` using the supplied `revision_id`. Forward `smoke_test_task_id`, `smoke_test_workflow_id`, and `smoke_test_input` (when operator-directed) if provided. The gateway unconditionally verifies smoke-test evidence for new capability-bearing agents (`NetworkAccess` / `CodeExecution`).
 
 Default behavior (`install_mode: "full"` or omitted) remains create + promote in one turn.
 

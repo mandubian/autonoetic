@@ -65,6 +65,7 @@ pub mod session_overview;
 pub mod session_read_cache;
 pub mod session_report;
 pub mod session_tracer;
+pub mod smoke_test_gate;
 pub mod state_attestation;
 pub mod store;
 pub mod tool_call_processor;

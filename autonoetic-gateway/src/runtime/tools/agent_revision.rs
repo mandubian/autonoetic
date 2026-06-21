@@ -2304,12 +2304,16 @@ struct RevisionPromoteArgs {
     #[serde(default)]
     force_reason: Option<String>,
     /// Task id of a successful smoke-test run for this candidate revision.
-    /// Required when `agent_install_smoke_test` is `required` for new agents.
+    /// Required for new capability-bearing agents (NetworkAccess / CodeExecution).
     #[serde(default)]
     smoke_test_task_id: Option<String>,
     /// Workflow id containing the smoke-test task.
     #[serde(default)]
     smoke_test_workflow_id: Option<String>,
+    /// Operator-confirmed input used for the smoke test. Required when the
+    /// candidate is classified operator-directed (credentials or external WriteAccess).
+    #[serde(default)]
+    smoke_test_input: Option<String>,
 }
 
 pub struct AgentRevisionPromoteTool;
@@ -2361,8 +2365,9 @@ do not re-issue."
                     "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (R++2). Pass it on retry to bypass the gate." },
                     "force": { "type": "boolean", "description": "Optional: bypass the promotion safety governor (issue #25). Requires `force_reason`; emits a `governor.override` causal event." },
                     "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." },
-                    "smoke_test_task_id": { "type": "string", "description": "Optional: task id of a successful smoke-test run for this candidate revision. Required when agent_install_smoke_test is 'required' for new agents." },
-                    "smoke_test_workflow_id": { "type": "string", "description": "Optional: workflow id containing the smoke-test task. Required alongside smoke_test_task_id when agent_install_smoke_test is 'required'." }
+                    "smoke_test_task_id": { "type": "string", "description": "Task id of a successful smoke-test run for this candidate revision. Required for new capability-bearing agents (NetworkAccess or CodeExecution)." },
+                    "smoke_test_workflow_id": { "type": "string", "description": "Workflow id containing the smoke-test task. Required alongside smoke_test_task_id for new capability-bearing agents." },
+                    "smoke_test_input": { "type": "string", "description": "Operator-confirmed test input used when spawning the smoke test. Required when the candidate declares credential_services or external WriteAccess scopes." }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -3390,25 +3395,59 @@ do not re-issue."
             }
         }
 
-        // Smoke-test gate for new agent installation.
-        // When configured as `required`, a brand-new agent (no existing alias) must
-        // have been executed at least once via agent_spawn with revision_id.
-        let smoke_test_required = config
-            .map(|c| c.agent_install_smoke_test)
-            .unwrap_or_default()
-            == autonoetic_types::config::AgentInstallSmokeTestMode::Required;
+        // Smoke-test gate for new agent installation (P-2.28 / #578).
+        // Unconditional for capability-bearing agents; pure-reasoning agents exempt.
         let is_new_agent = gateway_store.resolve_alias(&args.agent_id)?.is_none();
-        if smoke_test_required && is_new_agent {
+        let runtime_lock_rel = crate::runtime::parser::SkillParser::parse(&skill_text)
+            .map(|(m, _)| m.runtime.runtime_lock)
+            .unwrap_or_else(|_| "runtime.lock".to_string());
+        let credential_services = crate::runtime::smoke_test_gate::load_revision_credential_services(
+            &revision_dir,
+            &runtime_lock_rel,
+        );
+        let smoke_involvement = crate::runtime::smoke_test_gate::smoke_test_involvement(
+            &current_capabilities,
+            &credential_services,
+        );
+
+        if is_new_agent
+            && smoke_involvement != crate::runtime::smoke_test_gate::SmokeTestInvolvement::NotRequired
+        {
+            if smoke_involvement
+                == crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected
+            {
+                let input = args.smoke_test_input.as_deref().unwrap_or("").trim();
+                if input.is_empty() {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "validation",
+                        "error": "smoke_test_input_required",
+                        "message": format!(
+                            "Agent '{}' requires operator-directed smoke test input (credential_services or external WriteAccess declared).",
+                            args.agent_id
+                        ),
+                        "smoke_test_involvement": "operator_directed",
+                        "repair_hint": "Propose a representative test input, confirm it with the operator via user_ask, run agent_spawn(revision_id=...) with that message, then retry promotion with smoke_test_input plus smoke_test_workflow_id and smoke_test_task_id.",
+                    })
+                    .to_string());
+                }
+            }
+
             let Some(workflow_id) = args.smoke_test_workflow_id.as_deref() else {
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "validation",
                     "error": "smoke_test_required",
                     "message": format!(
-                        "Agent '{}' is new and agent_install_smoke_test is 'required'. \
+                        "Agent '{}' is new and declares executable capabilities. \
                          Provide smoke_test_workflow_id and smoke_test_task_id from a successful smoke-test run.",
                         args.agent_id
                     ),
+                    "smoke_test_involvement": match smoke_involvement {
+                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::AutoRun => "auto_run",
+                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected => "operator_directed",
+                        _ => "required",
+                    },
                     "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...), wait for success, then retry promotion with smoke_test_workflow_id and smoke_test_task_id.",
                 })
                 .to_string());
@@ -3419,21 +3458,27 @@ do not re-issue."
                     "error_type": "validation",
                     "error": "smoke_test_required",
                     "message": format!(
-                        "Agent '{}' is new and agent_install_smoke_test is 'required'. \
+                        "Agent '{}' is new and declares executable capabilities. \
                          Provide smoke_test_task_id from a successful smoke-test run.",
                         args.agent_id
                     ),
+                    "smoke_test_involvement": match smoke_involvement {
+                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::AutoRun => "auto_run",
+                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected => "operator_directed",
+                        _ => "required",
+                    },
                     "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...), wait for success, then retry promotion with smoke_test_workflow_id and smoke_test_task_id.",
                 })
                 .to_string());
             };
             if let Err(e) = verify_smoke_test_task(
-                config.unwrap(),
+                config.ok_or_else(|| anyhow::anyhow!("GatewayConfig required for smoke-test verification"))?,
                 &gateway_store,
                 workflow_id,
                 task_id,
                 &args.agent_id,
                 &args.revision_id,
+                args.smoke_test_input.as_deref(),
             ) {
                 return Ok(serde_json::json!({
                     "ok": false,
@@ -3964,6 +4009,7 @@ fn verify_smoke_test_task(
     task_id: &str,
     agent_id: &str,
     revision_id: &str,
+    expected_input: Option<&str>,
 ) -> anyhow::Result<()> {
     let task = crate::scheduler::workflow_store::load_task_run(config, Some(gateway_store), workflow_id, task_id)?
         .ok_or_else(|| anyhow::anyhow!("Smoke-test task '{}' not found in workflow '{}'", task_id, workflow_id))?;
@@ -3995,7 +4041,7 @@ fn verify_smoke_test_task(
         .and_then(|v| v.as_str());
 
     match spawned_revision_id {
-        Some(rid) if rid == revision_id => Ok(()),
+        Some(rid) if rid == revision_id => {}
         Some(rid) => anyhow::bail!(
             "Smoke-test task '{}' ran revision '{}', not '{}'",
             task_id,
@@ -4007,6 +4053,20 @@ fn verify_smoke_test_task(
             task_id
         ),
     }
+
+    if let Some(expected) = expected_input.map(str::trim).filter(|s| !s.is_empty()) {
+        let actual = task.message.as_deref().unwrap_or("").trim();
+        if actual != expected {
+            anyhow::bail!(
+                "Smoke-test task '{}' message does not match smoke_test_input (expected {:?}, got {:?})",
+                task_id,
+                expected,
+                actual
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn check_revision_promote_approval(

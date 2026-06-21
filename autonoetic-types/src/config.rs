@@ -81,8 +81,9 @@ pub enum CapabilityDeltaGateMode {
 
 /// Smoke-test gate mode for new agent installation.
 ///
-/// A smoke test runs the candidate revision once before promotion so the
-/// operator can confirm the agent actually executes under real conditions.
+/// **Deprecated (#578):** promotion now requires smoke tests unconditionally for
+/// capability-bearing agents (`NetworkAccess` / `CodeExecution`). This field is
+/// retained for backwards-compatible YAML only and has no effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentInstallSmokeTestMode {
@@ -966,12 +967,8 @@ pub struct GatewayConfig {
     #[serde(default = "default_true")]
     pub require_operator_approval_for_new_agents: bool,
 
-    /// Smoke-test gate for new agent installation.
-    ///
-    /// - `ask` (default): agent-factory asks the operator before running the
-    ///   candidate revision once. Promotion only happens if the test succeeds.
-    /// - `required`: promotion of any new agent requires a passed smoke-test task.
-    /// - `skip`: no smoke-test gate; legacy behavior.
+    /// **Deprecated (#578):** ignored — smoke-test requirement is derived from the
+    /// candidate revision's declared capabilities. Retained for YAML compatibility.
     #[serde(default)]
     pub agent_install_smoke_test: AgentInstallSmokeTestMode,
 

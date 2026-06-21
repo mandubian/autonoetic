@@ -1,15 +1,7 @@
-//! Smoke-test install gate.
+//! Smoke-test install gate (#578).
 //!
-//! New agents can be required to execute once (via agent_spawn with revision_id)
-//! before promotion. This proves the agent actually runs under real conditions,
-//! not just that mocked unit tests pass in a no-network sandbox.
-//!
-//! Tests:
-//!   - new agent + required smoke test + no evidence → blocked
-//!   - new agent + required smoke test + passed task → promoted
-//!   - new agent + required smoke test + failed task → blocked
-//!   - new agent + skip mode + no evidence → promoted
-//!   - existing agent re-promote + required mode → no smoke-test requirement
+//! Capability-bearing new agents must execute once before promotion.
+//! Pure-reasoning agents (no NetworkAccess / CodeExecution) are exempt.
 
 mod support;
 
@@ -21,17 +13,17 @@ use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
 use autonoetic_types::capability::Capability;
-use autonoetic_types::config::{
-    AgentInstallSmokeTestMode, GatewayConfig,
-};
+use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
+use autonoetic_types::promotion::{Finding, PromotionRole};
 use std::sync::Arc;
 use tempfile::tempdir;
 
 const AGENT_ID: &str = "smoke-test-agent";
 const REVISION_ID: &str = "rev_smoke_candidate";
 const OUTGOING_REVISION: &str = "rev_outgoing";
+const ARTIFACT_ID: &str = "art_smoke_test01";
 
 fn manifest_with_revision_cap(agent_id: &str) -> AgentManifest {
     AgentManifest {
@@ -68,15 +60,35 @@ fn manifest_with_revision_cap(agent_id: &str) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
-            open_web: false,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 
-fn skill_md(agent_id: &str) -> String {
+fn skill_md(agent_id: &str, executable: bool, with_credentials: bool) -> String {
+    if !executable {
+        return format!(
+            "---\nname: \"{agent_id}\"\ndescription: test\nmetadata:\n  autonoetic:\n    version: \"1.0\"\n    runtime:\n      engine: autonoetic\n      gateway_version: \"0.1.0\"\n      sdk_version: \"0.1.0\"\n      type: stateful\n      sandbox: bubblewrap\n      runtime_lock: runtime.lock\n    agent:\n      id: {agent_id}\n      name: {agent_id}\n      description: test\n---\n# Test\n",
+            agent_id = agent_id,
+        );
+    }
+    let caps = if with_credentials {
+            r#"    capabilities:
+      - type: "CredentialAccess"
+        services: ["trading-api"]
+      - type: "NetworkAccess"
+        hosts: ["api.example.com"]
+      - type: "WriteAccess"
+        scopes: ["self.*"]"#
+    } else {
+        r#"    capabilities:
+      - type: "NetworkAccess"
+        hosts: ["api.open-meteo.com"]"#
+    };
     format!(
-        "---\nversion: \"1.0\"\nruntime:\n  engine: autonoetic\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  type: stateful\n  sandbox: bubblewrap\n  runtime_lock: runtime.lock\nagent:\n  id: {}\n  name: {}\n  description: test\n---\n# Test\n",
-        agent_id, agent_id,
+        "---\nname: \"{agent_id}\"\ndescription: test\nmetadata:\n  autonoetic:\n    version: \"1.0\"\n    runtime:\n      engine: autonoetic\n      gateway_version: \"0.1.0\"\n      sdk_version: \"0.1.0\"\n      type: stateful\n      sandbox: bubblewrap\n      runtime_lock: runtime.lock\n    agent:\n      id: {agent_id}\n      name: {agent_id}\n      description: test\n{caps}\n---\n# Test\n",
+        agent_id = agent_id,
+        caps = caps,
     )
 }
 
@@ -84,21 +96,46 @@ fn write_revision_skill(
     gateway_dir: &std::path::Path,
     agent_id: &str,
     revision_id: &str,
+    executable: bool,
+    with_credentials: bool,
 ) {
     let dir = gateway_dir
         .join("revisions/agents")
         .join(agent_id)
         .join(revision_id);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("SKILL.md"), skill_md(agent_id)).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        skill_md(agent_id, executable, with_credentials),
+    )
+    .unwrap();
+    if with_credentials {
+        let lock = r#"gateway:
+  artifact: autonoetic-gateway
+  version: "0.1.0"
+  sha256: sha256:test
+sdk:
+  version: "0.1.0"
+sandbox:
+  backend: bubblewrap
+credentials:
+  - service: trading-api
+"#;
+        std::fs::write(dir.join("runtime.lock"), lock).unwrap();
+    }
 }
 
-fn make_revision_record(agent_id: &str, revision_id: &str, status: AgentRevisionStatus) -> AgentRevisionRecord {
+fn make_revision_record(
+    agent_id: &str,
+    revision_id: &str,
+    status: AgentRevisionStatus,
+    with_artifact: bool,
+) -> AgentRevisionRecord {
     AgentRevisionRecord {
         revision_id: revision_id.to_string(),
         agent_id: agent_id.to_string(),
         base_revision_id: None,
-        artifact_id: None,
+        artifact_id: with_artifact.then(|| ARTIFACT_ID.to_string()),
         content_digest: format!("sha256:{}", revision_id),
         runtime_lock_hash: "sha256:lock".to_string(),
         manifest_hash: "sha256:manifest".to_string(),
@@ -118,6 +155,35 @@ fn make_revision_record(agent_id: &str, revision_id: &str, status: AgentRevision
     }
 }
 
+fn seed_promotion_records(gateway_dir: &std::path::Path, content_digest: &str) {
+    let store =
+        autonoetic_gateway::runtime::promotion_store::PromotionStore::new(gateway_dir).unwrap();
+    store
+        .record_promotion(
+            ARTIFACT_ID.to_string(),
+            None,
+            Some(content_digest.to_string()),
+            PromotionRole::Evaluator,
+            "evaluator.default",
+            true,
+            Vec::<Finding>::new(),
+            None,
+        )
+        .unwrap();
+    store
+        .record_promotion(
+            ARTIFACT_ID.to_string(),
+            None,
+            Some(content_digest.to_string()),
+            PromotionRole::Auditor,
+            "auditor.default",
+            true,
+            Vec::<Finding>::new(),
+            None,
+        )
+        .unwrap();
+}
+
 struct Harness {
     _temp: tempfile::TempDir,
     store: Arc<GatewayStore>,
@@ -126,34 +192,44 @@ struct Harness {
     config: GatewayConfig,
 }
 
-fn setup_harness(smoke_test_mode: AgentInstallSmokeTestMode, existing_alias: bool) -> Harness {
+fn setup_harness(executable: bool, with_credentials: bool, existing_alias: bool) -> Harness {
     let temp = tempdir().unwrap();
     let agents_dir = temp.path().join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     let agent_dir = agents_dir.join(AGENT_ID);
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("SKILL.md"), skill_md(AGENT_ID)).unwrap();
+    std::fs::write(
+        agent_dir.join("SKILL.md"),
+        skill_md(AGENT_ID, executable, with_credentials),
+    )
+    .unwrap();
 
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
     let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
 
-    write_revision_skill(&gateway_dir, AGENT_ID, REVISION_ID);
+    write_revision_skill(&gateway_dir, AGENT_ID, REVISION_ID, executable, with_credentials);
+    let content_digest = format!("sha256:{}", REVISION_ID);
     store
         .insert_agent_revision(&make_revision_record(
             AGENT_ID,
             REVISION_ID,
             AgentRevisionStatus::Candidate,
+            executable,
         ))
         .unwrap();
+    if executable {
+        seed_promotion_records(&gateway_dir, &content_digest);
+    }
 
     if existing_alias {
-        write_revision_skill(&gateway_dir, AGENT_ID, OUTGOING_REVISION);
+        write_revision_skill(&gateway_dir, AGENT_ID, OUTGOING_REVISION, executable, false);
         store
             .insert_agent_revision(&make_revision_record(
                 AGENT_ID,
                 OUTGOING_REVISION,
                 AgentRevisionStatus::Ready,
+                executable,
             ))
             .unwrap();
         let alias = AgentAliasRecord {
@@ -175,7 +251,6 @@ fn setup_harness(smoke_test_mode: AgentInstallSmokeTestMode, existing_alias: boo
     config.agents_dir = agents_dir.clone();
     config.sentinel.enabled = false;
     config.require_operator_approval_for_new_agents = false;
-    config.agent_install_smoke_test = smoke_test_mode;
 
     Harness {
         _temp: temp,
@@ -190,6 +265,7 @@ fn create_smoke_test_task(
     h: &Harness,
     task_id: &str,
     status: TaskRunStatus,
+    message: Option<&str>,
 ) -> String {
     let workflow = autonoetic_gateway::scheduler::workflow_store::ensure_workflow_for_root_session(
         &h.config,
@@ -201,8 +277,12 @@ fn create_smoke_test_task(
 
     let mut run = workflow.clone();
     run.status = WorkflowRunStatus::Active;
-    autonoetic_gateway::scheduler::workflow_store::save_workflow_run(&h.config, Some(h.store.as_ref()), &run)
-        .unwrap();
+    autonoetic_gateway::scheduler::workflow_store::save_workflow_run(
+        &h.config,
+        Some(h.store.as_ref()),
+        &run,
+    )
+    .unwrap();
 
     let task = TaskRun {
         task_id: task_id.to_string(),
@@ -216,7 +296,7 @@ fn create_smoke_test_task(
         source_agent_id: Some("agent-factory.default".to_string()),
         result_summary: None,
         join_group: None,
-        message: Some("smoke test".to_string()),
+        message: message.map(|m| m.to_string()),
         metadata: Some(serde_json::json!({
             "_autonoetic_spawn_revision_id": REVISION_ID,
         })),
@@ -240,6 +320,7 @@ fn invoke_promote(
     h: &Harness,
     smoke_test_workflow_id: Option<&str>,
     smoke_test_task_id: Option<&str>,
+    smoke_test_input: Option<&str>,
 ) -> serde_json::Value {
     let manifest = manifest_with_revision_cap(AGENT_ID);
     let policy = PolicyEngine::new(manifest.clone());
@@ -253,6 +334,9 @@ fn invoke_promote(
     }
     if let Some(tid) = smoke_test_task_id {
         args["smoke_test_task_id"] = serde_json::json!(tid);
+    }
+    if let Some(input) = smoke_test_input {
+        args["smoke_test_input"] = serde_json::json!(input);
     }
     let raw = registry
         .execute(
@@ -273,19 +357,19 @@ fn invoke_promote(
 }
 
 #[test]
-fn required_mode_blocks_new_agent_without_smoke_test() {
-    let h = setup_harness(AgentInstallSmokeTestMode::Required, false);
-    let result = invoke_promote(&h, None, None);
+fn capability_bearing_new_agent_blocks_without_smoke_test() {
+    let h = setup_harness(true, false, false);
+    let result = invoke_promote(&h, None, None, None);
 
     assert_eq!(result["ok"], false, "unexpected: {:?}", result);
     assert_eq!(result["error"], "smoke_test_required");
 }
 
 #[test]
-fn required_mode_promotes_new_agent_with_passed_smoke_test() {
-    let h = setup_harness(AgentInstallSmokeTestMode::Required, false);
-    let wf_id = create_smoke_test_task(&h, "smoke-pass-001", TaskRunStatus::Succeeded);
-    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-pass-001"));
+fn capability_bearing_new_agent_promotes_with_passed_smoke_test() {
+    let h = setup_harness(true, false, false);
+    let wf_id = create_smoke_test_task(&h, "smoke-pass-001", TaskRunStatus::Succeeded, None);
+    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-pass-001"), None);
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
     assert_eq!(result["status"], "promoted");
@@ -293,29 +377,76 @@ fn required_mode_promotes_new_agent_with_passed_smoke_test() {
 }
 
 #[test]
-fn required_mode_blocks_new_agent_with_failed_smoke_test() {
-    let h = setup_harness(AgentInstallSmokeTestMode::Required, false);
-    let wf_id = create_smoke_test_task(&h, "smoke-fail-001", TaskRunStatus::Failed);
-    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-fail-001"));
+fn capability_bearing_new_agent_blocks_with_failed_smoke_test() {
+    let h = setup_harness(true, false, false);
+    let wf_id = create_smoke_test_task(&h, "smoke-fail-001", TaskRunStatus::Failed, None);
+    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-fail-001"), None);
 
     assert_eq!(result["ok"], false, "unexpected: {:?}", result);
     assert_eq!(result["error"], "smoke_test_failed_or_mismatched");
 }
 
 #[test]
-fn skip_mode_promotes_new_agent_without_smoke_test() {
-    let h = setup_harness(AgentInstallSmokeTestMode::Skip, false);
-    let result = invoke_promote(&h, None, None);
+fn pure_reasoning_new_agent_promotes_without_smoke_test() {
+    let h = setup_harness(false, false, false);
+    let result = invoke_promote(&h, None, None, None);
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
     assert_eq!(result["status"], "promoted");
 }
 
 #[test]
-fn required_mode_exempts_existing_agent_repromote() {
-    let h = setup_harness(AgentInstallSmokeTestMode::Required, true);
-    let result = invoke_promote(&h, None, None);
+fn existing_agent_repromote_exempts_smoke_test() {
+    let h = setup_harness(true, false, true);
+    let result = invoke_promote(&h, None, None, None);
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
     assert_eq!(result["status"], "promoted");
+}
+
+#[test]
+fn operator_directed_requires_smoke_test_input() {
+    let h = setup_harness(true, true, false);
+    let wf_id = create_smoke_test_task(
+        &h,
+        "smoke-cred-001",
+        TaskRunStatus::Succeeded,
+        Some("buy 1 share"),
+    );
+    let result = invoke_promote(&h, Some(&wf_id), Some("smoke-cred-001"), None);
+
+    assert_eq!(result["ok"], false, "unexpected: {:?}", result);
+    assert_eq!(result["error"], "smoke_test_input_required");
+}
+
+#[test]
+fn operator_directed_promotes_with_matching_input() {
+    let h = setup_harness(true, true, false);
+    let input = "buy 1 share of AAPL";
+    let wf_id = create_smoke_test_task(
+        &h,
+        "smoke-cred-002",
+        TaskRunStatus::Succeeded,
+        Some(input),
+    );
+    let result = invoke_promote(
+        &h,
+        Some(&wf_id),
+        Some("smoke-cred-002"),
+        Some(input),
+    );
+
+    assert_eq!(result["ok"], true, "unexpected: {:?}", result);
+    assert_eq!(result["status"], "promoted");
+}
+
+#[test]
+fn legacy_skip_config_does_not_bypass_capability_gate() {
+    let mut h = setup_harness(true, false, false);
+    h.config.agent_install_smoke_test =
+        autonoetic_types::config::AgentInstallSmokeTestMode::Skip;
+    let result = invoke_promote(&h, None, None, None);
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"], "smoke_test_required");
 }
