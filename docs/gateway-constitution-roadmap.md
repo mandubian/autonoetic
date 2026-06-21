@@ -47,7 +47,7 @@ invisible, unbounded, or hard to revert.
 
 ### 1.1 `R+6` Causal-chain fsync ordering invariant
 
-**Threat.** The gateway acknowledges an approval (continuation resumes,
+**Threat.** The gateway acknowledges an approval (checkpoint resumes,
 grant activates, promotion commits) while the corresponding causal
 event is still in the page cache. A crash between ack and flush loses
 the audit trail of a privileged action — the worst possible class of
@@ -60,7 +60,7 @@ promotion commit, emergency stop) to `log_durable`. Leave hot-path
 informational events on the non-durable path.
 
 Files: `autonoetic-gateway/src/causal_chain.rs`,
-`autonoetic-gateway/src/runtime/continuation.rs`,
+`autonoetic-gateway/src/runtime/checkpoint.rs`,
 `autonoetic-gateway/src/runtime/tools/approval.rs`,
 `autonoetic-gateway/src/runtime/tools/promotion.rs`,
 `autonoetic-gateway/src/execution.rs::emergency_stop_root_session`.
@@ -678,15 +678,14 @@ approvals get the same UX affordances as low-risk ones.
    1.0, set to 0 in tests).
 
 2. **Typed confirmation phrase** (`confirm_phrase`): required for
-   Critical-risk approvals (`RevisionPromote`, `CredentialPrompt`).
-   The phrase encodes the action identity (e.g. `promote {agent_id}
-   {revision_id[:16]}`). Operator must provide it via
-   `--confirm-phrase`.
+    Critical-risk approvals (`RevisionPromote`, `CredentialPrompt`).
+    The phrase encodes the action identity (e.g. `promote {agent_id}
+    {revision_id[:16]}`). Operator must provide it via
+    `--confirm-phrase`.
 
-3. **Structural-similarity dedup**: Jaccard similarity over command
-   tokens (70%) + hosts (30%) computed at approval creation, stored
-   as `similar_to_request_id` + `similarity_score`. Displayed in CLI
-   `gateway approval show` and TUI.
+3. **Structural-similarity dedup**: removed in #565. The score was
+    write-only for sandbox-exec approvals; the small Jaccard advisory
+    check for wiki proposals is now inlined in `human_gate.rs`.
 
 Risk classification (`ApprovalRisk` enum):
 - Critical: `RevisionPromote`, `CredentialPrompt`
@@ -696,8 +695,7 @@ Risk classification (`ApprovalRisk` enum):
 
 Files: `autonoetic-gateway/src/scheduler/approval_hardening.rs`
 (classification, enrich), `scheduler/approval.rs` (dwell/phrase
-enforcement), `scheduler/gateway_store/approvals.rs` (schema v23),
-`autonoetic/src/cli/gateway.rs` (`--confirm-phrase` flag, Show display).
+enforcement), `autonoetic/src/cli/gateway.rs` (`--confirm-phrase` flag, Show display).
 
 **Test.** `constitution_approval_hardening.rs` — 12 tests: risk
 classification for all action types, enrich sets dwell/phrase,

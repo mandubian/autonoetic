@@ -99,8 +99,8 @@ autonoetic-gateway/src/
 │   │   ├── admin_proposal.rs      #     admin.proposal.*
 │   │   ├── security_redteam.rs    #     security_redteam.*
 │   │   └── content_patch.rs       #     content.patch
-│   ├── continuation.rs            #   TurnContinuation: HMAC-signed suspend/resume
-│   ├── guard.rs                   #   LoopGuard: 6 trip conditions (progress, failures, polling)
+│   ├── checkpoint.rs              #   SessionCheckpoint: HMAC-signed snapshots at all yield points
+│   ├── guard.rs                   #   LoopGuard: progress + per-tool failure budgets
 │   ├── session_context.rs         #   Session state, checkpoints, resume assessment
 │   ├── session_read_cache.rs      #   Per-session LRU cache for pure-read tool results
 │   ├── session_resume.rs          #   Resume a session from checkpoint
@@ -371,11 +371,10 @@ AgentExecutor::execute_with_history(history)
        │           │     │     3. Session approval grants
        │           │     │     4. Existing pending/approved approvals
        │           │     │     5. Approval flood cap (>50 → rejected)
-       │           │     ├─ If not auto-approved:
-       │           │     │     ├─ Create ApprovalRequest (SQLite)
-       │           │     │     ├─ Save TurnContinuation (HMAC-signed)
-       │           │     │     ├─ Checkpoint session (YieldReason::ApprovalRequired)
-       │           │     │     └─ Suspend turn
+        │           │     ├─ If not auto-approved:
+        │           │     │     ├─ Create ApprovalRequest (SQLite)
+        │           │     │     ├─ Save signed SessionCheckpoint (YieldReason::ApprovalRequired)
+        │           │     │     └─ Suspend turn
        │           │     └─ If auto-approved: execute directly
        │           │
        │           └─ Aggregate results for LLM
@@ -409,27 +408,15 @@ ToolCallProcessor detects action requires approval
   │
   ├─ Check 5-layer dedup chain (see above)
   │
-<<<<<<< HEAD
-       └─ If new approval needed:
-            │
-            ├─ 1. GATEWAY PERSISTS
-            │     ├─ Create ApprovalRequest in SQLite
-            │     └─ Save TurnContinuation (HMAC-signed, includes:
-            │           history, pending tool, remaining tools, loop guard state)
-            │
-            ├─ 2. TURN SUSPENDS
-=======
   └─ If new approval needed:
        │
        ├─ 1. GATEWAY PERSISTS
        │     ├─ Create ApprovalRequest in SQLite
-       │     ├─ Compute similarity score (Jaccard vs recent same-agent)
-       │     └─ Save TurnContinuation (HMAC-signed, includes:
-       │           history, pending tool, remaining tools, loop guard state)
+       │     └─ Save signed SessionCheckpoint (includes:
+       │           history, pending tool, remaining tools, loop guard)
        │
        ├─ 2. TURN SUSPENDS
->>>>>>> origin/main
-       │     ├─ Checkpoint session with YieldReason::ApprovalRequired
+       │     ├─ YieldReason::ApprovalRequired
        │     └─ Return TurnOutcome::Suspended
        │
        ├─ 3. OPERATOR DECIDES (via JSON-RPC or CLI)
@@ -441,18 +428,25 @@ ToolCallProcessor detects action requires approval
        │     │    ├─ Check confirm phrase (R++4)
        │     │    ├─ Check capability accretion acknowledgement (R++2)
        │     │    ├─ Persist decision → SQLite
-       │     │    └─ Update workflow task status
-       │     ├─ Load TurnContinuation from disk
-       │     ├─ Verify HMAC integrity
+       │     │    └─ apply_decision() handles all post-decision side-effects:
+       │     │         - workflow task status update
+       │     │         - session approval grant materialization
+       │     │         - notification / signal delivery
+       │     │         - causal event emission
+       │     ├─ Verify checkpoint HMAC
+       │     ├─ Verify checkpoint/approval action-equality
        │     ├─ If sandbox_exec: record session approval grants
-       │     ├─ Execute approved action directly
-       │     ├─ Reconstruct history (inject approval result)
+       │     ├─ Inject approval_ref into suspended tool call
+       │     ├─ Resume reasoning loop
+       │     ├─ Agent re-issues tool call with approval_ref; gateway executes it normally
+       │     ├─ Inject real tool result into history
        │     ├─ Execute remaining tool calls from original batch
-       │     └─ Resume reasoning loop
+       │     └─ Delete checkpoint after successful resume
        │
-       └─ 4b. REJECTED
-             ├─ Persist rejection → SQLite
-             └─ Notify agent (tool returns error in history)
+        └─ 4b. REJECTED
+              ├─ Persist rejection → SQLite
+              ├─ apply_decision() notifies agent / fails workflow task
+              └─ Checkpoint is deleted when the session is cleaned up
 ```
 
 ### 3.5 Background Scheduler Tick
@@ -589,8 +583,7 @@ MISC:
 │   └── layer_{id}/
 │       ├── manifest.json        # Metadata
 │       └── contents.tar.zst     # Compressed tarball
-├── checkpoints/<session_id>/    # Session checkpoints
-├── continuations/               # HMAC-signed turn continuations
+├── checkpoints/<session_id>/    # Session checkpoints (HMAC-signed)
 └── history/              
     └── causal_chain.jsonl       # Append-only audit log
 ```
@@ -702,10 +695,10 @@ Filter strategies:
 |---|---|---|
 | **Unified tool metadata schema** | `ToolMetadata` is currently minimal (just `path`) and defined in `tools/mod.rs`. A richer schema shared across all tools would improve introspection. | Low |
 | **Generic MCP-bridge pattern** | Both `mcp.rs` and the native tool dispatch follow similar patterns (definition → availability → execute). A shared trait-based dispatch framework could reduce boilerplate. | Medium |
-| **Approval flow state machine** | Approval lifecycle (pending → approved/rejected → history) is spread across `scheduler/approval.rs`, `runtime/continuation.rs`, and `runtime/tool_call_processor.rs`. A centralized state machine would reduce inconsistencies. | High |
+| **Approval flow state machine** | Approval lifecycle (pending → approved/rejected → history) is spread across `scheduler/approval.rs`, `runtime/checkpoint.rs`, and `runtime/tool_call_processor.rs`. A centralized state machine would reduce inconsistencies. | High |
 | **Causal event publishing** | Every tool/action that emits a causal event does so ad-hoc. A centralized event bus with typed event payloads would: (1) guarantee every tool call emits a trace, (2) enable `policy.decision` hooks without per-tool cooperation, (3) simplify the hook system. | High |
-| **Session lifecycle manager** | Session creation, checkpoint, suspend, resume, re-entry, and close logic is interleaved across `lifecycle.rs`, `execution.rs`, `session_resume.rs`, `session_context.rs`, and `continuation.rs`. A `SessionLifecycleManager` struct would clarify the state machine. | Medium |
-| **Resource reclamation unification** | Reclamation logic is in `scheduler/reclamation.rs` (GC), `runtime/continuation.rs` (orphan reaping), `execution.rs` (session cleanup), and `gateway_store/` (retention policy). A single `ReclamationService` would reduce missed-deadlines. | Medium |
+| **Session lifecycle manager** | Session creation, checkpoint, suspend, resume, re-entry, and close logic is interleaved across `lifecycle.rs`, `execution.rs`, `session_resume.rs`, `session_context.rs`, and `checkpoint.rs`. A `SessionLifecycleManager` struct would clarify the state machine. | Medium |
+| **Resource reclamation unification** | Reclamation logic is in `scheduler/reclamation.rs` (GC), `runtime/checkpoint.rs` (orphan reaping), `execution.rs` (session cleanup), and `gateway_store/` (retention policy). A single `ReclamationService` would reduce missed-deadlines. | Medium |
 | **Tool registration vs. JSON-RPC routing** | Both `default_registry()` (tools) and `JsonRpcRouter::dispatch()` (RPC methods) define method-name → handler mappings. A shared routing table would DRY up name resolution. | Low |
 | **Loop guard types** | `LoopGuardTripReason` variants and `TurnOutcome` variants partially overlap (both handle failures, suspensions). A unified `SessionInterruptReason` enum could simplify checkpoint/resume logic. | Low |
 | **Secret redaction pipeline** | Secret redaction happens in `log_redaction.rs`, `tool_call_processor.rs` (secret store), and each tool individually. A centralized post-execution redaction pass would prevent accidental leaks. | Medium |
@@ -715,7 +708,7 @@ Filter strategies:
 ### 6.3 Known Hard Problems
 
 1. **Recursive approval loops** — Agent spawns tool that requires approval, which spawns another agent, which calls another privileged tool. The approval dedup chain must correctly scope session grants across nested sessions.
-2. **Continuation + checkpoint divergence** — Turn continuations and session checkpoints both save execution state but at different granularities. A restart between save_continuation and checkpoint could lose state — the reaper handles some cases but not all.
+2. **Checkpoint consistency on restart** — Session checkpoints save execution state at every yield point. A restart between the SQLite approval insert and the checkpoint write could leave a dangling approval row; the startup reaper handles orphaned checkpoints and approvals.
 3. **Flood cap interaction with nested sessions** — `max_pending_approvals_per_root` counts across all child sessions. An agent could inadvertently exhaust the cap for the entire root tree.
 4. **Session grant scope lifting** — A session grant created with `HostSuffix` coverage might unintentionally cover a host in a child session that the parent never intended.
 
