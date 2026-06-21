@@ -50,6 +50,7 @@ fn manifest_with_sandbox(allowed: Vec<&str>) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -87,6 +88,7 @@ fn manifest_no_capabilities() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

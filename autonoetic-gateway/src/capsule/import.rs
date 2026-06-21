@@ -241,6 +241,7 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
                 }
             }),
             short_id: manifest.revision_short_id.clone(),
+        detected_network_hosts: None,
             signature: manifest.signature.as_ref().map(|s| s.signature.clone()),
             signer_id: manifest.signature.as_ref().map(|s| s.signer_id.clone()),
         };

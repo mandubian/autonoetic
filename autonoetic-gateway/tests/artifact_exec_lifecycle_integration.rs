@@ -61,6 +61,7 @@ fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -101,6 +102,7 @@ fn manifest_without_network() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -326,6 +328,7 @@ fn test_artifact_exec_tool_registered_and_gated() {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     };
     let defs = registry.available_definitions(&manifest_no_exec);

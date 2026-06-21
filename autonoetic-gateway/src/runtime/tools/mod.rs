@@ -1233,6 +1233,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let unfiltered = registry.available_definitions(&manifest);
@@ -1275,6 +1276,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let filter = ToolTierFilter::core_only();
@@ -1406,6 +1408,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1454,6 +1457,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();

@@ -153,6 +153,21 @@ pub fn enforce_remote_target_policy(
         ));
     }
 
+    if has_network_capability
+        && !crate::runtime::network_host_contract::network_access_allows_host(manifest, host)
+    {
+        return Err(NetworkPolicyViolation::new(
+            "undeclared_network_host",
+            format!(
+                "Outbound target `{}` is not covered by NetworkAccess capability hosts for agent `{}`.",
+                host, manifest.agent.id
+            ),
+            Some(
+                "Add the host to NetworkAccess capability hosts, or declare open_web: true only for genuine open-web agents.".to_string(),
+            ),
+        ));
+    }
+
     Ok(Some(decl))
 }
 
@@ -200,6 +215,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }

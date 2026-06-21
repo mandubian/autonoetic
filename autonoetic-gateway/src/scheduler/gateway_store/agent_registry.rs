@@ -6,6 +6,52 @@ use autonoetic_types::agent_revision::{
 };
 use rusqlite::{params, OptionalExtension};
 
+const AGENT_REVISION_SELECT: &str = "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
+                    runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
+                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
+                    short_id, signature, signer_id, detected_network_hosts
+             FROM agent_revisions";
+
+fn map_agent_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRevisionRecord> {
+    let status_str: String = row.get(14)?;
+    let status = match status_str.as_str() {
+        "Candidate" => AgentRevisionStatus::Candidate,
+        "Ready" => AgentRevisionStatus::Ready,
+        "Archived" => AgentRevisionStatus::Archived,
+        "Rejected" => AgentRevisionStatus::Rejected,
+        _ => AgentRevisionStatus::Candidate,
+    };
+    let metadata_json: String = row.get(15)?;
+    let metadata_json = serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
+    let short_id: Option<String> = row.get(16).ok();
+    let detected_network_hosts: Option<String> = row.get(19).ok().flatten();
+    let detected_network_hosts = detected_network_hosts
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
+    Ok(AgentRevisionRecord {
+        revision_id: row.get(0)?,
+        agent_id: row.get(1)?,
+        base_revision_id: row.get(2)?,
+        artifact_id: row.get(3)?,
+        content_digest: row.get(4)?,
+        runtime_lock_hash: row.get(5)?,
+        manifest_hash: row.get(6)?,
+        created_at: row.get(7)?,
+        created_by_type: row.get(8)?,
+        created_by_id: row.get(9)?,
+        source_kind: row.get(10)?,
+        source_ref: row.get(11)?,
+        origin_node_id: row.get(12)?,
+        trust_domain: row.get(13)?,
+        status,
+        metadata_json,
+        short_id: short_id.unwrap_or_default(),
+        signature: row.get(17).ok().flatten(),
+        signer_id: row.get(18).ok().flatten(),
+        detected_network_hosts,
+    })
+}
+
 impl GatewayStore {
     pub fn insert_agent_revision(&self, rev: &AgentRevisionRecord) -> Result<()> {
         let _ = self.insert_agent_revision_transactional(rev)?;
@@ -14,6 +60,11 @@ impl GatewayStore {
 
     pub fn insert_agent_revision_transactional(&self, rev: &AgentRevisionRecord) -> Result<String> {
         let metadata_json = serde_json::to_string(&rev.metadata_json)?;
+        let detected_network_hosts = rev
+            .detected_network_hosts
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
@@ -39,8 +90,8 @@ impl GatewayStore {
                     revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
-                    short_id, signature, signer_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                    short_id, signature, signer_id, detected_network_hosts
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     &rev.revision_id,
                     &rev.agent_id,
@@ -61,6 +112,7 @@ impl GatewayStore {
                     &short,
                     rev.signature,
                     rev.signer_id,
+                    detected_network_hosts,
                 ],
             )?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -76,48 +128,8 @@ impl GatewayStore {
 
     pub fn get_agent_revision(&self, revision_id: &str) -> Result<Option<AgentRevisionRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
-                    runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
-                    short_id, signature, signer_id
-             FROM agent_revisions WHERE revision_id = ?1",
-        )?;
-        let rows = stmt.query_map(params![revision_id], |row| {
-            let status_str: String = row.get(14)?;
-            let status = match status_str.as_str() {
-                "Candidate" => AgentRevisionStatus::Candidate,
-                "Ready" => AgentRevisionStatus::Ready,
-                "Archived" => AgentRevisionStatus::Archived,
-                "Rejected" => AgentRevisionStatus::Rejected,
-                _ => AgentRevisionStatus::Candidate,
-            };
-            let metadata_json: String = row.get(15)?;
-            let metadata_json =
-                serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
-            let short_id: Option<String> = row.get(16).ok();
-            Ok(AgentRevisionRecord {
-                revision_id: row.get(0)?,
-                agent_id: row.get(1)?,
-                base_revision_id: row.get(2)?,
-                artifact_id: row.get(3)?,
-                content_digest: row.get(4)?,
-                runtime_lock_hash: row.get(5)?,
-                manifest_hash: row.get(6)?,
-                created_at: row.get(7)?,
-                created_by_type: row.get(8)?,
-                created_by_id: row.get(9)?,
-                source_kind: row.get(10)?,
-                source_ref: row.get(11)?,
-                origin_node_id: row.get(12)?,
-                trust_domain: row.get(13)?,
-                status,
-                metadata_json,
-                short_id: short_id.unwrap_or_default(),
-                signature: row.get(17).ok().flatten(),
-                signer_id: row.get(18).ok().flatten(),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!("{AGENT_REVISION_SELECT} WHERE revision_id = ?1"))?;
+        let rows = stmt.query_map(params![revision_id], map_agent_revision_row)?;
         let mut results = Vec::new();
         for r in rows {
             results.push(r?);
@@ -127,48 +139,9 @@ impl GatewayStore {
 
     pub fn list_agent_revisions(&self, agent_id: &str) -> Result<Vec<AgentRevisionRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
-                    runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
-                    short_id, signature, signer_id
-             FROM agent_revisions WHERE agent_id = ?1 ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map(params![agent_id], |row| {
-            let status_str: String = row.get(14)?;
-            let status = match status_str.as_str() {
-                "Candidate" => AgentRevisionStatus::Candidate,
-                "Ready" => AgentRevisionStatus::Ready,
-                "Archived" => AgentRevisionStatus::Archived,
-                "Rejected" => AgentRevisionStatus::Rejected,
-                _ => AgentRevisionStatus::Candidate,
-            };
-            let metadata_json: String = row.get(15)?;
-            let short_id: Option<String> = row.get(16).ok();
-            let metadata_json =
-                serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
-            Ok(AgentRevisionRecord {
-                revision_id: row.get(0)?,
-                agent_id: row.get(1)?,
-                base_revision_id: row.get(2)?,
-                artifact_id: row.get(3)?,
-                content_digest: row.get(4)?,
-                runtime_lock_hash: row.get(5)?,
-                manifest_hash: row.get(6)?,
-                created_at: row.get(7)?,
-                created_by_type: row.get(8)?,
-                created_by_id: row.get(9)?,
-                source_kind: row.get(10)?,
-                source_ref: row.get(11)?,
-                origin_node_id: row.get(12)?,
-                trust_domain: row.get(13)?,
-                status,
-                metadata_json,
-                short_id: short_id.unwrap_or_default(),
-                signature: row.get(17).ok().flatten(),
-                signer_id: row.get(18).ok().flatten(),
-            })
-        })?;
+        let mut stmt =
+            conn.prepare(&format!("{AGENT_REVISION_SELECT} WHERE agent_id = ?1 ORDER BY created_at DESC"))?;
+        let rows = stmt.query_map(params![agent_id], map_agent_revision_row)?;
         let mut results = Vec::new();
         for r in rows {
             results.push(r?);
@@ -178,48 +151,8 @@ impl GatewayStore {
 
     pub fn list_all_agent_revisions(&self) -> Result<Vec<AgentRevisionRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
-                    runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
-                    source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
-                    short_id, signature, signer_id
-             FROM agent_revisions ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map(params![], |row| {
-            let status_str: String = row.get(14)?;
-            let status = match status_str.as_str() {
-                "Candidate" => AgentRevisionStatus::Candidate,
-                "Ready" => AgentRevisionStatus::Ready,
-                "Archived" => AgentRevisionStatus::Archived,
-                "Rejected" => AgentRevisionStatus::Rejected,
-                _ => AgentRevisionStatus::Candidate,
-            };
-            let metadata_json: String = row.get(15)?;
-            let short_id: Option<String> = row.get(16).ok();
-            let metadata_json =
-                serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
-            Ok(AgentRevisionRecord {
-                revision_id: row.get(0)?,
-                agent_id: row.get(1)?,
-                base_revision_id: row.get(2)?,
-                artifact_id: row.get(3)?,
-                content_digest: row.get(4)?,
-                runtime_lock_hash: row.get(5)?,
-                manifest_hash: row.get(6)?,
-                created_at: row.get(7)?,
-                created_by_type: row.get(8)?,
-                created_by_id: row.get(9)?,
-                source_kind: row.get(10)?,
-                source_ref: row.get(11)?,
-                origin_node_id: row.get(12)?,
-                trust_domain: row.get(13)?,
-                status,
-                metadata_json,
-                short_id: short_id.unwrap_or_default(),
-                signature: row.get(17).ok().flatten(),
-                signer_id: row.get(18).ok().flatten(),
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!("{AGENT_REVISION_SELECT} ORDER BY created_at DESC"))?;
+        let rows = stmt.query_map(params![], map_agent_revision_row)?;
         let mut results = Vec::new();
         for r in rows {
             results.push(r?);

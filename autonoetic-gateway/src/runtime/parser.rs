@@ -65,6 +65,8 @@ struct AutonoeticMetadata {
     #[serde(default)]
     compression: Option<CompressionConfig>,
     #[serde(default)]
+    open_web: Option<bool>,
+    #[serde(default)]
     sandbox_network: Option<autonoetic_types::agent::SandboxNetworkPolicy>,
 }
 
@@ -185,6 +187,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
         agentskills_import,
         compression: meta.compression,
+        open_web: meta.open_web.unwrap_or(false),
         sandbox_network: meta.sandbox_network.unwrap_or_default(),
     }
 }

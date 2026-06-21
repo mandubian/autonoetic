@@ -223,6 +223,7 @@ impl NativeTool for AgentInspectTool {
                     "script_input_mode": script_input_mode,
                     "io_accepts": io_accepts,
                     "io_returns": io_returns,
+                    "open_web": m.open_web,
                     "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
                 })
             } else {
@@ -250,6 +251,7 @@ impl NativeTool for AgentInspectTool {
                 "source_kind": rev.source_kind,
                 "base_revision_id": rev.base_revision_id,
                 "artifact_id": rev.artifact_id,
+                "detected_network_hosts": rev.detected_network_hosts,
             },
             "skill": skill_meta,
             "files": file_list,

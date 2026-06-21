@@ -45,6 +45,7 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     }
 }
@@ -73,6 +74,7 @@ fn seed_revision(
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };

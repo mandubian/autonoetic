@@ -217,6 +217,7 @@ impl NativeTool for SkillInstallTool {
             allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
             agentskills_import: parsed_manifest.agentskills_import.clone(),
             compression: parsed_manifest.compression.clone(),
+            open_web: false,
             sandbox_network: parsed_manifest.sandbox_network,
         };
 

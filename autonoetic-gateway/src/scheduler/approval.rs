@@ -252,6 +252,13 @@ pub fn apply_decision(
                             error = %e,
                             "Failed to insert session approval grants"
                         );
+                    } else {
+                        emit_host_contract_drift_events(
+                            store,
+                            &decision.agent_id,
+                            &decision.session_id,
+                            &hosts,
+                        );
                     }
                 }
             }
@@ -1311,6 +1318,56 @@ fn enforce_decider_motivation(
         return Ok(DeciderObligationOutcome::Satisfied);
     }
     Ok(DeciderObligationOutcome::NotApplicable)
+}
+
+/// Best-effort drift signal when an approved grant host is outside the
+/// gateway-persisted install-time host contract (NULL contract = unconstrained).
+fn emit_host_contract_drift_events(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    session_id: &str,
+    hosts: &[String],
+) {
+    let Ok(Some(alias)) = store.resolve_alias(agent_id) else {
+        return;
+    };
+    let Ok(Some(revision)) = store.get_agent_revision(&alias.revision_id) else {
+        return;
+    };
+    let contract = revision.detected_network_hosts.as_deref();
+    for host in hosts {
+        if !crate::runtime::network_host_contract::host_outside_revision_contract(contract, host) {
+            continue;
+        }
+        let now = chrono::Utc::now();
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: now.timestamp_millis().max(0) as u64,
+            timestamp: now.to_rfc3339(),
+            category: "host_contract".to_string(),
+            action: "host_outside_revision_contract".to_string(),
+            status: "warning".to_string(),
+            enforced_rules: vec![],
+            target: Some(host.clone()),
+            payload: Some(
+                serde_json::json!({
+                    "host": host,
+                    "revision_id": revision.revision_id,
+                    "detected_network_hosts": revision.detected_network_hosts,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some(format!(
+                "Approved grant host `{host}` is outside revision install-time detected_network_hosts contract"
+            )),
+        };
+        let _ = store.create_causal_event(&event);
+    }
 }
 
 /// Emit an `O-1`-tagged causal event recording the §O motivation-obligation

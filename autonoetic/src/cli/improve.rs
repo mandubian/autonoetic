@@ -529,6 +529,7 @@ fn propose_improvement(
         status: AgentRevisionStatus::Candidate,
         metadata_json: metadata,
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -622,6 +623,7 @@ async fn handle_propose_code_fix(
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     };
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
@@ -792,6 +794,7 @@ fn run_ab_replay(
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     };
 
@@ -900,6 +903,7 @@ fn promote_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     }
 }

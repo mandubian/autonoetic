@@ -425,6 +425,9 @@ struct RevisionCreateFromIntentArgs {
     /// script-mode agents that read credentials from env vars.
     #[serde(default)]
     credential_services: Vec<String>,
+    /// When true, allows `NetworkAccess.hosts: ["*"]` for genuine open-web agents.
+    #[serde(default)]
+    open_web: bool,
 }
 
 fn normalized_llm_preset(preset: &Option<String>) -> Option<String> {
@@ -449,6 +452,7 @@ struct RevisionCreateCommonArgs {
     manifest_meta: Option<serde_json::Value>,
     source_kind: String,
     source_ref: Option<String>,
+    detected_network_hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -733,6 +737,7 @@ fn create_revision_from_files(
         short_id: String::new(),
         signature,
         signer_id,
+        detected_network_hosts: common.detected_network_hosts.clone(),
     };
 
     let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
@@ -1045,6 +1050,16 @@ impl NativeTool for AgentRevisionCreateTool {
             args.agent_id
         );
 
+        if let Err(err) = crate::runtime::network_host_contract::validate_network_host_contract(
+            &bundle_manifest.capabilities,
+            &file_map,
+            bundle_manifest.open_web,
+        ) {
+            return Ok(err.to_error_response());
+        }
+        let detected_network_hosts =
+            crate::runtime::network_host_contract::detect_network_hosts_from_file_map(&file_map);
+
         let lock_rel_path = bundle_manifest.runtime.runtime_lock.clone();
         validate_relative_agent_path(&lock_rel_path)?;
         let lock_content = file_map.get(&lock_rel_path);
@@ -1107,6 +1122,7 @@ impl NativeTool for AgentRevisionCreateTool {
             manifest_meta: Some(manifest_meta),
             source_kind: "artifact".to_string(),
             source_ref: Some(args.artifact_id.clone()),
+            detected_network_hosts: Some(detected_network_hosts),
         };
         let persisted = create_revision_from_files(
             &common,
@@ -1390,107 +1406,6 @@ fn capability_oneof_schema() -> serde_json::Value {
 
 pub struct AgentRevisionCreateFromIntentTool;
 
-/// Check whether a declared NetworkAccess host pattern covers a detected host.
-fn capability_host_allows(declared: &str, host: &str) -> bool {
-    let declared = declared.trim().to_ascii_lowercase();
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    if declared == "*" {
-        return true;
-    }
-    if declared.is_empty() || host.is_empty() {
-        return false;
-    }
-    if host == declared {
-        return true;
-    }
-    if !declared.contains('*') {
-        return host.ends_with(&format!(".{}", declared));
-    }
-    wildcard_match(&declared, &host)
-}
-
-/// Validate that declared `Capability::NetworkAccess.hosts` cover the actual
-/// network targets detected in the artifact source. Returns an error string
-/// listing undeclared hosts if the contract is violated.
-fn validate_network_access_hosts(
-    capabilities: &[Capability],
-    file_map: &BTreeMap<String, Vec<u8>>,
-) -> Result<(), String> {
-    let declared_patterns: Vec<String> = capabilities
-        .iter()
-        .filter_map(|cap| match cap {
-            Capability::NetworkAccess { hosts } => Some(hosts.clone()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-
-    if declared_patterns.iter().any(|h| h.trim() == "*") {
-        return Ok(());
-    }
-
-    let mut detected_hosts: BTreeSet<String> = BTreeSet::new();
-    for (path, bytes) in file_map {
-        let ext = std::path::Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        if !matches!(
-            ext,
-            "py" | "js" | "ts" | "rs" | "go" | "java" | "kt" | "swift" | "c" | "cpp" | "h"
-                | "sh" | "bash" | "yaml" | "yml" | "json" | "toml"
-        ) {
-            continue;
-        }
-        let Ok(code) = std::str::from_utf8(bytes) else {
-            continue;
-        };
-        let analysis = RemoteAccessAnalyzer::analyze_code(code);
-        for pattern in &analysis.detected_patterns {
-            match pattern.category.as_str() {
-                "url_literal" => {
-                    if let Some(host) = extract_host_from_url_literal(&pattern.pattern) {
-                        if !host.is_empty()
-                            && host != "localhost"
-                            && !host.ends_with(".localhost")
-                        {
-                            detected_hosts.insert(host);
-                        }
-                    }
-                }
-                "ip_address" => {
-                    let host = pattern.pattern.trim().to_ascii_lowercase();
-                    if !host.is_empty() && !host.starts_with("127.") && host != "0.0.0.0" {
-                        detected_hosts.insert(host);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let undeclared: Vec<String> = detected_hosts
-        .iter()
-        .filter(|host| {
-            !declared_patterns
-                .iter()
-                .any(|declared| capability_host_allows(declared, host))
-        })
-        .cloned()
-        .collect();
-
-    if undeclared.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "NetworkAccess capability hosts do not cover all network targets detected in the artifact. \
-             Undeclared hosts: {:?}. \
-             Add these hosts to the NetworkAccess capability, or use hosts: [\"*\"] only for genuine open-web agents.",
-            undeclared
-        ))
-    }
-}
-
 impl NativeTool for AgentRevisionCreateFromIntentTool {
     fn name(&self) -> &'static str {
         "agent_revision_create_from_intent"
@@ -1747,6 +1662,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             bundle_opt,
             source_kind,
             source_ref,
+            detected_network_hosts,
         ) = if let Some(resolved_artifact) = resolved_artifact.as_ref() {
             let artifact_id = &resolved_artifact.artifact_id;
             anyhow::ensure!(
@@ -1847,9 +1763,15 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 resolved_script_entry.as_deref(),
             );
 
-            if let Err(reason) = validate_network_access_hosts(&args.capabilities, &file_map) {
-                return Ok(ToolError::validation(reason, None::<String>).to_error_response());
+            if let Err(err) = crate::runtime::network_host_contract::validate_network_host_contract(
+                &args.capabilities,
+                &file_map,
+                args.open_web,
+            ) {
+                return Ok(err.to_error_response());
             }
+            let detected_network_hosts =
+                crate::runtime::network_host_contract::detect_network_hosts_from_file_map(&file_map);
 
             (
                 resolved_mode,
@@ -1859,6 +1781,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 Some(bundle),
                 "intent_artifact".to_string(),
                 Some(resolved_artifact.source_ref.clone()),
+                Some(detected_network_hosts),
             )
         } else {
             // Pure reasoning agent — no artifact, no custom code.
@@ -1898,6 +1821,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 None,
                 "intent_reasoning".to_string(),
                 None,
+                None,
             )
         };
 
@@ -1935,6 +1859,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: args.open_web,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
 
@@ -1978,6 +1903,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             manifest_meta: Some(manifest_meta),
             source_kind,
             source_ref,
+            detected_network_hosts,
         };
         let persisted = create_revision_from_files(
             &common,
@@ -4595,6 +4521,7 @@ mod capability_lenient_deser_tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -5093,6 +5020,10 @@ mod network_access_host_validation_tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    use crate::runtime::network_host_contract::{
+        capability_host_allows, validate_network_host_contract,
+    };
+
     #[test]
     fn capability_host_allows_exact_match() {
         assert!(capability_host_allows("api.example.com", "api.example.com"));
@@ -5128,7 +5059,7 @@ mod network_access_host_validation_tests {
         let caps = vec![Capability::NetworkAccess {
             hosts: vec!["api.open-meteo.com".to_string()],
         }];
-        assert!(validate_network_access_hosts(&caps, &file_map).is_ok());
+        assert!(validate_network_host_contract(&caps, &file_map, false).is_ok());
     }
 
     #[test]
@@ -5141,17 +5072,12 @@ mod network_access_host_validation_tests {
         let caps = vec![Capability::NetworkAccess {
             hosts: vec!["other.example.com".to_string()],
         }];
-        let err = validate_network_access_hosts(
-            &caps,
-            &file_map,
-        )
-        .unwrap_err();
-        assert!(err.contains("api.open-meteo.com"));
-        assert!(err.contains("Undeclared hosts"));
+        let err = validate_network_host_contract(&caps, &file_map, false).unwrap_err();
+        assert!(err.undeclared_hosts.iter().any(|h| h.contains("open-meteo")));
     }
 
     #[test]
-    fn validate_network_access_hosts_allows_wildcard() {
+    fn validate_network_access_hosts_rejects_wildcard_without_open_web() {
         let mut file_map = BTreeMap::new();
         file_map.insert(
             "main.py".to_string(),
@@ -5160,7 +5086,20 @@ mod network_access_host_validation_tests {
         let caps = vec![Capability::NetworkAccess {
             hosts: vec!["*".to_string()],
         }];
-        assert!(validate_network_access_hosts(&caps, &file_map).is_ok());
+        assert!(validate_network_host_contract(&caps, &file_map, false).is_err());
+    }
+
+    #[test]
+    fn validate_network_access_hosts_allows_wildcard_with_open_web() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        assert!(validate_network_host_contract(&caps, &file_map, true).is_ok());
     }
 
     #[test]
@@ -5173,10 +5112,6 @@ mod network_access_host_validation_tests {
         let caps = vec![Capability::NetworkAccess {
             hosts: vec!["other.example.com".to_string()],
         }];
-        assert!(validate_network_access_hosts(
-            &caps,
-            &file_map,
-        )
-        .is_ok());
+        assert!(validate_network_host_contract(&caps, &file_map, false).is_ok());
     }
 }

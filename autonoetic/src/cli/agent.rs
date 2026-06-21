@@ -589,6 +589,7 @@ fn admin_revision_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     }
 }
@@ -1303,6 +1304,7 @@ pub async fn run_agent_with_runtime(
     // Override sandbox_network to Recording when --record-network is active.
     let manifest = if record_network {
         autonoetic_types::agent::AgentManifest {
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::Recording,
             ..manifest
         }
@@ -1796,6 +1798,7 @@ pub fn handle_agent_import_skill(
         allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
         agentskills_import,
         compression: parsed_manifest.compression.clone(),
+            open_web: false,
         sandbox_network: parsed_manifest.sandbox_network,
     };
 
@@ -2813,6 +2816,7 @@ Use tools when needed.
             status: AgentRevisionStatus::Ready,
             metadata_json: serde_json::json!({}),
             short_id: "abc12345".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };
@@ -2907,6 +2911,7 @@ Use tools when needed.
                 status: AgentRevisionStatus::Ready,
                 metadata_json: serde_json::json!({}),
                 short_id: "list1234".to_string(),
+        detected_network_hosts: None,
                 signature: None,
                 signer_id: None,
             })
@@ -2970,6 +2975,7 @@ Use tools when needed.
             status: AgentRevisionStatus::Candidate,
             metadata_json: serde_json::json!({}),
             short_id: "seed1234".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };

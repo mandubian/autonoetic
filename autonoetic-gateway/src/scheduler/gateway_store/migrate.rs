@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 55;
+const SCHEMA_VERSION_LATEST: i64 = 56;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -540,7 +540,40 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_agent_suspension_v53(conn)?;
     apply_fork_lineage_v54(conn)?;
     apply_drop_approval_similarity_v55(conn)?;
+    apply_agent_revision_detected_network_hosts_v56(conn)?;
 
+    Ok(())
+}
+
+fn apply_agent_revision_detected_network_hosts_v56(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 56 {
+        return Ok(());
+    }
+
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('agent_revisions') WHERE name = 'detected_network_hosts'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute_batch(
+            "ALTER TABLE agent_revisions ADD COLUMN detected_network_hosts TEXT;",
+        )?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            56_i64,
+            "agent_revision_detected_network_hosts",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

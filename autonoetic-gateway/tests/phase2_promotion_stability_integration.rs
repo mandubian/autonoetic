@@ -48,6 +48,7 @@ fn revision_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -71,6 +72,7 @@ fn make_revision(agent_id: &str, suffix: &str) -> AgentRevisionRecord {
         status: AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: format!("sid{}", &suffix[..8]),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     }

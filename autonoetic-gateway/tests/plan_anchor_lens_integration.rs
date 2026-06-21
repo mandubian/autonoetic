@@ -53,6 +53,7 @@ fn planner_manifest() -> AgentManifest {
         agentskills_import: None,
         allowed_tool_tiers: vec![],
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
