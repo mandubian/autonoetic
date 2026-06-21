@@ -71,6 +71,7 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -120,6 +121,7 @@ fn make_revision_record(revision_id: &str) -> AgentRevisionRecord {
         status: AgentRevisionStatus::Candidate,
         metadata_json: serde_json::Value::Null,
         short_id: revision_id.chars().take(8).collect(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     }

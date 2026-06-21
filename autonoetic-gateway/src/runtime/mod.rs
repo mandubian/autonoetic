@@ -36,6 +36,7 @@ pub mod mcp;
 pub mod memory;
 pub mod middleware;
 pub mod model_router;
+pub mod network_host_contract;
 pub mod network_policy;
 pub mod local_model_context;
 pub mod openrouter_catalog;

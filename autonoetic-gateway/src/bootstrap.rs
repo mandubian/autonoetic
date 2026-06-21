@@ -368,6 +368,7 @@ fn bootstrap_agent_inner(
             },
         }),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };

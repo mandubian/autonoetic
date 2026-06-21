@@ -178,6 +178,10 @@ pub struct AgentRevisionRecord {
     /// Collision-safe short ID for LLM-friendly references (e.g., `abc12345`).
     #[serde(default)]
     pub short_id: String,
+    /// Hostnames detected in artifact source at install time (gateway-owned contract).
+    /// `None` on pre-migration revisions — unconstrained for drift signals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_network_hosts: Option<Vec<String>>,
     /// Ed25519 signature over the canonical revision content digest (base64).
     /// Produced by the gateway at revision creation time (P-9.13 auto-sign).
     /// Verified against the signer's public key for integrity attestation.

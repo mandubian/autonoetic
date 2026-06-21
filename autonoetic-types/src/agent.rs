@@ -133,6 +133,10 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// Per-agent overrides merged onto a resolved `llm_preset` at runtime.
 /// Must not carry `provider` / `model` — those live in gateway `llm_presets`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -208,6 +212,10 @@ pub struct AgentManifest {
     /// for this agent with optional overrides for threshold and LLM preset.
     #[serde(default)]
     pub compression: Option<CompressionConfig>,
+    /// When true, the agent is a genuine open-web agent and may declare
+    /// `NetworkAccess.hosts: ["*"]` at install time.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub open_web: bool,
     /// Sandbox network egress policy (RFC scope 5.1). Default `Normal`.
     ///
     /// `Sealed` routes HTTP through a fixture-driven proxy (scope 5.2

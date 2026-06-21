@@ -50,6 +50,7 @@ fn make_manifest(has_network: bool) -> AgentManifest {
         io: None,
         disclosure: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         allowed_tool_tiers: vec![],
     }

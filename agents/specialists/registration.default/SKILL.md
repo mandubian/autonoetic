@@ -18,6 +18,7 @@ metadata:
     llm_preset: agentic
     llm_overrides:
       temperature: 0.0
+    open_web: true
     capabilities:
       - type: "CredentialAccess"
         services: ["*"]

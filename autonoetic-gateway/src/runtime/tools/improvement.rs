@@ -841,6 +841,7 @@ mod surface_drift_tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: SandboxNetworkPolicy::default(),
         }
     }

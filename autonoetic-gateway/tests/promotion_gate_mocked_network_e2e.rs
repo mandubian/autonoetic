@@ -66,6 +66,7 @@ fn base_manifest(id: &str, name: &str, capabilities: Vec<Capability>) -> AgentMa
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

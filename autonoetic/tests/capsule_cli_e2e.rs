@@ -63,6 +63,7 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::Value::Null,
         short_id: "abcd1234".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };

@@ -250,6 +250,7 @@ fn test_eval_run_persists_with_real_revision() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "test1234".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -438,6 +439,7 @@ fn test_agent_revision_diff_reports_modified_files() {
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
             metadata_json: json!({}),
             short_id: "testshort".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };
@@ -523,6 +525,7 @@ fn test_eval_compare_builds_completed_comparison_report() {
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
             metadata_json: json!({}),
             short_id: "cmp".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };
@@ -661,6 +664,7 @@ fn test_eval_compare_with_session_outcomes_produces_stats() {
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
             metadata_json: json!({}),
             short_id: "cmp".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };
@@ -1017,6 +1021,7 @@ fn test_eval_run_validates_revision_belongs_to_agent() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "test1234".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -1129,6 +1134,7 @@ fn test_promote_rejects_required_eval_run_for_different_revision() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "target111".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -1151,6 +1157,7 @@ fn test_promote_rejects_required_eval_run_for_different_revision() {
         status: autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: "other222".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };

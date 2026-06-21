@@ -153,6 +153,21 @@ pub fn enforce_remote_target_policy(
         ));
     }
 
+    if has_network_capability
+        && !crate::runtime::network_host_contract::network_access_allows_host(manifest, host)
+    {
+        return Err(NetworkPolicyViolation::new(
+            "undeclared_network_host",
+            format!(
+                "Outbound target `{}` is not covered by NetworkAccess capability hosts for agent `{}`.",
+                host, manifest.agent.id
+            ),
+            Some(
+                "Add the host to NetworkAccess capability hosts, or declare open_web: true only for genuine open-web agents.".to_string(),
+            ),
+        ));
+    }
+
     Ok(Some(decl))
 }
 
@@ -200,6 +215,7 @@ mod tests {
             allowed_tool_tiers: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -324,5 +340,39 @@ metadata:
         )
         .expect("optional declaration should allow transitional path");
         assert!(result.is_none());
+    }
+
+    fn manifest_with_hosts(hosts: Vec<String>) -> AgentManifest {
+        let mut m = manifest(false);
+        m.capabilities = vec![Capability::NetworkAccess { hosts }];
+        m
+    }
+
+    #[test]
+    fn network_access_blocks_host_not_in_capability() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("SKILL.md"),
+            r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: required
+      targets:
+        - kind: any
+---
+"#,
+        )
+        .expect("skill write");
+
+        let err = enforce_remote_target_policy(
+            &manifest_with_hosts(vec!["api.example.com".to_string()]),
+            tmp.path(),
+            "evil.com",
+            Some("https://evil.com/secret"),
+            DeclarationRequirement::Required,
+        )
+        .expect_err("host outside NetworkAccess should be blocked");
+        assert_eq!(err.error_type, "undeclared_network_host");
     }
 }

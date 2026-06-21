@@ -82,6 +82,7 @@ fn seed_revision_with_artifact(store: &GatewayStore, agent_id: &str, revision_id
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };

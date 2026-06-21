@@ -61,6 +61,7 @@ fn make_fixture(agent_id: &str, revision_id: &str) -> Fixture {
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::Value::Null,
         short_id: "abcd1234".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
