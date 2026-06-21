@@ -341,4 +341,38 @@ metadata:
         .expect("optional declaration should allow transitional path");
         assert!(result.is_none());
     }
+
+    fn manifest_with_hosts(hosts: Vec<String>) -> AgentManifest {
+        let mut m = manifest(false);
+        m.capabilities = vec![Capability::NetworkAccess { hosts }];
+        m
+    }
+
+    #[test]
+    fn network_access_blocks_host_not_in_capability() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("SKILL.md"),
+            r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: required
+      targets:
+        - kind: any
+---
+"#,
+        )
+        .expect("skill write");
+
+        let err = enforce_remote_target_policy(
+            &manifest_with_hosts(vec!["api.example.com".to_string()]),
+            tmp.path(),
+            "evil.com",
+            Some("https://evil.com/secret"),
+            DeclarationRequirement::Required,
+        )
+        .expect_err("host outside NetworkAccess should be blocked");
+        assert_eq!(err.error_type, "undeclared_network_host");
+    }
 }

@@ -18,6 +18,7 @@ metadata:
     llm_preset: agentic
     llm_overrides:
       temperature: 0.1
+    open_web: true
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["content_", "artifact_", "sandbox_"]

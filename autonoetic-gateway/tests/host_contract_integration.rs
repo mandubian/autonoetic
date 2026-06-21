@@ -270,3 +270,133 @@ fn migration_v56_adds_detected_network_hosts_column() {
         .unwrap();
     assert!(version >= 56);
 }
+
+#[test]
+#[serial]
+fn grant_drift_emits_causal_event_for_host_outside_contract() {
+    use autonoetic_gateway::scheduler::approval::{apply_decision, DecisionContext};
+    use autonoetic_types::agent_revision::{
+        AgentAliasRecord, AgentRevisionStatus, SessionAgentBinding,
+    };
+    use autonoetic_types::background::{
+        ApprovalDecision, ApprovalLevel, ApprovalStatus, ScheduledAction,
+    };
+    use autonoetic_types::config::GatewayConfig;
+    use autonoetic_types::principal::PrincipalKind;
+
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+    let agent_id = "weather-agent-drift";
+    let revision_id = "rev_sha256:drift-test".to_string();
+    let session_id = "session-drift/coder.default-abc".to_string();
+    let root_session_id = "session-drift".to_string();
+
+    store
+        .insert_agent_revision(&AgentRevisionRecord {
+            revision_id: revision_id.clone(),
+            agent_id: agent_id.to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: "sha256:drift".to_string(),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            manifest_hash: "sha256:manifest".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: PrincipalKind::Human.tag().to_string(),
+            created_by_id: "test".to_string(),
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: AgentRevisionStatus::Ready,
+            metadata_json: serde_json::json!({}),
+            short_id: String::new(),
+            signature: None,
+            signer_id: None,
+            detected_network_hosts: Some(vec!["api.open-meteo.com".to_string()]),
+        })
+        .unwrap();
+
+    store
+        .upsert_agent_alias(&AgentAliasRecord {
+            alias_id: agent_id.to_string(),
+            agent_id: agent_id.to_string(),
+            revision_id: revision_id.clone(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            updated_by_type: PrincipalKind::Human.tag().to_string(),
+            updated_by_id: "test".to_string(),
+            reason: Some("test".to_string()),
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
+        })
+        .unwrap();
+
+    store
+        .upsert_session_agent_binding(&SessionAgentBinding {
+            session_id: session_id.clone(),
+            root_session_id: root_session_id.clone(),
+            alias_id: Some(agent_id.to_string()),
+            agent_id: agent_id.to_string(),
+            revision_id: revision_id.clone(),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            home_node_id: "gateway".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            requested_target: agent_id.to_string(),
+        })
+        .unwrap();
+
+    let cfg = GatewayConfig {
+        agents_dir,
+        ..Default::default()
+    };
+
+    let decision = ApprovalDecision {
+        request_id: "apr-drift01".to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.clone(),
+        action: ScheduledAction::SandboxExec {
+            command: "curl https://evil.com".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["evil.com".to_string()]),
+        },
+        status: ApprovalStatus::Approved,
+        decided_at: chrono::Utc::now().to_rfc3339(),
+        decided_by: "operator".to_string(),
+        reason: None,
+        workflow_id: None,
+        task_id: None,
+        root_session_id: Some(root_session_id),
+        approval_level: ApprovalLevel::Operator,
+    };
+
+    apply_decision(
+        &cfg,
+        Some(&store),
+        &decision,
+        &Default::default(),
+        &DecisionContext {
+            wiki_materialized_meta: None,
+            hook_executor: None,
+        },
+    )
+    .unwrap();
+
+    let events = store
+        .search_causal_events(Some(&session_id), Some(agent_id), 20)
+        .unwrap();
+    assert!(
+        events.iter().any(|e| {
+            e.category == "host_contract"
+                && e.action == "host_outside_revision_contract"
+                && e.target.as_deref() == Some("evil.com")
+        }),
+        "expected host_outside_revision_contract causal event, got: {events:?}"
+    );
+}

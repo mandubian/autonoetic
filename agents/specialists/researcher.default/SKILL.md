@@ -16,6 +16,7 @@ metadata:
       name: "Researcher Default"
       description: "Collects evidence, compares sources, and reports uncertainty explicitly."
     llm_preset: research
+    open_web: true
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge_", "web_", "mcp_"]

@@ -1449,7 +1449,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "base_revision_id": { "type": "string" },
                     "summary": { "type": "string" },
                     "replace": { "type": "boolean", "description": "Set to true to archive the existing active revision and install this as the new one. Required when updating an already-installed agent." },
-                    "credential_services": { "type": "array", "items": { "type": "string" }, "description": "Service names whose credentials the agent needs at spawn time. The env-var name is derived deterministically from the service name (e.g. 'moltbook' → MOLTBOOK_SECRET). Only meaningful for script-mode agents." }
+                    "credential_services": { "type": "array", "items": { "type": "string" }, "description": "Service names whose credentials the agent needs at spawn time. The env-var name is derived deterministically from the service name (e.g. 'moltbook' → MOLTBOOK_SECRET). Only meaningful for script-mode agents." },
+                    "open_web": { "type": "boolean", "description": "Set true only for genuine open-web agents that require NetworkAccess hosts: [\"*\"]. Default false." }
                 },
                 "required": ["agent_id", "instructions", "description", "capabilities"],
                 "additionalProperties": false,
