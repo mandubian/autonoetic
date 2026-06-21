@@ -24,10 +24,18 @@ fn map_agent_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRevi
     let metadata_json: String = row.get(15)?;
     let metadata_json = serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
     let short_id: Option<String> = row.get(16).ok();
-    let detected_network_hosts: Option<String> = row.get(19).ok().flatten();
-    let detected_network_hosts = detected_network_hosts
-        .as_deref()
-        .and_then(|raw| serde_json::from_str(raw).ok());
+    let detected_network_hosts_raw: Option<String> = row.get(19)?;
+    let detected_network_hosts = match detected_network_hosts_raw {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => None,
+        Some(raw) => Some(serde_json::from_str(&raw).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                19,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?),
+    };
     Ok(AgentRevisionRecord {
         revision_id: row.get(0)?,
         agent_id: row.get(1)?,

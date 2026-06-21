@@ -1304,7 +1304,6 @@ pub async fn run_agent_with_runtime(
     // Override sandbox_network to Recording when --record-network is active.
     let manifest = if record_network {
         autonoetic_types::agent::AgentManifest {
-            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::Recording,
             ..manifest
         }

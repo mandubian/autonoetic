@@ -113,13 +113,15 @@ impl SessionCloseFlags {
             (true, true, false, false) => SessionCloseOutcome::JsonRpcSpawnComplete,
             (true, false, false, false) => SessionCloseOutcome::JsonRpcSpawnCompleteEmpty,
             (true, false, true, false) => SessionCloseOutcome::JsonRpcSpawnSuspended,
+            (true, false, false, true) => SessionCloseOutcome::JsonRpcSpawnSuspendedUserInput,
             (false, true, false, false) => SessionCloseOutcome::CheckpointRespawnComplete,
             (false, true, false, true) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
             (false, false, true, false) => SessionCloseOutcome::CheckpointRespawnSuspended,
             (false, false, false, true) => {
                 SessionCloseOutcome::CheckpointRespawnSuspendedUserInput
             }
-            // Defensive fallback — multiple flags should never be set.
+            (false, false, false, false) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
+            // Defensive fallback — conflicting flags should never be set.
             _ => SessionCloseOutcome::SpawnExecuteError,
         }
     }

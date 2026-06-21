@@ -1050,15 +1050,15 @@ impl NativeTool for AgentRevisionCreateTool {
             args.agent_id
         );
 
-        if let Err(err) = crate::runtime::network_host_contract::validate_network_host_contract(
+        let host_contract = match crate::runtime::network_host_contract::validate_network_host_contract(
             &bundle_manifest.capabilities,
             &file_map,
             bundle_manifest.open_web,
         ) {
-            return Ok(err.to_error_response());
-        }
-        let detected_network_hosts =
-            crate::runtime::network_host_contract::detect_network_hosts_from_file_map(&file_map);
+            Err(err) => return Ok(err.to_error_response()),
+            Ok(contract) => contract,
+        };
+        let detected_network_hosts = host_contract.detected_hosts;
 
         let lock_rel_path = bundle_manifest.runtime.runtime_lock.clone();
         validate_relative_agent_path(&lock_rel_path)?;
@@ -1763,15 +1763,15 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 resolved_script_entry.as_deref(),
             );
 
-            if let Err(err) = crate::runtime::network_host_contract::validate_network_host_contract(
+            let host_contract = match crate::runtime::network_host_contract::validate_network_host_contract(
                 &args.capabilities,
                 &file_map,
                 args.open_web,
             ) {
-                return Ok(err.to_error_response());
-            }
-            let detected_network_hosts =
-                crate::runtime::network_host_contract::detect_network_hosts_from_file_map(&file_map);
+                Err(err) => return Ok(err.to_error_response()),
+                Ok(contract) => contract,
+            };
+            let detected_network_hosts = host_contract.detected_hosts;
 
             (
                 resolved_mode,

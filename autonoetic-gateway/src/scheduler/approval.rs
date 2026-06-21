@@ -1328,10 +1328,8 @@ fn emit_host_contract_drift_events(
     session_id: &str,
     hosts: &[String],
 ) {
-    let Ok(Some(alias)) = store.resolve_alias(agent_id) else {
-        return;
-    };
-    let Ok(Some(revision)) = store.get_agent_revision(&alias.revision_id) else {
+    let revision = resolve_revision_for_host_contract(store, agent_id, session_id);
+    let Some(revision) = revision else {
         return;
     };
     let contract = revision.detected_network_hosts.as_deref();
@@ -1368,6 +1366,20 @@ fn emit_host_contract_drift_events(
         };
         let _ = store.create_causal_event(&event);
     }
+}
+
+fn resolve_revision_for_host_contract(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    session_id: &str,
+) -> Option<autonoetic_types::agent_revision::AgentRevisionRecord> {
+    if let Ok(Some(binding)) = store.get_session_agent_binding(session_id) {
+        if let Ok(Some(revision)) = store.get_agent_revision(&binding.revision_id) {
+            return Some(revision);
+        }
+    }
+    let alias = store.resolve_alias(agent_id).ok().flatten()?;
+    store.get_agent_revision(&alias.revision_id).ok().flatten()
 }
 
 /// Emit an `O-1`-tagged causal event recording the §O motivation-obligation
