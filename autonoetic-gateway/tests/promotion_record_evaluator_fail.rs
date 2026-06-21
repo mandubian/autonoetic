@@ -35,25 +35,26 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
         .build(&input_names, None, None, session_id)
         .unwrap();
     let promotion_store = PromotionStore::new(&gateway_dir).unwrap();
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.artifact_manifest_digest.clone()),
-        None,
+    let gw_store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &promotion_store,
+        &gw_store,
+        &bundle.artifact_id,
         PromotionRole::SealedEvaluator,
         "sealed_evaluator.default",
         true,
-        vec![],
-        Some("Test auto-pass".to_string()),
-    );
-    let _ = promotion_store.record_promotion(
-        bundle.artifact_id.clone(),
-        Some(bundle.artifact_manifest_digest.clone()),
+        session_id,
         None,
+    );
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &promotion_store,
+        &gw_store,
+        &bundle.artifact_id,
         PromotionRole::Auditor,
         "auditor.default",
         true,
-        vec![],
-        Some("Test auto-pass".to_string()),
+        session_id,
+        None,
     );
     (bundle.artifact_id, gateway_dir)
 }

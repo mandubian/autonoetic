@@ -301,17 +301,19 @@ fn record_promotion(
     builder_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
+    session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} check — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -320,10 +322,10 @@ fn record_promotion(
             builder_dir,
             Some(gateway_dir),
             &serde_json::to_string(&args).unwrap(),
-            Some(&format!("session-{role}")),
+            Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion.record should succeed");
@@ -348,10 +350,14 @@ fn try_promote(
     agent_id: &str,
     revision_id: &str,
 ) -> Result<serde_json::Value, String> {
+    let (smoke_wf, smoke_task) =
+        support::promotion_trace::seed_smoke_test_task(config, store.as_ref(), agent_id, revision_id);
     let promote_args = serde_json::json!({
         "agent_id": agent_id,
         "revision_id": revision_id,
         "reason": "integration test",
+        "smoke_test_workflow_id": smoke_wf,
+        "smoke_test_task_id": smoke_task,
     });
     match registry.execute(
         "agent_revision_promote",
@@ -507,9 +513,11 @@ fn test_promote_succeeds_with_both_evaluator_and_auditor_pass() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -521,9 +529,11 @@ fn test_promote_succeeds_with_both_evaluator_and_auditor_pass() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -564,9 +574,11 @@ fn test_promote_rejects_when_evaluator_fails() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         false,
+        "session-sealed_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -578,9 +590,11 @@ fn test_promote_rejects_when_evaluator_fails() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -620,9 +634,11 @@ fn test_promote_rejects_when_auditor_missing() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     let result = try_promote(
@@ -751,9 +767,11 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -765,9 +783,11 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let b_manifest = builder_manifest();
@@ -822,30 +842,26 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
     let promo_store = PromotionStore::new(&gateway_dir).unwrap();
     // record_promotion auto-timestamps "now". We then create a revision with a future
     // created_at to verify timestamp ordering no longer blocks promotion.
-    promo_store
-        .record_promotion(
-            artifact_id.to_string(),
-            None,
-            None,
-            PromotionRole::Evaluator,
-            "evaluator.default",
-            true,
-            vec![],
-            Some("eval pass".to_string()),
-        )
-        .unwrap();
-    promo_store
-        .record_promotion(
-            artifact_id.to_string(),
-            None,
-            None,
-            PromotionRole::Auditor,
-            "auditor.default",
-            true,
-            vec![],
-            Some("audit pass".to_string()),
-        )
-        .unwrap();
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &promo_store,
+        store.as_ref(),
+        artifact_id,
+        PromotionRole::Evaluator,
+        "evaluator.default",
+        true,
+        "session-evaluator",
+        None,
+    );
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &promo_store,
+        store.as_ref(),
+        artifact_id,
+        PromotionRole::Auditor,
+        "auditor.default",
+        true,
+        "session-auditor",
+        None,
+    );
 
     // Create the revision with created_at in the future relative to pre-recorded evidence.
     let revision_id = "rev_sha256:test_stale_freshness_001";
@@ -937,9 +953,11 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     // Step 3: Attempt promotion with only evaluator — should still fail
@@ -970,9 +988,11 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     // Step 5: Now promote should succeed

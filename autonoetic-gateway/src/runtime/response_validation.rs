@@ -1670,6 +1670,7 @@ mod tests {
                 true,
                 vec![],
                 Some("all good".to_string()),
+                None,
             )
             .unwrap();
 
@@ -1695,6 +1696,7 @@ mod tests {
                     description: "tests failed".to_string(),
                     evidence: None,
                 }],
+                None,
                 None,
             )
             .unwrap();
@@ -1724,6 +1726,7 @@ mod tests {
                     description: "security risk".to_string(),
                     evidence: Some("found network access".to_string()),
                 }],
+                None,
                 None,
             )
             .unwrap();

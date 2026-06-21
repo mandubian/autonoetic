@@ -101,7 +101,7 @@ After completing your evaluation, call `promotion_record`:
 {
   "artifact_ref": "ar.example",
   "role": "static_evaluator",
-  "pass": <true if evaluator_pass is true, false otherwise>,
+  "execution_trace_id": "<trace id from the evaluation run>",
   "findings": [
     {"severity": "info"|"warning"|"error"|"critical",
      "description": "...",
@@ -110,6 +110,8 @@ After completing your evaluation, call `promotion_record`:
   "summary": "..."
 }
 ```
+
+`pass` is trace-derived — attach the execution trace from your run; findings are advisory.
 
 ## Status Field Mapping
 

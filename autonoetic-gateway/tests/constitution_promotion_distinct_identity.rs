@@ -143,18 +143,19 @@ fn record_promotion(
     builder_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
     session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} check — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -166,7 +167,7 @@ fn record_promotion(
             Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion.record should succeed");
@@ -309,6 +310,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
@@ -321,6 +323,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "auditor",
         true,
@@ -402,6 +405,7 @@ fn distinct_identities_allowed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
@@ -417,6 +421,7 @@ fn distinct_identities_allowed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "auditor",
         true,

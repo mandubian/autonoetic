@@ -116,12 +116,13 @@ These are stop conditions, not invitations to explore.
 
 ## Recording Promotion
 
-If you found and ran tests:
+If you found and ran tests, call `promotion_record`:
 
 ```json
 {
-  "status": "pass" | "fail",
-  "evaluator_pass": true | false,
+  "artifact_ref": "ar.example",
+  "role": "unit_test_runner",
+  "execution_trace_id": "<trace id from artifact_exec>",
   "findings": [
     {"severity": "info"|"warning"|"error",
      "description": "X/Y tests passed",
@@ -131,10 +132,7 @@ If you found and ran tests:
 }
 ```
 
-- `status`: "pass" if all tests pass; "fail" if any test fails
-- `evaluator_pass`: boolean — true if all tests pass, false otherwise
-- `findings`: array of test result findings
-- `summary`: string with test execution summary
+`pass` is trace-derived from `execution_trace_id`. Findings are advisory.
 
 If you found NO tests, **do NOT call `promotion_record`**. The role is inapplicable for this artifact — that is not a failure. Return this JSON exactly:
 

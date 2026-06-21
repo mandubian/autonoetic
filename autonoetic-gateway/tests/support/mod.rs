@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod agents;
+pub mod promotion_trace;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse, JsonRpcRouter};
 use autonoetic_gateway::scheduler::{

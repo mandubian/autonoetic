@@ -44,6 +44,7 @@ pub mod operator_activity;
 pub mod parser;
 pub mod post_session_digest;
 pub mod promotion_governor;
+pub mod promotion_evidence;
 pub mod promotion_store;
 pub mod session_timeline;
 pub mod prompt_budget;

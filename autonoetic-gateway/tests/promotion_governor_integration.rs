@@ -111,6 +111,7 @@ fn seed_verdict_with_findings(
             true,
             findings,
             None,
+            None,
         )
         .unwrap();
 }
