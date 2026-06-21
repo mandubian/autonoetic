@@ -912,6 +912,7 @@ impl NativeTool for WebSearchTool {
                     summary: format!("web.search {}", engine_host),
                     approval_ref: None,
                     pre_validated: false,
+                    cache_backfill: None,
                     turn_id: None,
                 },
             )?;
@@ -1305,9 +1306,10 @@ fn gate_web_fetch_host(
         config: Some(cfg),
         reason: reason.to_string(),
         summary: format!("web.fetch {}", host),
-        approval_ref: None,
-        pre_validated: false,
-        turn_id: None,
+                    approval_ref: None,
+                    pre_validated: false,
+                    cache_backfill: None,
+                    turn_id: None,
     })?;
     match gate_result {
         crate::runtime::human_gate::GateResult::Cleared { .. } => Ok(WebFetchHostGate::Allowed),
@@ -1924,6 +1926,7 @@ impl NativeTool for WebCallTool {
                     summary: format!("web.call {}", host),
                     approval_ref: None,
                     pre_validated: false,
+                    cache_backfill: None,
                     turn_id: None,
                 },
             )?;

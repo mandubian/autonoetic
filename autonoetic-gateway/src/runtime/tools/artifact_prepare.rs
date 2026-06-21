@@ -302,6 +302,7 @@ impl NativeTool for ArtifactPrepareTool {
                 summary: summary.clone(),
                 approval_ref: None,
                 pre_validated,
+                cache_backfill: None,
                 turn_id: None,
             },
         )?;

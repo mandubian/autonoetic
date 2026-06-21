@@ -255,6 +255,7 @@ impl NativeTool for UserAskTool {
             summary: "user question".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
             turn_id,
         })?;
 

@@ -428,6 +428,7 @@ impl NativeTool for CredentialRequestTool {
                         summary: format!("Credential request to {}", url_host),
                         approval_ref: None,
                         pre_validated: false,
+                        cache_backfill: None,
                         turn_id: None,
                     },
                 )?;
@@ -519,6 +520,7 @@ impl NativeTool for CredentialRequestTool {
                     summary: format!("Credential request to {}", url_host),
                     approval_ref: None,
                     pre_validated: false,
+                    cache_backfill: None,
                     turn_id: None,
                 },
             )?;
@@ -1666,6 +1668,7 @@ impl NativeTool for CredentialSetupTool {
                                     summary: format!("Fetch skill.md from {}", url_host),
                                     approval_ref: None,
                                     pre_validated: false,
+                                    cache_backfill: None,
                         turn_id: None,
                                 },
                             )?;
@@ -1957,6 +1960,7 @@ impl NativeTool for CredentialSetupTool {
                                 summary: format!("Credential setup API call to {}", display_host),
                                 approval_ref: None,
                                 pre_validated: false,
+                                cache_backfill: None,
                         turn_id: None,
                             },
                         )?;

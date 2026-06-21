@@ -21,6 +21,7 @@ use autonoetic_types::background::{
 };
 
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill;
 use crate::runtime::content_store;
 use crate::runtime::tools::{build_approval_details, extract_host};
 use crate::runtime::failure_classification::normalize_tool_result_json;
@@ -87,6 +88,10 @@ pub struct GateRequest<'a> {
     /// Tool-specific cache hit (e.g. `ApprovedExecCache`).  When `true` the
     /// gate short-circuits to `GateResult::Cleared`.
     pub pre_validated: bool,
+    /// Optional exec-cache backfill data.  When the gate clears without a
+    /// cache hit, the entry is recorded so future identical executions skip
+    /// approval.
+    pub cache_backfill: Option<ApprovedExecCacheBackfill>,
     /// Current turn ID (used for UserInput checkpoint tracking).
     pub turn_id: Option<&'a str>,
 }
@@ -233,7 +238,10 @@ impl GateService {
         // 2. approval_ref validation.
         if let Some(ref_id) = req.approval_ref {
             match self.validate_approval_ref(ref_id, req, action, targets, match_strategy)? {
-                Some(result) => return Ok(result),
+                Some(result) => {
+                    self.maybe_backfill_exec_cache(req, &result)?;
+                    return Ok(result);
+                }
                 None => {}
             }
         }
@@ -244,10 +252,12 @@ impl GateService {
                 if !sid.is_empty() {
                     let root_sid = content_store::root_session_id(sid);
                     if self.store.session_grants_cover_targets(root_sid, targets) {
-                        return Ok(GateResult::Cleared {
+                        let result = GateResult::Cleared {
                             source: ClearanceSource::SessionGrant,
                             enforced_rules: vec!["P-2.4"],
-                        });
+                        };
+                        self.maybe_backfill_exec_cache(req, &result)?;
+                        return Ok(result);
                     }
                 }
             }
@@ -865,6 +875,39 @@ impl GateService {
     // Helpers — approval row creation
     // -----------------------------------------------------------------------
 
+    /// Backfill the approved-exec cache when a gate clears without a cache hit.
+    /// This is the single place the gate layer triggers cache backfill; the
+    /// actual write implementation lives in `approved_exec_cache.rs`.
+    fn maybe_backfill_exec_cache(
+        &self,
+        req: &GateRequest<'_>,
+        result: &GateResult,
+    ) -> Result<()> {
+        let (source, ref_id) = match result {
+            GateResult::Cleared { source, .. } => match source {
+                ClearanceSource::CachedApproval => return Ok(()),
+                ClearanceSource::ApprovalRef(id) => (source, Some(id.as_str())),
+                _ => (source, None),
+            },
+            _ => return Ok(()),
+        };
+
+        if let Some(mut backfill) = req.cache_backfill.clone() {
+            if let Some(id) = ref_id {
+                backfill.approval_request_id = id.to_string();
+            }
+            if let Err(e) = backfill.record_if_missing() {
+                tracing::warn!(
+                    target: "human_gate",
+                    error = %e,
+                    source = ?source,
+                    "Failed to backfill approved exec cache"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn create_approval_row(
         &self,
         req: &GateRequest<'_>,
@@ -1237,6 +1280,7 @@ mod tests {
             summary: "test summary".to_string(),
             approval_ref: None,
             pre_validated: true,
+            cache_backfill: None,
             turn_id: None,
         };
 
@@ -1270,6 +1314,7 @@ mod tests {
             summary: "Fetch API from localhost".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
             turn_id: None,
         };
 
@@ -1319,6 +1364,7 @@ mod tests {
             summary: "first".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
             turn_id: None,
         };
         let result1 = svc.check(req1)?;
@@ -1342,6 +1388,7 @@ mod tests {
             summary: "second".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
             turn_id: None,
         };
         let result2 = svc.check(req2)?;
@@ -1406,6 +1453,7 @@ mod tests {
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
+            cache_backfill: None,
             turn_id: None,
         };
         let result = svc.check(req)?;
@@ -1469,11 +1517,92 @@ mod tests {
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
+            cache_backfill: None,
             turn_id: None,
         };
         let result = svc.check(req)?;
         // Should NOT clear — wrong agent.
         assert!(matches!(result, GateResult::Suspended { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn substitute_command_match_strategy_approval_ref_clears() -> Result<()> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let manifest = test_manifest();
+        let sid = "ses-substitute-123";
+
+        // Approved action: a specific command that accessed api.example.com.
+        let approved_action = ScheduledAction::SandboxExec {
+            command: "python3 /tmp/fetch.py".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["api.example.com".to_string()]),
+        };
+
+        let ref_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let mut approval = ApprovalRequest {
+            request_id: ref_id.clone(),
+            agent_id: manifest.agent.id.clone(),
+            session_id: sid.to_string(),
+            root_session_id: Some(sid.to_string()),
+            workflow_id: None,
+            task_id: None,
+            action: approved_action.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            reason: Some("test".to_string()),
+            evidence_ref: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+        };
+        store.create_approval(&mut approval)?;
+        store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+
+        // Retry with a *different* command string but the same concrete target.
+        // SubstituteCommand strategy should clear because the approved hosts cover
+        // the requested targets, regardless of command string equality.
+        let retry_action = ScheduledAction::SandboxExec {
+            command: "python3 /tmp/wrapper.py".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["api.example.com".to_string()]),
+        };
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action: retry_action,
+                targets: vec!["api.example.com".to_string()],
+                match_strategy: MatchStrategy::SubstituteCommand,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            reason: "test".to_string(),
+            summary: "test".to_string(),
+            approval_ref: Some(&ref_id),
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+        let result = svc.check(req)?;
+        assert!(result.is_cleared(), "expected SubstituteCommand approval_ref to clear");
+        match result {
+            GateResult::Cleared { source: ClearanceSource::ApprovalRef(id), .. } => {
+                assert_eq!(id, ref_id);
+            }
+            other => panic!("expected Cleared(ApprovalRef), got {:?}", other),
+        }
         Ok(())
     }
 
@@ -1520,6 +1649,7 @@ mod tests {
             summary: "Fetch data".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
             turn_id: None,
         };
 
@@ -1543,6 +1673,98 @@ mod tests {
             "seed message should contain the target: {:?}",
             msgs[0].content
         );
+        Ok(())
+    }
+
+    #[test]
+    fn session_grant_clearance_backfills_exec_cache() -> Result<()> {
+        use crate::runtime::approved_exec_cache::{
+            compute_fingerprint, ApprovedExecCache, ApprovedExecCacheBackfill,
+        };
+        use autonoetic_types::background::{GrantScope, GrantTarget};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let manifest = test_manifest();
+        let sid = "ses-cache-backfill-123";
+        let root_sid = sid;
+        let agent_id = manifest.agent.id.clone();
+
+        // Seed a session grant covering api.example.com.
+        store.insert_session_grant(
+            root_sid,
+            sid,
+            &agent_id,
+            &GrantScope::RootSession,
+            &[GrantTarget::ExactHost("api.example.com".to_string())],
+            "test",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+            None,
+        )?;
+
+        // Build the cache backfill payload as sandbox_exec would.
+        let code_content = r#"print("https://api.example.com/data")"#;
+        let targets = vec!["api.example.com".to_string()];
+        let fingerprint = compute_fingerprint(
+            &agent_id,
+            &targets,
+            code_content,
+            None,
+            &manifest.capabilities,
+        );
+
+        let action = ScheduledAction::SandboxExec {
+            command: "python3 /tmp/fetch.py".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(targets.clone()),
+        };
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action,
+                targets: targets.clone(),
+                match_strategy: MatchStrategy::SubstituteCommand,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            reason: "network access required".to_string(),
+            summary: "fetch data".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: Some(ApprovedExecCacheBackfill {
+                gateway_dir: tmp.path().to_path_buf(),
+                fingerprint: fingerprint.clone(),
+                agent_id,
+                remote_targets: targets.clone(),
+                code_content: code_content.to_string(),
+                approval_request_id: String::new(),
+            }),
+            turn_id: None,
+        };
+
+        let result = svc.check(req)?;
+        assert!(
+            result.is_cleared(),
+            "session grant should clear the gate without creating an approval"
+        );
+        match result {
+            GateResult::Cleared {
+                source: ClearanceSource::SessionGrant,
+                ..
+            } => {}
+            other => panic!("expected Cleared(SessionGrant), got {:?}", other),
+        }
+
+        // The cache should have been backfilled automatically.
+        let cache = ApprovedExecCache::new(tmp.path())?;
+        let entry = cache.find(&fingerprint).expect("cache entry was backfilled");
+        assert_eq!(entry.remote_targets, targets);
+        assert_eq!(entry.code_content, code_content);
         Ok(())
     }
 }

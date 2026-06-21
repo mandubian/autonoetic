@@ -88,6 +88,7 @@ fn r3_pre_validated_bypass_enforces_r_2_6() -> Result<()> {
         summary: "test".into(),
         approval_ref: None,
         pre_validated: true,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -135,6 +136,7 @@ fn r3_session_grant_clearance_enforces_r_2_4() -> Result<()> {
         summary: "test".into(),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -171,6 +173,7 @@ fn r3_dedup_enforces_r_2_3() -> Result<()> {
         summary: "first".into(),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -188,6 +191,7 @@ fn r3_dedup_enforces_r_2_3() -> Result<()> {
         summary: "second".into(),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -222,6 +226,7 @@ fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
         summary: "fetch API".into(),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -288,6 +293,7 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
         summary: "test".into(),
         approval_ref: Some(&ref_id),
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -331,6 +337,7 @@ fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
         summary: String::new(),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -360,6 +367,7 @@ fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
         summary: String::new(),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -391,6 +399,7 @@ fn r_2_19_gate_enrichment_recorded_with_sender() -> Result<()> {
         summary: "fetch data".into(),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
