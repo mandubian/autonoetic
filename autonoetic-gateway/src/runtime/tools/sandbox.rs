@@ -1315,14 +1315,16 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             pre_validated = true;
                         }
                     }
-                    cache_backfill = Some(crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill {
-                        gateway_dir: gw_dir.to_path_buf(),
-                        fingerprint,
-                        agent_id: manifest.agent.id.clone(),
-                        remote_targets: normalized_targets.clone(),
-                        code_content: code_to_analyze.clone(),
-                        approval_request_id: String::new(),
-                    });
+                    if !pre_validated {
+                        cache_backfill = Some(crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill {
+                            gateway_dir: gw_dir.to_path_buf(),
+                            fingerprint,
+                            agent_id: manifest.agent.id.clone(),
+                            remote_targets: normalized_targets.clone(),
+                            code_content: code_to_analyze.clone(),
+                            approval_request_id: String::new(),
+                        });
+                    }
                 }
             }
 

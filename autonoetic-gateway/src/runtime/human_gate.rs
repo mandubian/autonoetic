@@ -883,28 +883,41 @@ impl GateService {
         req: &GateRequest<'_>,
         result: &GateResult,
     ) -> Result<()> {
-        let (source, ref_id) = match result {
+        let source = match result {
             GateResult::Cleared { source, .. } => match source {
                 ClearanceSource::CachedApproval => return Ok(()),
-                ClearanceSource::ApprovalRef(id) => (source, Some(id.as_str())),
-                _ => (source, None),
+                _ => source,
             },
             _ => return Ok(()),
         };
 
-        if let Some(mut backfill) = req.cache_backfill.clone() {
-            if let Some(id) = ref_id {
-                backfill.approval_request_id = id.to_string();
+        let backfill = match req.cache_backfill.as_ref() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        // Clone only when necessary: if clearance came from an approval_ref, we
+        // need to override the approval_request_id field. For other clearance
+        // sources the backfill is used as-is.
+        let cloned = match source {
+            ClearanceSource::ApprovalRef(id) => {
+                let mut b = backfill.clone();
+                b.approval_request_id = id.clone();
+                Some(b)
             }
-            if let Err(e) = backfill.record_if_missing() {
-                tracing::warn!(
-                    target: "human_gate",
-                    error = %e,
-                    source = ?source,
-                    "Failed to backfill approved exec cache"
-                );
-            }
+            _ => None,
+        };
+        let backfill_to_record = cloned.as_ref().unwrap_or(backfill);
+
+        if let Err(e) = backfill_to_record.record_if_missing() {
+            tracing::warn!(
+                target: "human_gate",
+                error = %e,
+                source = ?source,
+                "Failed to backfill approved exec cache"
+            );
         }
+
         Ok(())
     }
 
