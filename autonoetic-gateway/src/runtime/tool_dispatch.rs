@@ -145,10 +145,16 @@ pub(crate) fn effective_loop_guard_config(
     effective
 }
 
-pub(crate) fn loop_guard_from_config_and_manifest(config: Option<&GatewayConfig>, agent_dir: &Path) -> LoopGuard {
+pub(crate) fn loop_guard_from_config_and_manifest(
+    config: Option<&GatewayConfig>,
+    agent_dir: &Path,
+    declaration: Option<&LoopGuardDeclaration>,
+) -> LoopGuard {
     match config {
         Some(cfg) => {
-            let declaration = load_manifest_loop_guard_declaration(agent_dir);
+            let declaration = declaration
+                .cloned()
+                .or_else(|| load_manifest_loop_guard_declaration(agent_dir));
             let effective = effective_loop_guard_config(&cfg.loop_guard, declaration.as_ref());
             LoopGuard::with_config(&effective)
         }
@@ -160,9 +166,8 @@ pub(crate) fn loop_guard_from_config_and_manifest(config: Option<&GatewayConfig>
 /// Returns the effective limit to use for this agent's sessions.
 pub(crate) fn effective_max_session_turns(
     system_turns: u32,
-    agent_dir: &Path,
+    declaration: Option<&LoopGuardDeclaration>,
 ) -> u32 {
-    let declaration = load_manifest_loop_guard_declaration(agent_dir);
     match declaration.and_then(|d| d.max_session_turns) {
         Some(v) => v.min(system_turns),
         None => system_turns,

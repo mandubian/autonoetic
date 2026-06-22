@@ -25,6 +25,8 @@ pub struct ToolCallProcessor<'a> {
     manifest: &'a AgentManifest,
     disclosure_state: &'a mut DisclosureState,
     secret_store: Option<&'a mut SecretStoreRuntime>,
+    /// Cached per-processor to avoid cloning the manifest for every tool call.
+    policy: crate::policy::PolicyEngine,
     session_id: Option<String>,
     turn_id: Option<String>,
     config: Option<&'a GatewayConfig>,
@@ -84,6 +86,7 @@ impl<'a> ToolCallProcessor<'a> {
             manifest,
             disclosure_state,
             secret_store,
+            policy: crate::policy::PolicyEngine::new(manifest.clone()),
             session_id: None,
             turn_id: None,
             config,
@@ -390,7 +393,7 @@ impl<'a> ToolCallProcessor<'a> {
         gateway_dir: Option<&Path>,
     ) -> anyhow::Result<String> {
         let tool_name = Self::canonical_tool_name(&tc.name);
-        let policy = crate::policy::PolicyEngine::new(self.manifest.clone());
+        let policy = &self.policy;
 
         let sanitized_args = strip_gemma_token_artifacts(&tc.arguments);
 

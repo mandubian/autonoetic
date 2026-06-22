@@ -278,6 +278,9 @@ pub struct AgentExecutor {
     /// Written to content store for on-demand retrieval by the agent.
     pub extended_instructions: Option<String>,
 
+    /// Parsed once from SKILL.md; used instead of re-reading the file every turn.
+    pub loop_guard_declaration: Option<autonoetic_types::agent::LoopGuardDeclaration>,
+
     /// In-session divergence monitor (Sentinel P1). Observes LoopGuard
     /// pressure, digest stall, repetition entropy, error bursts, and
     /// context pressure. Emits `divergence.*` causal events on level
@@ -334,6 +337,9 @@ impl AgentExecutor {
         registry: crate::runtime::tools::NativeToolRegistry,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
     ) -> Self {
+        let loop_guard_declaration =
+            crate::runtime::tool_dispatch::load_manifest_loop_guard_declaration(&agent_dir,
+            );
         Self {
             manifest: manifest.clone(),
             instructions,
@@ -375,6 +381,7 @@ impl AgentExecutor {
             persona: None,
             overflow_recovery: false,
             extended_instructions: None,
+            loop_guard_declaration,
             trajectory_monitor: TrajectoryMonitor::new(Default::default()),
             last_context_utilization: None,
             suppress_until_turn: Arc::new(AtomicU64::new(0)),
@@ -405,7 +412,11 @@ impl AgentExecutor {
     }
 
     pub fn with_config(mut self, config: Arc<GatewayConfig>) -> Self {
-        self.guard = loop_guard_from_config_and_manifest(Some(config.as_ref()), &self.agent_dir);
+        self.guard = loop_guard_from_config_and_manifest(
+            Some(config.as_ref()),
+            &self.agent_dir,
+            self.loop_guard_declaration.as_ref(),
+        );
         self.trajectory_monitor = TrajectoryMonitor::new(config.trajectory.clone());
         self.config = Some(config);
         self
@@ -1083,7 +1094,11 @@ impl AgentExecutor {
             );
         }
 
-        self.guard = loop_guard_from_config_and_manifest(self.config.as_deref(), &self.agent_dir);
+        self.guard = loop_guard_from_config_and_manifest(
+            self.config.as_deref(),
+            &self.agent_dir,
+            self.loop_guard_declaration.as_ref(),
+        );
         self.llm_usage_last_run.clear();
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
@@ -1091,7 +1106,10 @@ impl AgentExecutor {
         // Hard session-level turn limit with explicit approval gate.
         // Each approval grants one additional window of `max_session_turns`.
         if let Some(cfg) = &self.config {
-            let effective_turns = effective_max_session_turns(cfg.max_session_turns, &self.agent_dir);
+            let effective_turns = effective_max_session_turns(
+                cfg.max_session_turns,
+                self.loop_guard_declaration.as_ref(),
+            );
             if effective_turns > 0 {
                 let approved_windows = self.approved_session_continue_count(&session_id)?;
                 let allowed_turns =

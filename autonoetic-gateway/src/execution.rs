@@ -2715,6 +2715,7 @@ impl GatewayExecutionService {
                         runtime.guard = crate::runtime::tool_dispatch::loop_guard_from_config_and_manifest(
                             runtime.config.as_deref(),
                             &runtime.agent_dir,
+                            runtime.loop_guard_declaration.as_ref(),
                         );
                         // If the incoming message is already the last user message in
                         // the checkpoint history, don't duplicate it.
