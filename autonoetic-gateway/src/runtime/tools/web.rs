@@ -912,6 +912,7 @@ impl NativeTool for WebSearchTool {
                     summary: format!("web.search {}", engine_host),
                     approval_ref: None,
                     pre_validated: false,
+                    cache_backfill: None,
                     turn_id: None,
                 },
             )?;
@@ -1307,6 +1308,7 @@ fn gate_web_fetch_host(
         summary: format!("web.fetch {}", host),
         approval_ref: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
     match gate_result {
@@ -1924,6 +1926,7 @@ impl NativeTool for WebCallTool {
                     summary: format!("web.call {}", host),
                     approval_ref: None,
                     pre_validated: false,
+                    cache_backfill: None,
                     turn_id: None,
                 },
             )?;

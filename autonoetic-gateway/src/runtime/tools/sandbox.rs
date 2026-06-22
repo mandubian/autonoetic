@@ -972,59 +972,6 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                 "Proceeding with approved sandbox execution (command from store)"
                             );
                             approval_validated_for_command = true;
-
-                            // Record to cache immediately upon approval validation,
-                            // before any execution attempt. This ensures retries after
-                            // sandbox failures (e.g. SUN_LEN) still get cached.
-                            let code_to_analyze = extract_code_for_analysis(
-                                &effective_command,
-                                agent_dir,
-                                gateway_dir,
-                                session_id,
-                            );
-                            let dep_packages: Option<Vec<String>> =
-                                args.dependencies.as_ref().map(|d| d.packages.clone());
-                            let remote_analysis =
-                                crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
-                                    &code_to_analyze,
-                                    dep_packages.as_deref(),
-                                );
-                            let normalized_targets =
-                                normalize_targets(&remote_analysis.detected_patterns);
-                            let fingerprint = compute_fingerprint(
-                                &manifest.agent.id,
-                                &normalized_targets,
-                                &code_to_analyze,
-                                explicit_mount_artifact_id.as_deref(),
-                                &manifest.capabilities,                            );
-                            if let Some(gw_dir) = gateway_dir {
-                                if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                                    if cache.find(&fingerprint).is_none() {
-                                        let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                                            fingerprint: fingerprint.clone(),
-                                            agent_id: manifest.agent.id.clone(),
-                                            remote_targets: normalized_targets,
-                                            code_content: code_to_analyze,
-                                            approval_request_id: approval_ref.clone(),
-                                            approved_at: chrono::Utc::now().to_rfc3339(),
-                                            approved_by: "operator".to_string(),
-                                            last_used_at: chrono::Utc::now().to_rfc3339(),
-                                        };
-                                        if let Err(e) = cache.record(entry) {
-                                            tracing::warn!(
-                                                target: "sandbox_exec", error = %e,
-                                                fingerprint = %fingerprint,
-                                                "Failed to record approved exec cache entry"
-                                            );
-                                        } else {
-                                            tracing::info!(
-                                                target: "sandbox_exec", fingerprint = %fingerprint,
-                                                "Cached approved exec on approval_ref validation"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
                         }
                         ScheduledAction::LayerMount {
                             command: approved_cmd,
@@ -1345,36 +1292,41 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
 
             // Pre-check: exec cache for concrete targets (sets pre_validated for GateService bypass)
             let mut pre_validated = false;
-            let fingerprint_for_backfill: Option<String> = match &coverage {
-                crate::runtime::remote_access::NetworkCoverage::Concrete { targets } => {
-                    if let Some(gw_dir) = gateway_dir {
-                        let fingerprint = compute_fingerprint(
-                            &manifest.agent.id,
-                            targets,
-                            &code_to_analyze,
-                            explicit_mount_artifact_id.as_deref(),
-                            &manifest.capabilities,
-                        );
-                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                            if let Some(entry) = cache.find(&fingerprint) {
-                                tracing::info!(
-                                    target: "sandbox_exec",
-                                    fingerprint = %fingerprint,
-                                    previously_approved_by = %entry.approved_by,
-                                    previously_approved_at = %entry.approved_at,
-                                    "Cache hit: skipping approval for previously approved sandbox exec"
-                                );
-                                let _ = cache.update_last_used(&fingerprint);
-                                pre_validated = true;
-                            }
+            let mut cache_backfill: Option<crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill> = None;
+            if let crate::runtime::remote_access::NetworkCoverage::Concrete { targets } = &coverage {
+                if let Some(gw_dir) = gateway_dir {
+                    let fingerprint = compute_fingerprint(
+                        &manifest.agent.id,
+                        targets,
+                        &code_to_analyze,
+                        explicit_mount_artifact_id.as_deref(),
+                        &manifest.capabilities,
+                    );
+                    if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                        if let Some(entry) = cache.find(&fingerprint) {
+                            tracing::info!(
+                                target: "sandbox_exec",
+                                fingerprint = %fingerprint,
+                                previously_approved_by = %entry.approved_by,
+                                previously_approved_at = %entry.approved_at,
+                                "Cache hit: skipping approval for previously approved sandbox exec"
+                            );
+                            let _ = cache.update_last_used(&fingerprint);
+                            pre_validated = true;
                         }
-                        Some(fingerprint)
-                    } else {
-                        None
+                    }
+                    if !pre_validated {
+                        cache_backfill = Some(crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill {
+                            gateway_dir: gw_dir.to_path_buf(),
+                            fingerprint,
+                            agent_id: manifest.agent.id.clone(),
+                            remote_targets: normalized_targets.clone(),
+                            code_content: code_to_analyze.clone(),
+                            approval_request_id: String::new(),
+                        });
                     }
                 }
-                _ => None,
-            };
+            }
 
             if pre_validated {
                 // Exec cache hit — fast path, no GateService or store needed.
@@ -1427,33 +1379,12 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             summary: summary.clone(),
                             approval_ref: None,
                             pre_validated,
+                            cache_backfill,
                             turn_id: None,
                         },
                     )?;
                     match gate_result {
-                        crate::runtime::human_gate::GateResult::Cleared { source, .. } => {
-                            // Backfill exec cache when cleared by session grant
-                            if source == crate::runtime::human_gate::ClearanceSource::SessionGrant {
-                                if let Some(fp) = fingerprint_for_backfill {
-                                    if let Some(gw_dir) = gateway_dir {
-                                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                                            if cache.find(&fp).is_none() {
-                                                let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                                                    fingerprint: fp,
-                                                    agent_id: manifest.agent.id.clone(),
-                                                    remote_targets: normalized_targets.clone(),
-                                                    code_content: code_to_analyze.clone(),
-                                                    approval_request_id: String::new(),
-                                                    approved_at: chrono::Utc::now().to_rfc3339(),
-                                                    approved_by: "operator".to_string(),
-                                                    last_used_at: chrono::Utc::now().to_rfc3339(),
-                                                };
-                                                let _ = cache.record(entry);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        crate::runtime::human_gate::GateResult::Cleared { .. } => {
                             approval_validated_for_command = true;
                         }
                         crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
@@ -1779,6 +1710,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                         summary: summary.clone(),
                                         approval_ref: None,
                                         pre_validated: false,
+                                        cache_backfill: None,
                                 turn_id: None,
                                     },
                                 )?;
@@ -2345,56 +2277,6 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                         }
                         Err(e) => {
                             tracing::warn!(target: "sandbox", error = %e, "Failed to create layer store for auto-capture");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Record to approved exec cache when an operator-granted approval was used.
-        // We cache on approval grant, not execution success — the operator's decision
-        // that this code may access these hosts is independent of whether the command
-        // runs correctly.
-        if approval_validated_for_command && args.approval_ref.is_some() {
-            let remote_analysis_cached =
-                crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies(
-                    &code_to_analyze,
-                    dep_packages.as_deref(),
-                );
-            let normalized_targets = normalize_targets(&remote_analysis_cached.detected_patterns);
-            let fingerprint = compute_fingerprint(
-                &manifest.agent.id,
-                &normalized_targets,
-                &code_to_analyze,
-                explicit_mount_artifact_id.as_deref(),
-                &manifest.capabilities,            );
-            if let Some(gw_dir) = gateway_dir {
-                if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                    if cache.find(&fingerprint).is_none() {
-                        let approval_request_id = args.approval_ref.clone().unwrap_or_default();
-                        let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                            fingerprint: fingerprint.clone(),
-                            agent_id: manifest.agent.id.clone(),
-                            remote_targets: normalized_targets,
-                            code_content: code_to_analyze.clone(),
-                            approval_request_id,
-                            approved_at: chrono::Utc::now().to_rfc3339(),
-                            approved_by: "operator".to_string(),
-                            last_used_at: chrono::Utc::now().to_rfc3339(),
-                        };
-                        if let Err(e) = cache.record(entry) {
-                            tracing::warn!(
-                                target: "sandbox_exec",
-                                error = %e,
-                                fingerprint = %fingerprint,
-                                "Failed to record approved exec cache entry"
-                            );
-                        } else {
-                            tracing::info!(
-                                target: "sandbox_exec",
-                                fingerprint = %fingerprint,
-                                "Recorded approved execution in cache (operator-granted approval)"
-                            );
                         }
                     }
                 }

@@ -56,6 +56,42 @@ pub struct ApprovedExecCache {
     entries: Arc<Mutex<HashMap<String, ApprovedExecEntry>>>,
 }
 
+/// Data needed to backfill the approved-exec cache when a sandbox exec gate is
+/// cleared without a cache hit (e.g. by session grant or approval_ref).
+#[derive(Debug, Clone)]
+pub struct ApprovedExecCacheBackfill {
+    pub gateway_dir: std::path::PathBuf,
+    pub fingerprint: String,
+    pub agent_id: String,
+    pub remote_targets: Vec<String>,
+    pub code_content: String,
+    pub approval_request_id: String,
+}
+
+impl ApprovedExecCacheBackfill {
+    /// Records the entry if no entry with the same fingerprint already exists.
+    /// This is the single implementation of exec-cache backfill; both the
+    /// `GateService` clearance path and the `sandbox_exec` approval_ref
+    /// validation path route through it.
+    pub fn record_if_missing(&self) -> anyhow::Result<()> {
+        let cache = ApprovedExecCache::new(&self.gateway_dir)?;
+        if cache.find(&self.fingerprint).is_some() {
+            return Ok(());
+        }
+        let entry = ApprovedExecEntry {
+            fingerprint: self.fingerprint.clone(),
+            agent_id: self.agent_id.clone(),
+            remote_targets: self.remote_targets.clone(),
+            code_content: self.code_content.clone(),
+            approval_request_id: self.approval_request_id.clone(),
+            approved_at: chrono::Utc::now().to_rfc3339(),
+            approved_by: "operator".to_string(),
+            last_used_at: chrono::Utc::now().to_rfc3339(),
+        };
+        cache.record(entry)
+    }
+}
+
 impl ApprovedExecCache {
     /// Creates a new ApprovedExecCache, loading existing entries from disk.
     pub fn new(gateway_dir: &Path) -> anyhow::Result<Self> {

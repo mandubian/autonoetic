@@ -337,6 +337,7 @@ impl NativeTool for WikiProposeTool {
             summary: format!("Wiki proposal: {}", args.title),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
             turn_id: None,
         };
 
