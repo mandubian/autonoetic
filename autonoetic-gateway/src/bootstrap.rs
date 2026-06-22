@@ -3,8 +3,9 @@
 //! Scans `config.agents_dir` for agent bundles (directories with `SKILL.md`),
 //! creates revisions from their content, and auto-promotes them. Skips agents
 //! whose content hash matches an existing revision (content-addressed dedup). Merges preset-level LLM config into the
-//! agent's `SKILL.md`: always overrides `provider`, `model`, `temperature`;
-//! fills missing `base_url`, `thinking`, `chat_only`, `api_key_env`.
+//! agent's `SKILL.md`: always overrides `provider`, `model`, `temperature`, and
+//! `thinking` (when the preset defines it); fills missing `base_url`, `chat_only`,
+//! `api_key_env`.
 //! Also materializes constitution snapshots in `.gateway/constitution/`.
 
 use crate::scheduler::gateway_store::GatewayStore;
@@ -501,9 +502,9 @@ fn normalize_path_label(path: &Path) -> String {
 
 /// Merges preset-level `llm_config` fields into the SKILL.md file,
 /// preserving the original YAML structure. Always overrides `provider`,
-/// `model`, and `temperature` from the preset (when set). Fills missing
-/// `base_url`, `thinking`, `chat_only`, and `api_key_env` only if not
-/// already present in the agent's config.
+/// `model`, and `temperature` from the preset (when set). Always overrides
+/// `thinking` when the preset defines it. Fills missing `base_url`, `chat_only`,
+/// and `api_key_env` only if not already present in the agent's config.
 /// Returns `None` if no modification was needed or if the frontmatter couldn't
 /// be parsed.
 /// Whether a script entry is JavaScript (compiled to wasm via Javy at bootstrap).
@@ -669,12 +670,9 @@ fn merge_preset_into_skill(skill_text: &str, preset: &LlmPreset) -> Option<Strin
             }
 
             let thinking_key = yaml_str("thinking");
-            let has_thinking = map.get(&thinking_key).map_or(false, |v| !v.is_null());
-            if !has_thinking {
-                if let Some(ref thinking) = preset.thinking {
-                    map.insert(thinking_key, serde_yaml::to_value(thinking).ok()?);
-                    modified = true;
-                }
+            if let Some(ref thinking) = preset.thinking {
+                map.insert(thinking_key, serde_yaml::to_value(thinking).ok()?);
+                modified = true;
             }
         }
     }

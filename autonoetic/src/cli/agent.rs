@@ -988,7 +988,48 @@ pub fn handle_agent_bootstrap(
         config_path.display()
     );
     let config = autonoetic_gateway::config::load_config(config_path)?;
+    let install = install_reference_agents(&config, from, overwrite)?;
+
+    if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
+        println!(
+            "Created vault master key at {} — back it up; without it encrypted credentials cannot be decrypted.",
+            autonoetic_gateway::execution::gateway_root_dir(&config)
+                .join("vault.key")
+                .display()
+        );
+    }
+
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
+
+    println!(
+        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} activated (target: {}).",
+        install.copied,
+        install.overwritten,
+        install.skipped,
+        activated,
+        config.agents_dir.display()
+    );
+
+    Ok(())
+}
+
+/// Result of copying reference agent bundles into `config.agents_dir`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstallReferenceAgentsResult {
+    pub copied: usize,
+    pub overwritten: usize,
+    pub skipped: usize,
+}
+
+/// Copy bundled reference agents from the repo (or `--from`) into `config.agents_dir`.
+/// When `overwrite` is true, existing agent directories are replaced with the
+/// latest reference bundles.
+pub fn install_reference_agents(
+    config: &autonoetic_types::config::GatewayConfig,
+    from: Option<&str>,
+    overwrite: bool,
+) -> anyhow::Result<InstallReferenceAgentsResult> {
     std::fs::create_dir_all(&config.agents_dir)?;
 
     let reference_root = resolve_reference_agents_dir(from)?;
@@ -1032,25 +1073,11 @@ pub fn handle_agent_bootstrap(
         println!("Installed '{}' from {}", agent_id, bundle.display());
     }
 
-    if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
-        println!(
-            "Created vault master key at {} — back it up; without it encrypted credentials cannot be decrypted.",
-            gateway_dir.join("vault.key").display()
-        );
-    }
-
-    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
-
-    println!(
-        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} activated (target: {}).",
+    Ok(InstallReferenceAgentsResult {
         copied,
         overwritten,
         skipped,
-        activated,
-        config.agents_dir.display()
-    );
-
-    Ok(())
+    })
 }
 
 fn resolve_reference_agents_dir(from: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
@@ -2692,6 +2719,33 @@ Use tools when needed.
             current,
             "ACTIVE constitution version must match CURRENT"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_reference_agents_creates_missing_agents_dir() {
+        autonoetic_gateway::constitution_digest::reset_constitution_runtime_for_tests();
+        let temp = tempdir().expect("tempdir should create");
+        let reference_root = temp.path().join("reference_agents");
+        write_reference_bundle(&reference_root, "lead", "planner.default", "v1");
+
+        let agents_dir = temp.path().join("runtime_agents");
+        assert!(!agents_dir.exists());
+
+        let mut config = autonoetic_gateway::config::load_config(&temp.path().join("nope.yaml"))
+            .expect("default config should load");
+        config.agents_dir = agents_dir.clone();
+
+        let install = install_reference_agents(
+            &config,
+            Some(reference_root.to_str().expect("utf-8 path")),
+            false,
+        )
+        .expect("install should succeed");
+
+        assert!(agents_dir.exists());
+        assert_eq!(install.copied, 1);
+        assert!(agents_dir.join("planner.default").join("SKILL.md").exists());
     }
 
     #[test]

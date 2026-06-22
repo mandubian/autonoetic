@@ -1353,6 +1353,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     requires_approval: true,
                     evidence_ref: None,
                     detected_hosts: Some(normalized_targets.clone()),
+                    intent: args.intent.clone(),
                 };
                 let reason = sandbox_approval_operator_reason(
                     &effective_command,
@@ -2774,6 +2775,7 @@ mod approval_ref_binding_tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: "2026-01-01T00:00:00Z".to_string(),

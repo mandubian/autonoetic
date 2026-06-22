@@ -27,15 +27,20 @@ const RESET_EPHIMERAL_PATHS: &[&str] = &[
     "wiki",
 ];
 
-/// Stop any running daemon, delete the gateway database and derived state, and
-/// re-bootstrap agents from the current config. The operator config
-/// (`config.yaml`, `persona.md`, and the `agents/` tree) is left untouched and
-/// no model-selection prompts are shown.
+/// Stop any running daemon, delete the gateway database and derived state, refresh
+/// reference agent bundles from the repo, and re-bootstrap gateway revisions.
+/// The operator config (`config.yaml`, `persona.md`) is left untouched and no
+/// model-selection prompts are shown.
 pub async fn handle_gateway_reset(
     config_path: &Path,
     yes: bool,
     json: bool,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config_path.exists(),
+        "Config file not found at {}. Create it first (or pass a valid --config path) before running 'gateway reset'.",
+        config_path.display()
+    );
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
 
@@ -49,6 +54,11 @@ pub async fn handle_gateway_reset(
         writeln!(
             stderr,
             "Sessions, approvals, traces, artifacts, and credentials will be lost.",
+        )?;
+        writeln!(
+            stderr,
+            "Reference agent bundles in {} will be refreshed from the latest repo copies.",
+            config.agents_dir.display()
         )?;
         write!(stderr, "Type 'yes' to continue: ")?;
         stderr.flush()?;
@@ -76,9 +86,17 @@ pub async fn handle_gateway_reset(
         }
     }
 
-    // Re-create a fresh gateway directory and bootstrap agents without touching
-    // the operator config.
+    // Refresh operator agent bundles (creates agents_dir when missing) and
+    // re-bootstrap gateway revisions from the latest on-disk bundles.
+    let install = super::agent::install_reference_agents(&config, None, true)?;
     std::fs::create_dir_all(&gateway_dir)?;
+    if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
+        tracing::info!(
+            target: "bootstrap",
+            path = %gateway_dir.join("vault.key").display(),
+            "Created default vault master key during gateway reset"
+        );
+    }
     let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
 
     if json {
@@ -90,11 +108,18 @@ pub async fn handle_gateway_reset(
                 "ok": true,
                 "gateway_dir": gateway_dir,
                 "activated_agents": activated,
+                "agents_installed": install.copied,
+                "agents_overwritten": install.overwritten,
+                "agents_skipped": install.skipped,
             })
         );
     } else {
         eprintln!("Gateway environment reset.");
         eprintln!("  Gateway dir: {}", gateway_dir.display());
+        eprintln!(
+            "  Agent bundles: {} installed, {} overwritten, {} skipped",
+            install.copied, install.overwritten, install.skipped
+        );
         eprintln!("  Activated agents: {activated}");
     }
     Ok(())

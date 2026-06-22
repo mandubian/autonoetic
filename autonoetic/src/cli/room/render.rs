@@ -789,7 +789,28 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
         }
     }
     if let Some(cmd) = field("command") {
-        lines.push(format!("  command: {}", one_line(&cmd, 140)));
+        if field("command_kind").as_deref() == Some("content_ref") {
+            lines.push(format!("  command: {} (content ref)", one_line(&cmd, 120)));
+            if let Some(hint) = field("command_hint") {
+                lines.push(format!("  note: {}", one_line(&hint, 140)));
+            }
+        } else {
+            lines.push(format!("  command: {}", one_line(&cmd, 140)));
+        }
+    }
+    if let Some(intent) = field("intent") {
+        lines.push("  purpose:".to_string());
+        for line in wrap_display_lines(&intent, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    if action != "revision_promote" {
+        if let Some(summary) = field("summary") {
+            lines.push("  details:".to_string());
+            for line in wrap_display_lines(&summary, 76) {
+                lines.push(format!("    {line}"));
+            }
+        }
     }
     if let Some(hosts) = p
         .as_ref()
@@ -3700,6 +3721,35 @@ mod tests {
             !payload.contains("\"message\":\n      All federation"),
             "raw glued message"
         );
+    }
+
+    #[test]
+    fn render_spec_sandbox_approval_shows_summary_and_content_ref_hint() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("researcher.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-59f8",
+                "approval_level": "operator",
+                "action": "sandbox_exec",
+                "command": "cnt_f57014c6",
+                "command_kind": "content_ref",
+                "command_hint": "Content handle — not a shell command.",
+                "host_patterns": ["api.open-meteo.com"],
+                "intent": "Run weather fetch script against Open-Meteo",
+                "summary": "What will run:\ncnt_f57014c6\n\nWhy approval is required:\nRemote URL detected in script",
+            }),
+        );
+        let spec = render_spec(&appr);
+        let detail = spec.detail.expect("approval card body");
+        assert!(detail.contains("content ref"));
+        assert!(detail.contains("purpose:"));
+        assert!(detail.contains("Open-Meteo"));
+        assert!(detail.contains("details:"));
+        assert!(detail.contains("Why approval is required"));
+        assert!(detail.contains("api.open-meteo.com"));
     }
 
     #[test]

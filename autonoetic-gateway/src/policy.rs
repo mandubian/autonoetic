@@ -100,6 +100,30 @@ Fix: widen the agent's CodeExecution patterns or `commands` list, wrap with an a
     }
 }
 
+/// Strip `#` line comments when the `#` is outside single/double quotes.
+fn strip_shell_line_comments_outside_quotes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    for c in s.chars() {
+        if !in_single && !in_double && c == '#' {
+            break;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+        } else if c == '"' && !in_single {
+            in_double = !in_double;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// First whitespace-delimited token of a shell segment (lowercased input expected).
+fn first_shell_token(cmd_lower: &str) -> Option<&str> {
+    cmd_lower.split_whitespace().next()
+}
+
 /// Analyzes shell commands for security threats.
 pub struct SecurityAnalyzer;
 
@@ -135,8 +159,9 @@ impl SecurityAnalyzer {
                 threats.push(SecurityThreat::EnvironmentDisclosure);
             }
 
-            // Check for sandbox escape attempts
-            if Self::is_sandbox_escape(trimmed) {
+            // Check for sandbox escape attempts (ignore `#` line comments outside quotes)
+            let without_comments = strip_shell_line_comments_outside_quotes(trimmed);
+            if Self::is_sandbox_escape(&without_comments) {
                 threats.push(SecurityThreat::SandboxEscape);
             }
 
@@ -256,24 +281,26 @@ impl SecurityAnalyzer {
 
     /// Check for sandbox escape attempts.
     fn is_sandbox_escape(cmd: &str) -> bool {
-        let escape_patterns = &[
+        let path_patterns = [
             "cat /proc/",
             "ls /proc/",
             "cat /sys/",
             "ls /sys/",
-            "mount",
-            "umount",
-            "chroot",
-            "nsenter",
-            "unshare",
-            "docker ",
-            "lxc-",
-            "systemctl",
-            "service ",
         ];
-
         let cmd_lower = cmd.to_lowercase();
-        escape_patterns.iter().any(|p| cmd_lower.contains(p))
+        if path_patterns.iter().any(|p| cmd_lower.contains(p)) {
+            return true;
+        }
+        if cmd_lower.contains("lxc-") {
+            return true;
+        }
+        matches!(
+            first_shell_token(&cmd_lower),
+            Some(
+                "mount" | "umount" | "chroot" | "nsenter" | "unshare" | "systemctl" | "service"
+                    | "docker"
+            )
+        )
     }
 
     /// Check for shell injection patterns.
@@ -974,6 +1001,18 @@ mod tests {
         assert!(analysis
             .threats
             .contains(&SecurityThreat::EnvironmentDisclosure));
+    }
+
+    #[test]
+    fn test_security_analyzer_sandbox_escape_weather_service_comment() {
+        let analysis = SecurityAnalyzer::analyze_command(
+            "python3 -c 'import json  # National Weather Service API'",
+        );
+        assert!(
+            !analysis.threats.contains(&SecurityThreat::SandboxEscape),
+            "comment mentioning 'Service' must not trip sandbox escape: {:?}",
+            analysis.threats
+        );
     }
 
     #[test]

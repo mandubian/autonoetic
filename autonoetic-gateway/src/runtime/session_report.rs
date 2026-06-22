@@ -151,6 +151,7 @@ pub struct SessionReportWriter {
     depth: usize,
     payload_counter: u32,
     content_store: Option<crate::runtime::content_store::ContentStore>,
+    live_html_on_update: bool,
 }
 
 impl SessionReportState {
@@ -202,6 +203,15 @@ impl AgentReport {
 
 impl SessionReportWriter {
     pub fn open(gateway_dir: &Path, session_id: &str, agent_id: &str) -> anyhow::Result<Self> {
+        Self::open_with_options(gateway_dir, session_id, agent_id, false)
+    }
+
+    pub fn open_with_options(
+        gateway_dir: &Path,
+        session_id: &str,
+        agent_id: &str,
+        live_html_on_update: bool,
+    ) -> anyhow::Result<Self> {
         let base = base_session_id(session_id);
         let dir = gateway_dir.join("sessions").join(base);
         std::fs::create_dir_all(&dir)?;
@@ -225,6 +235,7 @@ impl SessionReportWriter {
             depth: session_depth(session_id),
             payload_counter,
             content_store,
+            live_html_on_update,
         })
     }
 
@@ -762,10 +773,12 @@ impl SessionReportWriter {
         f(&mut state);
         state.generated_at = chrono::Utc::now().to_rfc3339();
         let live_md = render_live_markdown(&state);
-        let live_html = render_live_html(&state);
         write_json_atomic(&self.state_path, &state)?;
         write_string_atomic(&self.live_md_path, &live_md)?;
-        write_string_atomic(&self.live_html_path, &live_html)?;
+        if self.live_html_on_update {
+            let live_html = render_live_html(&state);
+            write_string_atomic(&self.live_html_path, &live_html)?;
+        }
         Ok(())
     }
 

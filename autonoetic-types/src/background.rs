@@ -106,6 +106,9 @@ pub enum ScheduledAction {
         evidence_ref: Option<String>,
         #[serde(default)]
         detected_hosts: Option<Vec<String>>,
+        /// Agent-stated purpose from `sandbox_exec` `intent` (operator-facing).
+        #[serde(default)]
+        intent: Option<String>,
     },
     /// Approval subject only: "this approval request is for an agent install." Not executed by the scheduler; install is performed by the caller retrying `agent.install` with `install_approval_ref`.
     AgentInstall {
@@ -513,6 +516,7 @@ impl ScheduledAction {
                 dependencies,
                 requires_approval,
                 detected_hosts,
+                intent,
                 ..
             } => Self::SandboxExec {
                 // Command is blanked for the Agent class because shell strings
@@ -527,6 +531,7 @@ impl ScheduledAction {
                 requires_approval: *requires_approval,
                 evidence_ref: None,
                 detected_hosts: detected_hosts.clone(),
+                intent: intent.clone(),
             },
             Self::WriteFile {
                 path,

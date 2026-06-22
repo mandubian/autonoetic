@@ -156,7 +156,7 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
     // OpenAI is similar but gated by model name inside the driver.
     let thinking_block = match provider.as_str() {
         "openai" | "codex" | "openrouter" => {
-            "\n    # Extended reasoning. Drop or comment out to disable.\n    # Effort levels: low | medium | high | xhigh\n    thinking:\n      effort: high"
+            "\n    # Extended reasoning. Drop or comment out to disable.\n    # Effort levels: low | medium | high | xhigh\n    thinking:\n      effort: medium"
         }
         _ => "",
     };
@@ -185,6 +185,9 @@ digest_agent:
 
 auto_learning:
   enabled: true
+
+# Starter profile defaults (also applied at config load when omitted).
+evidence_mode: errors
 
 {llm_section}"#,
         agents_dir = agents_dir_str,

@@ -58,6 +58,13 @@ pub fn build_timeline_event(
 
 /// Optional structured fields for an `approval.pending` timeline payload, derived
 /// from the persisted `ScheduledAction`.
+pub fn looks_like_content_ref_command(command: &str) -> bool {
+    let t = command.trim();
+    t.starts_with("cnt_")
+        && t.len() > 4
+        && t[4..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 pub fn approval_timeline_extra_from_action(
     action: &autonoetic_types::background::ScheduledAction,
 ) -> Option<serde_json::Value> {
@@ -78,11 +85,32 @@ pub fn approval_timeline_extra_from_action(
         ScheduledAction::SandboxExec {
             command,
             detected_hosts,
+            intent,
             ..
-        } => Some(serde_json::json!({
-            "command": command,
-            "host_patterns": detected_hosts,
-        })),
+        } => {
+            let mut extra = serde_json::json!({
+                "command": command,
+                "host_patterns": detected_hosts,
+            });
+            if let Some(obj) = extra.as_object_mut() {
+                if let Some(i) = intent.as_ref().filter(|s| !s.trim().is_empty()) {
+                    obj.insert("intent".into(), serde_json::Value::String(i.clone()));
+                }
+                if looks_like_content_ref_command(command) {
+                    obj.insert(
+                        "command_kind".into(),
+                        serde_json::Value::String("content_ref".into()),
+                    );
+                    obj.insert(
+                        "command_hint".into(),
+                        serde_json::Value::String(
+                            "Content handle — not a shell command. Use python3 /tmp/<name> with the file's sandbox_path from content.write.".into(),
+                        ),
+                    );
+                }
+            }
+            Some(extra)
+        }
         ScheduledAction::SessionEscalate {
             session_id,
             root_session_id,

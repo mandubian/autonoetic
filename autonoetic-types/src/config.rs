@@ -201,6 +201,23 @@ fn default_digest_min_turns() -> u32 {
     2
 }
 
+/// Structured live/session report files under `.gateway/sessions/<id>/`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionReportConfig {
+    /// When true, rewrite `session_overview.html` on every report update.
+    /// Default `false` — HTML is written on session close only (lower CPU/IO).
+    #[serde(default)]
+    pub live_html_on_update: bool,
+}
+
+impl Default for SessionReportConfig {
+    fn default() -> Self {
+        Self {
+            live_html_on_update: false,
+        }
+    }
+}
+
 impl Default for DigestAgentConfig {
     fn default() -> Self {
         Self {
@@ -1055,6 +1072,10 @@ pub struct GatewayConfig {
     /// "off": no evidence files (causal_events DB still captures everything)
     #[serde(default)]
     pub evidence_mode: String,
+
+    /// Live/session structured report files (`session_overview.md`, `session_report.*`).
+    #[serde(default)]
+    pub session_report: SessionReportConfig,
 
     /// Optional post-session digest (narrative + extracted memories). Off by default — enable in config.
     #[serde(default)]
@@ -2813,6 +2834,7 @@ impl Default for GatewayConfig {
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
             evidence_mode: default_evidence_mode(),
+            session_report: SessionReportConfig::default(),
             digest_agent: DigestAgentConfig::default(),
             outcome_grader: OutcomeGraderConfig::default(),
             improve: ImproveConfig::default(),
@@ -2855,6 +2877,17 @@ impl Default for GatewayConfig {
 }
 
 impl GatewayConfig {
+    /// Apply profile-specific defaults for knobs that use serde defaults when omitted.
+    /// Explicit operator values in `config.yaml` are preserved.
+    pub fn apply_profile_defaults(&mut self) {
+        if matches!(self.profile, Profile::Starter) {
+            if self.evidence_mode == default_evidence_mode() {
+                self.evidence_mode = "errors".to_string();
+            }
+            // `session_report.live_html_on_update` defaults to false via serde.
+        }
+    }
+
     /// Validate that LLM preset references are consistent.
     /// Returns a list of error messages; empty vec means valid.
     pub fn validate_llm_presets(&self) -> Vec<String> {

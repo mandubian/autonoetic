@@ -386,12 +386,23 @@ retention:
 #  stale_job_max_age_days: 60
 
 # ── Post-Session Digest ───────────────────────────────────────────────
-# LLM summarization + memory extraction after sessions complete.
+# Gateway-internal post-session LLM step (`autonoetic.digest`). Requires
+# `auto_learning.enabled` — not invoked by other agent bundles directly.
 # Uncomment to enable.
 # digest_agent:
 #   enabled: true
 #   min_turns: 2
 #   llm_preset: agentic
+
+# ── Session Report ────────────────────────────────────────────────────
+# Structured live views under `.gateway/sessions/<id>/`.
+# `live_html_on_update: false` (default) writes HTML only on session close.
+#session_report:
+#  live_html_on_update: false
+
+# ── Evidence mode ─────────────────────────────────────────────────────
+# `full` (default) | `errors` | `off` — controls per-tool evidence files.
+#evidence_mode: errors
 
 # ── Max Session Turns ─────────────────────────────────────────────────
 # Circuit breaker: max turns per session before forced suspension.
@@ -534,6 +545,8 @@ llm_presets:
         skip_threshold: 0.95                  # 0.0–1.0
       hybrid:
         ambiguity_threshold: 0.5              # 0.0–1.0
+    thinking:
+      effort: medium
 
   budget:
     routing:
@@ -549,6 +562,8 @@ llm_presets:
     provider: "openrouter"
     model: "minimax/minimax-m2.7"
     temperature: 0.2
+    thinking:
+      effort: medium
 
   coding:
     provider: "openrouter"

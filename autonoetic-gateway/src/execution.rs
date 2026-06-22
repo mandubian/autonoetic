@@ -2397,8 +2397,13 @@ impl GatewayExecutionService {
                 // session_overview.md and causal_events — the LLM fast path skips the
                 // full SessionTracer, so we wire it up manually here.
                 let gateway_dir = self.config.agents_dir.join(".gateway");
-                let mut report =
-                    SessionReportWriter::open(&gateway_dir, session_id, agent_id).ok();
+                let mut report = SessionReportWriter::open_with_options(
+                    &gateway_dir,
+                    session_id,
+                    agent_id,
+                    self.config.session_report.live_html_on_update,
+                )
+                .ok();
                 if let Some(ref mut r) = report {
                     let _ = r.start_session(message);
                     let _ = r.record_tool_requested(

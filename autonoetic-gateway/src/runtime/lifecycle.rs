@@ -1162,10 +1162,16 @@ impl AgentExecutor {
             }
             if self.live_report.is_none() {
                 let agent_id = &self.manifest.agent.id;
-                match crate::runtime::session_report::SessionReportWriter::open(
+                let live_html_on_update = self
+                    .config
+                    .as_ref()
+                    .map(|cfg| cfg.session_report.live_html_on_update)
+                    .unwrap_or(false);
+                match crate::runtime::session_report::SessionReportWriter::open_with_options(
                     gw,
                     &session_id,
                     agent_id,
+                    live_html_on_update,
                 ) {
                     Ok(w) => {
                         self.live_report = Some(Arc::new(std::sync::Mutex::new(w)));
