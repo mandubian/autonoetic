@@ -235,9 +235,7 @@ When you receive such a bundle:
   alongside `execution_mode: "reasoning"` and the matching
   `instructions` string. The gateway tool already accepts an
   `artifact_ref` for reasoning-mode installs; no schema change.
-- The auditor (when §5.9 lands) will have recorded a `promotion_record`
-  against this same `artifact_ref` — that is the audit evidence
-  `specialized_builder` will check in the `audit_only` gating mode.
+- The auditor records `promotion_record` against this same `artifact_ref` before install.
 
 If you receive a request that says "reasoning agent" but no
 `artifact_ref` is provided, report `ok: false, stage: "install",
@@ -317,104 +315,28 @@ For `execution_mode: "script"` on `agent_revision_create_from_intent`, you MUST 
 ```
 **Missing `script_entry` will cause install to fail! Also: do NOT include `llm_preset` for script agents.**
 
-### Required: promotion_gate
+### Promotion evidence (gateway-enforced)
 
-**Promotion evidence is required when the planner specifies gates.** The planner decides which gates are needed based on agent complexity (see Promotion Gate Decision Matrix in planner instructions).
+The gateway verifies `promotion_record` entries for the `artifact_ref` at promote time.
+You do **not** pass boolean `evaluator_pass` / `auditor_pass` flags in the install intent.
 
-**When gates ARE required** (network access, code execution, agent spawning), include `promotion_gate` with concrete evidence (booleans alone are insufficient):
-```json
-{
-  "agent_id": "my-agent",
-  "instructions": "# My Agent...",
-  "capabilities": [...],
-  "promotion_gate": {
-    "evaluator_pass": true,
-    "auditor_pass": true,
-    "security_analysis": {
-      "passed": true,
-      "threats_detected": [],
-      "remote_access_detected": true
-    },
-    "capability_analysis": {
-      "inferred_capabilities": ["NetworkAccess"],
-      "missing_capabilities": [],
-      "declared_capabilities": ["NetworkAccess", "ReadAccess"],
-      "analysis_passed": true
-    }
-  }
-}
-```
+Before `agent_revision_promote`, call `promotion_query({artifact_ref})` and confirm:
 
-**When gating is `audit_only`** (pure-reasoning / pure-transform agents, agent-factory built an intent-only artifact bundle): require the **auditor**'s `promotion_record(pass=true)` for the same `artifact_ref` you are installing from. The evaluator record will be absent — that is correct for now and reflects the not-yet-implemented behavioural evaluation mechanism for pure-skill agents.
+| Role | Required when | Evidence |
+|---|---|---|
+| `auditor` | Every install with gates | `pass: true`, no `critical` findings |
+| `static_evaluator` / `unit_test_runner` / `sealed_evaluator` | Code-bearing or network/exec agents | `execution_trace_id` present; gateway derives `pass` from trace |
+| Operator escalation | Full jury (typical federation path) | Approved `federation.escalate` before promote |
 
-The install request shape for `audit_only`:
+Pure-reasoning intent-only bundles may have auditor record only — execution roles correctly absent.
 
-```json
-{
-  "agent_id": "my-agent",
-  "artifact_ref": "ar.* (intent-only bundle from agent-factory Step 2a)",
-  "instructions": "<same SKILL body that was bundled>",
-  "capabilities": [...],
-  "execution_mode": "reasoning",
-  "llm_preset": "agentic",
-  "promotion_gate": {
-    "auditor_pass": true,
-    "evaluator_pass": null,
-    "evaluator_status": "skipped",
-    "skip_reason": "behavioural_eval_not_implemented"
-  }
-}
-```
+If `promotion_query` is missing required records, stop and report to the spawner. Do not invent evidence or retry promote in a loop.
 
-**When gates are NOT required** — the narrow operator-override case, NOT the default for pure-skill agents — the planner will specify `"gating: none"`. In this case:
-- Do NOT require `promotion_gate` evidence
-- The gateway's built-in code analysis on revision creation still validates capabilities and detects security threats
-- Proceed directly to `agent_revision_create_from_intent` + `agent_revision_promote`
+#### `remote_access_detected` (install analysis, not promotion_record)
 
-**Reject if you receive `"gating: none"` for a reasoning-only agent without an explicit operator-override flag.** Pure-skill agents should default to `audit_only`, not `none`. If the planner has not granted an operator override but the install nonetheless arrives with `gating: none`, report `ok: false, stage: "install", reason: "pure_skill_needs_audit"` back to the spawner — do not install on faith.
-
-#### remote_access_detected (CRITICAL)
-
-**`remote_access_detected` is about CAPABILITY, not SECURITY THREATS.**
-
-| Value | When to use |
-|-------|-------------|
-| `true` | Code makes ANY network calls (HTTP, WebSocket, API requests, urllib, requests, httpx, fetch, etc.) |
-| `false` | Code does NOT make any network calls (pure local processing only) |
-
-**The gateway analyzes the code and detects network calls. If you set `remote_access_detected: false` but the code contains `urllib.request.urlopen()`, `requests.get()`, etc., the install will be REJECTED.**
-
-**Examples:**
-
-```python
-# Code with network calls → remote_access_detected: TRUE
-import urllib.request
-response = urllib.request.urlopen("https://api.example.com/data")
-
-# Code with NO network calls → remote_access_detected: FALSE
-def calculate(x, y):
-    return x + y  # Pure local computation
-```
-
-**If auditor found "no security threats" (no API keys, passwords, etc.), that does NOT mean `remote_access_detected: false`. These are separate concepts:**
-- `threats_detected: []` = No security vulnerabilities found
-- `remote_access_detected: true` = Code makes network calls (this is a capability, not a threat)
-
-**Note:** The gateway validates promotion evidence against install analysis in strict mode. If your `security_analysis` / `capability_analysis` payload does not match the install request and analyzer output, install is rejected.
-
-Before calling `agent_revision_create_from_intent`, ensure:
-
-**When gates are required:**
-1. You have evaluator and auditor pass reports from planner context.
-2. `capability_analysis.declared_capabilities` matches the capabilities you are installing.
-3. `capability_analysis.missing_capabilities` is empty.
-4. `security_analysis.passed` is true.
-5. **`remote_access_detected` is `true` if the code makes ANY network calls.**
-
-**When gates are NOT required (`gating: none`):**
-1. Inspect the artifact to verify declared capabilities match actual code behavior.
-2. **`remote_access_detected` is `true` if the code makes ANY network calls.**
-3. Proceed directly to install — the gateway's code analysis provides baseline safety.
+When the install path still asks for capability/security analysis payloads, remember:
+`remote_access_detected: true` means the code makes network calls (capability fact), not that threats were found.
+Set it from artifact inspection — the gateway cross-checks against static analysis.
 
 ### Approval Flow
 

@@ -39,8 +39,6 @@ metadata:
             type: string
           execution_mode:
             type: string
-          gating_applied:
-            type: string
           stage:
             type: string
           error:
@@ -64,7 +62,9 @@ When a pipeline stage is owned by another installed agent, your default action i
 - `intended_capabilities`: list of capability types needed (e.g. `["NetworkAccess", "CredentialAccess"]`)
 - `source_artifact_ref` (optional): existing artifact to reuse for packaging, gating, or installation instead of rebuilding from loose files
 - `source_script_entry` (optional): entry script inside `source_artifact_ref` when the artifact is already a script candidate
-- `source_validated` (optional): whether executor/evaluator already proved the artifact works for the intended use
+- `source_validated` (optional): whether executor/evaluator already proved the artifact works for the intended use (transient `artifact_exec` — not a substitute for federation traces or install smoke test)
+- `federation_complete` (optional): `true` when the planner already ran federation gates and `federation.escalate` was **approved**. Skip Step 4 re-gating; verify `promotion_query` records + `escalation_approval_id` before Step 5.
+- `escalation_approval_id` (optional): approved `apr-esc-*` from planner's `federation.escalate`. Required when `federation_complete: true`.
 - `execution_mode_hint` (optional): `reasoning | script | auto` — defaults to auto-detect
 - `design_needed` (optional): boolean — force architect step even for simple tasks
 
@@ -75,12 +75,11 @@ When a pipeline stage is owned by another installed agent, your default action i
   "status": "ok",
   "agent_id": "my-agent",
   "revision_id": "r01.example",
-  "execution_mode": "reasoning",
-  "gating_applied": "audit_only"
+  "execution_mode": "reasoning"
 }
 ```
 
-On success: set `status: "ok"` and include `agent_id`, `revision_id`, `execution_mode`, `gating_applied`, `smoke_test_performed`, `installed`. Never claim success unless the final `specialized_builder.default` promote call returned `status: "promoted"` / `installed: true`.
+On success: set `status: "ok"` and include `agent_id`, `revision_id`, `execution_mode`, `smoke_test_performed`, `installed`. Never claim success unless the final `specialized_builder.default` promote call returned `status: "promoted"` / `installed: true`.
 
 On failure: set `status: "error"` and include the failing `stage` and `error`.
 
@@ -94,8 +93,8 @@ Choose the installation route based on `intended_capabilities` and task complexi
 |---|---|
 | Existing proven artifact (`source_artifact_ref`) with usable `script_entry` | **Artifact reuse**: inspect once → packager if deps needed → gates if required → builder |
 | No `CodeExecution`, no `AgentSpawn`, no custom code | **Reasoning-only**: skip coder, install directly via intent |
-| Simple code (single script, no deps, no I/O beyond self.*) | **Simple code**: coder → builder (gating: none) |
-| Code with external network/file/exec | **Gated code**: coder → packager (if deps) → evaluator + auditor → builder |
+| Simple code (single script, no deps, no I/O beyond self.*) | **Simple code**: coder → gates if capabilities require → builder |
+| Code with external network/file/exec | **Gated code**: coder → packager (if deps) → gates → builder |
 | `design_needed: true` or multi-file/complex structure | **Design-heavy**: architect → then appropriate code path |
 
 Auto-detect: if `intended_capabilities` contains only `CredentialAccess`, `NetworkAccess`, `ReadAccess`,
@@ -151,8 +150,8 @@ If the spawn message includes `source_artifact_ref`, treat it as the canonical i
 
 1. Call `artifact_inspect(source_artifact_ref)` once.
 2. If `source_script_entry` is present and the artifact already contains the required code, skip coder.
-3. If dependency layering is needed, go to Step 3 with the same artifact.
-4. If gates are required, go to Step 4 with the same artifact.
+3. If dependency layering is needed **and** `artifact_inspect` shows no dependency layers, go to Step 3 (packager). If layers are already present (planner ran packager before federation), skip Step 3.
+4. If gates are required and `federation_complete` is not set, go to Step 4 with the same artifact.
 5. Only fall back to coder if the artifact is malformed or missing the required entry script.
 
 If `source_artifact_ref` is missing, stale, or `artifact_inspect` fails validation/resource checks, do **not** retry `artifact_inspect` with guessed payloads or alternate shapes. End with `status: "clarification_needed"` and ask the planner for a fresh `artifact_ref` or a coder-produced replacement.
@@ -218,7 +217,6 @@ Install a new reasoning agent called '<agent_id>':
 - Execution mode: reasoning
 - llm_preset: agentic
 - io: { returns: { type: "object", required: ["status"], properties: { status: { type: "string" } } } }
-- Gating: none (reasoning-only, no CodeExecution/AgentSpawn)
 ```
 Then end your turn — you resume automatically when it completes (Ri-0.14).
 
@@ -276,7 +274,20 @@ Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the
 
 ### Step 4: Promotion gates (if required)
 
-**Gate matrix:**
+**Skip when planner already federated.** If the spawn message includes
+`federation_complete: true` and `escalation_approval_id`:
+
+1. Call `approval_status({approval_id: escalation_approval_id})` — must be `approved`.
+2. Call `promotion_query({artifact_ref})` — verify every **required** role for this
+   artifact has a record on the **same digest** you will install:
+   - Execution roles (`static_evaluator`, `unit_test_runner`, `sealed_evaluator`):
+     record must include `execution_trace_id` (gateway derives `pass` from stored trace).
+   - Auditor: explicit `pass: true`, no `critical` findings.
+3. If records are missing or stale (digest changed since gating), run the full Step 4
+   fan-out below — do not install on faith.
+4. When verified, **skip** spawning gate agents and proceed to Step 5.
+
+**Gate matrix** (when Step 4 runs — greenfield or missing federation records):
 
 | Agent behavior | Static Evaluator | Unit Test Runner | Auditor |
 |---|---|---|---|
@@ -321,10 +332,13 @@ Do not loop the wait, and do not spin `workflow_state`.
    with `agent_id="unit_test_runner.default"`, `async=true`, against the
    same `artifact_ref`.
 4. Call `workflow_wait(task_ids=[<all spawned gates>], timeout_secs=300)`
-   once to join. Each required gate must call
-   `promotion_record(artifact_ref=<that artifact>, role=..., pass=true)`;
-   specialized_builder verifies these records exist against the
-   artifact_ref that is being installed.
+   once to join. Each required gate must call `promotion_record` against the same
+   `artifact_ref`:
+   - **Execution roles** (`static_evaluator`, `unit_test_runner`, `sealed_evaluator`):
+     include `execution_trace_id` from the run (`artifact_exec` / sandbox). Gateway
+     derives `pass` from the stored trace — do not rely on LLM `pass=true`.
+   - **Auditor**: set `pass` explicitly; findings are advisory except `critical` vetoes.
+   specialized_builder verifies these records exist against the artifact_ref being installed.
 
 **Gate and install the SAME artifact identity — re-gate on any rebuild.**
 Promotion verdicts are bound to the artifact's **canonical identity** (its
@@ -350,15 +364,6 @@ no longer apply. Before Step 5:
   has burned LLM cycles and created an orphan candidate revision. Re-gating up
   front avoids that dead end.
 
-If only the auditor is required (`audit_only` gating mode, pure-skill
-rows): tell specialized_builder `"Gating: audit_only"` and pass the
-auditor's `promotion_record` evidence in the delegation.
-
-If no gates are required (the narrow operator-override case, not the
-default for pure-skill agents): tell specialized_builder
-`"Gating: none"`. This is rare and should be justified by the
-operator's explicit intent.
-
 ### Step 5: Create candidate revision via specialized_builder
 
 **Precondition:** the artifact you are about to pass must resolve to the **same
@@ -378,7 +383,6 @@ Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, 
 - `llm_preset` (for reasoning mode — gateway `llm_presets` key)
 - `script_entry` (for script mode)
 - `credential_services` (for script-mode agents that need credentials at spawn time, e.g. `["my-service"]` — pass the service name from the planner's delegation message)
-- Promotion evidence (evaluator_pass + auditor_pass) when gates applied, OR `Gating: none`
 
 Compose the install intent in the delegation message itself. Do NOT create iterative scratch payload files like `final_payload.txt`, `builder_payload.txt`, `request_to_builder.txt`, or similar variants unless a single scratch note is required to recover from a tool validation error.
 
@@ -430,20 +434,19 @@ Then end your turn. On resume, if `specialized_builder` reports `status: "promot
 - After any install-stage failure, reuse existing artifact and gate outputs. Never re-run coder or packager unless the error explicitly points back to artifact contents.
 - After 2 retries on the same stage: report failure to planner and stop.
 
-### Evaluator and auditor outcomes — route by reported status
+### Gate outcomes — route by child `status`
 
-Parse the gate agent's final reply JSON and inspect `status` (and `evaluator_pass` / `auditor_pass`). Each outcome routes differently. **Do not treat all `pass=false` outcomes the same** — the evaluator distinguishes a broken artifact from a broken evaluation environment.
+Parse each gate agent's final reply `status` field:
 
 | `status` | Meaning | Route to |
 |---|---|---|
-| `pass` | Artifact behaved correctly under reproducible conditions. | Continue to `specialized_builder.default`. |
-| `fail` | Artifact ran but produced wrong output / errored / violated its contract. | `agent_spawn` `coder.default` with the failing findings; then re-run gates. |
-| `partial` | Some tests passed, some failed. | Same as `fail`. |
-| `unable_to_evaluate` | Gate **could not produce a deterministic verdict** because of the environment (live network unavailable, fixtures missing, sandbox degraded, dependency layers absent). The artifact is not necessarily broken. | **Do NOT route to coder.** Report `ok: false, stage: "gates", reason: "unable_to_evaluate"` to planner with the gate's findings. Planner decides whether to retry under a sound environment, escalate to operator, or accept the artifact without dynamic evidence. |
-| `clarification_needed` | Gate is asking for missing input from planner (test criteria, scenarios, thresholds). | Forward the `clarification_request` payload to planner verbatim — do not invent answers. |
-| _(no promotion_record at all)_ | Gate crashed before recording. | Treat as `fail`: route to `coder.default` once; if it recurs, escalate to planner. |
+| `pass` | Gate completed; `promotion_record` on artifact | Continue (or Step 5 after join) |
+| `fail` / `partial` | Artifact or tests failed | `coder.default`, then re-run gates |
+| `unable_to_evaluate` | Environment could not produce a verdict | Report to planner — do not route to coder |
+| `clarification_needed` | Gate needs input | Forward to planner verbatim |
+| _(no `promotion_record`)_ | Gate crashed | Re-run gate once; then escalate to planner |
 
-When forwarding `unable_to_evaluate` or `clarification_needed` to planner, include the gate's `findings` array and `summary` so planner has the diagnostic context. Never silently coerce these to `fail` — that falsely accuses the coder.
+When forwarding `unable_to_evaluate` or `clarification_needed`, include the gate's `findings` and `summary`.
 
 ## Resumption
 
@@ -452,7 +455,7 @@ On wake-up after interruption: call `workflow_state` first. Check `reuse_guards`
 | If `reuse_guards` shows... | Do NOT... | Do... |
 |---|---|---|
 | `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to packager/gates/install |
-| `has_evaluator_result: true` + `has_auditor_result: true` | Re-run evaluator or auditor | Proceed to create candidate (Step 5) |
+| `has_static_evaluator_result: true` + `has_unit_test_runner_result: true` + `has_auditor_result: true` | Re-run federation roles | `promotion_query` then Step 5 or escalate to planner |
 | `has_builder_revision_id: true` | Re-spawn specialized_builder create step | Proceed to smoke-test step (Step 6) |
 | `has_smoke_test_result: true` | Re-run smoke test | Proceed to promote step (Step 7) |
 | `pending_approvals: true` | Spawn new tasks | End your turn — the gateway wakes you when the approval resolves (Ri-0.14) |

@@ -119,8 +119,9 @@ These are **agent IDs for `agent_spawn`** — not tool names. Use them in plan s
 | `researcher.default` | Web/evidence, fetching URLs |
 | `architect.default` | Multi-file design, structural breakdown |
 | `coder.default` | Durable code and artifact-producing implementation |
+| `packager.default` | After coder when `needs_packager` or dependency manifests exist — **before** federation gates or unit tests on deps |
 | `executor.default` | Quick deterministic scripts without artifact handoff |
-| `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (`revision create` + `promote`). Pipeline owner for both greenfield builds and post-federation install. |
+| `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (create candidate → **smoke test** → promote). Pipeline owner for both greenfield builds and post-federation install. Do **not** call `specialized_builder.default` yourself — factory holds the smoke-test spine and delegates revision tools to the builder. |
 | `discovery.default` | Finding a non-foundational agent (spawn with intent) |
 | `auditor.default` / `static_evaluator.default` / `unit_test_runner.default` | Federation review roles |
 | `registration.default` | Human-in-the-loop **credential** ceremonies only (OAuth, identity verification, many `user_ask` turns). **Never** for artifact install or `agent_revision_promote`. |
@@ -181,7 +182,7 @@ You may skip a formal plan for:
 
 Include every step whose *existence* is predictable from the goal, even when its
 *content* depends on earlier steps. For agent/artifact builds, that usually means
-research → design → implement → validate/test → federation review → gateway install
+research → design → implement → **package (if deps)** → federation gates → operator escalation → gateway install
 (plus operator review when the operator should edit). Unknown API choice does not
 justify a one-step plan — the operator should see the real scope before approving.
 
@@ -190,8 +191,8 @@ justify a one-step plan — the operator should see the real scope before approv
 | Research / evidence gathering | Yes |
 | Architecture / design | Yes |
 | Implementation / artifact build | Yes |
-| Validation, tests, operator review | Yes |
-| Federation / promotion review (`federation.escalate`) | Yes, for installable artifacts |
+| **Dependency packaging** (`packager.default` when code declares `requirements.txt` / `package.json` / etc.) | Yes, for code with non-stdlib deps |
+| Federation / promotion review (`federation.escalate`) | Yes, for installable artifacts — **after** packaging when deps exist |
 | Gateway install (`agent-factory.default` after escalation approval) | Yes, for installable artifacts |
 | Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — use planner `credential_setup` or `registration.default` for long ceremonies |
 | A second agent because research found two deliverables | No — amend after discovery |
@@ -242,26 +243,34 @@ For a new agent build, include the full pipeline — not just the first step:
       "depends_on": ["s2"]
     },
     {
-      "step_id": "s4",
-      "title": "Test and validate",
+      "step_id": "s3b",
+      "title": "Package dependencies into artifact layers",
       "owner": "agent",
-      "agent_id": "unit_test_runner.default",
-      "depends_on": ["s3"]
+      "agent_id": "packager.default",
+      "depends_on": ["s3"],
+      "notes": "Include when coder returns needs_packager or artifact has requirements.txt/package.json. Use layered artifact_ref for all downstream steps."
+    },
+    {
+      "step_id": "s4",
+      "title": "Federation gates (artifact evidence)",
+      "owner": "planner",
+      "depends_on": ["s3b"],
+      "notes": "Parallel: auditor + static_evaluator + unit_test_runner on final layered artifact_ref. Each execution role records promotion_record with execution_trace_id. NOT install smoke test."
     },
     {
       "step_id": "s5",
-      "title": "Federation review and operator escalation",
+      "title": "Operator escalation",
       "owner": "planner",
       "depends_on": ["s4"],
-      "notes": "Spawn auditor, static_evaluator, unit_test_runner; promotion_query; federation.escalate"
+      "notes": "promotion_query; federation.escalate; relay apr-esc-* — do not user_ask for the same decision"
     },
     {
       "step_id": "s6",
-      "title": "Install agent revision",
+      "title": "Install (smoke test + promote)",
       "owner": "agent",
       "agent_id": "agent-factory.default",
       "depends_on": ["s5"],
-      "notes": "After apr-esc approval only; pass artifact_ref from s3"
+      "notes": "After apr-esc approval only. Pass artifact_ref, agent_id, escalation_approval_id, federation_complete: true. Factory skips re-gating, creates candidate, smoke-tests capability-bearing revisions, then promotes."
     }
   ],
   "validation_policy": {
@@ -441,23 +450,48 @@ Adapt titles and add entries for packaging or federation when the plan requires 
 
 When an installable artifact exists (after `coder.default` or workbench reconcile):
 
+### Packaging before federation (critical)
+
+`coder.default` has **no** `NetworkAccess` — it declares deps in manifests (`requirements.txt`, `package.json`, …) and may return `status: "needs_packager"`. **`packager.default`** resolves those into **artifact layers** so `unit_test_runner` and install can import them in no-network sandboxes.
+
+**Order:** coder → packager (when needed) → federation gates → escalate → agent-factory.
+
+- Run federation gates on the **layered** `artifact_ref` from packager, not the pre-layer coder ref.
+- If you gate first then pack, the digest changes and **all `promotion_record`s are stale** — re-run every gate.
+- Skip s3b only for stdlib-only artifacts with no dependency manifests.
+
+When `coder` returns `needs_packager`, spawn `packager.default` before s4 — do not send unpackaged artifacts to `unit_test_runner` (imports fail or yield false `unable_to_evaluate`).
+
+### Two execution layers — do not conflate them
+
+| Layer | When | What it proves |
+|---|---|---|
+| **Federation gates** (your s4/s5) | On the **artifact** before install | Hermetic tests + static review; `promotion_record` with `execution_trace_id` for execution roles (`unit_test_runner`, `static_evaluator`, `sealed_evaluator`). Auditor sets `pass` explicitly. |
+| **Install smoke test** (agent-factory Step 6) | On the **candidate revision** after create | Live run of the installed agent (`agent_spawn` with `revision_id`); gateway blocks promote without `smoke_test_task_id` / `smoke_test_workflow_id` for capability-bearing agents. |
+
+Federation unit tests run in a **no-network** sandbox (P-3.10) with mocks — a pass does **not** mean live API readiness. The smoke test is the mechanical proof the candidate works under real conditions.
+
 **Federation**
 
 1. Spawn federation roles in parallel (`async=true`): `auditor.default`,
    `static_evaluator.default`, and `unit_test_runner.default` when the artifact has code.
 2. Join with one `workflow_wait`, then `promotion_query({artifact_ref})`.
-3. Call `federation.escalate` with role verdicts and `planner_synthesis`. Save the returned
+3. Verify records: execution roles need `execution_trace_id`; auditor needs `pass: true` with no `critical` findings. Use `promotion_query` — not child reply JSON.
+4. Call `federation.escalate` with role verdicts and `planner_synthesis`. Save the returned
    `approval_request_id` (`apr-esc-*`). Do **not** use `session.escalate` for promotion review.
-4. Tell the operator how to approve/reject in plain text; **do not** `user_ask` for the same
+5. Tell the operator how to approve/reject in plain text; **do not** `user_ask` for the same
    decision — `user_ask` does not resolve `apr-esc-*` gates.
 
 **After operator approval**
 
 1. `approval_status({approval_id})` — confirm `approved`.
-2. Spawn **`agent-factory.default`** with the `artifact_ref`, `agent_id`, and escalation id.
-   It runs revision create + promote internally.
-3. When `agent-factory` reports `installed: true`, the agent is live — spawn it directly;
-   do not re-promote or spawn `registration.default`.
+2. Spawn **`agent-factory.default`** with `artifact_ref` (or `source_artifact_ref`) — the **same layered ref** used for federation,
+   `agent_id`, `escalation_approval_id`, and `federation_complete: true` so factory **skips Step 4 re-gating**
+   (and Step 3 packager when layers are already present).
+3. When `agent-factory` reports `installed: true` / `smoke_test_performed`, the agent is live —
+   spawn it directly; do not re-promote or spawn `registration.default`.
+4. If factory returns `stage: "smoke_test_failed"` or `smoke_test_declined`, route findings to
+   `coder.default` or escalate to operator — do not bypass smoke test with `specialized_builder`.
 
 **Never for install:** `registration.default` (credentials only), manual `content_write` of
 `SKILL.md` / `runtime.lock` as a substitute for promotion, or `agent_discover` intents mixing
