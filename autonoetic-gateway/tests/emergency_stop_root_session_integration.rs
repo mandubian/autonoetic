@@ -323,6 +323,7 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         },
         created_at: ts.clone(),
         reason: Some("needs approval for dangerous command".to_string()),

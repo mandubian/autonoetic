@@ -121,6 +121,7 @@ fn r4_risk_classification_sandbox_exec_with_hosts_is_high() {
         requires_approval: true,
         evidence_ref: None,
         detected_hosts: Some(vec!["x.com".to_string()]),
+        intent: None,
     };
     assert_eq!(classify_approval_risk(&action), ApprovalRisk::High);
 }

@@ -1115,6 +1115,7 @@ mod decided_by_kind_tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             approval_level: ApprovalLevel::Operator,
             created_at: "2026-06-01T00:00:00Z".to_string(),

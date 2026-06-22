@@ -23,6 +23,7 @@ fn make_request(ix: usize, root_session_id: &str) -> ApprovalRequest {
             dependencies: None,
             requires_approval: true,
             evidence_ref: None,
+            intent: None,
         },
         created_at: chrono::Utc::now().to_rfc3339(),
         reason: Some(format!("test approval {}", ix)),

@@ -139,6 +139,7 @@ fn approval_timeline_gets_expansion_hint_for_observed_host() -> anyhow::Result<(
                 "api.open-meteo.com".to_string(),
                 "geocoding-api.open-meteo.com".to_string(),
             ]),
+            intent: None,
         },
         approval_level: ApprovalLevel::Operator,
         created_at: "2026-06-14T12:00:00Z".to_string(),

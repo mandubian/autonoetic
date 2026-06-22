@@ -340,6 +340,7 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         },
         approval_level: ApprovalLevel::Operator,
         created_at: chrono::Utc::now().to_rfc3339(),

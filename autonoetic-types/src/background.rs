@@ -1103,6 +1103,7 @@ mod redaction_tests {
             requires_approval: true,
             evidence_ref: Some("evidence_handle_xyz".into()),
             detected_hosts: Some(vec!["x.example.com".into()]),
+            intent: None,
         }
     }
 
@@ -1113,6 +1114,7 @@ mod redaction_tests {
             requires_approval: true,
             evidence_ref: Some("evidence_handle_xyz".into()),
             detected_hosts: Some(vec!["x.example.com".into()]),
+            intent: None,
         }
     }
 
@@ -1384,6 +1386,7 @@ mod detected_hosts_tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["a.example.com".into(), "b.example.com".into()]),
+            intent: None,
         };
         assert_eq!(
             a.detected_hosts(),
@@ -1399,6 +1402,7 @@ mod detected_hosts_tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         };
         assert_eq!(a.detected_hosts(), None);
     }

@@ -94,6 +94,7 @@ fn discover_observed_hosts_includes_approved_network_actions() -> anyhow::Result
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["geocoding-api.open-meteo.com".to_string()]),
+            intent: None,
         },
         approval_level: ApprovalLevel::Operator,
         created_at: "2026-06-14T10:00:00Z".to_string(),

@@ -1554,6 +1554,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["api.example.com".to_string()]),
+            intent: None,
         };
 
         let ref_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -1590,6 +1591,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["api.example.com".to_string()]),
+            intent: None,
         };
         let req = GateRequest {
             kind: GateKind::Approval {
@@ -1734,6 +1736,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(targets.clone()),
+            intent: None,
         };
         let req = GateRequest {
             kind: GateKind::Approval {
