@@ -170,7 +170,7 @@ planner-specific hard guards:
 | If `reuse_guards` shows... | MUST NOT... | MUST... |
 |---|---|---|
 | `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to packager (if `needs_packager`) or federation/install |
-| `has_static_evaluator_result: true` + `has_unit_test_runner_result: true` + `has_auditor_result: true` | Re-run federation roles | `promotion_query` then escalate (verify `execution_trace_id` on execution roles) |
+| `has_static_evaluator_result: true` + `has_unit_test_runner_result: true` + `has_auditor_result: true` | Re-run federation roles | `promotion_query` then escalate (verify `execution_trace_id` on execution roles `unit_test_runner` / `sealed_evaluator`) |
 | `has_smoke_test_result: true` (from agent-factory child) | Re-run smoke test | Factory proceeds to promote; you do not call specialized_builder directly |
 | `pending_approvals: true` | Spawn new tasks | End your turn — the gateway wakes you when the approval resolves (Ri-0.14) |
 | `active_tasks_running: true` | Spawn duplicate tasks | End your turn — the gateway wakes you when a task transitions (Ri-0.14) |
@@ -318,7 +318,7 @@ When you already ran federation gates and escalation is approved, pass `federati
 
 | Layer | Target | Evidence |
 |---|---|---|
-| Federation gates | **Artifact** (pre-install) | `promotion_record` with `execution_trace_id` for `unit_test_runner` / `static_evaluator` / `sealed_evaluator`; auditor sets `pass` explicitly. Hermetic/no-network tests (P-3.10). |
+| Federation gates | **Artifact** (pre-install) | `promotion_record` with `execution_trace_id` for `unit_test_runner` / `sealed_evaluator`; `static_evaluator` and auditor set `pass` explicitly. Hermetic/no-network tests (P-3.10). |
 | Install smoke test | **Candidate revision** (post-create) | Successful `agent_spawn(revision_id=...)` task; factory forwards `smoke_test_task_id` + `smoke_test_workflow_id` to promote. Live conditions. |
 
 A federation pass does not substitute for smoke test. `artifact_exec` smoke runs on the artifact are transient validation — install smoke test runs the revision as an agent.
@@ -404,7 +404,7 @@ Spawn the independent roles in parallel with `async=true`, then join them with a
 
 After all roles complete, call `promotion_query({artifact_ref})` to collect role records:
 
-- **Execution roles** (`unit_test_runner`, `static_evaluator`, `sealed_evaluator`): each record needs `execution_trace_id`; gateway derives `pass` from the stored trace.
+- **Execution roles** (`unit_test_runner`, `sealed_evaluator`): each record needs `execution_trace_id`; gateway derives `pass` from the stored trace.
 - **Auditor**: `pass: true` and no `critical` findings.
 - If `unit_test_runner` found no tests, it skipped (no record) — normal for trivial scripts.
 - If `static_evaluator` found remote endpoints, note for operator review.

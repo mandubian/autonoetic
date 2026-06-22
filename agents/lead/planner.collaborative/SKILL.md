@@ -255,7 +255,7 @@ For a new agent build, include the full pipeline — not just the first step:
       "title": "Federation gates (artifact evidence)",
       "owner": "planner",
       "depends_on": ["s3b"],
-      "notes": "Parallel: auditor + static_evaluator + unit_test_runner on final layered artifact_ref. Each execution role records promotion_record with execution_trace_id. NOT install smoke test."
+      "notes": "Parallel: auditor + static_evaluator + unit_test_runner on final layered artifact_ref. Execution roles (unit_test_runner) record with execution_trace_id; static_evaluator and auditor set pass explicitly. NOT install smoke test."
     },
     {
       "step_id": "s5",
@@ -466,7 +466,7 @@ When `coder` returns `needs_packager`, spawn `packager.default` before s4 — do
 
 | Layer | When | What it proves |
 |---|---|---|
-| **Federation gates** (your s4/s5) | On the **artifact** before install | Hermetic tests + static review; `promotion_record` with `execution_trace_id` for execution roles (`unit_test_runner`, `static_evaluator`, `sealed_evaluator`). Auditor sets `pass` explicitly. |
+| **Federation gates** (your s4/s5) | On the **artifact** before install | Hermetic tests + static review; `promotion_record` with `execution_trace_id` for execution roles (`unit_test_runner`, `sealed_evaluator`). `static_evaluator` and auditor set `pass` explicitly. |
 | **Install smoke test** (agent-factory Step 6) | On the **candidate revision** after create | Live run of the installed agent (`agent_spawn` with `revision_id`); gateway blocks promote without `smoke_test_task_id` / `smoke_test_workflow_id` for capability-bearing agents. |
 
 Federation unit tests run in a **no-network** sandbox (P-3.10) with mocks — a pass does **not** mean live API readiness. The smoke test is the mechanical proof the candidate works under real conditions.

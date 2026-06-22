@@ -119,12 +119,12 @@ impl NativeTool for PromotionRecordTool {
             priority: 10,
             prose: "**Recording your verdict.** When your evaluation/audit reaches a verdict, call \
 `promotion_record` with the `artifact_ref` you reviewed. Execution roles (`unit_test_runner`, \
-`static_evaluator`, `sealed_evaluator`) must attach `execution_trace_id` from the run — the gateway \
-derives `pass` from `exit_code=0`; do not declare success without a trace. The `auditor` role sets \
-`pass` explicitly; only `critical` findings can veto an otherwise-passing audit. Include `findings` \
-and `summary` as advisory annotation. Use those exact field names — not alternates like `outcome`. \
-(Your role may define cases where the gate is inapplicable and you should NOT call this — e.g. no \
-tests found; follow that role-specific guidance.)"
+`sealed_evaluator`) must attach `execution_trace_id` from the run — the gateway \
+derives `pass` from `exit_code=0`; do not declare success without a trace. The `auditor` and \
+`static_evaluator` roles set `pass` explicitly; only `critical` findings can veto an otherwise-passing \
+audit. Include `findings` and `summary` as advisory annotation. Use those exact field names — not \
+alternates like `outcome`. (Your role may define cases where the gate is inapplicable and you should NOT \
+call this — e.g. no tests found; follow that role-specific guidance.)"
                 .to_string(),
         }]
     }
@@ -272,6 +272,12 @@ tests found; follow that role-specific guidance.)"
             } else if matches!(args.role, autonoetic_types::promotion::PromotionRole::Auditor) {
                 let mut pass = args.pass.unwrap_or(false);
                 if crate::runtime::promotion_evidence::auditor_critical_veto(&args.findings) {
+                    pass = false;
+                }
+                (pass, None)
+            } else if matches!(args.role, autonoetic_types::promotion::PromotionRole::StaticEvaluator) {
+                let mut pass = args.pass.unwrap_or(false);
+                if crate::runtime::promotion_evidence::findings_block_explicit_pass(&args.findings) {
                     pass = false;
                 }
                 (pass, None)

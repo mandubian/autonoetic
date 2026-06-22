@@ -6,18 +6,12 @@ use autonoetic_types::promotion::{Finding, FindingSeverity, PromotionRecord, Pro
 pub fn role_requires_execution_trace(role: &PromotionRole) -> bool {
     matches!(
         role,
-        PromotionRole::Evaluator
-            | PromotionRole::StaticEvaluator
-            | PromotionRole::UnitTestRunner
-            | PromotionRole::SealedEvaluator
+        PromotionRole::Evaluator | PromotionRole::UnitTestRunner | PromotionRole::SealedEvaluator
     )
 }
 
 pub fn role_requires_execution_trace_str(role: &str) -> bool {
-    matches!(
-        role,
-        "evaluator" | "static_evaluator" | "unit_test_runner" | "sealed_evaluator"
-    )
+    matches!(role, "evaluator" | "unit_test_runner" | "sealed_evaluator")
 }
 
 pub fn trace_indicates_pass(trace: &ExecutionTraceRecord) -> bool {
@@ -28,6 +22,18 @@ pub fn auditor_critical_veto(findings: &[Finding]) -> bool {
     findings
         .iter()
         .any(|f| matches!(f.severity, FindingSeverity::Critical))
+}
+
+/// Mechanical severity gating for roles that set `pass` explicitly (not
+/// trace-derived).  Returns `true` when error/critical findings make
+/// `pass=true` inadmissible — the gateway must reject or override the pass.
+pub fn findings_block_explicit_pass(findings: &[Finding]) -> bool {
+    findings.iter().any(|f| {
+        matches!(
+            f.severity,
+            FindingSeverity::Error | FindingSeverity::Critical
+        )
+    })
 }
 
 pub fn execution_trace_id_for_role<'a>(record: &'a PromotionRecord, role: &str) -> Option<&'a str> {
@@ -56,16 +62,11 @@ pub fn verify_stored_execution_traces(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     record: &PromotionRecord,
 ) -> anyhow::Result<Option<(String, String)>> {
-    let roles: [(&str, bool, Option<&str>); 4] = [
+    let roles: [(&str, bool, Option<&str>); 3] = [
         (
             "evaluator",
             record.evaluator_pass,
             record.evaluator_execution_trace_id.as_deref(),
-        ),
-        (
-            "static_evaluator",
-            record.static_evaluator_pass,
-            record.static_evaluator_execution_trace_id.as_deref(),
         ),
         (
             "unit_test_runner",

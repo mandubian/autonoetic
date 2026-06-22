@@ -209,10 +209,9 @@ fn llm_pass_true_without_trace_cannot_fake_success() {
 }
 
 #[test]
-fn warning_findings_do_not_block_execution_role_pass() {
+fn warning_findings_do_not_block_static_evaluator_pass() {
     let (_temp, gw, store) = setup_gateway();
     let session = "session-warning-advisory";
-    support::promotion_trace::seed_success_trace(store.as_ref(), session, "trace-warn-001");
     let manifest = unit_test_runner_manifest();
     let result = invoke_promotion_record(
         &gw,
@@ -221,7 +220,7 @@ fn warning_findings_do_not_block_execution_role_pass() {
         serde_json::json!({
             "artifact_id": "art_warning_ok",
             "role": "static_evaluator",
-            "execution_trace_id": "trace-warn-001",
+            "pass": true,
             "findings": [{"severity": "warning", "description": "style nit", "evidence": ""}],
         }),
         session,

@@ -45,6 +45,31 @@ The promote gate re-verifies stored traces at promotion time.
 
 **Implementation:** PR #583 — `runtime/promotion_evidence.rs`, `runtime/tools/promotion.rs`.
 
+### P-2.9 / P-2.26 — static_evaluator reclassification (amended)
+
+`static_evaluator` is a **static code review role**, not an execution role — it
+never executes code, so it cannot produce `execution_trace_id`. Reclassified from
+execution role (trace-derived pass) to review role (LLM-set pass with mechanical
+severity gating). The gateway's `findings_block_explicit_pass` overrides `pass`
+to `false` when error/critical findings are present.
+
+**Diff (P-2.9):**
+```
+< ... Execution roles (`unit_test_runner`, `static_evaluator`, `sealed_evaluator`, legacy `evaluator`) must attach `execution_trace_id` ... The auditor role sets `pass` explicitly; only `severity=critical` findings veto ...
+---
+> ... Execution roles (`unit_test_runner`, `sealed_evaluator`, legacy `evaluator`) ... Review roles set `pass` explicitly ... The `auditor` role: only `severity=critical` findings veto ... The `static_evaluator` role: both `error` and `critical` findings veto pass. ...
+```
+
+**Diff (P-2.26):**
+```
+< ... "Pass" for execution roles is trace-derived (P-2.9) ...
+---
+> ... "Pass" for execution roles (`unit_test_runner`, `sealed_evaluator`) is trace-derived (P-2.9) ... "Pass" for `static_evaluator` is LLM-set with mechanical severity gating (P-2.9): error/critical findings override `pass` to `false`. ...
+```
+
+**Implementation:** `runtime/promotion_evidence.rs::findings_block_explicit_pass`,
+`runtime/tools/promotion.rs` (static_evaluator branch).
+
 ### P-2.26 — All executed gate roles must pass (amended)
 
 Same intent, but "pass" is now trace-derived (P-2.9). The enforcement anchor shifts from
