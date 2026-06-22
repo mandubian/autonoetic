@@ -45,6 +45,9 @@ use serde::Deserialize;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
+/// Maximum buffered timeline events before an automatic flush.
+const LIVE_DIGEST_BUFFER_CAPACITY: usize = 32;
+
 pub use messages::AgentMessageRecord;
 pub(crate) use row_decode::memory_object_from_row;
 pub(crate) use util::escape_sqlite_like_fragment;
@@ -131,6 +134,10 @@ pub struct GatewayStore {
     pub task_notify: crate::scheduler::task_notify::TaskNotifyRegistry,
     /// Session-scoped result cache for pure read tools (issue #289).
     pub session_read_cache: crate::runtime::session_read_cache::SessionReadCacheRegistry,
+    /// Buffered live-digest timeline inserts. Flushed when the buffer is full,
+    /// before reads of the timeline, or on drop. This batches high-frequency
+    /// observability writes (turn/tool/agent events) into fewer transactions.
+    live_digest_buffer: Mutex<Vec<LiveDigestEventRecord>>,
 }
 
 impl GatewayStore {
@@ -157,6 +164,7 @@ impl GatewayStore {
             task_notify: crate::scheduler::task_notify::TaskNotifyRegistry::new(),
             session_read_cache:
                 crate::runtime::session_read_cache::SessionReadCacheRegistry::default(),
+            live_digest_buffer: Mutex::new(Vec::with_capacity(LIVE_DIGEST_BUFFER_CAPACITY)),
         };
         {
             let mut conn = store.conn.lock().unwrap();
@@ -201,6 +209,7 @@ impl GatewayStore {
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
+        self.flush_live_digest_events()?;
         let conn = self.conn.lock().unwrap();
         f(&conn)
     }
@@ -546,6 +555,55 @@ impl GatewayStore {
     ) -> Result<Vec<autonoetic_types::plan_frame::ValidationWaiver>> {
         let conn = self.conn.lock().unwrap();
         validation_waivers::list_waivers_for_workflow(&conn, workflow_id)
+    }
+
+    /// Persist all buffered timeline events in a single transaction.
+    pub fn flush_live_digest_events(&self) -> Result<()> {
+        let mut buf = self.live_digest_buffer.lock().unwrap();
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let drained: Vec<LiveDigestEventRecord> = buf.drain(..).collect();
+        drop(buf);
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO live_digest_events (
+                    event_id, root_session_id, source_session_id, turn_id, source_agent_id,
+                    source_node_id, event_type, payload, created_at,
+                    principal_kind, principal_id, role, altitude, refs_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            )?;
+            for event in &drained {
+                stmt.execute(params![
+                    &event.event_id,
+                    &event.root_session_id,
+                    &event.source_session_id,
+                    event.turn_id.as_deref(),
+                    event.source_agent_id.as_deref(),
+                    &event.source_node_id,
+                    &event.event_type,
+                    event.payload.as_deref(),
+                    &event.created_at,
+                    event.principal_kind.as_deref(),
+                    event.principal_id.as_deref(),
+                    event.role.as_deref(),
+                    event.altitude.as_deref(),
+                    event.refs_json.as_deref(),
+                ])?;
+            }
+            stmt.finalize()?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+impl Drop for GatewayStore {
+    fn drop(&mut self) {
+        let _ = self.flush_live_digest_events();
     }
 }
 
@@ -1125,3 +1183,5 @@ mod tests {
         Ok(())
     }
 }
+
+

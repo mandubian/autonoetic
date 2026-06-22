@@ -41,6 +41,7 @@ impl GatewayStore {
         min_altitude: Option<Altitude>,
         principal_id: Option<&str>,
     ) -> Result<SessionTimelineListResult> {
+        self.flush_live_digest_events()?;
         let conn = self.conn.lock().unwrap();
         let fetch_limit = (limit as i64).saturating_add(1);
 
@@ -124,6 +125,7 @@ impl GatewayStore {
     ) -> Result<usize> {
         use rusqlite::OptionalExtension;
 
+        self.flush_live_digest_events()?;
         let conn = self.conn.lock().unwrap();
         // Turn ids are zero-padded to a fixed width (`turn-000003`), so a plain
         // lexicographic `<=` comparison is also a numeric one.

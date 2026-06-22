@@ -1,5 +1,4 @@
-use super::GatewayStore;
-use super::LiveDigestEventRecord;
+use super::{GatewayStore, LiveDigestEventRecord, LIVE_DIGEST_BUFFER_CAPACITY};
 use anyhow::Result;
 use autonoetic_types::config::RetentionConfig;
 use rusqlite::params;
@@ -541,30 +540,12 @@ impl GatewayStore {
     }
 
     pub fn create_live_digest_event(&self, event: &LiveDigestEventRecord) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO live_digest_events (
-                event_id, root_session_id, source_session_id, turn_id, source_agent_id,
-                source_node_id, event_type, payload, created_at,
-                principal_kind, principal_id, role, altitude, refs_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                &event.event_id,
-                &event.root_session_id,
-                &event.source_session_id,
-                event.turn_id.as_deref(),
-                event.source_agent_id.as_deref(),
-                &event.source_node_id,
-                &event.event_type,
-                event.payload.as_deref(),
-                &event.created_at,
-                event.principal_kind.as_deref(),
-                event.principal_id.as_deref(),
-                event.role.as_deref(),
-                event.altitude.as_deref(),
-                event.refs_json.as_deref(),
-            ],
-        )?;
+        let mut buf = self.live_digest_buffer.lock().unwrap();
+        buf.push(event.clone());
+        if buf.len() >= LIVE_DIGEST_BUFFER_CAPACITY {
+            drop(buf);
+            return self.flush_live_digest_events();
+        }
         Ok(())
     }
 
