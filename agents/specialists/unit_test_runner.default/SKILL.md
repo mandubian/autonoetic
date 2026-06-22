@@ -19,15 +19,9 @@ metadata:
     sandbox_network: normal
     capabilities:
       - type: "SandboxFunctions"
-        # Prefixes match canonical tool ids (`knowledge_store`, `artifact_inspect`, `artifact_exec`, `promotion_record`) for P-1.1.
-        # sandbox_exec is intentionally excluded: it does not mount artifact dependency layers,
-        # so any test run or dependency probe via sandbox_exec will see empty mount paths.
-        # Use artifact_exec instead — it mounts layers and sets PYTHONPATH correctly.
-        allowed: ["knowledge_", "artifact_", "promotion_"]
-      - type: "CodeExecution"
-        patterns: ["python3 ", "python ", "node ", "npm ", "bash -c ", "sh -c ", "go test", "cargo test"]
-      - type: "WriteAccess"
-        scopes: ["self.*", "skills/*"]
+        # Exact tool names (not prefix) to exclude artifact_build and artifact_prepare.
+        # The runner inspects and executes — it never builds, repackages, or writes content.
+        allowed: ["knowledge_", "artifact_inspect", "artifact_exec", "promotion_"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
     validation: "soft"
