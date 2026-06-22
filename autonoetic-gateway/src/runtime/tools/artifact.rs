@@ -575,6 +575,21 @@ impl NativeTool for ArtifactInspectTool {
             }
         }
 
+        let has_tests = bundle.files.iter().any(|f| {
+            let name = f.name.as_str();
+            let lower = name.to_lowercase();
+            lower.contains("/tests/")
+                || lower.contains("/__tests__/")
+                || name.starts_with("test_")
+                || name.ends_with("_test.py")
+                || name.ends_with("_test.rs")
+                || name.ends_with("_test.go")
+                || name.ends_with(".test.ts")
+                || name.ends_with(".test.js")
+                || name.ends_with(".spec.ts")
+                || name.ends_with(".spec.js")
+        });
+
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "artifact_ref": args.artifact_ref,
@@ -586,6 +601,7 @@ impl NativeTool for ArtifactInspectTool {
                 "name": f.name,
                 "alias": f.alias,
             })).collect::<Vec<_>>(),
+            "has_tests": has_tests,
             "read_file": format!(
                 "resolve(ref=\"{}\", include=\"content\", file=<name>)", args.artifact_ref
             ),

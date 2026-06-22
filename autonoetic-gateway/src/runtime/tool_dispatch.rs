@@ -156,6 +156,19 @@ pub(crate) fn loop_guard_from_config_and_manifest(config: Option<&GatewayConfig>
     }
 }
 
+/// Resolve per-agent `max_session_turns`, clamped to the system ceiling.
+/// Returns the effective limit to use for this agent's sessions.
+pub(crate) fn effective_max_session_turns(
+    system_turns: u32,
+    agent_dir: &Path,
+) -> u32 {
+    let declaration = load_manifest_loop_guard_declaration(agent_dir);
+    match declaration.and_then(|d| d.max_session_turns) {
+        Some(v) => v.min(system_turns),
+        None => system_turns,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tool tier filtering
 // ---------------------------------------------------------------------------

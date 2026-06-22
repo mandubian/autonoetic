@@ -244,6 +244,7 @@ impl ArtifactStore {
 
         let mut files = Vec::new();
         let mut file_handles = Vec::new();
+        let mut inherited_layers: Vec<ArtifactLayer> = Vec::new();
 
         // Phase 1: Resolve all inputs to file handles
         for input_name in inputs {
@@ -265,6 +266,13 @@ impl ArtifactStore {
                         handle: file.handle.clone(),
                         alias: file.alias.clone(),
                     });
+                }
+                // Inherit layers from input artifacts so dependency layers
+                // propagate automatically without the caller re-specifying them.
+                for layer in &bundle.layers {
+                    if !inherited_layers.iter().any(|l| l.layer_id == layer.layer_id) {
+                        inherited_layers.push(layer.clone());
+                    }
                 }
                 continue;
             }
@@ -362,21 +370,24 @@ impl ArtifactStore {
             Vec::new()
         };
 
-        // Normalize layers
-        let layers_vec: Vec<ArtifactLayer> = layers
-            .map(|l| {
-                let mut l = l.to_vec();
-                l.sort_by(|a, b| {
-                    (&a.mount_path, &a.layer_id, &a.digest, &a.name).cmp(&(
-                        &b.mount_path,
-                        &b.layer_id,
-                        &b.digest,
-                        &b.name,
-                    ))
-                });
-                l
-            })
-            .unwrap_or_default();
+        // Normalize layers: merge inherited layers with explicitly supplied ones.
+        // Explicit layers take precedence (same layer_id overrides inherited).
+        let mut merged_layers = inherited_layers;
+        if let Some(explicit) = layers {
+            for layer in explicit {
+                merged_layers.retain(|l| l.layer_id != layer.layer_id);
+                merged_layers.push(layer.clone());
+            }
+        }
+        merged_layers.sort_by(|a, b| {
+            (&a.mount_path, &a.layer_id, &a.digest, &a.name).cmp(&(
+                &b.mount_path,
+                &b.layer_id,
+                &b.digest,
+                &b.name,
+            ))
+        });
+        let layers_vec = merged_layers;
 
         // Phase 2: Compute deterministic artifact ID from handles + entrypoints + layers
         let artifact_id = Self::compute_deterministic_artifact_id(

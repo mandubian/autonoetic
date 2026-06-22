@@ -319,7 +319,8 @@ pub struct AgentExecutor {
 }
 
 use crate::runtime::tool_dispatch::{
-    loop_guard_from_config_and_manifest, tool_result_counts_as_progress,
+    effective_max_session_turns, loop_guard_from_config_and_manifest,
+    tool_result_counts_as_progress,
 };
 pub use crate::runtime::tool_dispatch::determine_tool_tier_filter;
 use std::sync::atomic::AtomicU64;
@@ -1090,10 +1091,11 @@ impl AgentExecutor {
         // Hard session-level turn limit with explicit approval gate.
         // Each approval grants one additional window of `max_session_turns`.
         if let Some(cfg) = &self.config {
-            if cfg.max_session_turns > 0 {
+            let effective_turns = effective_max_session_turns(cfg.max_session_turns, &self.agent_dir);
+            if effective_turns > 0 {
                 let approved_windows = self.approved_session_continue_count(&session_id)?;
                 let allowed_turns =
-                    (cfg.max_session_turns as u64).saturating_mul(1 + approved_windows);
+                    (effective_turns as u64).saturating_mul(1 + approved_windows);
                 // turn_counter already includes the in-flight turn (next_turn_id incremented above),
                 // so we trip only when attempting turn N+1 for an allowance of N.
                 if self.turn_counter > allowed_turns {
@@ -1108,7 +1110,7 @@ impl AgentExecutor {
                         self.create_session_continue_approval(
                             cfg,
                             &session_id,
-                            cfg.max_session_turns,
+                            effective_turns,
                             blocked_turn,
                         )?
                     };

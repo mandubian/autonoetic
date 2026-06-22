@@ -416,6 +416,46 @@ the single join already does that."
             ));
         }
 
+        // Mechanical guard: block install spawns while federation gate tasks
+        // are still Running. Prevents the planner from racing ahead to install
+        // before unit_test_runner / sealed_evaluator / auditor finish.
+        let is_install_agent = args.agent_id.contains("agent-factory")
+            || args.agent_id.contains("specialized_builder");
+        if is_install_agent {
+            if let Some(gs) = gateway_store.as_ref() {
+                if let Ok(tasks) = crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                    gw_config,
+                    Some(gs),
+                    &workflow_id,
+                ) {
+                    let federation_agents = [
+                        "unit_test_runner",
+                        "sealed_evaluator",
+                        "static_evaluator",
+                        "auditor",
+                    ];
+                    let active_federation: Vec<&str> = tasks
+                        .iter()
+                        .filter(|t| {
+                            use autonoetic_types::workflow::TaskRunStatus as TRS;
+                            matches!(
+                                t.status,
+                                TRS::Running | TRS::Pending | TRS::Runnable
+                            ) && federation_agents.iter().any(|fa| t.agent_id.contains(fa))
+                        })
+                        .map(|t| t.agent_id.as_str())
+                        .collect();
+                    if !active_federation.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "Cannot spawn '{}' while federation gate tasks are still running: [{}]. Wait for them to complete (workflow_wait) before starting install.",
+                            args.agent_id,
+                            active_federation.join(", ")
+                        ));
+                    }
+                }
+            }
+        }
+
         let task_id = crate::scheduler::new_task_id();
         let target_agent_id = args.agent_id.clone();
 

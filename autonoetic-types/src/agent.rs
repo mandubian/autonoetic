@@ -276,7 +276,7 @@ pub struct RemoteAccessDeclaration {
     pub package_manager_commands: Vec<String>,
 }
 
-/// Optional per-agent LoopGuard limits declared in SKILL metadata.
+/// Optional per-agent circuit-breaker limits declared in SKILL metadata.
 ///
 /// Gateway applies these as stricter bounds within system ceilings.
 /// Any declared value above system config is capped to the system value.
@@ -290,6 +290,9 @@ pub struct LoopGuardDeclaration {
     pub max_consecutive_same_progress: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_child_failures: Option<u32>,
+    /// Per-agent session turn limit override (clamped to system ceiling).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_session_turns: Option<u32>,
 }
 
 /// Language detector identifier for remote-access import scanning.

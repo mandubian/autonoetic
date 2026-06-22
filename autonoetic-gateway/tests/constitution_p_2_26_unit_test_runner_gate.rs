@@ -108,11 +108,13 @@ layers: []
 "#;
 
     let main_py = "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'status': 'ok'}))\n";
+    let test_py = "#!/usr/bin/env python3\nimport unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n";
 
     for (path, content) in [
         ("SKILL.md", skill_md.as_bytes()),
         ("runtime.lock", runtime_lock.as_bytes()),
         ("main.py", main_py.as_bytes()),
+        ("test_main.py", test_py.as_bytes()),
     ] {
         let handle = content_store.write(content).unwrap();
         content_store
@@ -126,6 +128,7 @@ layers: []
                 "SKILL.md".to_string(),
                 "runtime.lock".to_string(),
                 "main.py".to_string(),
+                "test_main.py".to_string(),
             ],
             Some(&["main.py".to_string()]),
             None,
