@@ -17,9 +17,11 @@ const RESET_EPHIMERAL_PATHS: &[&str] = &[
     "history",
     "logs",
     "artifacts",
+    "checkpoints",
     "content",
     "revisions",
     "recordings",
+    "scheduler",
     "sessions",
     "vault.key",
     "constitution",
@@ -53,7 +55,7 @@ pub async fn handle_gateway_reset(
         writeln!(stderr, "  {}", gateway_dir.display())?;
         writeln!(
             stderr,
-            "Sessions, approvals, traces, artifacts, and credentials will be lost.",
+            "Sessions, approvals, scheduled jobs, workflow runs, traces, artifacts, and credentials will be lost.",
         )?;
         writeln!(
             stderr,

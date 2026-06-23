@@ -2456,8 +2456,18 @@ pub fn reroute_chat_ingest_for_active_workflow_child_session(
             continue;
         }
         let workflow_id = entry.file_name().to_string_lossy().to_string();
-        let Some(run) = load_workflow_run(config, store, &workflow_id)? else {
-            continue;
+        let run = match load_workflow_run(config, store, &workflow_id) {
+            Ok(Some(run)) => run,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    target: "workflow_store",
+                    workflow_id = %workflow_id,
+                    error = %e,
+                    "skipping corrupt workflow.json during chat ingest reroute"
+                );
+                continue;
+            }
         };
         if !workflow_run_is_active_for_user_chat_routing(&run) {
             continue;
@@ -3145,6 +3155,36 @@ mod tests {
             reroute_chat_ingest_for_active_workflow_child_session(&cfg, None, "root-2b12")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn reroute_chat_ingest_skips_corrupt_workflow_json() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf =
+            ensure_workflow_for_root_session(&cfg, None, "root-corrupt", Some("planner.default"))
+                .unwrap();
+        let corrupt_path = workflow_run_path(&cfg, &wf.workflow_id);
+        std::fs::write(
+            &corrupt_path,
+            r#"{
+  "workflow_id": "wf-bad",
+  "status": "active"
+} trailing garbage"#,
+        )
+        .unwrap();
+
+        assert!(
+            reroute_chat_ingest_for_active_workflow_child_session(
+                &cfg,
+                None,
+                "root-corrupt/child-y"
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
