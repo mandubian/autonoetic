@@ -1382,7 +1382,7 @@ fn capability_oneof_schema() -> serde_json::Value {
         },
         {
             "type": "object",
-            "description": "Access to PlanFrame operations (propose, amend, approve, list, get).",
+            "description": "Access to PlanFrame participation (propose, amend, list, get); `[\"*\"]` grants all of these. `planframe.approve` is an AUTHORITY that `[\"*\"]` does NOT grant — it must be listed exactly so a proposer cannot approve its own plan.",
             "properties": {
                 "type": { "const": "PlanFrameAccess" },
                 "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }

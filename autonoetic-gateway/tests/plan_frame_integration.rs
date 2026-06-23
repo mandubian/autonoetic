@@ -36,7 +36,10 @@ fn plan_frame_manifest() -> AgentManifest {
                 scopes: vec!["*".to_string()],
             },
             Capability::PlanFrameAccess {
-                patterns: vec!["*".to_string()],
+                // `*` grants participation; `planframe.approve` is an authority
+                // that must be granted EXACTLY (a wildcard no longer confers it),
+                // so this manifest represents an authorized approver.
+                patterns: vec!["*".to_string(), "planframe.approve".to_string()],
             },
         ],
         llm_overrides: None,

@@ -134,15 +134,31 @@ fn is_authority_operation(operation: &str) -> bool {
 
 /// Whether a set of `PlanFrameAccess` patterns grants `operation`. Pure so it
 /// is unit-testable without constructing a full manifest.
+///
+/// Empty/whitespace patterns — and degenerate prefixes like `"."` that trim to
+/// empty — grant nothing: otherwise `operation.starts_with("")` would silently
+/// authorize every participation op (an authorization footgun, since the
+/// capability schema does not forbid empty strings).
 fn patterns_allow(patterns: &[String], operation: &str) -> bool {
     let authority = is_authority_operation(operation);
-    patterns.iter().any(|p| {
-        if authority {
-            // Authority rights require an exact grant — no `*`, no prefix.
-            p == operation
-        } else {
-            p == "*" || p == operation || operation.starts_with(p.trim_end_matches('.'))
+    patterns.iter().any(|raw| {
+        let p = raw.trim();
+        if p.is_empty() {
+            return false;
         }
+        if p == operation {
+            // Exact grant always allowed (the only way to confer an authority).
+            return true;
+        }
+        if authority {
+            // Authority rights require an exact grant — never `*` or a prefix.
+            return false;
+        }
+        if p == "*" {
+            return true;
+        }
+        let prefix = p.trim_end_matches('.');
+        !prefix.is_empty() && operation.starts_with(prefix)
     })
 }
 
@@ -1423,6 +1439,17 @@ mod authority_tests {
             &pats(&["planframe.propose", "planframe.approve"]),
             "planframe.approve"
         ));
+    }
+
+    // Empty / whitespace / degenerate-prefix patterns must grant nothing —
+    // otherwise `starts_with("")` silently authorizes every participation op.
+    #[test]
+    fn empty_and_degenerate_patterns_grant_nothing() {
+        for bad in [&[""][..], &["   "][..], &["."][..]] {
+            let p: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+            assert!(!patterns_allow(&p, "planframe.propose"), "pattern {bad:?}");
+            assert!(!patterns_allow(&p, "planframe.approve"), "pattern {bad:?}");
+        }
     }
 
     #[test]

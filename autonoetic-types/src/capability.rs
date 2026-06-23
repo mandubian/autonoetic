@@ -176,10 +176,18 @@ pub enum Capability {
     /// Only agents with this capability can call wiki.propose.
     WikiContribute,
 
-    /// Access to PlanFrame operations (propose, amend, approve, list, get).
+    /// Access to PlanFrame operations (propose, amend, list, get).
     /// Controls whether an agent can create and modify collaborative plans.
     /// The `patterns` field restricts which operations are allowed.
-    /// Use ["*"] for all operations, or specific patterns like "planframe.propose".
+    /// Use ["*"] for all *participation* operations, or specific patterns like
+    /// "planframe.propose".
+    ///
+    /// `planframe.approve` is an **authority**, not participation: it is NEVER
+    /// granted by `["*"]` or a prefix and must be listed EXACTLY
+    /// (`"planframe.approve"`). This keeps a proposing agent (e.g. the planner,
+    /// which holds `["*"]`) from approving its own plan — approval is a held
+    /// right exercised by a distinct authority (the operator, or an agent
+    /// explicitly granted it).
     PlanFrameAccess {
         #[serde(default = "default_patterns_all")]
         patterns: Vec<String>,
