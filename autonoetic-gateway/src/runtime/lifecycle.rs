@@ -1303,6 +1303,9 @@ impl AgentExecutor {
                         crate::runtime_lock::DriftSkippedReason::LockMalformed(e) => {
                             ("lock_malformed", e.as_str())
                         }
+                        crate::runtime_lock::DriftSkippedReason::LockUnpinned => {
+                            ("lock_unpinned", "runtime.lock has no pinned build sha256")
+                        }
                     };
                     let _ = tracer.log_event(
                         "runtime_lock_drift",

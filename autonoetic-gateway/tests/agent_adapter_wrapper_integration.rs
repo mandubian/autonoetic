@@ -8,6 +8,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
+/// Wrapper execution runs the generated pre/post map scripts inside a
+/// bubblewrap sandbox. On hosts without `bwrap` (e.g. local dev boxes) those
+/// tests can't run; skip them rather than fail with a spawn ENOENT — matching
+/// the convention in sandbox_capture_integration.rs.
+fn is_bwrap_available() -> bool {
+    std::process::Command::new("bwrap")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn script_path(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -147,6 +159,10 @@ Base instructions.
 
 #[tokio::test]
 async fn test_generated_wrapper_executes_with_io_transformation() {
+    if !is_bwrap_available() {
+        eprintln!("skipping test_generated_wrapper_executes_with_io_transformation: `bwrap` not on PATH");
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir should create");
     let target_spec = serde_json::json!({
         "accepts": {
@@ -301,6 +317,10 @@ impl LlmDriver for EchoSummaryConfidenceDriver {
 
 #[tokio::test]
 async fn test_generated_wrapper_executes_with_multiple_io_transformations() {
+    if !is_bwrap_available() {
+        eprintln!("skipping test_generated_wrapper_executes_with_multiple_io_transformations: `bwrap` not on PATH");
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir should create");
     let target_spec = serde_json::json!({
         "accepts": {
