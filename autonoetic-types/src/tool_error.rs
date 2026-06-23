@@ -635,32 +635,32 @@ impl From<anyhow::Error> for ToolError {
             let msg = cause.to_string();
             let msg_trimmed = msg.trim();
             if msg.starts_with("validation:") {
-                let inner = msg.strip_prefix("validation:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("validation:").unwrap_or(&msg).trim();
                 let repair_hint = derive_validation_hint(msg_trimmed);
                 return Self::validation(inner.to_string(), repair_hint);
             } else if msg.starts_with("permission:") {
-                let inner = msg.strip_prefix("permission:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("permission:").unwrap_or(&msg).trim();
                 return Self::permission(inner.to_string());
             } else if msg.starts_with("resource:") {
-                let inner = msg.strip_prefix("resource:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("resource:").unwrap_or(&msg).trim();
                 return Self::resource(inner.to_string(), None::<String>);
             } else if msg.starts_with("execution:") {
-                let inner = msg.strip_prefix("execution:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("execution:").unwrap_or(&msg).trim();
                 return Self::execution(inner.to_string(), None::<String>);
             } else if msg.starts_with("fatal:") {
-                let inner = msg.strip_prefix("fatal:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("fatal:").unwrap_or(&msg).trim();
                 return Self::fatal(inner.to_string(), Some(err.to_string()));
             } else if msg.starts_with("conflict:") {
-                let inner = msg.strip_prefix("conflict:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("conflict:").unwrap_or(&msg).trim();
                 return Self::conflict(inner.to_string(), None::<String>);
             } else if msg.starts_with("quota_exceeded:") {
-                let inner = msg.strip_prefix("quota_exceeded:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("quota_exceeded:").unwrap_or(&msg).trim();
                 return Self::quota_exceeded(inner.to_string(), None::<String>);
             } else if msg.starts_with("not_found:") {
-                let inner = msg.strip_prefix("not_found:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("not_found:").unwrap_or(&msg).trim();
                 return Self::not_found(inner.to_string(), None::<String>);
             } else if msg.starts_with("timeout:") {
-                let inner = msg.strip_prefix("timeout:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("timeout:").unwrap_or(&msg).trim();
                 return Self::timeout(inner.to_string(), None::<String>);
             }
         }
@@ -715,6 +715,17 @@ mod tests {
         assert_eq!(err.error_type, ToolErrorType::Validation);
         assert!(err.is_recoverable());
         assert!(err.repair_hint.is_some());
+    }
+
+    // Tagged anyhow errors use the "{type}: {msg}" convention (Tagged::Display).
+    // Stripping the prefix must not leave a leading space on the surfaced
+    // message (PR #601 review).
+    #[test]
+    fn tagged_anyhow_message_has_no_leading_space() {
+        let err: ToolError = anyhow::anyhow!("resource: sandbox driver 'bwrap' not found").into();
+        assert_eq!(err.error_type, ToolErrorType::Resource);
+        assert_eq!(err.message, "sandbox driver 'bwrap' not found");
+        assert!(!err.message.starts_with(' '));
     }
 
     #[test]
