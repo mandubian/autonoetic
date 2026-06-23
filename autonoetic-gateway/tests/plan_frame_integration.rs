@@ -1476,3 +1476,89 @@ fn planframe_amend_inherits_when_capability_envelope_unchanged() {
     assert_eq!(parsed["requires_regate"], false);
     assert_eq!(parsed["diff_summary"], "no envelope change");
 }
+
+// Auto-approve convenience (config: plan_auto_approve). When enabled, a proposed
+// plan is approved immediately by the configured authority identity, so
+// local/dev and autonomous runs (no operator in the loop) don't stall waiting
+// for approval. Default remains off (separation of powers). (#602 follow-up)
+#[test]
+fn planframe_propose_auto_approves_when_config_enabled() {
+    let dir = tempdir().unwrap();
+    let mut config = make_config(dir.path());
+    config.plan_auto_approve = true;
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-auto/planner-auto";
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "Auto",
+                "objective": "Auto-approve on propose"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["status"], "approved", "auto-approve should approve on propose: {result}");
+    assert_eq!(v["auto_approved"], true);
+
+    let plan_id = v["plan_id"].as_str().unwrap();
+    let plan = store.load_plan_frame(plan_id).unwrap().unwrap();
+    assert_eq!(plan.status, PlanStatus::Approved);
+    assert_eq!(plan.approved_by.as_deref(), Some("auto-approve"));
+}
+
+// Default (auto-approve off): proposing leaves the plan awaiting approval.
+#[test]
+fn planframe_propose_defaults_to_awaiting_approval() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path()); // plan_auto_approve defaults to false
+    assert!(!config.plan_auto_approve);
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({"title": "Manual", "objective": "Await approval"})).unwrap(),
+            Some("root-session-manual/planner-manual"),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["status"], "awaiting_approval");
+    assert_eq!(v["auto_approved"], false);
+}

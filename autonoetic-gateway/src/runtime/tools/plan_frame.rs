@@ -524,14 +524,92 @@ impl NativeTool for PlanFrameProposeTool {
             },
         )?;
 
+        // Optional auto-approval (config: `plan_auto_approve`). A convenience for
+        // local/dev and autonomous runs with no operator in the loop. OFF by
+        // default, so separation of powers holds unless explicitly enabled. The
+        // approver is recorded as `plan_auto_approver` so the audit trail shows it
+        // was an automatic decision, not a human/agent authority. (#602 follow-up)
+        // `config` was unwrapped to `&GatewayConfig` above (early return otherwise).
+        let mut effective_status = "awaiting_approval";
+        let mut auto_approved = false;
+        {
+            if config.plan_auto_approve {
+                let approver = config.plan_auto_approver.clone();
+                let request_id = plan_approval_request_id(&plan.plan_id, plan.version);
+                match crate::scheduler::approval::approve_request(
+                    config,
+                    Some(&store),
+                    &request_id,
+                    &approver,
+                    None,
+                    None,
+                    None,
+                    None,
+                ) {
+                    Ok(decision) => {
+                        let now2 = now_rfc3339();
+                        let grants = materialize_plan_grants(
+                            &store,
+                            Some(config),
+                            &plan,
+                            &decision.decided_by,
+                            &now2,
+                        );
+                        let _ = crate::scheduler::workflow_store::append_workflow_event(
+                            config,
+                            Some(&store),
+                            &autonoetic_types::workflow::WorkflowEventRecord {
+                                event_id: {
+                                    let b = uuid::Uuid::new_v4();
+                                    format!("evt-{}", hex::encode(&b.as_bytes()[..8]))
+                                },
+                                workflow_id: plan.workflow_id.clone(),
+                                task_id: None,
+                                event_type: "planframe.approved".to_string(),
+                                agent_id: Some(approver.clone()),
+                                payload: serde_json::json!({
+                                    "plan_id": plan.plan_id,
+                                    "version": plan.version,
+                                    "grants_materialized": grants,
+                                    "auto_approved": true,
+                                }),
+                                occurred_at: now2,
+                            },
+                        );
+                        effective_status = "approved";
+                        auto_approved = true;
+                        tracing::info!(
+                            target: "plan_frame",
+                            plan_id = %plan.plan_id,
+                            approver = %approver,
+                            "plan auto-approved (plan_auto_approve=true)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "plan_frame",
+                            error = %e,
+                            plan_id = %plan.plan_id,
+                            "auto-approve failed; plan left awaiting_approval"
+                        );
+                    }
+                }
+            }
+        }
+
         let summary = plan.compact_summary();
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
             "plan_id": plan_id,
             "workflow_id": updated_workflow.workflow_id,
-            "status": "awaiting_approval",
+            "status": effective_status,
             "version": 1,
-            "message": "Plan proposed. Operator approval is required before agents can act on it.",
+            "message": if auto_approved {
+                "Plan proposed and auto-approved (plan_auto_approve=true). Proceed to execution."
+            } else {
+                "Plan proposed. Approval by an authority is required before agents can act on it."
+            },
+            "auto_approved": auto_approved,
             "summary": summary,
         }))?)
     }

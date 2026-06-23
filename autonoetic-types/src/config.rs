@@ -116,6 +116,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_plan_auto_approver() -> String {
+    "auto-approve".to_string()
+}
+
 impl Default for SchemaEnforcementConfig {
     fn default() -> Self {
         Self {
@@ -1222,6 +1226,21 @@ pub struct GatewayConfig {
     /// Default: false (drift is fatal).
     #[serde(default)]
     pub allow_runtime_lock_drift: bool,
+
+    /// Auto-approve a PlanFrame the moment it is proposed, instead of waiting for
+    /// an authority to approve it. A convenience for local/dev and autonomous
+    /// runs where no operator is in the loop. Default: false — plans await an
+    /// authority (separation of powers: agents propose, an authority disposes).
+    /// The approval is recorded under `plan_auto_approver` so the causal chain
+    /// shows it was an automatic decision, not a human/agent authority.
+    #[serde(default)]
+    pub plan_auto_approve: bool,
+
+    /// Identity recorded as the approver when `plan_auto_approve` is enabled.
+    /// Default: "auto-approve" — documents in the audit trail that approval was
+    /// automatic rather than a deliberate authority decision.
+    #[serde(default = "default_plan_auto_approver")]
+    pub plan_auto_approver: String,
 
     /// When true, allow revision creation to proceed without a gateway signature
     /// when the gateway identity key is unavailable (e.g. first boot on a read-only
@@ -2863,6 +2882,8 @@ impl Default for GatewayConfig {
             system_agents: Vec::new(),
             interaction_answer_orchestration: default_interaction_answer_orchestration(),
             allow_runtime_lock_drift: false,
+            plan_auto_approve: false,
+            plan_auto_approver: default_plan_auto_approver(),
             trust_unsigned_bundles: false,
             approval_dwell_multiplier: default_approval_dwell_multiplier(),
             sentinel: SentinelConfig::default(),
