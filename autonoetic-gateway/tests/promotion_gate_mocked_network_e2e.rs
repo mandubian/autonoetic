@@ -83,14 +83,25 @@ fn writer_manifest() -> AgentManifest {
 }
 
 /// `unit_test_runner.default` — promotion federation exec gate on bubblewrap with
-/// no `CodeExecution` / `Evaluation` caps (gateway grants `artifact_exec` by role).
+/// no `CodeExecution` / `Evaluation` caps (gateway grants `artifact_exec` by role
+/// + `SandboxFunctions` allowlist).
 fn unit_test_runner_manifest() -> AgentManifest {
     base_manifest(
         "unit_test_runner.default",
         "Unit Test Runner",
-        vec![Capability::ReadAccess {
-            scopes: vec!["*".to_string()],
-        }],
+        vec![
+            Capability::SandboxFunctions {
+                allowed: vec![
+                    "knowledge_".to_string(),
+                    "artifact_inspect".to_string(),
+                    "artifact_exec".to_string(),
+                    "promotion_".to_string(),
+                ],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["*".to_string()],
+            },
+        ],
     )
 }
 

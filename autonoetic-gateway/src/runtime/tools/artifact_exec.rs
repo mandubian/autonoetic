@@ -1362,9 +1362,11 @@ fn copy_fixture_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Res
 mod tests {
     use super::{
         artifact_exec_approval_operator_reason, artifact_exec_approval_summary_line,
-        promotion_gate_artifact_command_decision, ArtifactExecArgs,
+        promotion_gate_artifact_command_decision, ArtifactExecArgs, ArtifactExecTool,
     };
     use crate::runtime::remote_access::DetectedPattern;
+    use crate::runtime::tools::NativeTool;
+    use autonoetic_types::capability::Capability;
 
     #[test]
     fn artifact_exec_args_accepts_optional_intent() {
@@ -1467,5 +1469,108 @@ mod tests {
         let decision = promotion_gate_artifact_command_decision("rm -rf /");
         assert!(!decision.is_allowed(), "{decision:?}");
         assert!(decision.enforced_rules.contains(&"P-3.8"));
+    }
+
+    #[test]
+    fn artifact_exec_available_for_unit_test_runner_without_code_execution() {
+        use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+        let tool = ArtifactExecTool;
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "unit_test_runner.default".to_string(),
+                name: "Unit Test Runner".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![
+                Capability::SandboxFunctions {
+                    allowed: vec![
+                        "knowledge_".to_string(),
+                        "artifact_inspect".to_string(),
+                        "artifact_exec".to_string(),
+                        "promotion_".to_string(),
+                    ],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+            ],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        };
+        assert!(tool.is_available(&manifest));
+    }
+
+    #[test]
+    fn artifact_exec_not_available_for_static_evaluator() {
+        use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+        let tool = ArtifactExecTool;
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "static_evaluator.default".to_string(),
+                name: "Static Evaluator".to_string(),
+                description: "test".to_string(),
+            },
+            capabilities: vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+            ],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        };
+        assert!(!tool.is_available(&manifest));
     }
 }
