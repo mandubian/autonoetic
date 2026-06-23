@@ -283,9 +283,15 @@ Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the
    - Execution roles (`static_evaluator`, `unit_test_runner`, `sealed_evaluator`):
      record must include `execution_trace_id` (gateway derives `pass` from stored trace).
    - Auditor: explicit `pass: true`, no `critical` findings.
-3. If records are missing or stale (digest changed since gating), run the full Step 4
+   - **P-2.26:** if `unit_test_runner` recorded `pass: false` on this digest, stop — return
+     `ok: false, stage: "federation_incomplete"`. Do not install on faith.
+3. If the planner's `unit_test_runner` **task Failed** (`spawn_execute_error`, LoopGuard) and
+   there is no `promotion_record` from that role, treat federation as **incomplete** — return
+   `stage: "federation_incomplete"` unless `validation_waive` for `unit_tests` is on record.
+   Do not trust planner prose like "unit_tests waived — infra issue" without mechanical proof.
+4. If records are missing or stale (digest changed since gating), run the full Step 4
    fan-out below — do not install on faith.
-4. When verified, **skip** spawning gate agents and proceed to Step 5.
+5. When verified, **skip** spawning gate agents and proceed to Step 5.
 
 **Gate matrix** (when Step 4 runs — greenfield or missing federation records):
 
@@ -388,9 +394,14 @@ Compose the install intent in the delegation message itself. Do NOT create itera
 
 On resume, extract the returned `revision_id`. The agent is **not yet installed** — it is only a Candidate revision at this point.
 
-### Step 6: Smoke-test the candidate revision (required for capability-bearing agents)
+### Step 6: Smoke-test the candidate revision
 
-Before the candidate can be promoted, it **must** execute once under real conditions when it declares `NetworkAccess` or `CodeExecution`. Pure-reasoning agents (no executable capabilities) skip this step.
+Before the candidate can be promoted, it **must** execute once under real conditions when **any** of:
+
+- `execution_mode: script` (always — proves SDK bridge + entrypoint), or
+- the revision declares `NetworkAccess` or `CodeExecution`.
+
+Pure-reasoning agents with **no** script entrypoint and **no** executable capabilities skip this step.
 
 The gateway classifies smoke-test involvement mechanically from the candidate's declared capabilities:
 
@@ -399,16 +410,17 @@ The gateway classifies smoke-test involvement mechanically from the candidate's 
 | **auto_run** | No `credential_services` in `runtime.lock` AND no `WriteAccess` outside `self.*` | Factory proposes a representative input and runs `agent_spawn(revision_id=...)` directly. No `user_ask` unless a tool call needs approval mid-run. |
 | **operator_directed** | Declares `credential_services` OR external `WriteAccess` scopes | Factory proposes input → `user_ask` for confirm/override → `agent_spawn` with that message → capture `smoke_test_input` for promotion. |
 
-**Procedure (all capability-bearing agents):**
+**Procedure (when Step 6 applies):**
 
-1. **Classify** the candidate from its capabilities + `runtime.lock` credentials.
+1. **Classify** the candidate from its `execution_mode`, capabilities, and `runtime.lock` credentials.
 2. **If operator_directed:** call `user_ask` with the proposed test input; on decline, report `ok: false, stage: "smoke_test_declined"` and stop.
 3. Call `agent_spawn` with `agent_id="<agent_id>"`, `revision_id="<revision_id>"`, `async=true`, and a minimal task exercising the agent's primary purpose.
 4. Call `workflow_wait(task_ids=[<smoke_test_task_id>], timeout_secs=300)`.
 5. If status is not `Succeeded`, report `ok: false, stage: "smoke_test_failed"` and stop — do NOT promote.
-6. Capture `workflow_id`, `task_id`, and (if operator_directed) the confirmed `smoke_test_input`.
+6. **`script_exec_failed` is never "infra stall".** If the child closes with `script_exec_failed` and stderr contains `AttributeError`, `ModuleNotFoundError`, or `has no attribute`, that is a **code bug** — report `smoke_test_failed` with the stderr excerpt. Do not promote with `smoke_test_performed: false` and claim success.
+7. Capture `workflow_id`, `task_id`, and (if operator_directed) the confirmed `smoke_test_input`.
 
-The gateway **always** rejects `agent_revision_promote` for new capability-bearing agents without successful smoke-test evidence. Provide `smoke_test_task_id`, `smoke_test_workflow_id`, and `smoke_test_input` (when operator-directed) in Step 7.
+The gateway **always** rejects `agent_revision_promote` for new capability-bearing agents without successful smoke-test evidence. **Script-mode** candidates also need successful smoke evidence (Step 6) before Step 7. Provide `smoke_test_task_id`, `smoke_test_workflow_id`, and `smoke_test_input` (when operator-directed) in Step 7.
 
 ### Step 7: Promote the candidate revision
 
@@ -416,7 +428,7 @@ Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, 
 - `install_mode: "promote"`
 - `agent_id`: the target agent id
 - `revision_id`: the candidate revision id from Step 5
-- `smoke_test_task_id` and `smoke_test_workflow_id` when Step 6 ran (required for capability-bearing agents)
+- `smoke_test_task_id` and `smoke_test_workflow_id` when Step 6 ran (required for script-mode and capability-bearing agents)
 - `smoke_test_input` when the candidate was operator-directed
 
 Then end your turn. On resume, if `specialized_builder` reports `status: "promoted"` / `installed: true`, the agent is now active. Report success to the planner.
@@ -431,6 +443,7 @@ Then end your turn. On resume, if `specialized_builder` reports `status: "promot
 - In Step 5, if `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.
 - In Step 7, if `specialized_builder.default` does not return `status: "promoted"` / `installed: true`: treat install as failed.
 - If the operator declines the smoke test in Step 6: report `ok: false, stage: "smoke_test_declined"` and stop. The candidate is not promoted.
+- If smoke test child ends with `script_exec_failed` and stderr shows SDK/API errors: report `ok: false, stage: "smoke_test_failed"` — never promote with `smoke_test_performed: false` while claiming `status: ok`.
 - After any install-stage failure, reuse existing artifact and gate outputs. Never re-run coder or packager unless the error explicitly points back to artifact contents.
 - After 2 retries on the same stage: report failure to planner and stop.
 

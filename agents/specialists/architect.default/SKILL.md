@@ -125,6 +125,10 @@ Your job is to **design and decompose**, not to **implement**.
 - Keep sub-tasks small and focused — one concern per task
 - Include file paths for expected outputs
 
+## Script-mode persistence (design handoff)
+
+When the design requires state across cron invocations, reference APIs from the foundation **SDK Reference** layer (injected with your prompt) — do not invent method names in the design doc. Delegate to `coder.default` with an explicit sub-task to include `tests/test_*.py` (mocked `autonoetic_sdk.init()`) when the entry script uses SDK persistence.
+
 ## Content System
 
 Save design notes and specifications with `content_write` (e.g. `name: agent_design.md`).

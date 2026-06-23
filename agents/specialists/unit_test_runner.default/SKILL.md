@@ -25,6 +25,8 @@ metadata:
       - type: "SandboxFunctions"
         # Exact tool names (not prefix) to exclude artifact_build and artifact_prepare.
         # The runner inspects and executes — it never builds, repackages, or writes content.
+        # `artifact_exec` + `promotion_` here declare a promotion exec gate (gateway #596):
+        # artifact_exec is permitted without broad CodeExecution/Evaluation caps.
         allowed: ["knowledge_", "artifact_inspect", "artifact_exec", "promotion_"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
@@ -82,6 +84,26 @@ dependency; only an actual live call is. Do not read mocked code and guess.
 
 If the entire suite is network/integration-only, skip `promotion_record` and return `unable_to_evaluate` (same as “no tests”).
 
+## Wrong delegation — stop immediately
+
+If the spawn message asks you to **write**, **create**, **build**, or **author** tests (or to mock-implement tests the artifact lacks), you were delegated incorrectly. **Do not** call `content_write`, `artifact_build`, or `sandbox_exec` — you do not have those tools.
+
+Return this JSON on the first turn and end:
+
+```json
+{
+  "status": "unable_to_evaluate",
+  "evaluator_pass": false,
+  "findings": [
+    {
+      "severity": "warning",
+      "description": "Task asks unit_test_runner to author tests; that is coder.default's job before federation."
+    }
+  ],
+  "summary": "Wrong delegation — inspect-only gate; planner must retry with standard unit-test message or send coder to add tests/"
+}
+```
+
 ## Behavior
 
 1. `artifact_inspect(artifact_ref)` — review file list and entrypoints
@@ -107,7 +129,7 @@ If the entire suite is network/integration-only, skip `promotion_record` and ret
 These are stop conditions, not invitations to explore.
 
 - If `artifact_exec` returns `promotion_gate_network_denied` or `approval_required` for network patterns in the artifact's tests, stop immediately — return `unable_to_evaluate` (see above). **Never** wait for or seek operator approval.
-- If `artifact_exec` is rejected by CodeExecution policy, stop and report the policy mismatch. Do **not** retry with different command variants.
+- If `artifact_exec` is rejected by gateway execution policy (P-1.9 / P-3.8), stop and report the policy mismatch. Do **not** retry with different command variants.
 - If test execution fails with `ModuleNotFoundError` / missing third-party dependency, first check whether the artifact has dependency layers (review `artifact_inspect` output for `layers` with a `mount_path`). If layers exist but imports still fail, the issue is a runtime PYTHONPATH wiring problem — not a packaging failure. In that case, record a `warning` finding describing the missing module and the layer mount paths, and set `status: "unable_to_evaluate"` rather than `fail`. If no layers exist and the artifact declares dependencies that were not packaged, that IS a packaging failure — record `status: "fail"`.
 - If `artifact_exec` fails because the artifact ref is missing, expired, or revoked, stop and report that exact issue. Do not retry with guessed artifact refs.
 - Maximum retry budget: at most one runner-selection retry after an initial mismatch. Missing dependency, policy rejection, or missing artifact ref are terminal after the first clear signal.

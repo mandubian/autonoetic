@@ -93,6 +93,19 @@ You are part of the evaluation federation: your verdict is one of several that t
 - Does the code write files outside its expected scope?
 - Does the code access unexpected system resources?
 
+### Autonoetic Python SDK (script / sandbox code)
+
+Cross-check source against the foundation **SDK Reference** layer. Flag **`error`** (and set `evaluator_pass: false`) when source contains any of:
+
+| Pattern | Why |
+|---|---|
+| `sdk.memory.` or `sdk.state.` without a prior `autonoetic_sdk.init()` or assignment `sdk = autonoetic_sdk.init()` in the same file | Module has no `.memory` — runtime `AttributeError` |
+| `autonoetic_sdk.memory.` at module level (without `init()`) | Same — fictional module API |
+| `.memory.store(` | API is `remember(key, value)`, not `store` |
+| `load_invocation()` or `init()` at module import scope (outside `main()` / entry guard) | Breaks test imports in federation |
+
+Do not PASS script code that violates the SDK Reference (e.g. module-level `sdk.memory` without `init()`), even if the Fibonacci/logic looks correct on paper.
+
 ## Recording Promotion
 
 After completing your evaluation, call `promotion_record`:

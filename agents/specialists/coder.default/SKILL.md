@@ -327,6 +327,16 @@ if __name__ == "__main__":
     main()
 ```
 
+Persistence APIs (`init`, `memory`, `state`) are in the foundation **SDK Reference** layer — follow that reference; do not invent `store` or module-level `sdk.memory`.
+
+### Stateful / scheduled script agents — ship tests in the artifact
+
+When the agent persists state across independent invocations (cron, scheduler):
+
+1. Implement persistence per the foundation SDK Reference (`sdk.state` preferred for counters/cursors).
+2. **Include `tests/test_*.py` in the same artifact** before federation — mock `autonoetic_sdk.init()` with `unittest.mock`. The `unit_test_runner` only runs existing tests; it will not write them for you.
+3. Do not rely on file-based `state.json` unless stdlib-only is an explicit requirement — prefer SDK state/memory so smoke tests and cron share the same persistence path.
+
 When writing a script agent that accepts structured inputs, always declare `io.accepts` in the install intent so callers format their message as JSON:
 
 ```yaml
@@ -418,8 +428,9 @@ The gateway's LoopGuard will block `sandbox_exec` after too many failures. To av
 
 1. **On repeated failures**, stop rewriting the same way. Read the stderr carefully and identify the root cause.
 2. **If failures are logic bugs**, simplify the test. A smoke test just needs to verify the code runs without crashing — it does NOT need to verify every edge case. Simplify until it passes.
-3. **If failures are missing dependencies** (ImportError, ModuleNotFoundError), stop trying to install them — you don't have network. Declare them in `requirements.txt` / `package.json`, skip the smoke test, and return `needs_packager` to the planner.
-4. **If you cannot get a passing smoke test**, build the artifact anyway. It is better to deliver a buildable artifact with untested runtime behavior than to exhaust your failure budget and deliver nothing. The `unit_test_runner.default` agent will test it properly later in the promotion pipeline.
+3. **If failures are missing dependencies** (ImportError, ModuleNotFoundError for third-party packages), stop trying to install them — you don't have network. Declare them in `requirements.txt` / `package.json`, skip the smoke test, and return `needs_packager` to the planner.
+4. **If stderr shows wrong SDK usage** (`has no attribute 'memory'`, `has no attribute 'store'`), fix `autonoetic_sdk.init()` and `remember`/`recall` or `state.get`/`set` before rebuilding — do not ship the artifact hoping federation will catch it later.
+5. **If you cannot get a passing smoke test** for environment reasons only (not API/syntax bugs), you may still build the artifact — but fix SDK API errors first; those are code bugs, not environment limits.
 
 ## Remote Access Approval
 

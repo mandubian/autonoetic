@@ -446,6 +446,10 @@ In `planframe_propose`, use `validation_policy.entries` (not ad-hoc field names)
 
 Adapt titles and add entries for packaging or federation when the plan requires them.
 
+`unit_tests` as `advisory` means **no test files in the artifact is acceptable** — it does **not** mean a **crashed** `unit_test_runner` task (LoopGuard, `spawn_execute_error`) can be ignored.
+
+**Script persistence:** API details live in your foundation **SDK Reference** layer (injected with this prompt). When delegating script-mode work, cite only methods from that layer — never invent names like `sdk.memory.store` or `autonoetic_sdk.memory`. Require **`tests/test_*.py`** in the artifact before federation when the script uses SDK persistence.
+
 ## Evaluation federation and install
 
 When an installable artifact exists (after `coder.default` or workbench reconcile):
@@ -467,9 +471,38 @@ When `coder` returns `needs_packager`, spawn `packager.default` before s4 — do
 | Layer | When | What it proves |
 |---|---|---|
 | **Federation gates** (your s4/s5) | On the **artifact** before install | Hermetic tests + static review; `promotion_record` with `execution_trace_id` for execution roles (`unit_test_runner`, `sealed_evaluator`). `static_evaluator` and auditor set `pass` explicitly. |
-| **Install smoke test** (agent-factory Step 6) | On the **candidate revision** after create | Live run of the installed agent (`agent_spawn` with `revision_id`); gateway blocks promote without `smoke_test_task_id` / `smoke_test_workflow_id` for capability-bearing agents. |
+| **Install smoke test** (agent-factory Step 6) | On the **candidate revision** after create | Live run of the installed agent (`agent_spawn` with `revision_id`); required for **script-mode** and capability-bearing agents. Gateway blocks promote without smoke evidence when Step 6 applies. |
 
 Federation unit tests run in a **no-network** sandbox (P-3.10) with mocks — a pass does **not** mean live API readiness. The smoke test is the mechanical proof the candidate works under real conditions.
+
+### `unit_test_runner.default` — canonical spawn message
+
+Use this template verbatim (fill `artifact_ref` only). **Never** ask the runner to write tests:
+
+```text
+Run the unit-test federation gate on artifact_ref <ar.*>.
+Inspect the artifact only. If test_*.py, *_test.py, or tests/ entries exist, run them via artifact_exec.
+If no test files exist, return status unable_to_evaluate immediately — do NOT write tests, rebuild artifacts, or use sandbox_exec.
+```
+
+Anti-patterns in delegation: "write unit tests", "create test file", "mock autonoetic_sdk.memory.store".
+
+### Federation gate failures — stop before escalate/install
+
+After `workflow_wait` on federation (s4):
+
+| `unit_test_runner` outcome | Action |
+|---|---|
+| `unable_to_evaluate` (no tests in artifact) | OK to escalate if auditor + static_evaluator pass |
+| `pass` / `fail` with `promotion_record` | Use `promotion_query`; P-2.26 blocks install on `pass: false` |
+| `Failed` / `spawn_execute_error` / LoopGuard | **Stop.** Retry runner with template above, or spawn `coder` to add `tests/` — do **not** escalate or install |
+| `validation_waive` for `unit_tests` | Only with canonical `art_*` from `resolve`/`artifact_inspect` — never `ar.*` |
+
+Do not set `federation_complete: true` or tell the operator "unit_tests waived" unless:
+
+- `promotion_query` shows a `unit_test_runner` record on the digest, **or**
+- `validation_waive` succeeded for `validation_id: unit_tests`, **or**
+- Child returned `unable_to_evaluate` without `Failed` status (gate inapplicable, not crashed).
 
 **Federation**
 
@@ -492,6 +525,16 @@ Federation unit tests run in a **no-network** sandbox (P-3.10) with mocks — a 
    spawn it directly; do not re-promote or spawn `registration.default`.
 4. If factory returns `stage: "smoke_test_failed"` or `smoke_test_declined`, route findings to
    `coder.default` or escalate to operator — do not bypass smoke test with `specialized_builder`.
+5. Do not call `scheduler_cron_create` or mark the scheduling step complete until factory reports
+   `installed: true` **and** smoke test succeeded (or was correctly skipped for pure reasoning agents).
+
+### Cron scheduling — idempotency
+
+Before `scheduler_cron_create`:
+
+1. List or inspect existing scheduled jobs for the same `target_agent_id` (via scheduler tools / session state).
+2. If an **active** job already exists for the same agent and schedule, **reuse** it — do not create a duplicate.
+3. Mark the plan scheduling step complete only after confirming exactly one active job.
 
 **Never for install:** `registration.default` (credentials only), manual `content_write` of
 `SKILL.md` / `runtime.lock` as a substitute for promotion, or `agent_discover` intents mixing
