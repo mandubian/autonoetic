@@ -119,14 +119,37 @@ fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
     })
 }
 
-fn can_perform(manifest: &AgentManifest, operation: &str) -> bool {
-    manifest.capabilities.iter().any(|c| {
-        match c {
-            Capability::PlanFrameAccess { patterns } => patterns
-                .iter()
-                .any(|p| p == "*" || p == operation || operation.starts_with(p.trim_end_matches('.'))),
-            _ => false,
+/// Operations that confer **authority** over a plan (e.g. approving it) rather
+/// than participation in it. An authority right must be granted EXACTLY — it is
+/// never satisfied by a `*` wildcard or a prefix pattern. This is the
+/// separation-of-powers boundary: a proposing agent holding a broad
+/// `PlanFrameAccess: ["*"]` (as the planner does) must NOT thereby be able to
+/// approve its own plan. Approval is a held right, exercised by an authority —
+/// the operator surface today (which bypasses this gate via `approve_request`),
+/// or an agent explicitly granted `"planframe.approve"` in future. (issue:
+/// planner self-approval / DISCRETION LEAK).
+fn is_authority_operation(operation: &str) -> bool {
+    matches!(operation, "planframe.approve")
+}
+
+/// Whether a set of `PlanFrameAccess` patterns grants `operation`. Pure so it
+/// is unit-testable without constructing a full manifest.
+fn patterns_allow(patterns: &[String], operation: &str) -> bool {
+    let authority = is_authority_operation(operation);
+    patterns.iter().any(|p| {
+        if authority {
+            // Authority rights require an exact grant — no `*`, no prefix.
+            p == operation
+        } else {
+            p == "*" || p == operation || operation.starts_with(p.trim_end_matches('.'))
         }
+    })
+}
+
+fn can_perform(manifest: &AgentManifest, operation: &str) -> bool {
+    manifest.capabilities.iter().any(|c| match c {
+        Capability::PlanFrameAccess { patterns } => patterns_allow(patterns, operation),
+        _ => false,
     })
 }
 
@@ -684,7 +707,7 @@ impl NativeTool for PlanFrameApproveTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Approve a PlanFrame. Moves status from 'awaiting_approval' to 'approved'. Typically invoked by the operator through the gateway, not directly by agents.".to_string(),
+            description: "Approve a PlanFrame (status 'awaiting_approval' → 'approved'). Approval is an AUTHORITY: it requires the explicit `planframe.approve` right (a `*` wildcard does NOT grant it), so a proposing agent cannot approve its own plan. Exercised by the operator through the gateway, or by an agent explicitly granted the right.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1362,5 +1385,50 @@ impl NativeTool for PlanFrameHistoryTool {
 
     fn extract_metadata(&self, _arguments_json: &str) -> ToolMetadata {
         ToolMetadata::default()
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    fn pats(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // The planner holds `PlanFrameAccess: ["*"]`. The wildcard must grant
+    // participation but NOT the authority to approve — otherwise the proposer
+    // can self-approve its own plan (separation of powers).
+    #[test]
+    fn wildcard_grants_participation_not_approval_authority() {
+        let p = pats(&["*"]);
+        assert!(patterns_allow(&p, "planframe.propose"));
+        assert!(patterns_allow(&p, "planframe.amend"));
+        assert!(!patterns_allow(&p, "planframe.approve"));
+    }
+
+    // A prefix pattern also must not confer the approve authority.
+    #[test]
+    fn prefix_pattern_does_not_grant_approval_authority() {
+        let p = pats(&["planframe."]);
+        assert!(patterns_allow(&p, "planframe.propose"));
+        assert!(!patterns_allow(&p, "planframe.approve"));
+    }
+
+    // An authority is granted only by an exact `planframe.approve` right.
+    #[test]
+    fn explicit_grant_confers_approval_authority() {
+        assert!(patterns_allow(&pats(&["planframe.approve"]), "planframe.approve"));
+        assert!(patterns_allow(
+            &pats(&["planframe.propose", "planframe.approve"]),
+            "planframe.approve"
+        ));
+    }
+
+    #[test]
+    fn approve_is_the_authority_operation() {
+        assert!(is_authority_operation("planframe.approve"));
+        assert!(!is_authority_operation("planframe.propose"));
+        assert!(!is_authority_operation("planframe.amend"));
     }
 }
