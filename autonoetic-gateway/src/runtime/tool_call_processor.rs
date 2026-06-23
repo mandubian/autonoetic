@@ -696,6 +696,15 @@ fn infer_trace_success(
     let Some(parsed) = parsed_result else {
         return true;
     };
+    // Prefer the explicit command outcome when present. For exec tools
+    // (`artifact_exec`) `ok` now means "the tool ran to completion" while
+    // `command_succeeded` is the exit-0 signal — so the recorded trace
+    // `success` (and operator-facing digests/overviews derived from it) must
+    // reflect the command result, not merely that the sandbox executed.
+    // (RFC: unit-test-runner-divergence-loop)
+    if let Some(cs) = parsed.get("command_succeeded").and_then(|v| v.as_bool()) {
+        return cs;
+    }
     if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
         return ok;
     }

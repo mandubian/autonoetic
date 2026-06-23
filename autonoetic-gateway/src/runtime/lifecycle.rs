@@ -3157,12 +3157,25 @@ impl AgentExecutor {
             // ── Trajectory Monitor ──────────────────────────────────────
             // After guard updates, recompute health and emit divergence
             // events on level transitions.
-            {
+            'trajectory_monitor: {
                 use crate::runtime::trajectory_monitor::fingerprint_tool_call;
                 use crate::runtime::trajectory_health::{
                     build_event_payload, DIVERGENCE_CATEGORY,
                 };
                 use autonoetic_types::causal_chain::EntryStatus;
+
+                // Clarification is a single read-only Q&A turn (ask-agent
+                // spawns). It must not be subject to divergence escalation: a
+                // clarification child that loops on read-only inspection tools
+                // would otherwise be classified Critical and spawn another
+                // clarification, forming a clarify→diverge→clarify chain. The
+                // LoopGuard's hard limits (max_session_turns) still bound it.
+                // (RFC: unit-test-runner-divergence-loop, Change 3 / Option A)
+                if self.session_state
+                    == autonoetic_types::agent::SessionState::Clarification
+                {
+                    break 'trajectory_monitor;
+                }
 
                 let observations: Vec<ToolObservation> = results
                     .iter()
@@ -3171,15 +3184,15 @@ impl AgentExecutor {
                         let fp = fingerprint_tool_call(&tc.name, &tc.arguments);
                         let parsed = serde_json::from_str::<serde_json::Value>(result).ok();
                         let failed = parsed.as_ref().map_or(false, |v| {
-                            // Primary: ok:false
-                            if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
-                                return true;
-                            }
-                            // Secondary: non-zero exit code (sandbox tools)
-                            if let Some(code) = v.get("exit_code").and_then(|c| c.as_i64()) {
-                                return code != 0;
-                            }
-                            false
+                            // A tool failure is signalled by `ok: false`. We do
+                            // NOT treat a non-zero `exit_code` as a failure when
+                            // the tool reports `ok: true`: for sandbox/exec tools
+                            // a non-zero exit code is a DOMAIN result (e.g. a unit
+                            // test suite that failed), not a tool malfunction, and
+                            // must not drive divergence. Tools that genuinely
+                            // failed set `ok: false`. (RFC: unit-test-runner-
+                            // divergence-loop)
+                            v.get("ok").and_then(|o| o.as_bool()) == Some(false)
                         });
                         Some(ToolObservation {
                             fingerprint: fp,

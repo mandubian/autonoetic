@@ -18,9 +18,9 @@ metadata:
     llm_preset: coding
     sandbox_network: normal
     loop_guard:
-      max_loops_without_progress: 2
-      max_tool_failures: 2
-      max_session_turns: 4
+      max_loops_without_progress: 4
+      max_tool_failures: 4
+      max_session_turns: 8
     capabilities:
       - type: "SandboxFunctions"
         # Exact tool names (not prefix) to exclude artifact_build and artifact_prepare.

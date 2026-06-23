@@ -296,6 +296,14 @@ pub fn send_workflow_join_satisfied(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     write_signal(store, root_session_id, &signal_id, &signal)?;
+    // Ring the notifier so a parent blocked in `workflow.wait` wakes via its
+    // signal-driven path. The per-child notification is intentionally skipped
+    // when the join is satisfied in the same update (to avoid a double wake),
+    // so this is the only wake for the task that completes the join — without
+    // it the parent only resumes on its 5-second fallback poll.
+    if let Some(s) = store {
+        s.task_notify.notify_session(root_session_id);
+    }
     Ok(())
 }
 

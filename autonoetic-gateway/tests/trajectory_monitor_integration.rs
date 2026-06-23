@@ -20,7 +20,15 @@ fn cfg() -> TrajectoryConfig {
 }
 
 fn quiet_guard_state() -> LoopGuard {
-    LoopGuard::default()
+    // Pin the pressure denominators so this test's arithmetic holds independent
+    // of the production LoopGuard defaults (which are 10 / 8). The transitions
+    // below are expressed as ratios — `current_loops`/5 and a tool failure
+    // count/5 — so a warn signal fires at 4/5 = 0.80 and critical at 5/5 = 1.0.
+    LoopGuard {
+        max_loops_without_progress: 5,
+        max_tool_failures: 5,
+        ..LoopGuard::default()
+    }
 }
 
 #[test]

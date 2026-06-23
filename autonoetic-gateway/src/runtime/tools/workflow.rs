@@ -602,38 +602,110 @@ async fn signal_driven_wait(
             );
         }
 
+        // After a grace period, reconcile each still-`Running` task against its
+        // session transcript. Two mismatches mean the TaskRun status is stale
+        // and we must stop blocking rather than wait out `timeout_secs`:
+        //   1. No transcript at all → the child failed to start.
+        //   2. The transcript is terminal (`completed`/`failed`) while the
+        //      TaskRun still says `Running` → the crash window between
+        //      transcript finalization and the TaskRun status update
+        //      (RFC: unit-test-runner-divergence-loop §2.5, Change 5).
         if waited_secs >= STALL_GRACE_SECS as u64 && waited_secs != last_waited_report {
             last_waited_report = waited_secs;
             if let Some(gw_store) = store {
-                let mut stall_detected = false;
+                let mut mismatch_detected = false;
+                let mut mismatch_any_failed = false;
+                let mut mismatch_failed_count = 0usize;
+                let mut mismatch_failures: Vec<serde_json::Value> = Vec::new();
                 let mut enriched_status = tasks_status.clone();
                 for entry in enriched_status.iter_mut() {
-                    let status_str = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    let task_session = entry.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if status_str == "Running" && !task_session.is_empty() {
-                        let has_transcript = gw_store
-                            .find_transcript_by_session_id(task_session)
-                            .ok()
-                            .flatten()
-                            .is_some();
-                        if !has_transcript {
-                            stall_detected = true;
+                    let status_str = entry
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let task_session = entry
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if status_str != "Running" || task_session.is_empty() {
+                        continue;
+                    }
+                    let transcript = gw_store
+                        .find_transcript_by_session_id(&task_session)
+                        .ok()
+                        .flatten();
+                    match transcript {
+                        None => {
+                            mismatch_detected = true;
                             entry["stall_detected"] = serde_json::json!(true);
                             entry["stall_reason"] = serde_json::json!(
                                 "Task is Running but has no transcript after grace period — child session may have failed to start"
                             );
                         }
+                        Some(t) => {
+                            let tstatus = t.status.to_ascii_lowercase();
+                            let terminal_failed = matches!(
+                                tstatus.as_str(),
+                                "failed" | "aborted" | "cancelled" | "error"
+                            );
+                            let terminal_done = tstatus == "completed";
+                            if terminal_failed || terminal_done {
+                                mismatch_detected = true;
+                                // Uniform signal for callers: a reconciled
+                                // transcript/TaskRun mismatch is also a
+                                // "stop blocking and reconcile" condition, like
+                                // the no-transcript stall above.
+                                entry["stall_detected"] = serde_json::json!(true);
+                                entry["transcript_status"] = serde_json::json!(t.status);
+                                entry["transcript_status_mismatch"] = serde_json::json!(true);
+                                if terminal_failed {
+                                    // Keep `failure_summary` consistent with the
+                                    // returned `any_failed`/`failed_task_count`:
+                                    // surface this reconciled failure so the
+                                    // caller has something actionable.
+                                    mismatch_failures.push(serde_json::json!({
+                                        "task_id": entry.get("task_id").cloned().unwrap_or(serde_json::Value::Null),
+                                        "agent_id": entry.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
+                                        "result_summary": entry.get("result_summary").cloned().unwrap_or(serde_json::Value::Null),
+                                        "reason": "session transcript terminal (failed) while TaskRun still Running",
+                                    }));
+                                    entry["status"] = serde_json::json!("Failed");
+                                    entry["stall_reason"] = serde_json::json!(
+                                        "TaskRun is Running but the session transcript is terminal (failed) — resolving as Failed (crash window, RFC §2.5)"
+                                    );
+                                    mismatch_any_failed = true;
+                                    mismatch_failed_count += 1;
+                                } else {
+                                    entry["status"] = serde_json::json!("Succeeded");
+                                    entry["stall_reason"] = serde_json::json!(
+                                        "TaskRun is Running but the session transcript is completed — resolving as Succeeded (TaskRun update lag, RFC §2.5)"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
-                if stall_detected {
+                if mismatch_detected {
+                    // Recompute join completion from the reconciled view so a
+                    // lagging-but-completed task is reported done, not pending.
+                    let resolved_all_done = enriched_status.iter().all(|e| {
+                        matches!(
+                            e.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                            "Succeeded" | "Failed" | "Cancelled" | "Aborted"
+                        )
+                    });
+                    let mut reconciled_failures = failure_summary.clone();
+                    reconciled_failures.extend(mismatch_failures);
                     return (
                         enriched_status,
-                        false,
-                        any_failed,
+                        resolved_all_done,
+                        any_failed || mismatch_any_failed,
                         any_not_found,
                         waited_secs,
-                        failed_task_count,
-                        failure_summary,
+                        failed_task_count + mismatch_failed_count,
+                        reconciled_failures,
                     );
                 }
             }

@@ -159,4 +159,36 @@ mod tests {
         };
         assert!(!trace_indicates_pass(&fail));
     }
+
+    // Verdict-safety invariant for the artifact_exec `ok` decoupling
+    // (RFC: unit-test-runner-divergence-loop). After that change, a failing
+    // test suite produces `ok: true` so the loop guard treats the run as
+    // progress — which makes `infer_trace_success` record `success: 1`. The
+    // promotion verdict must STILL be `fail` because the suite exited non-zero:
+    // `pass` is gated on `exit_code == 0`, not on `success` alone.
+    #[test]
+    fn trace_with_nonzero_exit_is_fail_even_when_success_flag_set() {
+        let trace = ExecutionTraceRecord {
+            trace_id: "t1".into(),
+            event_id: None,
+            agent_id: "a".into(),
+            session_id: "s".into(),
+            turn_id: None,
+            timestamp: "now".into(),
+            tool_name: "artifact_exec".into(),
+            command: None,
+            exit_code: Some(1),
+            stdout: None,
+            stderr: None,
+            duration_ms: 1,
+            success: 1,
+            error_type: None,
+            error_summary: None,
+            approval_required: None,
+            approval_request_id: None,
+            arguments: None,
+            result: None,
+        };
+        assert!(!trace_indicates_pass(&trace));
+    }
 }
