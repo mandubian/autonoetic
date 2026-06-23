@@ -960,14 +960,16 @@ impl NativeTool for ArtifactExecTool {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         // `ok` reports TOOL-execution success: the sandbox ran the command to
-        // completion. A non-zero exit code is a DOMAIN result the caller must
-        // process (e.g. a unit-test suite that failed) — NOT a tool failure —
-        // so it must not be counted as a loop-guard failure or a trajectory
-        // divergence. A signal kill (no exit code) or a seccomp SIGSYS
-        // (exit 159 under the shell wrapper) is a genuine sandbox-level fault
-        // and stays `ok: false`. `command_succeeded` carries the exit-0 signal
-        // for consumers that need it. (RFC: unit-test-runner-divergence-loop)
-        let ok = matches!(exit_code, Some(code) if code != 159);
+        // completion. A non-zero exit code in the normal range is a DOMAIN
+        // result the caller must process (e.g. a unit-test suite that failed)
+        // — NOT a tool failure — so it must not be counted as a loop-guard
+        // failure or a trajectory divergence. A signal kill (no exit code) or
+        // any signal-derived exit code (128 + signal: SIGKILL/OOM 137,
+        // SIGTERM 143, SIGSYS/seccomp 159, …) is a genuine sandbox-level fault
+        // and stays `ok: false`, so repeated OOM/timeout kills are not mistaken
+        // for progress. `command_succeeded` carries the exit-0 signal for
+        // consumers that need it. (RFC: unit-test-runner-divergence-loop)
+        let ok = matches!(exit_code, Some(code) if (0..128).contains(&code));
 
         let mut body = serde_json::json!({
             "ok": ok,
@@ -1300,9 +1302,10 @@ fn execute_with_ticket(
 
     // See the finalizer above: `ok` reports tool-execution success (the sandbox
     // ran the command to completion), not the command's exit status. A non-zero
-    // exit code is a domain result; a signal kill / seccomp SIGSYS (exit 159)
-    // stays `ok: false`. (RFC: unit-test-runner-divergence-loop)
-    let ok = matches!(exit_code, Some(code) if code != 159);
+    // exit code in the normal range is a domain result; a signal kill (no exit
+    // code) or any signal-derived code (>= 128, e.g. SIGKILL/OOM 137,
+    // SIGSYS 159) stays `ok: false`. (RFC: unit-test-runner-divergence-loop)
+    let ok = matches!(exit_code, Some(code) if (0..128).contains(&code));
 
     let mut body = serde_json::json!({
         "ok": ok,

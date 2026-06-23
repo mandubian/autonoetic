@@ -165,11 +165,12 @@ exit code:
 // artifact_exec.rs — replace `let ok = output.status.success();`
 let exit_code = output.status.code();
 let command_succeeded = output.status.success();
-// `ok` = the tool worked: the sandbox ran the command to completion. A non-zero
-// exit code is a DOMAIN result the runner must process (tests failed), not a
-// tool failure. A signal kill (no exit code) or a seccomp SIGSYS (exit 159
-// under the shell wrapper) is a genuine sandbox-level fault and stays ok:false.
-let ok = matches!(exit_code, Some(code) if code != 159);
+// `ok` = the tool worked: the sandbox ran the command to completion with an
+// exit code in the normal range (0–127). A non-zero exit code here is a DOMAIN
+// result the runner must process (tests failed), not a tool failure. A signal
+// kill (no exit code) or any signal-derived code (>= 128: SIGKILL/OOM 137,
+// SIGTERM 143, SIGSYS/seccomp 159) is a sandbox-level fault and stays ok:false.
+let ok = matches!(exit_code, Some(code) if (0..128).contains(&code));
 let mut body = serde_json::json!({
     "ok": ok,
     "command_succeeded": command_succeeded,
@@ -365,19 +366,21 @@ headroom.
 | 5 | `workflow.wait` detects transcript/TaskRun mismatch | ✅ Done |
 
 **Change 1** — `artifact_exec.rs` (both finalizers) now sets
-`ok = matches!(exit_code, Some(code) if code != 159)` plus a new
+`ok = matches!(exit_code, Some(code) if (0..128).contains(&code))` plus a new
 `command_succeeded` field; the trajectory observation in `lifecycle.rs:3173`
-keys only on `ok`. Verdict safety is preserved by `trace_indicates_pass`'s
-`exit_code == 0` gate and locked in by
+keys only on `ok`. The gate accepts the normal exit range (0–127) as a domain
+result; a signal kill (no exit code) or any signal-derived code (≥ 128 —
+SIGKILL/OOM 137, SIGTERM 143, SIGSYS/seccomp 159) stays `ok: false`, so repeated
+OOM/timeout kills are not mistaken for progress. Verdict safety is preserved by
+`trace_indicates_pass`'s `exit_code == 0` gate and locked in by
 `promotion_evidence::tests::trace_with_nonzero_exit_is_fail_even_when_success_flag_set`.
 
-> **Known cosmetic side effect.** Because `infer_trace_success`
-> (`tool_call_processor.rs:699`) keys on `ok` first, a failing suite now records
-> the execution trace with `success: 1` (while `exit_code: 1`). Digest/overview
-> surfaces that render `success == 1` as a green "success"
-> (`post_session_digest.rs:252`, `session_overview.rs:292`) will show a failing
-> test run as succeeded. The promotion verdict is unaffected. A follow-up can
-> teach those surfaces to read `command_succeeded`/`exit_code` for display.
+**Observability:** `infer_trace_success` (`tool_call_processor.rs`) now prefers
+`command_succeeded` over `ok`, so the recorded `ExecutionTraceRecord.success`
+(and digest/overview surfaces derived from it) reflect the actual command
+outcome rather than merely that the sandbox executed. A failing suite records
+`success: 0, exit_code: 1`; the promotion verdict (gated on `exit_code == 0`)
+is unchanged.
 
 **Change 2** — `unit_test_runner.default/SKILL.md` loop guard raised to
 `max_loops_without_progress: 4`, `max_tool_failures: 4`, `max_session_turns: 8`.

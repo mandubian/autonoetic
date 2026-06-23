@@ -616,6 +616,7 @@ async fn signal_driven_wait(
                 let mut mismatch_detected = false;
                 let mut mismatch_any_failed = false;
                 let mut mismatch_failed_count = 0usize;
+                let mut mismatch_failures: Vec<serde_json::Value> = Vec::new();
                 let mut enriched_status = tasks_status.clone();
                 for entry in enriched_status.iter_mut() {
                     let status_str = entry
@@ -652,9 +653,24 @@ async fn signal_driven_wait(
                             let terminal_done = tstatus == "completed";
                             if terminal_failed || terminal_done {
                                 mismatch_detected = true;
+                                // Uniform signal for callers: a reconciled
+                                // transcript/TaskRun mismatch is also a
+                                // "stop blocking and reconcile" condition, like
+                                // the no-transcript stall above.
+                                entry["stall_detected"] = serde_json::json!(true);
                                 entry["transcript_status"] = serde_json::json!(t.status);
                                 entry["transcript_status_mismatch"] = serde_json::json!(true);
                                 if terminal_failed {
+                                    // Keep `failure_summary` consistent with the
+                                    // returned `any_failed`/`failed_task_count`:
+                                    // surface this reconciled failure so the
+                                    // caller has something actionable.
+                                    mismatch_failures.push(serde_json::json!({
+                                        "task_id": entry.get("task_id").cloned().unwrap_or(serde_json::Value::Null),
+                                        "agent_id": entry.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
+                                        "result_summary": entry.get("result_summary").cloned().unwrap_or(serde_json::Value::Null),
+                                        "reason": "session transcript terminal (failed) while TaskRun still Running",
+                                    }));
                                     entry["status"] = serde_json::json!("Failed");
                                     entry["stall_reason"] = serde_json::json!(
                                         "TaskRun is Running but the session transcript is terminal (failed) — resolving as Failed (crash window, RFC §2.5)"
@@ -680,6 +696,8 @@ async fn signal_driven_wait(
                             "Succeeded" | "Failed" | "Cancelled" | "Aborted"
                         )
                     });
+                    let mut reconciled_failures = failure_summary.clone();
+                    reconciled_failures.extend(mismatch_failures);
                     return (
                         enriched_status,
                         resolved_all_done,
@@ -687,7 +705,7 @@ async fn signal_driven_wait(
                         any_not_found,
                         waited_secs,
                         failed_task_count + mismatch_failed_count,
-                        failure_summary,
+                        reconciled_failures,
                     );
                 }
             }
