@@ -261,6 +261,19 @@ fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// A `plan_id` the reply claims (top-level or under `result`), if any non-empty
+/// one is present. Used to catch a fabricated reference, NOT to require plans —
+/// agents that never mention a `plan_id` (e.g. `planner.default`) are unaffected.
+fn reply_claimed_plan_id(assistant_reply: Option<&str>) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(assistant_reply?).ok()?;
+    v.get("plan_id")
+        .or_else(|| v.get("result").and_then(|r| r.get("plan_id")))
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// The violation for a spawn-less `delegated` self-report.
 ///
 /// An `AgentSpawn`-capable agent reporting `status: "delegated"` asserts it
@@ -276,6 +289,27 @@ fn delegated_without_spawn_violation() -> ValidationViolation {
         repair_hint: "To delegate you must actually call `agent_spawn` (async=true), then report \
 `delegated`. If you are not delegating, report a truthful status (`ok`, `partial`, \
 `clarification_needed`, or `failed`)."
+            .into(),
+    }
+}
+
+/// The violation for a reply that references a non-existent `plan_id`.
+///
+/// PlanFrames are optional (e.g. `planner.default` never uses them), so this is
+/// NOT a "you must propose a plan" check — it only fires when a reply explicitly
+/// names a `plan_id` that does not exist. A weak model may fabricate one (e.g.
+/// `plan-a1b2c3d4`) and report `awaiting_approval` without ever calling
+/// `planframe_propose`, leaving nothing to approve and stalling the flow.
+/// Deterministic truthfulness check against observable state; feeds the bounded
+/// repair loop.
+fn fabricated_plan_id_violation(plan_id: &str) -> ValidationViolation {
+    ValidationViolation {
+        rule: "unknown_plan_id".into(),
+        message: format!(
+            "reply references plan_id \"{plan_id}\" but no such PlanFrame exists"
+        ),
+        repair_hint: "Do not invent a plan_id. If you proposed a plan, use the exact plan_id \
+returned by `planframe_propose`; otherwise omit `plan_id` and report a truthful status."
             .into(),
     }
 }
@@ -952,6 +986,28 @@ impl GatewayExecutionService {
             };
             if spawned_child == Some(false) {
                 violations.push(delegated_without_spawn_violation());
+            }
+        }
+        // Fabricated-plan-id guard: PlanFrames are optional, so this does NOT
+        // require a plan — it only fires when a reply explicitly names a `plan_id`
+        // that doesn't exist (a weak model inventing one, e.g. `plan-a1b2c3d4`,
+        // and claiming `awaiting_approval` without calling `planframe_propose`).
+        // Gate the DB lookup on the cheap reply check; skip on lookup error to
+        // avoid a false positive.
+        if let Some(claimed) = reply_claimed_plan_id(result.assistant_reply.as_deref()) {
+            if let Some(store) = self.gateway_store().as_deref() {
+                match store.load_plan_frame(&claimed) {
+                    Ok(Some(_)) => {} // real plan → truthful
+                    Ok(None) => violations.push(fabricated_plan_id_violation(&claimed)),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "response_validation",
+                            plan_id = %claimed,
+                            error = %e,
+                            "plan-id guard: load failed; skipping guard"
+                        );
+                    }
+                }
             }
         }
         if violations.is_empty() {
@@ -1854,6 +1910,34 @@ mod tests {
         assert!(!reply_is_delegated(Some("just prose")));
         assert!(!reply_is_delegated(Some(r#"{"summary":"no status"}"#)));
         assert!(!reply_is_delegated(None));
+    }
+
+    #[test]
+    fn reply_claimed_plan_id_detection() {
+        // top-level plan_id
+        assert_eq!(
+            reply_claimed_plan_id(Some(r#"{"status":"awaiting_approval","plan_id":"plan-a1b2c3d4"}"#)).as_deref(),
+            Some("plan-a1b2c3d4")
+        );
+        // nested under result
+        assert_eq!(
+            reply_claimed_plan_id(Some(r#"{"status":"ok","result":{"plan_id":"plan-xyz"}}"#)).as_deref(),
+            Some("plan-xyz")
+        );
+        // no plan_id (e.g. planner.default) → None, guard never fires
+        assert_eq!(reply_claimed_plan_id(Some(r#"{"status":"ok","summary":"done"}"#)), None);
+        // empty / prose / none
+        assert_eq!(reply_claimed_plan_id(Some(r#"{"plan_id":"  "}"#)), None);
+        assert_eq!(reply_claimed_plan_id(Some("just prose")), None);
+        assert_eq!(reply_claimed_plan_id(None), None);
+    }
+
+    #[test]
+    fn fabricated_plan_id_violation_shape() {
+        let v = fabricated_plan_id_violation("plan-a1b2c3d4");
+        assert_eq!(v.rule, "unknown_plan_id");
+        assert!(v.message.contains("plan-a1b2c3d4"));
+        assert!(v.repair_hint.contains("planframe_propose"));
     }
 
     #[test]
