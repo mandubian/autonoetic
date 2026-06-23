@@ -433,7 +433,7 @@ impl SandboxRunner {
             }
         };
 
-        let mut command = Command::new(program);
+        let mut command = Command::new(&program);
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -442,7 +442,7 @@ impl SandboxRunner {
 
         apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
 
-        let child = command.spawn()?;
+        let child = spawn_driver_process(&mut command, &program)?;
         Ok(Self {
             process: child,
             driver,
@@ -522,7 +522,7 @@ impl SandboxRunner {
             }
         };
 
-        let mut command = Command::new(program);
+        let mut command = Command::new(&program);
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -531,7 +531,7 @@ impl SandboxRunner {
 
         apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
 
-        let child = command.spawn()?;
+        let child = spawn_driver_process(&mut command, &program)?;
         Ok(Self {
             process: child,
             driver,
@@ -667,6 +667,29 @@ struct SdkBridgeWiring {
     docker_volumes: Vec<(String, String, bool)>,
     /// Docker: env vars for `docker run -e` (the container won't inherit them).
     docker_env: Vec<(String, String)>,
+}
+
+/// Spawn the sandbox driver process, mapping a missing-driver `ENOENT` to a
+/// clear, terminal error instead of the bare `No such file or directory
+/// (os error 2)` that `Command::spawn` returns when the binary is absent.
+///
+/// The `resource:` tag makes it a recoverable structured tool error (the agent
+/// sees it and can stop cleanly), and the `[sandbox_driver_unavailable]` marker
+/// routes it through `classify_message` to a non-retryable
+/// `GateUnableToEvaluate` failure so it does not burn the divergence budget.
+/// See issue #600.
+fn spawn_driver_process(command: &mut Command, program: &str) -> anyhow::Result<Child> {
+    match command.spawn() {
+        Ok(child) => Ok(child),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "resource: sandbox driver '{program}' not found on PATH — this host is missing the \
+             sandbox backend this agent requires. Install it (bubblewrap provides 'bwrap', Docker \
+             provides 'docker') or run `autonoetic gateway preflight` to inspect host \
+             capabilities. [sandbox_driver_unavailable]"
+        ),
+        Err(e) => Err(anyhow::Error::new(e)
+            .context(format!("failed to spawn sandbox driver '{program}'"))),
+    }
 }
 
 fn wire_sdk_bridge(
@@ -1704,6 +1727,19 @@ mod tests {
     use super::*;
     use serde_json::json;
     use serial_test::serial;
+
+    #[test]
+    fn spawn_driver_process_explains_missing_driver() {
+        // A driver binary that cannot exist on PATH → clear, tagged terminal
+        // error instead of a bare "No such file or directory". (#600)
+        let mut cmd = Command::new("autonoetic-no-such-sandbox-driver-xyz");
+        let err = spawn_driver_process(&mut cmd, "autonoetic-no-such-sandbox-driver-xyz")
+            .expect_err("spawning a missing driver must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("not found on PATH"), "got: {msg}");
+        assert!(msg.contains("sandbox_driver_unavailable"), "got: {msg}");
+        assert!(msg.contains("preflight"), "got: {msg}");
+    }
 
     #[test]
     fn test_parse_driver_kind() {
