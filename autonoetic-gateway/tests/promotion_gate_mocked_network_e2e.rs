@@ -82,16 +82,14 @@ fn writer_manifest() -> AgentManifest {
     )
 }
 
-/// `unit_test_runner.default` — a promotion-verdict role on bubblewrap with
-/// CodeExecution but NO NetworkAccess (so the gate's network-off isolation, not
-/// an auto-approval, is what lets the suite run).
+/// `unit_test_runner.default` — promotion federation exec gate on bubblewrap with
+/// no `CodeExecution` / `Evaluation` caps (gateway grants `artifact_exec` by role).
 fn unit_test_runner_manifest() -> AgentManifest {
     base_manifest(
         "unit_test_runner.default",
         "Unit Test Runner",
-        vec![Capability::CodeExecution {
-            patterns: vec!["python3 ".to_string()],
-            commands: vec![],
+        vec![Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
         }],
     )
 }

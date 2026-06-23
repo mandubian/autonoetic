@@ -335,6 +335,128 @@ fn test_artifact_exec_tool_registered_and_gated() {
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
         !names.contains(&"artifact_exec"),
-        "artifact.exec should NOT be available without CodeExecution"
+        "artifact_exec should NOT be available without CodeExecution, Evaluation, or promotion exec gate role"
+    );
+}
+
+fn unit_test_runner_gate_manifest() -> AgentManifest {
+    AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "acme.custom_unit_test_runner".to_string(),
+            name: "Custom Unit Test Runner".to_string(),
+            description: "Federation unit-test gate".to_string(),
+        },
+        capabilities: vec![
+            Capability::SandboxFunctions {
+                allowed: vec![
+                    "artifact_inspect".to_string(),
+                    "artifact_exec".to_string(),
+                    "promotion_".to_string(),
+                ],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            },
+        ],
+        llm_overrides: None,
+        llm_preset: None,
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+        open_web: false,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    }
+}
+
+#[test]
+fn test_artifact_exec_available_for_promotion_gate_runner_without_evaluation() {
+    let registry = default_registry();
+    let manifest = unit_test_runner_gate_manifest();
+    let defs = registry.available_definitions(&manifest);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"artifact_exec"),
+        "artifact_exec must be available for promotion exec gate declared in SandboxFunctions"
+    );
+    assert!(
+        !names.contains(&"eval_suite_publish"),
+        "promotion gate runner must not gain eval-suite tools via Evaluation cap"
+    );
+    assert!(
+        !names.contains(&"sandbox_exec"),
+        "promotion gate runner must not gain sandbox_exec without CodeExecution"
+    );
+}
+
+#[test]
+fn test_artifact_exec_not_available_for_static_evaluator() {
+    let registry = default_registry();
+    let manifest = AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "static_evaluator.default".to_string(),
+            name: "Static Evaluator".to_string(),
+            description: "Static federation gate".to_string(),
+        },
+        capabilities: vec![
+            Capability::SandboxFunctions {
+                allowed: vec!["promotion_".to_string()],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            },
+        ],
+        llm_overrides: None,
+        llm_preset: None,
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+        agentskills_import: None,
+        compression: None,
+        open_web: false,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    };
+    let defs = registry.available_definitions(&manifest);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        !names.contains(&"artifact_exec"),
+        "static_evaluator must not gain artifact_exec via promotion verdict list"
     );
 }

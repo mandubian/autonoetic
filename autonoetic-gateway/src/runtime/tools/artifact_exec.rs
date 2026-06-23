@@ -1,5 +1,5 @@
 use crate::llm::ToolDefinition;
-use crate::policy::PolicyEngine;
+use crate::policy::{PolicyDecision, PolicyEngine, SecurityAnalyzer};
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
@@ -9,7 +9,10 @@ use crate::runtime::remote_access::{
     NetworkCoverage, RemoteAccessAnalyzer,
 };
 use crate::runtime::tools::{
-    build_approval_details, load_session_content_mounts, promotion::manifest_may_record_promotion_verdicts,
+    build_approval_details, load_session_content_mounts,
+    promotion::{
+        manifest_may_exec_artifact_in_promotion_gate, manifest_may_record_promotion_verdicts,
+    },
     CredentialEnvMapping, NativeTool, NativeToolRegistry,
 };
 use crate::sandbox::{SandboxDriverKind, SandboxMount, SandboxRunner};
@@ -151,7 +154,7 @@ impl NativeTool for ArtifactExecTool {
         manifest.capabilities.iter().any(|cap| {
             matches!(cap, Capability::CodeExecution { .. })
                 || matches!(cap, Capability::Evaluation { .. })
-        })
+        }) || manifest_may_exec_artifact_in_promotion_gate(manifest)
     }
 
     fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
@@ -365,7 +368,11 @@ impl NativeTool for ArtifactExecTool {
         }
 
         let command = build_command(entrypoint, &args.args);
-        let decision = policy.can_exec_shell_detailed(&command);
+        let decision = if manifest_may_exec_artifact_in_promotion_gate(manifest) {
+            promotion_gate_artifact_command_decision(&command)
+        } else {
+            policy.can_exec_shell_detailed(&command)
+        };
         if !decision.is_allowed() {
             return Err(autonoetic_types::tool_error::tagged::Tagged::permission_with_rules(
                 anyhow::anyhow!(decision.explain_shell_denial("Artifact execution")),
@@ -1005,6 +1012,18 @@ impl NativeTool for ArtifactExecTool {
 /// wasm WASI-no-sockets → yes; microvm → no, the operator firecracker config
 /// controls the NIC, so its promotion runs keep the deterministic-without-network
 /// pre-deny, P-3.10).
+/// P-3.8 security analysis for promotion-gate `artifact_exec` runs. Skips
+/// CodeExecution pattern matching (P-1.9) because the command is synthesized
+/// from a gateway-controlled entrypoint + args, not operator-supplied shell.
+fn promotion_gate_artifact_command_decision(command: &str) -> PolicyDecision {
+    let security = SecurityAnalyzer::analyze_command(command);
+    if !security.is_safe {
+        PolicyDecision::deny_with_analysis("P-3.8", security)
+    } else {
+        PolicyDecision::allow("P-3.10")
+    }
+}
+
 pub fn promotion_run_is_network_isolated(manifest: &AgentManifest) -> bool {
     manifest_may_record_promotion_verdicts(manifest)
         && SandboxDriverKind::parse(&manifest.runtime.sandbox)
@@ -1320,7 +1339,7 @@ fn copy_fixture_dir(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Res
 mod tests {
     use super::{
         artifact_exec_approval_operator_reason, artifact_exec_approval_summary_line,
-        ArtifactExecArgs,
+        promotion_gate_artifact_command_decision, ArtifactExecArgs,
     };
     use crate::runtime::remote_access::DetectedPattern;
 
@@ -1410,5 +1429,20 @@ mod tests {
             super::copy_fixture_dir(&std::path::Path::new("/nonexistent"), dst.path()).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn promotion_gate_artifact_command_allows_synthesized_test_runner() {
+        let decision =
+            promotion_gate_artifact_command_decision("python3 /tmp/tests/test_fibonacci.py -v");
+        assert!(decision.is_allowed(), "{decision:?}");
+        assert!(decision.enforced_rules.contains(&"P-3.10"));
+    }
+
+    #[test]
+    fn promotion_gate_artifact_command_denies_destructive_shell() {
+        let decision = promotion_gate_artifact_command_decision("rm -rf /");
+        assert!(!decision.is_allowed(), "{decision:?}");
+        assert!(decision.enforced_rules.contains(&"P-3.8"));
     }
 }

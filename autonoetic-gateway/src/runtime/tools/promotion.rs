@@ -4,6 +4,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::promotion_store::PromotionStore;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::ToolError;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::promotion::{
@@ -30,6 +31,42 @@ pub fn manifest_may_record_promotion_verdicts(manifest: &AgentManifest) -> bool 
             | "static_evaluator.default"
             | "unit_test_runner.default"
     )
+}
+
+/// Manifest explicitly lists a native tool id under [`Capability::SandboxFunctions`]
+/// (same prefix rules as [`PolicyEngine::can_invoke_tool`]).
+pub fn manifest_sandbox_allows_tool(manifest: &AgentManifest, tool_name: &str) -> bool {
+    manifest.capabilities.iter().any(|cap| {
+        if let Capability::SandboxFunctions { allowed } = cap {
+            allowed.iter().any(|pattern| {
+                let prefix = pattern.trim_end_matches('*');
+                tool_name.starts_with(prefix)
+            })
+        } else {
+            false
+        }
+    })
+}
+
+fn manifest_has_broad_artifact_exec_cap(manifest: &AgentManifest) -> bool {
+    manifest.capabilities.iter().any(|cap| {
+        matches!(
+            cap,
+            Capability::CodeExecution { .. } | Capability::Evaluation { .. }
+        )
+    })
+}
+
+/// Federation exec gates may run artifact entrypoints via [`artifact_exec`] without
+/// declaring broad `CodeExecution` or `Evaluation` capabilities.
+///
+/// Declared in SKILL frontmatter: list `artifact_exec` and `promotion_` under
+/// `SandboxFunctions.allowed`. Static reviewers keep `promotion_` only (no exec).
+/// Agents with `CodeExecution` / `Evaluation` use the standard exec gates instead.
+pub fn manifest_may_exec_artifact_in_promotion_gate(manifest: &AgentManifest) -> bool {
+    !manifest_has_broad_artifact_exec_cap(manifest)
+        && manifest_sandbox_allows_tool(manifest, "artifact_exec")
+        && manifest_sandbox_allows_tool(manifest, "promotion_record")
 }
 
 fn is_promotion_agent(manifest: &AgentManifest) -> bool {
@@ -638,5 +675,104 @@ mod guidance_tests {
 
         // Absent when promotion_record isn't in the advertised tool set.
         assert_eq!(compose_guidance(&blocks, &GuidanceContext::default()), "");
+    }
+}
+
+#[cfg(test)]
+mod promotion_gate_exec_tests {
+    use super::*;
+    use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
+
+    fn base_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: agent_id.to_string(),
+                name: agent_id.to_string(),
+                description: "test".to_string(),
+            },
+            capabilities,
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        }
+    }
+
+    fn promotion_exec_sandbox() -> Capability {
+        Capability::SandboxFunctions {
+            allowed: vec![
+                "artifact_inspect".to_string(),
+                "artifact_exec".to_string(),
+                "promotion_".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn promotion_gate_exec_any_agent_id_with_declared_tools() {
+        let manifest = base_manifest(
+            "acme.custom_unit_test_runner",
+            vec![
+                promotion_exec_sandbox(),
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+            ],
+        );
+        assert!(manifest_may_exec_artifact_in_promotion_gate(&manifest));
+    }
+
+    #[test]
+    fn static_evaluator_promotion_only_not_exec_gate() {
+        let manifest = base_manifest(
+            "static_evaluator.default",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+            ],
+        );
+        assert!(!manifest_may_exec_artifact_in_promotion_gate(&manifest));
+    }
+
+    #[test]
+    fn code_execution_agent_uses_standard_exec_path() {
+        let manifest = base_manifest(
+            "sealed_evaluator.default",
+            vec![
+                promotion_exec_sandbox(),
+                Capability::CodeExecution {
+                    patterns: vec!["python3 ".to_string()],
+                    commands: vec![],
+                },
+            ],
+        );
+        assert!(!manifest_may_exec_artifact_in_promotion_gate(&manifest));
     }
 }
