@@ -103,6 +103,21 @@ impl WorkflowFailureMetadata {
         }
     }
 
+    /// The host is missing the sandbox driver the agent requires (e.g. `bwrap`
+    /// not on PATH). A node-level infrastructure gap, not a transient blip:
+    /// retrying the same exec can never succeed, so mark it non-retryable and
+    /// surface it as "unable to evaluate" rather than a hard failure. (#600)
+    fn sandbox_unavailable() -> Self {
+        Self {
+            failure_class: Some(FailureClass::GateUnableToEvaluate),
+            retry_advice: Some(RetryAdvice::DoNotRetry),
+            retryable: Some(false),
+            requires_external_event: Some(false),
+            requires_human: Some(true),
+            side_effect_state: Some(SideEffectState::NoSideEffect),
+        }
+    }
+
     fn unknown_failure() -> Self {
         Self {
             failure_class: Some(FailureClass::Unknown),
@@ -191,6 +206,14 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
     }
     if lower.contains("approval_rejected") || lower.contains("denied by policy") {
         return WorkflowFailureMetadata::policy_denied();
+    }
+    // A missing sandbox driver (e.g. `bwrap` not on PATH) is terminal for this
+    // node: retrying the same exec can never succeed. Match before the generic
+    // Resource→transient_infra fallthrough so it is not classified retryable. (#600)
+    if lower.contains("sandbox_driver_unavailable")
+        || (lower.contains("sandbox driver") && lower.contains("not found on path"))
+    {
+        return WorkflowFailureMetadata::sandbox_unavailable();
     }
     if lower.contains("timed out") || lower.contains("timeout") {
         return WorkflowFailureMetadata::timeout();
@@ -403,5 +426,25 @@ mod tests {
         assert_eq!(err.failure_class, Some(FailureClass::InstallConflict));
         assert_eq!(err.retry_advice, Some(RetryAdvice::DoNotRetry));
         assert_eq!(err.retryable, Some(false));
+    }
+
+    // A missing sandbox driver must be terminal & unable-to-evaluate, not the
+    // generic retryable Resource→transient_infra classification. (#600)
+    #[test]
+    fn sandbox_driver_unavailable_is_terminal_unable_to_evaluate() {
+        // The marker the SandboxRunner stamps on a spawn ENOENT.
+        let msg = "sandbox driver 'bwrap' not found on PATH — ... [sandbox_driver_unavailable]";
+        let err = decorate_tool_error(ToolError::resource(msg, None::<String>));
+        assert_eq!(err.failure_class, Some(FailureClass::GateUnableToEvaluate));
+        assert_eq!(err.retry_advice, Some(RetryAdvice::DoNotRetry));
+        assert_eq!(err.retryable, Some(false));
+    }
+
+    #[test]
+    fn plain_resource_error_stays_retryable() {
+        // Guard: the sandbox rule must not swallow ordinary resource errors.
+        let err = decorate_tool_error(ToolError::resource("rate limited", None::<String>));
+        assert_eq!(err.failure_class, Some(FailureClass::TransientInfra));
+        assert_eq!(err.retryable, Some(true));
     }
 }
