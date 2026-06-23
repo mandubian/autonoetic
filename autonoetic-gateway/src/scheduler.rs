@@ -863,6 +863,18 @@ pub async fn reap_orphaned_sessions(
                     &task.task_id,
                 )
                 .ok();
+
+                // Wake a parent blocked in `workflow.wait`. The reaper writes
+                // the Cancelled status directly to the TaskRun, bypassing the
+                // normal completion path that would notify the waiter — without
+                // this signal the parent only discovers the cancellation via its
+                // 5-second fallback poll or its own `timeout_secs` deadline.
+                // `workflow.wait` registers its notifier under the waiting
+                // session's id, which is the child task's `parent_session_id`.
+                // (RFC: unit-test-runner-divergence-loop, Change 4)
+                if !task.parent_session_id.is_empty() {
+                    store.task_notify.notify_session(&task.parent_session_id);
+                }
             }
         }
 
