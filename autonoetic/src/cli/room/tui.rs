@@ -1757,6 +1757,14 @@ pub fn run(
     let _restore = TerminalRestore;
     execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    // Force a full clear of the (alternate) screen before the first paint. On
+    // terminals where switching to the alternate buffer is a no-op — notably
+    // GNU `screen` with `altscreen off` (its default) — `EnterAlternateScreen`
+    // does not present a fresh, cleared surface, so ratatui's first diff-based
+    // draw paints over whatever was already on the terminal. An explicit clear
+    // makes the first frame deterministic there and is a harmless no-op on
+    // terminals that did switch to a blank alternate buffer.
+    terminal.clear()?;
 
     let mut entries: Vec<SessionTimelineEntry> = Vec::new();
     let mut cursor: Option<String> = None;
