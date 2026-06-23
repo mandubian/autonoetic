@@ -265,7 +265,11 @@ fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
 /// one is present. Used to catch a fabricated reference, NOT to require plans —
 /// agents that never mention a `plan_id` (e.g. `planner.default`) are unaffected.
 fn reply_claimed_plan_id(assistant_reply: Option<&str>) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(assistant_reply?).ok()?;
+    // Strip markdown code fences first — models often wrap their JSON reply in
+    // ```json … ``` (handled elsewhere in this module the same way), and a fenced
+    // reply must not slip the fabricated-plan_id guard.
+    let stripped = strip_markdown_code_fences(assistant_reply?);
+    let v: serde_json::Value = serde_json::from_str(stripped.trim()).ok()?;
     v.get("plan_id")
         .or_else(|| v.get("result").and_then(|r| r.get("plan_id")))
         .and_then(|p| p.as_str())
@@ -1923,6 +1927,11 @@ mod tests {
         assert_eq!(
             reply_claimed_plan_id(Some(r#"{"status":"ok","result":{"plan_id":"plan-xyz"}}"#)).as_deref(),
             Some("plan-xyz")
+        );
+        // JSON wrapped in a markdown code fence is still detected
+        assert_eq!(
+            reply_claimed_plan_id(Some("```json\n{\"status\":\"awaiting_approval\",\"plan_id\":\"plan-fenced\"}\n```")).as_deref(),
+            Some("plan-fenced")
         );
         // no plan_id (e.g. planner.default) → None, guard never fires
         assert_eq!(reply_claimed_plan_id(Some(r#"{"status":"ok","summary":"done"}"#)), None);
