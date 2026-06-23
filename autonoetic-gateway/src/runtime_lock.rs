@@ -24,6 +24,11 @@ pub struct RuntimeLockDrift {
 pub enum DriftSkippedReason {
     LockAbsent,
     LockMalformed(String),
+    /// The lock parses but its `gateway.sha256` is empty — it has not been
+    /// pinned to a build yet (e.g. a freshly generated wrapper whose lock is
+    /// "computed on first gateway load"). There is nothing to compare against,
+    /// so drift is not enforced.
+    LockUnpinned,
 }
 
 /// Result of the drift check: either clean, drift detected, or enforcement skipped.
@@ -56,6 +61,14 @@ pub fn check_runtime_lock_drift(agent_dir: &Path) -> DriftCheckResult {
             return DriftCheckResult::Skipped(DriftSkippedReason::LockMalformed(e.to_string()));
         }
     };
+
+    // An empty locked build SHA means the lock was generated but never pinned
+    // (the generator writes `sha256: ""` with "computed on first gateway load").
+    // There is no recorded build to compare against, so treat it as unpinned
+    // rather than reporting spurious drift against the current build.
+    if lock.gateway.sha256.trim().is_empty() {
+        return DriftCheckResult::Skipped(DriftSkippedReason::LockUnpinned);
+    }
 
     let current_build_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
 
@@ -91,4 +104,45 @@ pub fn check_runtime_lock_drift(agent_dir: &Path) -> DriftCheckResult {
     }
 
     DriftCheckResult::Clean
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mirrors the runtime.lock that generate_wrapper.py emits for a freshly
+    // generated wrapper: a parseable lock whose build sha256 is intentionally
+    // empty ("computed on first gateway load"). It must be treated as unpinned,
+    // not as drift against the current build (regression: wrapper execution
+    // failed with "runtime lock drift detected (build_sha256): locked=").
+    const UNPINNED_LOCK: &str = "# Generated runtime.lock - sha256 is computed on first gateway load.\n\
+gateway:\n\
+\x20 artifact: \"marketplace://gateway/autonoetic-gateway\"\n\
+\x20 version: \"0.1.0\"\n\
+\x20 sha256: \"\"\n\
+sdk:\n\
+\x20 version: \"0.1.0\"\n\
+sandbox:\n\
+\x20 backend: \"bubblewrap\"\n\
+dependencies: []\n\
+artifacts: []\n";
+
+    #[test]
+    fn unpinned_lock_is_skipped_not_drift() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("runtime.lock"), UNPINNED_LOCK).expect("write lock");
+        match check_runtime_lock_drift(dir.path()) {
+            DriftCheckResult::Skipped(DriftSkippedReason::LockUnpinned) => {}
+            other => panic!("expected Skipped(LockUnpinned), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absent_lock_is_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match check_runtime_lock_drift(dir.path()) {
+            DriftCheckResult::Skipped(DriftSkippedReason::LockAbsent) => {}
+            other => panic!("expected Skipped(LockAbsent), got {other:?}"),
+        }
+    }
 }
