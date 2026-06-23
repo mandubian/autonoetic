@@ -48,7 +48,7 @@ every matching agent) — not duplicated prose — so they are kept as-is.
 | Artifact | `foundation_artifact.md` | has `WriteAccess` |
 | Script | `foundation_script.md` | execution mode is `Script` |
 | Digest | `foundation_digest.md` | has `WriteAccess` with a `digest`/`*` scope |
-| SDK | `foundation_sdk.md` | has `CodeExecution` |
+| SDK | `foundation_sdk.md` | `CodeExecution`, **`AgentSpawn`**, or role **`architect`** / **`static_evaluator`** |
 
 Gating is locked by `test_compose_foundation_*` tests in `lifecycle.rs`.
 

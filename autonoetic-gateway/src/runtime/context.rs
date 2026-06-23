@@ -49,6 +49,13 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
         )
     });
 
+    // SDK reference: writers (CodeExecution), delegators (AgentSpawn), and
+    // federation roles that statically review script code (architect, static_evaluator).
+    let role = role_from_manifest(manifest);
+    let needs_sdk_reference = has_code_execution
+        || has_workflow_caps
+        || matches!(role, Some("architect") | Some("static_evaluator"));
+
     if has_workflow_caps || !is_script_mode {
         parts.push(FOUNDATION_WORKFLOW.trim());
     }
@@ -67,7 +74,7 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
         parts.push(FOUNDATION_DIGEST.trim());
     }
 
-    if has_code_execution {
+    if needs_sdk_reference {
         parts.push(FOUNDATION_SDK.trim());
     }
 

@@ -1,6 +1,8 @@
 # SDK Reference for Sandboxed Code
 
-When your code runs inside `sandbox.exec`, it executes in a Python environment with the `autonoetic_sdk` package available.
+Included in your foundation when you **execute** script/sandbox code (`CodeExecution`), **delegate** builds (`AgentSpawn`), or **statically review** script artifacts (`architect`, `static_evaluator` roles). Single source of truth for API names — do not invent methods outside this reference.
+
+When your code runs inside **`sandbox.exec`** or as a **`execution_mode: script`** agent entrypoint, it executes in a Python environment with the `autonoetic_sdk` package available. Always call **`sdk = autonoetic_sdk.init()`** first — there is no module-level `autonoetic_sdk.memory`.
 
 ## Import
 

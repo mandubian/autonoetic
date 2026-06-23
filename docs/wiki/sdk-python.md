@@ -1,6 +1,6 @@
-# Python SDK Reference (sandbox.exec)
+# Python SDK Reference (sandbox.exec and script-mode agents)
 
-When your code runs inside `sandbox.exec`, it executes in a Python environment with the `autonoetic_sdk` package available.
+When your code runs inside **`sandbox.exec`** or as a **`execution_mode: script`** agent entrypoint, it executes in a Python environment with the `autonoetic_sdk` package available. Always call **`sdk = autonoetic_sdk.init()`** first.
 
 ## Import
 

@@ -3674,6 +3674,54 @@ mod tests {
     }
 
     #[test]
+    fn test_compose_foundation_includes_sdk_for_code_execution() {
+        let manifest = manifest_with_capabilities(vec![Capability::CodeExecution {
+            patterns: vec!["python3 ".to_string()],
+            commands: vec![],
+        }]);
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# SDK Reference"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_sdk_for_agent_spawn() {
+        let manifest = manifest_with_capabilities(vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 0,
+        }]);
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# SDK Reference"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_sdk_for_architect_role() {
+        let mut manifest = manifest_with_capabilities(vec![Capability::WriteAccess {
+            scopes: vec!["skills/*".to_string()],
+        }]);
+        manifest.agent.id = "architect.default".to_string();
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# SDK Reference"));
+    }
+
+    #[test]
+    fn test_compose_foundation_includes_sdk_for_static_evaluator_role() {
+        let mut manifest = manifest_with_capabilities(vec![]);
+        manifest.agent.id = "static_evaluator.default".to_string();
+        let foundation = compose_foundation(&manifest);
+        assert!(foundation.contains("# SDK Reference"));
+    }
+
+    #[test]
+    fn test_compose_foundation_excludes_sdk_for_minimal_reasoning_agent() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let mut manifest = manifest;
+        manifest.execution_mode = autonoetic_types::agent::ExecutionMode::Reasoning;
+        manifest.agent.id = "unit_test_runner.default".to_string();
+        let foundation = compose_foundation(&manifest);
+        assert!(!foundation.contains("# SDK Reference"));
+    }
+
+    #[test]
     fn test_execute_scheduled_write_file_action() {
         let manifest = manifest_with_capabilities(vec![Capability::WriteAccess {
             scopes: vec!["skills/*".to_string()],

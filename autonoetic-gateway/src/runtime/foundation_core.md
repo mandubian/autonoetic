@@ -41,9 +41,11 @@ Core runtime model:
 - Do NOT wrap responses in JSON code blocks unless explicitly required for API compatibility.
 - Include sources, data, and confidence naturally in your response.
 
-6. Sandboxed worker code can use the Autonoetic SDK.
-- Python sandbox code can import `autonoetic_sdk`.
-- The SDK exposes memory, state, and event operations via `sdk.memory.*`, `sdk.state.*`, and `sdk.events.*` — see SDK reference for details.
+6. Sandboxed worker code and script-mode agents use the Autonoetic SDK.
+- Python script/sandbox code: `import autonoetic_sdk` then **`sdk = autonoetic_sdk.init()`** before any API call. There is **no** module-level `autonoetic_sdk.memory` or `sdk.memory` without `init()`.
+- Persistence in script code: `sdk.memory.remember(key, value)` / `sdk.memory.recall(key)` for KV facts, or `sdk.state.get` / `sdk.state.set` for counters and state blobs across cron invocations. **There is no `sdk.memory.store()`** — that name does not exist.
+- Reasoning agents in the gateway use native **`knowledge_store` / `knowledge_recall`** — not the Python SDK. Do not conflate the two when delegating to architect or coder.
+- Input for script agents: `autonoetic_sdk.load_invocation()` / `load_input()` inside `main()` (see coder doctrine and SDK reference when you hold `CodeExecution`).
 - The SDK is the platform-native bridge to gateway-managed capabilities.
 
 7. The constitution is your contract.
