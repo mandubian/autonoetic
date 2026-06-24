@@ -908,7 +908,18 @@ impl NativeTool for WebSearchTool {
                     session_id: _session_id,
                     run_context: _run_context,
                     config: Some(cfg),
-                    reason: reason.clone(),
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!("web.search \"{}\" via {}", query, engine_host),
+                        format!(
+                            "{} is not in an approved network grant (NetworkAccess policy)",
+                            engine_host
+                        ),
+                        format!(
+                            "outbound search query to {}; read-only, reversible",
+                            engine_host
+                        ),
+                        "Approve if the search target and query are expected for this agent's task; reject if the host is unexpected",
+                    ),
                     summary: format!("web.search {}", engine_host),
                     approval_ref: None,
                     pre_validated: false,
@@ -1304,7 +1315,15 @@ fn gate_web_fetch_host(
         session_id,
         run_context,
         config: Some(cfg),
-        reason: reason.to_string(),
+        context: crate::runtime::human_gate::DecisionContext::tier2(
+            format!("web.fetch {}", request_url),
+            format!(
+                "{} is not in an approved network grant (NetworkAccess policy)",
+                host
+            ),
+            format!("fetches remote content from {}; read-only", host),
+            "Approve if the host and URL are expected for this agent's task; reject if the host is unexpected",
+        ),
         summary: format!("web.fetch {}", host),
         approval_ref: None,
         pre_validated: false,
@@ -1922,7 +1941,22 @@ impl NativeTool for WebCallTool {
                     session_id: _session_id,
                     run_context: _run_context,
                     config: Some(cfg),
-                    reason: reason.clone(),
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!(
+                            "web.call {} {}",
+                            args.method.as_deref().unwrap_or("GET").trim().to_uppercase(),
+                            host
+                        ),
+                        format!(
+                            "{} is not in an approved network grant (NetworkAccess policy)",
+                            host
+                        ),
+                        format!(
+                            "HTTP call to {} with the agent-supplied payload; MAY have side effects",
+                            host
+                        ),
+                        "Approve if the host, method, and payload are expected for this agent's task; reject if the host is unexpected or the call mutates external state unexpectedly",
+                    ),
                     summary: format!("web.call {}", host),
                     approval_ref: None,
                     pre_validated: false,

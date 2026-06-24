@@ -558,7 +558,34 @@ impl NativeTool for ArtifactExecTool {
                             session_id,
                             run_context,
                             config: Some(cfg),
-                            reason: reason.clone(),
+                            context: crate::runtime::human_gate::DecisionContext::tier2(
+                                format!(
+                                    "artifact.exec {} ({}): {}",
+                                    args.artifact_ref, entrypoint, command
+                                ),
+                                if concrete_targets.is_empty() {
+                                    "executing a stored artifact requires operator approval".to_string()
+                                } else {
+                                    format!(
+                                        "artifact execution reaching host(s) [{}] not covered by an approved network grant",
+                                        concrete_targets.join(", ")
+                                    )
+                                },
+                                if concrete_targets.is_empty() {
+                                    format!(
+                                        "runs artifact {} in the sandbox; effects depend on the entrypoint",
+                                        artifact_id
+                                    )
+                                } else {
+                                    format!(
+                                        "runs artifact {} in the sandbox with network access to [{}]; effects depend on the entrypoint",
+                                        artifact_id,
+                                        concrete_targets.join(", ")
+                                    )
+                                },
+                                "Approve if the artifact, entrypoint, and any network targets are expected for this agent's task; reject or escalate if any are unexpected",
+                            )
+                            .with_analysis(reason.clone()),
                             summary: summary.clone(),
                             approval_ref: None,
                             pre_validated,
