@@ -566,6 +566,7 @@ pub fn apply_network_isolation_failure_to_result(
     );
     if let Some(obj) = body.as_object_mut() {
         obj.insert("ok".to_string(), serde_json::json!(false));
+        obj.insert("command_succeeded".to_string(), serde_json::json!(false));
         obj.insert(
             "error_type".to_string(),
             serde_json::json!("network_isolated"),

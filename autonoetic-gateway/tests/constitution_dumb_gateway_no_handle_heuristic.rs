@@ -88,6 +88,7 @@ fn run_sandbox_exec(command: &str) -> anyhow::Result<serde_json::Value> {
 }
 
 fn assert_natural_exec_failure(body: &serde_json::Value, expected_path_fragment: &str) {
+    assert_eq!(body["ok"], true);
     assert_eq!(body["command_succeeded"], false);
     assert_ne!(
         body["exit_code"].as_i64(),
