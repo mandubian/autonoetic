@@ -815,6 +815,10 @@ pub async fn reap_orphaned_sessions(
                 Ok(t) => t,
                 Err(_) => continue,
             };
+            // Task ids we mark Cancelled below; their live Tokio handles are
+            // aborted after the loop (C2/#618 — close the zombie window where
+            // the DB said Cancelled but the future kept running).
+            let mut cancelled_task_ids: Vec<String> = Vec::new();
             for mut task in tasks {
                 if task.session_id != child_session_id {
                     continue;
@@ -834,7 +838,7 @@ pub async fn reap_orphaned_sessions(
                 task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
                 task.updated_at = now_rfc.clone();
                 task.result_summary = Some(
-                    "Cancelled by orphan-child reaper (R+12): parent session terminated"
+                    "child_abandoned: parent session terminated; live handle aborted (R+12)"
                         .to_string(),
                 );
                 let _ = crate::scheduler::workflow_store::save_task_run(
@@ -842,6 +846,7 @@ pub async fn reap_orphaned_sessions(
                     Some(store.as_ref()),
                     &task,
                 );
+                cancelled_task_ids.push(task.task_id.clone());
                 if was_awaiting_approval {
                     let _ = crate::scheduler::approval::cancel_pending_approval_for_workflow_task(
                         &config,
@@ -874,6 +879,25 @@ pub async fn reap_orphaned_sessions(
                 // (RFC: unit-test-runner-divergence-loop, Change 4)
                 if !task.parent_session_id.is_empty() {
                     store.task_notify.notify_session(&task.parent_session_id);
+                }
+            }
+
+            // Abort the live Tokio handles for the tasks we just cancelled in
+            // the DB. Without this the future keeps running (the zombie window).
+            // Scoped to this child's tasks in this workflow — never the whole
+            // root, so live siblings under the same root are untouched.
+            if !cancelled_task_ids.is_empty() {
+                let aborted = execution
+                    .active_executions()
+                    .abort_workflow_tasks(&wf_id, &cancelled_task_ids);
+                if aborted > 0 {
+                    tracing::info!(
+                        target: "orphan_reaper",
+                        child_session_id = %child_session_id,
+                        wf_id = %wf_id,
+                        aborted,
+                        "R+12: aborted in-flight task handles for abandoned child"
+                    );
                 }
             }
         }
