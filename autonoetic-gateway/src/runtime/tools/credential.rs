@@ -424,7 +424,15 @@ impl NativeTool for CredentialRequestTool {
                         session_id: _session_id,
                         run_context: _run_context,
                         config: _config,
-                        reason: reason.clone(),
+                        context: crate::runtime::human_gate::DecisionContext::tier2(
+                            format!("credential request to {}", url_host),
+                            format!(
+                                "remote target policy not satisfied for {} (policy: {})",
+                                url_host, violation.error_type
+                            ),
+                            format!("uses stored credential for {}", url_host),
+                            "Approve if this host is an expected credential target for the agent's task; reject if the host is unexpected",
+                        ),
                         summary: format!("Credential request to {}", url_host),
                         approval_ref: None,
                         pre_validated: false,
@@ -516,7 +524,15 @@ impl NativeTool for CredentialRequestTool {
                     session_id: _session_id,
                     run_context: _run_context,
                     config: _config,
-                    reason: reason.clone(),
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!("credential request to {}", url_host),
+                        format!(
+                            "{} is not in an approved network grant (NetworkAccess policy)",
+                            url_host
+                        ),
+                        format!("uses stored credential for {}", url_host),
+                        "Approve if this host is an expected credential target for the agent's task; reject if the host is unexpected",
+                    ),
                     summary: format!("Credential request to {}", url_host),
                     approval_ref: None,
                     pre_validated: false,
@@ -1664,7 +1680,15 @@ impl NativeTool for CredentialSetupTool {
                                     session_id: _session_id,
                                     run_context: _run_context,
                                     config: _config,
-                                    reason: reason.clone(),
+                                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                                        format!("fetch skill.md from {}", url_host),
+                                        format!(
+                                            "remote target policy not satisfied for {} (policy: {})",
+                                            url_host, violation_type
+                                        ),
+                                        format!("downloads agent skill manifest from {}", url_host),
+                                        "Approve if this host is the expected source of the agent's skill manifest; reject if the host is unexpected",
+                                    ),
                                     summary: format!("Fetch skill.md from {}", url_host),
                                     approval_ref: None,
                                     pre_validated: false,
@@ -1956,7 +1980,15 @@ impl NativeTool for CredentialSetupTool {
                                 session_id: _session_id,
                                 run_context: _run_context,
                                 config: _config,
-                                reason: reason.clone(),
+                                context: crate::runtime::human_gate::DecisionContext::tier2(
+                                    format!("credential setup API call to {}", display_host),
+                                    format!(
+                                        "remote target policy not satisfied for {} (policy: {})",
+                                        display_host, violation_type
+                                    ),
+                                    format!("registers/sets a credential against {}", display_host),
+                                    "Approve if this host is the expected credential-setup endpoint for the agent's task; reject if the host is unexpected",
+                                ),
                                 summary: format!("Credential setup API call to {}", display_host),
                                 approval_ref: None,
                                 pre_validated: false,

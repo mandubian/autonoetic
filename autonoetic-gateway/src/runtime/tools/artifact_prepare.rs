@@ -299,7 +299,28 @@ impl NativeTool for ArtifactPrepareTool {
                 session_id: Some(sid),
                 run_context,
                 config: Some(cfg),
-                reason: summary.clone(),
+                context: crate::runtime::human_gate::DecisionContext::tier2(
+                    format!("prepare + exec artifact {} ({})", artifact_id, args.entrypoint),
+                    if targets.is_empty() {
+                        "preparing a stored artifact for execution requires operator approval".to_string()
+                    } else {
+                        format!(
+                            "artifact execution reaching host(s) [{}] not covered by an approved network grant",
+                            targets.join(", ")
+                        )
+                    },
+                    if resolved_credential_env.is_empty() {
+                        format!("runs artifact {} in the sandbox; effects depend on the entrypoint", artifact_id)
+                    } else {
+                        format!(
+                            "runs artifact {} in the sandbox with {} credential(s) injected as env vars; the credentials are exposed to the executed code",
+                            artifact_id,
+                            resolved_credential_env.len()
+                        )
+                    },
+                    "Approve if the artifact, entrypoint, network targets, and any injected credentials are expected for this agent's task; reject or escalate if any are unexpected",
+                )
+                .with_analysis(summary.clone()),
                 summary: summary.clone(),
                 approval_ref: None,
                 pre_validated,

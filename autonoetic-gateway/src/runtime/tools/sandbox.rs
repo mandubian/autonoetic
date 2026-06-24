@@ -1376,7 +1376,27 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             session_id,
                             run_context,
                             config: Some(cfg),
-                            reason: reason.clone(),
+                            context: crate::runtime::human_gate::DecisionContext::tier2(
+                                format!("sandbox.exec: {}", effective_command),
+                                if normalized_targets.is_empty() {
+                                    "sandbox code execution requires operator approval".to_string()
+                                } else {
+                                    format!(
+                                        "sandbox code execution reaching host(s) [{}] not covered by an approved network grant",
+                                        normalized_targets.join(", ")
+                                    )
+                                },
+                                if normalized_targets.is_empty() {
+                                    "runs agent-supplied code in the sandbox; effects depend on the command".to_string()
+                                } else {
+                                    format!(
+                                        "runs agent-supplied code in the sandbox with network access to [{}]; effects depend on the command",
+                                        normalized_targets.join(", ")
+                                    )
+                                },
+                                "Approve if the command and any network targets are expected for this agent's task; reject or escalate if the command or hosts are unexpected",
+                            )
+                            .with_analysis(reason.clone()),
                             summary: summary.clone(),
                             approval_ref: None,
                             pre_validated,
@@ -1707,7 +1727,24 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                         session_id,
                                         run_context,
                                         config: Some(cfg),
-                                        reason: reason.clone(),
+                                        context: crate::runtime::human_gate::DecisionContext::tier2(
+                                            format!(
+                                                "mount {} layer(s) for sandbox.exec: {}",
+                                                scope_issues.len(),
+                                                effective_command
+                                            ),
+                                            format!(
+                                                "{} layer(s) were captured with build-time network access to host(s) [{}] not yet approved in this session",
+                                                scope_issues.len(),
+                                                all_unapproved.join(", ")
+                                            ),
+                                            format!(
+                                                "mounts pre-built layers whose build reached host(s) [{}]; the layer contents become available to the executed command",
+                                                all_unapproved.join(", ")
+                                            ),
+                                            "Approve if these build-time hosts are expected for the layers being mounted; reject or escalate if any host is unexpected",
+                                        )
+                                        .with_analysis(reason.clone()),
                                         summary: summary.clone(),
                                         approval_ref: None,
                                         pre_validated: false,

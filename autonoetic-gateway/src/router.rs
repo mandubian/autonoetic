@@ -1759,11 +1759,17 @@ impl JsonRpcRouter {
                     session_id: params.session_id.as_deref(),
                     run_context: None,
                     config: Some(self.config.as_ref()),
-                    reason: if is_edit {
-                        format!("Edit wiki page '{}': {}", params.id, params.title)
-                    } else {
-                        format!("Propose new wiki page '{}': {}", params.id, params.title)
-                    },
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!(
+                            "wiki {} \"{}\" ({})",
+                            if is_edit { "edit" } else { "new" },
+                            params.title,
+                            params.id
+                        ),
+                        "agent proposes a wiki change for review",
+                        "publishes agent-authored content to the wiki",
+                        "Approve if the proposed wiki content is accurate and appropriate to publish; reject if it is inaccurate, low-quality, or out of scope",
+                    ),
                     summary: format!("Wiki proposal: {}", params.title),
                     approval_ref: None,
                     pre_validated: false,

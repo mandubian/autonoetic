@@ -329,11 +329,17 @@ impl NativeTool for WikiProposeTool {
             session_id,
             run_context,
             config,
-            reason: if is_edit {
-                format!("Edit wiki page '{}': {}", args.id, args.title)
-            } else {
-                format!("Propose new wiki page '{}': {}", args.id, args.title)
-            },
+            context: crate::runtime::human_gate::DecisionContext::tier2(
+                format!(
+                    "wiki {} \"{}\" ({})",
+                    if is_edit { "edit" } else { "new" },
+                    args.title,
+                    args.id
+                ),
+                "agent proposes a wiki change for review",
+                "publishes agent-authored content to the wiki",
+                "Approve if the proposed wiki content is accurate and appropriate to publish; reject if it is inaccurate, low-quality, or out of scope",
+            ),
             summary: format!("Wiki proposal: {}", args.title),
             approval_ref: None,
             pre_validated: false,

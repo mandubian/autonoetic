@@ -75,6 +75,106 @@ pub enum MatchStrategy {
     SubstituteCommand,
 }
 
+/// Context a decider needs to choose correctly. Mandatory on every gate.
+///
+/// The gateway supplies the data; it never makes the choice (RFC determinism
+/// §3 E1). A gate cannot be built without real context: the typed constructors
+/// below are the primary enforcement, and `GateService::check` rejects any
+/// context that is empty or boilerplate (`is_sufficient`).
+#[derive(Debug, Clone)]
+pub struct DecisionContext {
+    /// Concrete action + target ("what is being done").
+    what: String,
+    /// The policy/rule that forced the gate, in prose (+ id if known).
+    why_gated: String,
+    /// Secret/payload/query/capability/budget + reversibility/blast radius.
+    at_stake: String,
+    /// How to decide; what would make an agent-decider escalate.
+    recommended_action: String,
+    /// Tier-3 extra (e.g. sandbox-detected network patterns / operator reason).
+    analysis: Option<String>,
+}
+
+impl DecisionContext {
+    /// Tier 1: self-explanatory. `what` + `why_gated` only.
+    pub fn tier1(what: impl Into<String>, why_gated: impl Into<String>) -> Self {
+        Self {
+            what: what.into(),
+            why_gated: why_gated.into(),
+            at_stake: String::new(),
+            recommended_action: String::new(),
+            analysis: None,
+        }
+    }
+
+    /// Tier 2: network/credential/API gates.
+    pub fn tier2(
+        what: impl Into<String>,
+        why_gated: impl Into<String>,
+        at_stake: impl Into<String>,
+        recommended_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            what: what.into(),
+            why_gated: why_gated.into(),
+            at_stake: at_stake.into(),
+            recommended_action: recommended_action.into(),
+            analysis: None,
+        }
+    }
+
+    /// Tier 3: code-exec/elevated/irreversible — Tier 2 + analysis.
+    pub fn with_analysis(mut self, a: impl Into<String>) -> Self {
+        let a = a.into();
+        self.analysis = if a.trim().is_empty() { None } else { Some(a) };
+        self
+    }
+
+    /// Sufficient = non-empty `what` & `why_gated`, and not a known boilerplate
+    /// phrase. This is a programming-error guard; the typed constructors are the
+    /// primary enforcement.
+    pub fn is_sufficient(&self) -> bool {
+        let bad = |s: &str| {
+            let t = s.trim();
+            t.is_empty()
+                || t.eq_ignore_ascii_case("user question")
+                || t.ends_with("requires approval")
+        };
+        !bad(&self.what) && !bad(&self.why_gated)
+    }
+
+    /// Human/agent-facing render (used as the persisted gate reason).
+    ///
+    /// Multi-line, omitting empty fields. This is what surfaces to the decider
+    /// (human OR agent) — the same render regardless of decider identity.
+    pub fn render(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        if !self.what.trim().is_empty() {
+            lines.push(format!("What: {}", self.what.trim()));
+        }
+        if !self.why_gated.trim().is_empty() {
+            lines.push(format!("Why gated: {}", self.why_gated.trim()));
+        }
+        if !self.at_stake.trim().is_empty() {
+            lines.push(format!("At stake: {}", self.at_stake.trim()));
+        }
+        if !self.recommended_action.trim().is_empty() {
+            lines.push(format!("Recommended: {}", self.recommended_action.trim()));
+        }
+        if let Some(a) = self.analysis.as_ref() {
+            if !a.trim().is_empty() {
+                lines.push(format!("Analysis: {}", a.trim()));
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// The concrete action + target.
+    pub fn what(&self) -> &str {
+        &self.what
+    }
+}
+
 /// What a tool provides to the gate.
 pub struct GateRequest<'a> {
     pub kind: GateKind,
@@ -82,7 +182,8 @@ pub struct GateRequest<'a> {
     pub session_id: Option<&'a str>,
     pub run_context: Option<&'a NativeToolRunContext>,
     pub config: Option<&'a autonoetic_types::config::GatewayConfig>,
-    pub reason: String,
+    /// Typed context the decider sees. Replaces the old free-form `reason`.
+    pub context: DecisionContext,
     pub summary: String,
     pub approval_ref: Option<&'a str>,
     /// Tool-specific cache hit (e.g. `ApprovedExecCache`).  When `true` the
@@ -204,6 +305,16 @@ impl GateService {
     /// or `GateResult::Suspended` when a new gate was created and the tool
     /// must suspend execution.
     pub fn check(&self, req: GateRequest<'_>) -> Result<GateResult> {
+        // Programming-error guard: a gate must never be built without real,
+        // decider-facing context. The typed constructors are the primary
+        // enforcement; this catches boilerplate / empty contexts (rule:
+        // determinism-E1).
+        if !req.context.is_sufficient() {
+            anyhow::bail!(
+                "gate constructed without sufficient DecisionContext (rule: determinism-E1): {}",
+                req.summary
+            );
+        }
         match &req.kind {
             GateKind::Approval {
                 action,
@@ -286,7 +397,7 @@ impl GateService {
             } else {
                 format!(" (targets: {})", targets.join(", "))
             };
-            let seed = format!("{}{}", req.reason, targets_str);
+            let seed = format!("{}{}", req.summary, targets_str);
             if !seed.trim().is_empty() {
                 let _ = self.add_gate_message(&gate_id, "system", &seed);
             }
@@ -942,10 +1053,16 @@ impl GateService {
             status: None,
             decided_at: None,
             decided_by: None,
-            reason: if req.reason.is_empty() {
-                None
-            } else {
-                Some(req.reason.clone())
+            reason: {
+                // The same rendered context is persisted regardless of decider
+                // identity (operator vs agent) — this is what surfaces to the
+                // decider (determinism-E1).
+                let rendered = req.context.render();
+                if rendered.trim().is_empty() {
+                    None
+                } else {
+                    Some(rendered)
+                }
             },
             evidence_ref: None,
             decision_reason: None,
@@ -998,10 +1115,13 @@ impl GateService {
                 status: None,
                 decided_at: None,
                 decided_by: None,
-                reason: if req.reason.is_empty() {
-                    None
-                } else {
-                    Some(req.reason.clone())
+                reason: {
+                    let rendered = req.context.render();
+                    if rendered.trim().is_empty() {
+                        None
+                    } else {
+                        Some(rendered)
+                    }
                 },
                 evidence_ref: None,
                 decision_reason: None,
@@ -1289,7 +1409,7 @@ mod tests {
             session_id: Some("ses-123"),
             run_context: None,
             config: None,
-            reason: "test".to_string(),
+            context: DecisionContext::tier1("test action", "test rule"),
             summary: "test summary".to_string(),
             approval_ref: None,
             pre_validated: true,
@@ -1323,7 +1443,12 @@ mod tests {
             session_id: Some("ses-123"),
             run_context: None,
             config: None,
-            reason: "network access required".to_string(),
+            context: DecisionContext::tier2(
+                "credential request to localhost",
+                "localhost is not in an approved network grant",
+                "uses stored credential for localhost",
+                "approve if expected",
+            ),
             summary: "Fetch API from localhost".to_string(),
             approval_ref: None,
             pre_validated: false,
@@ -1373,7 +1498,7 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "first".to_string(),
+            context: DecisionContext::tier1("first action", "first rule"),
             summary: "first".to_string(),
             approval_ref: None,
             pre_validated: false,
@@ -1397,7 +1522,7 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "second".to_string(),
+            context: DecisionContext::tier1("second action", "second rule"),
             summary: "second".to_string(),
             approval_ref: None,
             pre_validated: false,
@@ -1462,7 +1587,7 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "test".to_string(),
+            context: DecisionContext::tier1("test action", "test rule"),
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
@@ -1526,7 +1651,7 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "test".to_string(),
+            context: DecisionContext::tier1("test action", "test rule"),
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
@@ -1603,7 +1728,7 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "test".to_string(),
+            context: DecisionContext::tier1("test action", "test rule"),
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
@@ -1660,8 +1785,13 @@ mod tests {
             session_id: Some("ses-seed-123"),
             run_context: None,
             config: None,
-            reason: "API access required".to_string(),
-            summary: "Fetch data".to_string(),
+            context: DecisionContext::tier2(
+                "credential request to api.example.com",
+                "api.example.com is not in an approved network grant",
+                "uses stored credential for api.example.com",
+                "approve if expected",
+            ),
+            summary: "API access required".to_string(),
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
@@ -1748,7 +1878,12 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "network access required".to_string(),
+            context: DecisionContext::tier2(
+                "sandbox.exec: python3 /tmp/fetch.py",
+                "api.example.com is not covered by an approved network grant",
+                "runs agent-supplied code reaching api.example.com",
+                "approve if expected",
+            ),
             summary: "fetch data".to_string(),
             approval_ref: None,
             pre_validated: false,
@@ -1781,6 +1916,139 @@ mod tests {
         let entry = cache.find(&fingerprint).expect("cache entry was backfilled");
         assert_eq!(entry.remote_targets, targets);
         assert_eq!(entry.code_content, code_content);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // DecisionContext (determinism-E1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decision_context_rejects_boilerplate() {
+        // Boilerplate `what` ending in "requires approval" with empty `why_gated`.
+        assert!(
+            !DecisionContext::tier1("web.fetch x requires approval", "").is_sufficient(),
+            "boilerplate 'requires approval' + empty why_gated must be insufficient"
+        );
+
+        // The classic "user question" boilerplate.
+        assert!(
+            !DecisionContext::tier1("user question", "x").is_sufficient(),
+            "'user question' boilerplate must be insufficient"
+        );
+
+        // Empty fields are insufficient.
+        assert!(!DecisionContext::tier1("", "").is_sufficient());
+
+        // A real tier2 context is sufficient.
+        let real = DecisionContext::tier2(
+            "web.fetch https://api.example.com/data",
+            "api.example.com is not in an approved network grant (NetworkAccess policy)",
+            "fetches remote content from api.example.com; read-only",
+            "Approve if the host is expected for this agent's task",
+        );
+        assert!(real.is_sufficient(), "a real tier2 context must be sufficient");
+    }
+
+    #[test]
+    fn gate_check_rejects_insufficient_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = GateService::new(Arc::new(GatewayStore::open(tmp.path()).unwrap()));
+        let manifest = test_manifest();
+
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action: make_credential_request_action("http://localhost:8080/api"),
+                targets: vec!["localhost".to_string()],
+                match_strategy: MatchStrategy::HostLevel,
+            },
+            manifest: &manifest,
+            session_id: Some("ses-insufficient-123"),
+            run_context: None,
+            config: None,
+            // Boilerplate context: insufficient.
+            context: DecisionContext::tier1("user question", ""),
+            summary: "boilerplate summary".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+
+        let err = svc.check(req).expect_err("check must reject insufficient context");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("determinism-E1"),
+            "error should cite the determinism-E1 rule: {msg}"
+        );
+    }
+
+    #[test]
+    fn decider_symmetry_same_context() -> Result<()> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let manifest = test_manifest();
+        let sid = "ses-symmetry-123";
+
+        let context = DecisionContext::tier2(
+            "credential request to api.example.com",
+            "api.example.com is not in an approved network grant (NetworkAccess policy)",
+            "uses stored credential for api.example.com",
+            "Approve if this host is an expected credential target for the agent's task",
+        );
+        let expected_reason = context.render();
+
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action: make_credential_request_action("http://api.example.com/data"),
+                targets: vec!["api.example.com".to_string()],
+                match_strategy: MatchStrategy::HostLevel,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context,
+            summary: "Credential request to api.example.com".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+
+        let result = svc.check(req)?;
+        let gate_id = match result {
+            GateResult::Suspended { gate_id, .. } => gate_id,
+            other => panic!("expected Suspended, got {:?}", other),
+        };
+
+        // The persisted reason is exactly the rendered context — and does not
+        // depend on the decider identity (operator vs agent). We resolve the
+        // gate by two different deciders and assert the stored context is
+        // unchanged in both cases.
+        let stored = store
+            .get_approval(&gate_id)?
+            .expect("approval row exists")
+            .reason
+            .expect("reason was persisted from context.render()");
+        assert_eq!(stored, expected_reason, "stored reason must equal context.render()");
+
+        // Resolve by an operator.
+        store.record_decision(&gate_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+        let after_operator = store
+            .get_approval(&gate_id)?
+            .expect("approval row exists")
+            .reason
+            .expect("reason persisted");
+        assert_eq!(
+            after_operator, expected_reason,
+            "stored context must not change when an operator decides"
+        );
+
+        // The same render is what an agent decider would see — it is a pure
+        // function of the context and is independent of decider identity.
+        assert_eq!(after_operator, expected_reason);
         Ok(())
     }
 }

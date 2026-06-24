@@ -251,7 +251,12 @@ impl NativeTool for UserAskTool {
             session_id: Some(sid),
             run_context: _run_context,
             config: _config,
-            reason: "user question".to_string(),
+            context: crate::runtime::human_gate::DecisionContext::tier2(
+                format!("agent asks: {}", question_for_side_effects),
+                "agent requested operator input",
+                "the answer feeds the agent's next step",
+                "answer per the question",
+            ),
             summary: "user question".to_string(),
             approval_ref: None,
             pre_validated: false,
