@@ -202,6 +202,59 @@ pub enum Capability {
     },
 }
 
+/// Operations that confer **authority** rather than mere participation.
+/// Authority rights must be granted EXACTLY — they are never satisfied by a
+/// `*` wildcard or a prefix pattern. This is the separation-of-powers boundary
+/// for pattern-scoped capabilities: a broad participation grant (e.g.
+/// `PlanFrameAccess: ["*"]`) must NOT let a proposing agent exercise an
+/// authority operation (e.g. `planframe.approve`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityOp {
+    /// Approve a PlanFrame. The authority operation that motivated the
+    /// e316cd53 separation-of-powers fix.
+    PlanFrameApprove,
+}
+
+impl AuthorityOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuthorityOp::PlanFrameApprove => "planframe.approve",
+        }
+    }
+
+    /// True if `operation` is an authority-class operation.
+    pub fn is_authority_operation(operation: &str) -> bool {
+        operation == Self::PlanFrameApprove.as_str()
+    }
+
+    /// Whether a set of patterns grants `operation`.
+    ///
+    /// Empty/whitespace patterns — and degenerate prefixes like `"."` that
+    /// trim to empty — grant nothing. Authority operations require an exact
+    /// grant; participation operations may be granted by exact match, `*`, or
+    /// a non-empty prefix.
+    pub fn patterns_allow(patterns: &[String], operation: &str) -> bool {
+        let authority = Self::is_authority_operation(operation);
+        patterns.iter().any(|raw| {
+            let p = raw.trim();
+            if p.is_empty() {
+                return false;
+            }
+            if p == operation {
+                return true;
+            }
+            if authority {
+                return false;
+            }
+            if p == "*" {
+                return true;
+            }
+            let prefix = p.trim_end_matches('.');
+            !prefix.is_empty() && operation.starts_with(prefix)
+        })
+    }
+}
+
 fn default_patterns_all() -> Vec<String> {
     vec!["*".to_string()]
 }
@@ -780,5 +833,41 @@ mod tests {
         ];
         assert!(capability_set_covers(&declared, &artifact));
         assert!(!capability_set_covers(&artifact, &declared));
+    }
+
+    #[test]
+    fn authority_op_wildcard_does_not_grant_approval() {
+        let p = vec!["*".to_string()];
+        assert!(AuthorityOp::patterns_allow(&p, "planframe.propose"));
+        assert!(!AuthorityOp::patterns_allow(&p, "planframe.approve"));
+    }
+
+    #[test]
+    fn authority_op_prefix_does_not_grant_approval() {
+        let p = vec!["planframe.".to_string()];
+        assert!(AuthorityOp::patterns_allow(&p, "planframe.propose"));
+        assert!(!AuthorityOp::patterns_allow(&p, "planframe.approve"));
+    }
+
+    #[test]
+    fn authority_op_exact_grant_confers_approval() {
+        let p = vec!["planframe.approve".to_string()];
+        assert!(AuthorityOp::patterns_allow(&p, "planframe.approve"));
+    }
+
+    #[test]
+    fn authority_op_empty_patterns_grant_nothing() {
+        for bad in [&[][..], &[""][..], &["   "][..], &["."][..]] {
+            let p: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+            assert!(!AuthorityOp::patterns_allow(&p, "planframe.propose"));
+            assert!(!AuthorityOp::patterns_allow(&p, "planframe.approve"));
+        }
+    }
+
+    #[test]
+    fn authority_op_recognizes_planframe_approve() {
+        assert!(AuthorityOp::is_authority_operation("planframe.approve"));
+        assert!(!AuthorityOp::is_authority_operation("planframe.propose"));
+        assert!(!AuthorityOp::is_authority_operation("planframe.amend"));
     }
 }

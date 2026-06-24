@@ -119,19 +119,6 @@ fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
     })
 }
 
-/// Operations that confer **authority** over a plan (e.g. approving it) rather
-/// than participation in it. An authority right must be granted EXACTLY — it is
-/// never satisfied by a `*` wildcard or a prefix pattern. This is the
-/// separation-of-powers boundary: a proposing agent holding a broad
-/// `PlanFrameAccess: ["*"]` (as the planner does) must NOT thereby be able to
-/// approve its own plan. Approval is a held right, exercised by an authority —
-/// the operator surface today (which bypasses this gate via `approve_request`),
-/// or an agent explicitly granted `"planframe.approve"` in future. (issue:
-/// planner self-approval / DISCRETION LEAK).
-fn is_authority_operation(operation: &str) -> bool {
-    matches!(operation, "planframe.approve")
-}
-
 /// Whether a set of `PlanFrameAccess` patterns grants `operation`. Pure so it
 /// is unit-testable without constructing a full manifest.
 ///
@@ -140,26 +127,7 @@ fn is_authority_operation(operation: &str) -> bool {
 /// authorize every participation op (an authorization footgun, since the
 /// capability schema does not forbid empty strings).
 fn patterns_allow(patterns: &[String], operation: &str) -> bool {
-    let authority = is_authority_operation(operation);
-    patterns.iter().any(|raw| {
-        let p = raw.trim();
-        if p.is_empty() {
-            return false;
-        }
-        if p == operation {
-            // Exact grant always allowed (the only way to confer an authority).
-            return true;
-        }
-        if authority {
-            // Authority rights require an exact grant — never `*` or a prefix.
-            return false;
-        }
-        if p == "*" {
-            return true;
-        }
-        let prefix = p.trim_end_matches('.');
-        !prefix.is_empty() && operation.starts_with(prefix)
-    })
+    autonoetic_types::capability::AuthorityOp::patterns_allow(patterns, operation)
 }
 
 fn can_perform(manifest: &AgentManifest, operation: &str) -> bool {
@@ -1532,8 +1500,9 @@ mod authority_tests {
 
     #[test]
     fn approve_is_the_authority_operation() {
-        assert!(is_authority_operation("planframe.approve"));
-        assert!(!is_authority_operation("planframe.propose"));
-        assert!(!is_authority_operation("planframe.amend"));
+        use autonoetic_types::capability::AuthorityOp;
+        assert!(AuthorityOp::is_authority_operation("planframe.approve"));
+        assert!(!AuthorityOp::is_authority_operation("planframe.propose"));
+        assert!(!AuthorityOp::is_authority_operation("planframe.amend"));
     }
 }

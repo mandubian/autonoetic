@@ -163,7 +163,8 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         None,
     )?;
     let cnt_misuse_json: serde_json::Value = serde_json::from_str(&cnt_misuse)?;
-    assert_eq!(cnt_misuse_json["ok"], false);
+    assert_eq!(cnt_misuse_json["ok"], true);
+    assert_eq!(cnt_misuse_json["command_succeeded"], false);
     let stderr = cnt_misuse_json["stderr"].as_str().unwrap_or_default();
     assert!(
         stderr.contains("cnt_deadbeef"),
