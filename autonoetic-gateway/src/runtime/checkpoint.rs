@@ -503,6 +503,47 @@ pub fn load_latest_checkpoint(
     Ok(latest.map(|(_, c)| c))
 }
 
+/// Mark the latest checkpoint as being inside a response-validation repair
+/// cycle. The next respawn will restore the LoopGuard in repair mode so the
+/// repair iterations do not count against `max_loops_without_progress`.
+pub fn enter_repair_mode_on_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+    max_repair_loops: u32,
+) -> anyhow::Result<()> {
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    cp.loop_guard_state.enter_repair_mode(max_repair_loops);
+    save_checkpoint(config, &cp)
+}
+
+/// Reset the latest checkpoint's LoopGuard after a successful repair:
+/// `current_loops` is cleared and repair mode is exited.
+pub fn reset_after_successful_repair_on_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    cp.loop_guard_state.reset_after_successful_repair();
+    save_checkpoint(config, &cp)
+}
+
+/// Exit repair mode on the latest checkpoint without clearing `current_loops`,
+/// used when repair fails or is exhausted.
+pub fn exit_repair_mode_on_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    cp.loop_guard_state.exit_repair_mode();
+    save_checkpoint(config, &cp)
+}
+
 /// Append feedback events to the latest checkpoint for a session.
 ///
 /// Used when feedback is issued outside the agent executor (e.g. response
@@ -1138,5 +1179,67 @@ mod tests {
                 field_path: None,
             }
         );
+    }
+
+    #[test]
+    fn repair_mode_checkpoint_helpers_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let session_id = "session-repair";
+        let turn_id = "turn-003";
+
+        let mut guard = LoopGuard::new(5);
+        guard.current_loops = 3;
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 3,
+            loop_guard_state: guard,
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        save_checkpoint(&config, &checkpoint).expect("should save");
+
+        enter_repair_mode_on_latest_checkpoint(&config, session_id, 10).expect("enter repair mode");
+        let latest = load_latest_checkpoint(&config, session_id)
+            .expect("should load")
+            .expect("checkpoint should exist");
+        assert!(latest.loop_guard_state.repair_mode);
+        assert_eq!(latest.loop_guard_state.repair_loops, 0);
+        assert_eq!(latest.loop_guard_state.max_repair_loops, 10);
+        assert_eq!(latest.loop_guard_state.current_loops, 3, "outer loops preserved");
+
+        reset_after_successful_repair_on_latest_checkpoint(&config, session_id)
+            .expect("reset after repair");
+        let latest = load_latest_checkpoint(&config, session_id)
+            .expect("should load")
+            .expect("checkpoint should exist");
+        assert!(!latest.loop_guard_state.repair_mode);
+        assert_eq!(latest.loop_guard_state.current_loops, 0, "outer loops cleared on success");
     }
 }

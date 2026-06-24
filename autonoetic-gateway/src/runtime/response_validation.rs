@@ -215,6 +215,63 @@ pub fn reconcile_claims(ctx: &ClaimCtx) -> Vec<ValidationViolation> {
     violations
 }
 
+/// RFC C — advisory claim reconciliation on the child→parent result path.
+///
+/// The child's full `SpawnResult` is already validated against `io.returns`
+/// before the task is marked complete. This pass is an additional, advisory
+/// reconciliation of the *result summary* that crosses back to the parent via
+/// `workflow.state` / `workflow.wait` / child-state notifications. Mismatches
+/// are logged but never block — the goal is to surface upstream fabrication
+/// early for the classifier while the corpus test (§5.3) measures the false-
+/// positive rate.
+pub fn advisory_reconcile_child_result_summary(
+    result_summary: Option<&str>,
+    child_session_id: &str,
+    parent_session_id: &str,
+    child_agent_id: &str,
+    gateway_dir: &Path,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    config: Option<&GatewayConfig>,
+) -> Vec<ValidationViolation> {
+    let Some(summary) = result_summary else {
+        return Vec::new();
+    };
+    // Fabricated claims can only be detected when the summary carries
+    // structured references. Empty or trivial summaries are unverifiable.
+    if summary.trim().is_empty() || summary.len() < 8 {
+        return Vec::new();
+    }
+
+    let ctx = ClaimCtx {
+        assistant_reply: Some(summary),
+        workflow_id: None,
+        task_id: None,
+        gateway_store,
+        config,
+        agent_id: child_agent_id,
+        session_id: child_session_id,
+        gateway_dir,
+        // Advisory path: we do not have the child task's workflow_id/task_id,
+        // so delegated-spawn verification cannot be performed accurately. Leave
+        // it disabled to avoid false positives; `io.returns` validation already
+        // ran on the full child reply before the task was marked complete.
+        agent_is_spawn_capable: false,
+    };
+    let violations = reconcile_claims(&ctx);
+    if !violations.is_empty() {
+        let rules: Vec<_> = violations.iter().map(|v| v.rule.as_str()).collect();
+        tracing::warn!(
+            target: "response_validation",
+            child_session_id = %child_session_id,
+            parent_session_id = %parent_session_id,
+            child_agent_id = %child_agent_id,
+            rules = ?rules,
+            "response.validation.advisory: child→parent result summary contains fabricated claim(s)"
+        );
+    }
+    violations
+}
+
 /// Parse an `OutputPolicy` from metadata.
 pub fn parse_output_policy(
     metadata: Option<&serde_json::Value>,
@@ -1307,70 +1364,28 @@ impl GatewayExecutionService {
             ));
         }
 
-        for attempt in 1..=max_repair_rounds {
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    attempt = attempt,
-                    "response.repair.exhausted: deadline reached"
-                );
-                self.persist_validation_feedback(
-                    &result.session_id,
-                    &violations,
-                );
-                return Err(violations_to_final_error(
-                    &violations,
-                    &result.session_id,
-                    true,
-                    result.assistant_reply.as_deref(),
-                ));
-            }
+        // RFC D.4: enter repair-loop-aware accounting before cycling. Repair
+        // iterations count against their own budget, not
+        // `max_loops_without_progress`.
+        let repair_session_id = result.session_id.clone();
+        let _ = crate::runtime::checkpoint::enter_repair_mode_on_latest_checkpoint(
+            self.config().as_ref(),
+            &repair_session_id,
+            max_repair_rounds as u32 + 2,
+        );
 
-            let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
-
-            tracing::info!(
-                target: "response_validation",
-                agent_id = %agent_id,
-                session_id = %result.session_id,
-                attempt = attempt,
-                max_repair_rounds = max_repair_rounds,
-                "response.repair.start"
-            );
-
-            let base = base_session_id(&result.session_id);
-            let violation_summary = violations
-                .iter()
-                .map(|v| v.rule.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            append_repair_attempt_best_effort(
-                &gateway_dir,
-                base,
-                attempt,
-                max_repair_rounds,
-                &format!("{} ({})", violation_summary, violations.len()),
-            );
-
-            let repaired = match self
-                .respawn_from_checkpoint(
-                    agent_id,
-                    &result.session_id,
-                    Some(&repair_msg),
-                    source_agent_id,
-                    workflow_id,
-                    task_id,
-                    &violations_to_feedback_events(&violations),
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
+        let repair_outcome: anyhow::Result<SpawnResult> = async move {
+            for attempt in 1..=max_repair_rounds {
+                if std::time::Instant::now() >= deadline {
                     tracing::warn!(
                         target: "response_validation",
                         agent_id = %agent_id,
-                        error = %e,
-                        "response.repair.error: respawn failed"
+                        attempt = attempt,
+                        "response.repair.exhausted: deadline reached"
+                    );
+                    self.persist_validation_feedback(
+                        &result.session_id,
+                        &violations,
                     );
                     return Err(violations_to_final_error(
                         &violations,
@@ -1379,117 +1394,188 @@ impl GatewayExecutionService {
                         result.assistant_reply.as_deref(),
                     ));
                 }
-            };
 
-            if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    "response.repair.aborted: session suspended during repair"
-                );
-                return Err(anyhow::anyhow!(
-                    "repair aborted: agent suspended during repair; session: {}",
-                    result.session_id
-                ));
-            }
+                let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
 
-            if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(
-                &self.config(),
-                &repaired.session_id,
-            ) {
-                if matches!(
-                    cp.yield_reason,
-                    crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
-                ) {
-                    tracing::warn!(
-                        target: "response_validation",
-                        agent_id = %agent_id,
-                        session_id = %repaired.session_id,
-                        "response.repair.aborted: session suspended for user interaction during repair"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "repair aborted: agent suspended for user interaction during repair; session: {}",
-                        result.session_id
-                    ));
-                }
-            }
-
-            violations = validate_spawn_response(
-                &repaired,
-                output_schema,
-                output_policy,
-                Some(&gateway_dir),
-            );
-            violations.extend(validate_session_evidence(
-                self.gateway_store().as_deref(),
-                &repaired.session_id,
-                output_policy,
-            ));
-            result = repaired;
-
-            if let Some(out) = feedback_out.as_deref_mut() {
-                out.extend(violations_to_feedback_events(&violations));
-            }
-
-            if violations.is_empty() {
                 tracing::info!(
                     target: "response_validation",
                     agent_id = %agent_id,
                     session_id = %result.session_id,
                     attempt = attempt,
-                    "response.repair.pass"
+                    max_repair_rounds = max_repair_rounds,
+                    "response.repair.start"
                 );
-                append_repair_passed_best_effort(
+
+                let base = base_session_id(&result.session_id);
+                let violation_summary = violations
+                    .iter()
+                    .map(|v| v.rule.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                append_repair_attempt_best_effort(
                     &gateway_dir,
-                    base_session_id(&result.session_id),
+                    base,
                     attempt,
+                    max_repair_rounds,
+                    &format!("{} ({})", violation_summary, violations.len()),
                 );
-                return Ok(result);
+
+                let repaired = match self
+                    .respawn_from_checkpoint(
+                        agent_id,
+                        &result.session_id,
+                        Some(&repair_msg),
+                        source_agent_id,
+                        workflow_id,
+                        task_id,
+                        &violations_to_feedback_events(&violations),
+                    )
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "response_validation",
+                            agent_id = %agent_id,
+                            error = %e,
+                            "response.repair.error: respawn failed"
+                        );
+                        return Err(violations_to_final_error(
+                            &violations,
+                            &result.session_id,
+                            true,
+                            result.assistant_reply.as_deref(),
+                        ));
+                    }
+                };
+
+                if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        "response.repair.aborted: session suspended during repair"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "repair aborted: agent suspended during repair; session: {}",
+                        result.session_id
+                    ));
+                }
+
+                if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(
+                    &self.config(),
+                    &repaired.session_id,
+                ) {
+                    if matches!(
+                        cp.yield_reason,
+                        crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
+                    ) {
+                        tracing::warn!(
+                            target: "response_validation",
+                            agent_id = %agent_id,
+                            session_id = %repaired.session_id,
+                            "response.repair.aborted: session suspended for user interaction during repair"
+                        );
+                        return Err(anyhow::anyhow!(
+                            "repair aborted: agent suspended for user interaction during repair; session: {}",
+                            result.session_id
+                        ));
+                    }
+                }
+
+                violations = validate_spawn_response(
+                    &repaired,
+                    output_schema,
+                    output_policy,
+                    Some(&gateway_dir),
+                );
+                violations.extend(validate_session_evidence(
+                    self.gateway_store().as_deref(),
+                    &repaired.session_id,
+                    output_policy,
+                ));
+                result = repaired;
+
+                if let Some(out) = feedback_out.as_deref_mut() {
+                    out.extend(violations_to_feedback_events(&violations));
+                }
+
+                if violations.is_empty() {
+                    tracing::info!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        session_id = %result.session_id,
+                        attempt = attempt,
+                        "response.repair.pass"
+                    );
+                    append_repair_passed_best_effort(
+                        &gateway_dir,
+                        base_session_id(&result.session_id),
+                        attempt,
+                    );
+                    return Ok(result);
+                }
+
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    attempt = attempt,
+                    violation_count = violations.len(),
+                    "response.repair.fail"
+                );
+
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        attempt = attempt,
+                        "response.repair.exhausted: deadline reached after respawn"
+                    );
+                    self.persist_validation_feedback(
+                        &result.session_id,
+                        &violations,
+                    );
+                    return Err(violations_to_final_error(
+                        &violations,
+                        &result.session_id,
+                        true,
+                        result.assistant_reply.as_deref(),
+                    ));
+                }
             }
 
             tracing::warn!(
                 target: "response_validation",
                 agent_id = %agent_id,
-                attempt = attempt,
-                violation_count = violations.len(),
-                "response.repair.fail"
+                "response.repair.exhausted: max_loops reached"
             );
+            self.persist_validation_feedback(
+                &result.session_id,
+                &violations,
+            );
+            Err(violations_to_final_error(
+                &violations,
+                &result.session_id,
+                true,
+                result.assistant_reply.as_deref(),
+            ))
+        }.await;
 
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    attempt = attempt,
-                    "response.repair.exhausted: deadline reached after respawn"
-                );
-                self.persist_validation_feedback(
+        match repair_outcome {
+            Ok(result) => {
+                let _ = crate::runtime::checkpoint::reset_after_successful_repair_on_latest_checkpoint(
+                    self.config().as_ref(),
                     &result.session_id,
-                    &violations,
                 );
-                return Err(violations_to_final_error(
-                    &violations,
-                    &result.session_id,
-                    true,
-                    result.assistant_reply.as_deref(),
-                ));
+                Ok(result)
+            }
+            Err(e) => {
+                let _ = crate::runtime::checkpoint::exit_repair_mode_on_latest_checkpoint(
+                    self.config().as_ref(),
+                    &repair_session_id,
+                );
+                Err(e)
             }
         }
-
-        tracing::warn!(
-            target: "response_validation",
-            agent_id = %agent_id,
-            "response.repair.exhausted: max_loops reached"
-        );
-        self.persist_validation_feedback(
-            &result.session_id,
-            &violations,
-        );
-        Err(violations_to_final_error(
-            &violations,
-            &result.session_id,
-            true,
-            result.assistant_reply.as_deref(),
-        ))
     }
 
     fn persist_validation_feedback(
@@ -2357,5 +2443,72 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule, "unknown_plan_id");
         assert!(violations[0].message.contains("plan-fake"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // RFC C — advisory child→parent result claim reconciliation
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn advisory_child_result_summary_empty_is_unverified() {
+        let temp = tempfile::tempdir().unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            None,
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            None,
+            None,
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn advisory_child_result_summary_short_is_unverified() {
+        let temp = tempfile::tempdir().unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            Some("ok"),
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            None,
+            None,
+        );
+        assert!(violations.is_empty(), "trivial summaries should not be flagged");
+    }
+
+    #[test]
+    fn advisory_child_result_summary_finds_fabricated_plan_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            Some(r#"{"status":"awaiting_approval","plan_id":"plan-fake"}"#),
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            Some(&store),
+            None,
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "unknown_plan_id");
+    }
+
+    #[test]
+    fn advisory_child_result_summary_delegated_not_flagged() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            Some(r#"{"status":"delegated","summary":"handed off"}"#),
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            Some(&store),
+            None,
+        );
+        assert!(violations.is_empty(), "advisory path must not flag delegated claims; got: {violations:?}");
     }
 }

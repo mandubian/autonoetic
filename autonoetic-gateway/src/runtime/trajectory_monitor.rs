@@ -47,6 +47,10 @@ pub struct TickResult {
     /// level. Caller should emit a `divergence.*` causal event when this
     /// is `true` and `health` is not `Healthy`.
     pub level_changed: bool,
+    /// RFC D.5 — if progress grace was earned this turn, the caller should
+    /// suppress Sentinel escalation until this turn (exclusive). `None` when
+    /// no extension is requested.
+    pub suppress_until_turn: Option<u64>,
 }
 
 /// Per-session monitor state.
@@ -76,6 +80,9 @@ pub struct TrajectoryMonitor {
     /// Last verdict's level slug — used to detect transitions and to emit
     /// only on change. `None` until the first `tick`.
     last_level: Option<&'static str>,
+    /// RFC D.5 — consecutive turns showing `FeedbackIncorporated`. Resets when
+    /// a turn does not earn progress grace.
+    consecutive_progress_turns: u32,
 }
 
 impl TrajectoryMonitor {
@@ -89,6 +96,7 @@ impl TrajectoryMonitor {
             feedback_events: Vec::new(),
             feedback_turns: Vec::new(),
             last_level: None,
+            consecutive_progress_turns: 0,
         }
     }
 
@@ -263,6 +271,7 @@ impl TrajectoryMonitor {
             return TickResult {
                 health: TrajectoryHealth::Healthy,
                 level_changed: false,
+                suppress_until_turn: None,
             };
         }
 
@@ -321,6 +330,27 @@ impl TrajectoryMonitor {
         }
 
         let health = aggregate(signals);
+
+        // RFC D.5 — suppress-on-progress grace. Consecutive turns where the
+        // agent is clearly incorporating feedback earn a suppression window
+        // during which Sentinel escalation is silenced.
+        let has_progress = health
+            .signals()
+            .iter()
+            .any(|s| s.kind == DivergenceSignalKind::FeedbackIncorporated);
+        let suppress_until_turn = if has_progress {
+            self.consecutive_progress_turns += 1;
+            if self.consecutive_progress_turns >= self.config.progress_grace_window {
+                let grace_turns = self.config.progress_grace_turns.max(1);
+                Some(turn_counter.saturating_add(grace_turns as u64))
+            } else {
+                None
+            }
+        } else {
+            self.consecutive_progress_turns = 0;
+            None
+        };
+
         let level = health.level_str();
         let level_changed = self.last_level.map(|prev| prev != level).unwrap_or(true);
         self.last_level = Some(level);
@@ -328,6 +358,7 @@ impl TrajectoryMonitor {
         TickResult {
             health,
             level_changed,
+            suppress_until_turn,
         }
     }
 
@@ -1185,6 +1216,78 @@ mod tests {
             matches!(r.health, TrajectoryHealth::Diverging { .. }),
             "restored monitor should detect ignored validation feedback: {:?}",
             r.health
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // RFC D.5 — suppress-on-progress grace
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn progress_cfg(window: u32, turns: u32) -> TrajectoryConfig {
+        let mut c = cfg();
+        c.progress_grace_window = window;
+        c.progress_grace_turns = turns;
+        c
+    }
+
+    #[test]
+    fn progress_grace_earns_suppression_after_window() {
+        // Feedback given on turn 1, then two turns of distinct errors earn
+        // suppression for the next 3 turns.
+        let prior = FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        };
+        let different = FeedbackEvent::ToolError {
+            tool: "content.write".into(),
+            error_type: ToolErrorType::Validation,
+            message_signature: "missing field".into(),
+        };
+
+        let mut mon = TrajectoryMonitor::new(progress_cfg(2, 3));
+        mon.record_feedback(1, &[prior]);
+
+        let r1 = mon.tick(2, &[], &[different.clone()], None, &quiet_guard_state());
+        assert!(
+            r1.health
+                .signals()
+                .iter()
+                .any(|s| s.kind == DivergenceSignalKind::FeedbackIncorporated),
+            "turn 2 should show FeedbackIncorporated"
+        );
+        assert!(r1.suppress_until_turn.is_none(), "one progress turn is not enough");
+
+        let r2 = mon.tick(3, &[], &[different.clone()], None, &quiet_guard_state());
+        assert_eq!(
+            r2.suppress_until_turn,
+            Some(6),
+            "two consecutive progress turns should earn suppression until turn 6"
+        );
+    }
+
+    #[test]
+    fn progress_grace_resets_on_non_progress_turn() {
+        let prior = FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        };
+        let different = FeedbackEvent::ToolError {
+            tool: "content.write".into(),
+            error_type: ToolErrorType::Validation,
+            message_signature: "missing field".into(),
+        };
+
+        let mut mon = TrajectoryMonitor::new(progress_cfg(2, 3));
+        mon.record_feedback(1, &[prior]);
+
+        let _ = mon.tick(2, &[], &[different.clone()], None, &quiet_guard_state());
+        // Turn 3 has no feedback and no errors → not progress.
+        let _ = mon.tick(3, &[], &[], None, &quiet_guard_state());
+        // Turn 4 is progress again, but the streak was broken.
+        let r = mon.tick(4, &[], &[different], None, &quiet_guard_state());
+        assert!(
+            r.suppress_until_turn.is_none(),
+            "streak reset should prevent grace from a single progress turn"
         );
     }
 }
