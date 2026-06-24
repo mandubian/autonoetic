@@ -2,6 +2,29 @@
 //!
 //! Handles tool execution, disclosure tracking, and secret store integration.
 //! Returns structured error responses for recoverable failures instead of aborting.
+//!
+//! ## LLM-normalization doctrine (RFC determinism §3 M1, #619)
+//!
+//! The gateway tolerates some model non-conformance by *normalizing* output
+//! (e.g. stripping vendor special-token artifacts, mapping tool-name
+//! shorthands). The doctrine governing such tolerances:
+//!
+//! 1. **Closed set.** A new model quirk is either absorbed by an *existing*
+//!    normalizer or rejected with a typed repair hint — never handled by adding
+//!    a new bespoke silent branch.
+//! 2. **Observable, never silent.** Every applied normalization emits a
+//!    structured trace via [`note_llm_normalization`] so the gateway "guessing"
+//!    around a model is visible in traces, not hidden corner-cutting.
+//!
+//! Instrumented here: `strip_gemma_token_artifacts` (vendor tokens),
+//! `canonical_tool_name` (tool-name aliases).
+//!
+//! Deferred enforcement (tracked under #619, not in this change): move the
+//! Gemma stripping to the LLM driver boundary; consolidate markdown-fence
+//! stripping (`response_validation.rs`) to one chokepoint; replace tool-name
+//! aliasing with reject-with-repair-hint after a logged deprecation window;
+//! instrument the lenient `Option<String>` coercion (`tools/mod.rs`) and the
+//! `fuzzy_match` fallback through this same helper.
 
 use crate::llm::ToolCall;
 use crate::runtime::disclosure::DisclosureState;
@@ -45,18 +68,39 @@ pub fn is_degraded_mode_tool_blocked(
     matches!(tool_name, "sandbox_exec" | "artifact_exec")
 }
 
+/// Emit a single structured trace whenever the gateway tolerates a model
+/// non-conformance by normalizing its output (M1 doctrine: tolerance must be
+/// *observable*, never silent). `kind` is a stable label; `detail` is the
+/// before→after summary.
+fn note_llm_normalization(kind: &'static str, detail: &str) {
+    tracing::debug!(
+        target: "llm_normalization",
+        kind,
+        detail,
+        "tolerated model non-conformance (normalized)"
+    );
+}
+
 fn strip_gemma_token_artifacts(s: &str) -> String {
     let re = regex::Regex::new(r"<\|[^>]*\|>").unwrap();
-    re.replace_all(s, |caps: &regex::Captures| -> String {
-        let token = &caps[0];
-        match token {
-            "<|\"|>" => "\"".to_string(),
-            "<|'|>" => "'".to_string(),
-            "<|_|>" => "_".to_string(),
-            _ => token.to_string(),
-        }
-    })
-    .to_string()
+    let out = re
+        .replace_all(s, |caps: &regex::Captures| -> String {
+            let token = &caps[0];
+            match token {
+                "<|\"|>" => "\"".to_string(),
+                "<|'|>" => "'".to_string(),
+                "<|_|>" => "_".to_string(),
+                _ => token.to_string(),
+            }
+        })
+        .to_string();
+    if out != s {
+        note_llm_normalization(
+            "gemma_token_artifacts",
+            "stripped vendor special-token artifacts from tool arguments",
+        );
+    }
+    out
 }
 
 impl<'a> ToolCallProcessor<'a> {
@@ -134,6 +178,12 @@ impl<'a> ToolCallProcessor<'a> {
             let started_at = Instant::now();
             let approval_ref = extract_approval_ref_from_args(&tc.arguments);
             let tool_name = Self::canonical_tool_name(&tc.name).to_string();
+            if tool_name != tc.name {
+                note_llm_normalization(
+                    "tool_name_alias",
+                    &format!("mapped tool name '{}' -> '{}'", tc.name, tool_name),
+                );
+            }
 
             if self.is_degraded_blocked_tool(&tool_name) {
                 let tool_error = ToolError::permission(format!(
