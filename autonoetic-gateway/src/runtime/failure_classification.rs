@@ -228,9 +228,9 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
         return metadata;
     }
 
-    // Prose fallback (P-5.14 last-resort). Reached only for error types whose
-    // failure class genuinely depends on the message. Logged once so a
-    // discretion leak via prose is observable in traces.
+    // Prose fallback (P-5.14 last-resort). Reached for error types without an
+    // unambiguous type-only mapping. Logged when reached, so reliance on prose
+    // (a potential discretion leak) is observable in traces.
     tracing::debug!(
         target: "failure_classification",
         error_type = ?error_type,
@@ -500,8 +500,10 @@ mod tests {
         assert_eq!(err.retryable, Some(true));
     }
 
-    // P-5.14: the unambiguous typed variants classify from the type alone, with
-    // no message to lean on. Prose is never required for these.
+    // P-5.14: classification is deterministic from an empty message —
+    // Permission/Timeout/SandboxUnavailable via the fast typed mapping, and
+    // Resource via the fallback's type branch (Resource is deliberately NOT in
+    // the fast map — see classify_by_type — yet still resolves with no prose).
     #[test]
     fn typed_classification_needs_no_message() {
         assert_eq!(
@@ -522,10 +524,10 @@ mod tests {
         );
     }
 
-    // P-5.14: prose is the last-resort fallback for genuinely-untyped
-    // conditions. An `Execution` error (no unambiguous typed mapping) whose
-    // message says "active revision exists" still resolves to install_conflict
-    // via the string heuristics.
+    // P-5.14: prose is the last-resort fallback for error types without an
+    // unambiguous type-only mapping. An `Execution` error whose message says
+    // "active revision exists" still resolves to install_conflict via the
+    // string heuristics.
     #[test]
     fn prose_fallback_only_for_untyped() {
         let metadata = classify_message("active revision exists for this agent", ToolErrorType::Execution);
