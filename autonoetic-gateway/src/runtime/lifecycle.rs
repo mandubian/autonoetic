@@ -117,93 +117,6 @@ fn overflow_presend_block(
     }
 }
 
-fn build_critical_divergence_interaction(
-    session_id: &str,
-    root_session_id: String,
-    agent_id: &str,
-    turn_counter: u64,
-    signals: &[crate::runtime::trajectory_health::DivergenceSignal],
-    workflow_id: Option<String>,
-    task_id: Option<String>,
-) -> autonoetic_types::background::UserInteraction {
-    use crate::runtime::trajectory_health::SignalSeverity;
-
-    let signals_summary = signals
-        .iter()
-        .map(|s| {
-            let kind = s.kind.as_str();
-            match &s.evidence {
-                Some(e) => format!("- {} ({}): {}", kind, s.severity.as_str(), e),
-                None => format!("- {} ({})", kind, s.severity.as_str()),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let primary = signals
-        .iter()
-        .find(|s| s.severity == SignalSeverity::Critical)
-        .or_else(|| signals.first());
-
-    let question = match primary.and_then(|s| s.evidence.as_deref()) {
-        Some(evidence) => format!(
-            "Critical divergence in '{}' turn {}: {}",
-            agent_id, turn_counter, evidence
-        ),
-        None => format!(
-            "Critical trajectory divergence in agent '{}' at turn {}. Choose acknowledge (dismiss — the session keeps running), stop, or enter a note.",
-            agent_id, turn_counter
-        ),
-    };
-
-    autonoetic_types::background::UserInteraction {
-        interaction_id: format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]),
-        session_id: session_id.to_string(),
-        root_session_id,
-        agent_id: agent_id.to_string(),
-        turn_id: crate::runtime::checkpoint::turn_id_for(turn_counter),
-        kind: autonoetic_types::background::UserInteractionKind::DivergenceSentinel,
-        question,
-        context: Some(if signals_summary.is_empty() {
-            "See divergence.* events in the causal chain for details.".to_string()
-        } else {
-            format!(
-                "Signals:\n{}\n\nSee divergence.* events in the causal chain for full payload.",
-                signals_summary
-            )
-        }),
-        // Two distinct choices only. The prompt is non-blocking — the session
-        // keeps running while it's pending — so "Acknowledge" (dismiss/noted)
-        // and "Stop" (emergency-stop) are the only actions with different
-        // effects. A former third option, "Continue", behaved identically to
-        // "Acknowledge" (issue #500); "stop nagging me" is the agent's
-        // `sentinel.suppress` job, not a per-prompt operator action.
-        options: vec![
-            autonoetic_types::background::UserInteractionOption {
-                id: "ack".to_string(),
-                label: "Acknowledge".to_string(),
-                value: "acknowledged".to_string(),
-            },
-            autonoetic_types::background::UserInteractionOption {
-                id: "stop".to_string(),
-                label: "Stop".to_string(),
-                value: "stop".to_string(),
-            },
-        ],
-        allow_freeform: true,
-        status: autonoetic_types::background::UserInteractionStatus::Pending,
-        answer_option_id: None,
-        answer_text: None,
-        answered_by: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        answered_at: None,
-        expires_at: None,
-        workflow_id,
-        task_id,
-        checkpoint_turn_id: None,
-    }
-}
-
 pub struct AgentExecutor {
     pub manifest: AgentManifest,
     pub instructions: String,
@@ -3383,10 +3296,10 @@ impl AgentExecutor {
                                 }
                             }
 
-                            // Critical also escalates to the operator via the
-                            // user_interactions channel (per #241 spec — a
-                            // non-blocking notification, not a gate). We also
-                            // keep the causal event for durable audit.
+                            // Critical surfaces as a passive operator-activity
+                            // advisory (Phase 2 D.7a). The Sentinel no longer pushes
+                            // an answer-demanding UserInteraction; the operator may
+                            // stop the session explicitly via the TUI instead.
                             if matches!(result.health, TrajectoryHealth::Critical { .. }) {
                                 let notify_operator = cfg
                                     .map(|c| c.trajectory.notify_operator)
@@ -3408,18 +3321,13 @@ impl AgentExecutor {
 
                                     if let Some(store) = self.gateway_store.as_ref() {
                                         let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
-                                        let interaction = build_critical_divergence_interaction(
+                                        self.emit_critical_sentinel_operator_activity(
+                                            store,
                                             &session_id,
                                             root_sid,
-                                            &self.manifest.agent.id,
-                                            self.turn_counter,
-                                            result.health.signals(),
-                                            self.workflow_id.clone(),
-                                            self.task_id.clone(),
+                                            turn_id,
+                                            &result.health,
                                         );
-                                        if let Err(e) = store.create_user_interaction(&interaction) {
-                                            tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to create critical_divergence user_interaction");
-                                        }
                                     }
                                 }
                             }
@@ -3513,6 +3421,46 @@ impl AgentExecutor {
             tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to write divergence wake signal");
         }
         true
+    }
+
+    /// Emit a passive operator-activity advisory for a Critical Sentinel verdict.
+    /// Phase 2 D.7a replacement for the pushed DivergenceSentinel UserInteraction.
+    pub fn emit_critical_sentinel_operator_activity(
+        &self,
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        session_id: &str,
+        root_session_id: String,
+        turn_id: &str,
+        health: &crate::runtime::trajectory_health::TrajectoryHealth,
+    ) {
+        let crate::runtime::trajectory_health::TrajectoryHealth::Critical { signals } = health else {
+            return;
+        };
+        let draft = crate::runtime::operator_activity::classify_sentinel_notice(
+            health.level_str(),
+            &self.manifest.agent.id,
+            self.turn_counter,
+            signals,
+        );
+        let record = draft.into_record(
+            root_session_id,
+            session_id.to_string(),
+            self.manifest.agent.id.clone(),
+            self.workflow_id.clone(),
+            self.task_id.clone(),
+            Some(turn_id.to_string()),
+            None,
+            None,
+            None,
+        );
+        let rate_limit_per_min = self
+            .config
+            .as_ref()
+            .map(|c| c.operator_activity.rate_limit_per_min)
+            .unwrap_or_else(|| autonoetic_types::config::OperatorActivityConfig::default().rate_limit_per_min);
+        if let Err(e) = store.insert_operator_activity_throttled(&record, rate_limit_per_min) {
+            tracing::warn!(target = "autonoetic::trajectory", error = %e, "Failed to insert sentinel_notice operator_activity");
+        }
     }
 }
 
@@ -3726,49 +3674,6 @@ mod tests {
         }]);
         let foundation = compose_foundation(&manifest);
         assert!(foundation.contains("# Foundation Workflow"));
-    }
-
-    #[test]
-    fn critical_divergence_interaction_offers_options_and_freeform() {
-        use crate::runtime::trajectory_health::{
-            DivergenceSignal, DivergenceSignalKind, SignalSeverity,
-        };
-
-        let interaction = build_critical_divergence_interaction(
-            "session-1",
-            "root-1".to_string(),
-            "planner.default",
-            5,
-            &[DivergenceSignal::new(
-                DivergenceSignalKind::ChildFailurePressure,
-                SignalSeverity::Critical,
-                1.0,
-                0.95,
-            )
-            .with_evidence("3 child agent tasks have failed (limit 3)")],
-            Some("wf-1".to_string()),
-            Some("task-1".to_string()),
-        );
-
-        assert_eq!(
-            interaction.question,
-            "Critical divergence in 'planner.default' turn 5: 3 child agent tasks have failed (limit 3)"
-        );
-        assert!(
-            interaction
-                .context
-                .as_deref()
-                .unwrap_or("")
-                .contains("child_failure_pressure")
-        );
-        assert!(interaction.allow_freeform);
-        // Two distinct options only (issue #500 — "continue" was a no-op dup of "ack").
-        assert_eq!(interaction.options.len(), 2);
-        assert_eq!(interaction.options[0].id, "ack");
-        assert_eq!(interaction.options[1].id, "stop");
-        assert_eq!(interaction.options[1].value, "stop");
-        assert_eq!(interaction.workflow_id.as_deref(), Some("wf-1"));
-        assert_eq!(interaction.task_id.as_deref(), Some("task-1"));
     }
 
     #[test]
