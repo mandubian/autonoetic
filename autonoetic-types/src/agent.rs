@@ -295,6 +295,21 @@ pub struct LoopGuardDeclaration {
     pub max_session_turns: Option<u32>,
 }
 
+impl LoopGuardDeclaration {
+    pub fn for_execution_mode(mode: ExecutionMode) -> Self {
+        match mode {
+            ExecutionMode::Reasoning => Self::default(),
+            ExecutionMode::Script => Self {
+                max_loops_without_progress: Some(4),
+                max_tool_failures: Some(6),
+                max_consecutive_same_progress: Some(1),
+                max_child_failures: Some(5),
+                max_session_turns: None,
+            },
+        }
+    }
+}
+
 /// Language detector identifier for remote-access import scanning.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

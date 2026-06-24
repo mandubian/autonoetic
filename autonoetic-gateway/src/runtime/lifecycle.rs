@@ -277,6 +277,7 @@ pub struct AgentExecutor {
     /// Optional extended instructions (after `<!-- extended -->` in SKILL.md).
     /// Written to content store for on-demand retrieval by the agent.
     pub extended_instructions: Option<String>,
+    pub blocked_state_event_emitted: bool,
 
     /// Parsed once from SKILL.md; used instead of re-reading the file every turn.
     pub loop_guard_declaration: Option<autonoetic_types::agent::LoopGuardDeclaration>,
@@ -327,6 +328,14 @@ use crate::runtime::tool_dispatch::{
 };
 pub use crate::runtime::tool_dispatch::determine_tool_tier_filter;
 use std::sync::atomic::AtomicU64;
+
+fn is_signal_derived_exit(value: &serde_json::Value) -> bool {
+    value.get("ok").and_then(|v| v.as_bool()) == Some(false)
+        && value
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .map_or(false, |code| code >= 128)
+}
 
 impl AgentExecutor {
     pub fn new(
@@ -381,6 +390,7 @@ impl AgentExecutor {
             persona: None,
             overflow_recovery: false,
             extended_instructions: None,
+            blocked_state_event_emitted: false,
             loop_guard_declaration,
             trajectory_monitor: TrajectoryMonitor::new(Default::default()),
             last_context_utilization: None,
@@ -416,6 +426,7 @@ impl AgentExecutor {
             Some(config.as_ref()),
             &self.agent_dir,
             self.loop_guard_declaration.as_ref(),
+            self.manifest.execution_mode,
         );
         self.trajectory_monitor = TrajectoryMonitor::new(config.trajectory.clone());
         self.config = Some(config);
@@ -1098,6 +1109,7 @@ impl AgentExecutor {
             self.config.as_deref(),
             &self.agent_dir,
             self.loop_guard_declaration.as_ref(),
+            self.manifest.execution_mode,
         );
         self.llm_usage_last_run.clear();
         let session_id = self.ensure_session_id();
@@ -3105,15 +3117,44 @@ impl AgentExecutor {
                                 "quota_exceeded" => Some(autonoetic_types::tool_error::ToolErrorType::QuotaExceeded),
                                 "not_found" => Some(autonoetic_types::tool_error::ToolErrorType::NotFound),
                                 "timeout" => Some(autonoetic_types::tool_error::ToolErrorType::Timeout),
+                                "sandbox_unavailable" => Some(autonoetic_types::tool_error::ToolErrorType::SandboxUnavailable),
                                 _ => None,
                             });
+                        let signal_derived = is_signal_derived_exit(&parsed);
+                        let irrecoverable = error_type
+                            .as_ref()
+                            .map(crate::runtime::guard::LoopGuard::is_irrecoverable)
+                            .unwrap_or(false)
+                            || signal_derived;
                         if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
                         {
-                            self.guard.register_failure(
+                            let counted = self.guard.register_failure(
                                 &tc.name,
                                 &tc.arguments,
                                 error_type.as_ref(),
                             );
+                            if !counted && !self.blocked_state_event_emitted {
+                                let payload = serde_json::json!({
+                                    "tool": tc.name,
+                                    "error_type": error_type.as_ref().map(|e| e.to_string()),
+                                    "exit_code": parsed.get("exit_code").and_then(|v| v.as_i64()),
+                                    "signal_derived": signal_derived,
+                                    "message": "The agent is blocked by a gateway-side irrecoverable condition, not diverging.",
+                                });
+                                if let Err(e) = tracer.log_event(
+                                    "operator_alert",
+                                    "blocked_state",
+                                    autonoetic_types::causal_chain::EntryStatus::Success,
+                                    Some(payload),
+                                ) {
+                                    tracing::warn!(
+                                        target: "autonoetic::trajectory",
+                                        error = %e,
+                                        "Failed to log blocked_state operator alert"
+                                    );
+                                }
+                                self.blocked_state_event_emitted = true;
+                            }
                         }
                     } else if tool_result_counts_as_progress(result) {
                         if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
@@ -4446,5 +4487,33 @@ mod tests {
                 "execute_loop_error",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod divergence_robustness_tests {
+    use super::is_signal_derived_exit;
+
+    #[test]
+    fn signal_derived_exit_codes_are_irrecoverable() {
+        assert!(is_signal_derived_exit(
+            &serde_json::json!({"ok": false, "exit_code": 130})
+        ));
+        assert!(is_signal_derived_exit(
+            &serde_json::json!({"ok": false, "exit_code": 137})
+        ));
+    }
+
+    #[test]
+    fn non_signal_exits_are_not_irrecoverable() {
+        assert!(!is_signal_derived_exit(
+            &serde_json::json!({"ok": false, "exit_code": 1})
+        ));
+        assert!(!is_signal_derived_exit(
+            &serde_json::json!({"ok": true, "exit_code": 137})
+        ));
+        assert!(!is_signal_derived_exit(
+            &serde_json::json!({"ok": false})
+        ));
     }
 }

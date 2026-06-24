@@ -2716,6 +2716,7 @@ impl GatewayExecutionService {
                             runtime.config.as_deref(),
                             &runtime.agent_dir,
                             runtime.loop_guard_declaration.as_ref(),
+                            runtime.manifest.execution_mode,
                         );
                         // If the incoming message is already the last user message in
                         // the checkpoint history, don't duplicate it.

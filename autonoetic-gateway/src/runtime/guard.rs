@@ -272,23 +272,33 @@ impl LoopGuard {
         false
     }
 
+    pub fn is_irrecoverable(error_type: &ToolErrorType) -> bool {
+        matches!(
+            error_type,
+            ToolErrorType::Permission | ToolErrorType::QuotaExceeded | ToolErrorType::SandboxUnavailable
+        )
+    }
+
     /// Track a tool failure — failures accumulate per tool name regardless of arguments.
     ///
-    /// Permission errors are excluded entirely: the agent cannot fix by
-    /// retrying — it needs authorization.
+    /// Irrecoverable errors (permission, quota exceeded, sandbox unavailable) are
+    /// excluded: the agent cannot fix them by retrying.
     pub fn register_failure(
         &mut self,
         tool_name: &str,
         _arguments: &str,
         error_type: Option<&ToolErrorType>,
-    ) {
-        if matches!(error_type, Some(ToolErrorType::Permission)) {
-            return;
+    ) -> bool {
+        if let Some(e) = error_type {
+            if Self::is_irrecoverable(e) {
+                return false;
+            }
         }
         *self
             .tool_failure_counts
             .entry(tool_name.to_string())
             .or_insert(0) += 1;
+        true
     }
 
     /// Track a child agent task failure (from workflow.wait returning any_failed: true).
@@ -811,6 +821,40 @@ mod tests {
             Some(&ToolErrorType::Permission),
         );
         assert!(guard.check_loop().is_ok());
+    }
+
+    #[test]
+    fn test_is_irrecoverable() {
+        assert!(LoopGuard::is_irrecoverable(&ToolErrorType::Permission));
+        assert!(LoopGuard::is_irrecoverable(&ToolErrorType::QuotaExceeded));
+        assert!(LoopGuard::is_irrecoverable(&ToolErrorType::SandboxUnavailable));
+        assert!(!LoopGuard::is_irrecoverable(&ToolErrorType::Timeout));
+        assert!(!LoopGuard::is_irrecoverable(&ToolErrorType::Resource));
+    }
+
+    #[test]
+    fn test_irrecoverable_errors_do_not_count_against_budget() {
+        let mut guard = LoopGuard::new(100);
+
+        for _ in 0..10 {
+            guard.register_failure(
+                "web_fetch",
+                r#"{"url":"https://denied.com"}"#,
+                Some(&ToolErrorType::Permission),
+            );
+            guard.register_failure(
+                "sandbox_exec",
+                r#"{"command":"test"}"#,
+                Some(&ToolErrorType::QuotaExceeded),
+            );
+            guard.register_failure(
+                "sandbox_exec",
+                r#"{"command":"test"}"#,
+                Some(&ToolErrorType::SandboxUnavailable),
+            );
+            guard.register_progress("web_fetch", r#"{"url":"https://denied.com"}"#);
+            assert!(guard.check_loop().is_ok());
+        }
     }
 
     #[test]

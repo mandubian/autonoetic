@@ -682,7 +682,7 @@ fn spawn_driver_process(command: &mut Command, program: &str) -> anyhow::Result<
     match command.spawn() {
         Ok(child) => Ok(child),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
-            "resource: sandbox driver '{program}' not found on PATH — this host is missing the \
+            "sandbox_unavailable: sandbox driver '{program}' not found on PATH — this host is missing the \
              sandbox backend this agent requires. Install it (bubblewrap provides 'bwrap', Docker \
              provides 'docker') or run `autonoetic gateway preflight` to inspect host \
              capabilities. [sandbox_driver_unavailable]"
