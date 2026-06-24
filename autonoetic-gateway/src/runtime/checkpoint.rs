@@ -17,6 +17,7 @@ use crate::llm::Message;
 use crate::runtime::compression::CompressionMetadata;
 use crate::runtime::guard::LoopGuard;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::trajectory::FeedbackEvent;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -141,6 +142,8 @@ pub struct SessionCheckpoint {
     /// Tool names explicitly discovered via `tool_discover`.
     #[serde(default)]
     pub discovered_tools: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub blocked_state_event_emitted: bool,
 
     // --- Session identity ---
     pub agent_id: String,
@@ -223,6 +226,12 @@ pub struct SessionCheckpoint {
     /// divergence from the restored LoopGuard state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trajectory_last_level: Option<String>,
+
+    /// Feedback events the gateway issued to the agent before this checkpoint.
+    /// Restored into the trajectory monitor so cross-turn `FeedbackIgnored`
+    /// detection survives respawn, repair, and approval continuation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback_events: Vec<(u64, FeedbackEvent)>,
 }
 
 impl SessionCheckpoint {
@@ -234,6 +243,7 @@ impl SessionCheckpoint {
         runtime.discovered_tools = self.discovered_tools.clone();
         runtime.session_started = true;
         runtime.turn_counter = self.turn_counter;
+        runtime.blocked_state_event_emitted = self.blocked_state_event_emitted;
         runtime.runtime_lock_hash = self.runtime_lock_hash.clone();
         if let Some(ref cm) = self.compression_metadata {
             runtime.compression_metadata = cm.clone();
@@ -243,6 +253,9 @@ impl SessionCheckpoint {
         runtime
             .trajectory_monitor
             .restore_last_level(self.trajectory_last_level.as_deref());
+        runtime
+            .trajectory_monitor
+            .restore_feedback(self.feedback_events.clone());
     }
 
     pub fn initial_user_message(&self) -> String {
@@ -490,6 +503,30 @@ pub fn load_latest_checkpoint(
     Ok(latest.map(|(_, c)| c))
 }
 
+/// Append feedback events to the latest checkpoint for a session.
+///
+/// Used when feedback is issued outside the agent executor (e.g. response
+/// validation violations) so that a later resume or retry can still detect
+/// ignored feedback. The feedback is recorded against the checkpoint's own
+/// turn counter. Returns `Ok(())` if there is no checkpoint to update.
+pub fn append_feedback_to_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+    events: &[FeedbackEvent],
+) -> anyhow::Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    let turn_counter = cp.turn_counter;
+    for event in events {
+        cp.feedback_events.push((turn_counter, event.clone()));
+    }
+    save_checkpoint(config, &cp)
+}
+
 /// Delete all checkpoint files for a session.
 pub fn cleanup_session_checkpoints(
     config: &GatewayConfig,
@@ -700,6 +737,7 @@ impl SessionFork {
             suspended_at: None,
             suppress_until_turn: 0,
             trajectory_last_level: None,
+            feedback_events: vec![],
             ..checkpoint.clone()
         };
         save_checkpoint(config, &forked_checkpoint)?;
@@ -753,6 +791,7 @@ mod tests {
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
             agent_id: "test-agent".to_string(),
             session_id: "session-123".to_string(),
             turn_id: "turn-001".to_string(),
@@ -776,6 +815,7 @@ mod tests {
             suspended_at: None,
             suppress_until_turn: 0,
             trajectory_last_level: None,
+            feedback_events: vec![],
         };
 
         save_checkpoint(&config, &checkpoint).expect("should save");
@@ -813,6 +853,7 @@ mod tests {
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: "turn-001".to_string(),
@@ -836,6 +877,7 @@ mod tests {
             suspended_at: None,
             suppress_until_turn: 0,
             trajectory_last_level: None,
+            feedback_events: vec![],
         };
 
         let mut c2 = c1.clone();
@@ -881,6 +923,7 @@ mod tests {
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
                 discovered_tools: Default::default(),
+                blocked_state_event_emitted: false,
                 agent_id: "test-agent".to_string(),
                 session_id: session_id.to_string(),
                 turn_id: format!("turn-{:03}", i),
@@ -904,6 +947,7 @@ mod tests {
                 suspended_at: None,
             suppress_until_turn: 0,
             trajectory_last_level: None,
+            feedback_events: vec![],
             };
             save_checkpoint(&config, &checkpoint).unwrap();
         }
@@ -969,6 +1013,7 @@ mod tests {
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
@@ -992,6 +1037,7 @@ mod tests {
             suspended_at: None,
             suppress_until_turn: 0,
             trajectory_last_level: None,
+            feedback_events: vec![],
         };
         save_checkpoint(&config, &checkpoint).expect("should save");
 
@@ -1020,6 +1066,77 @@ mod tests {
         assert!(
             latest.is_none(),
             "tampered checkpoint should be skipped by load_latest_checkpoint"
+        );
+    }
+
+    #[test]
+    fn append_feedback_to_latest_checkpoint_round_trips() {
+        use autonoetic_types::trajectory::FeedbackEvent;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let session_id = "session-feedback";
+        let turn_id = "turn-002";
+
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 2,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        save_checkpoint(&config, &checkpoint).expect("should save");
+
+        let events = vec![
+            FeedbackEvent::Validation {
+                rule: "required_artifacts".into(),
+                field_path: None,
+            },
+            FeedbackEvent::Validation {
+                rule: "output_schema".into(),
+                field_path: None,
+            },
+        ];
+        append_feedback_to_latest_checkpoint(&config, session_id, &events)
+            .expect("should append feedback");
+
+        let latest = load_latest_checkpoint(&config, session_id)
+            .expect("should load")
+            .expect("checkpoint should exist");
+        assert_eq!(latest.feedback_events.len(), 2);
+        assert_eq!(latest.feedback_events[0].0, 2);
+        assert_eq!(
+            latest.feedback_events[0].1,
+            FeedbackEvent::Validation {
+                rule: "required_artifacts".into(),
+                field_path: None,
+            }
         );
     }
 }

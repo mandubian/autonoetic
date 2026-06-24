@@ -6,6 +6,7 @@
 use autonoetic_types::agent::{IoReturnsEnforcement, OutputPolicy};
 use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::trajectory::FeedbackEvent;
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::path::Path;
@@ -32,6 +33,17 @@ impl std::fmt::Display for ValidationViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}] {}", self.rule, self.message)
     }
+}
+
+/// Convert validation violations into feedback events for the trajectory monitor.
+pub fn violations_to_feedback_events(violations: &[ValidationViolation]) -> Vec<FeedbackEvent> {
+    violations
+        .iter()
+        .map(|v| FeedbackEvent::Validation {
+            rule: v.rule.clone(),
+            field_path: None,
+        })
+        .collect()
 }
 
 /// Parse an `OutputPolicy` from metadata.
@@ -941,6 +953,7 @@ impl GatewayExecutionService {
         workflow_id: Option<&str>,
         task_id: Option<&str>,
         agent_is_spawn_capable: bool,
+        mut feedback_out: Option<&mut Vec<FeedbackEvent>>,
     ) -> anyhow::Result<SpawnResult> {
         let max_duration_ms = output_policy.validation_max_duration_ms;
         let deadline =
@@ -1022,6 +1035,10 @@ impl GatewayExecutionService {
                 "response.validation.pass"
             );
 
+            if let Some(out) = feedback_out {
+                out.extend(violations_to_feedback_events(&violations));
+            }
+
             // Issue #30: if the reply carries a `decision_journal` array
             // (curator-style output), persist one `curator.decision` causal
             // event per entry so operators can query by target.
@@ -1067,7 +1084,7 @@ impl GatewayExecutionService {
         // Non-schema violations (prohibited_text_pattern, required_artifacts, etc.)
         // are still enforced.
         if returns_enforcement == IoReturnsEnforcement::Advisory {
-            let (schema_violations, policy_violations): (Vec<_>, Vec<_>) = violations
+            let (schema_violations, mut policy_violations): (Vec<_>, Vec<_>) = violations
                 .iter()
                 .partition(|v| v.rule == "output_schema");
 
@@ -1105,8 +1122,10 @@ impl GatewayExecutionService {
                 return Ok(result);
             }
 
-            // Continue enforcement with only non-schema violations.
-            violations = policy_violations.into_iter().cloned().collect();
+            if let Some(out) = feedback_out.as_deref_mut() {
+                let pv_owned: Vec<ValidationViolation> = policy_violations.iter().map(|v| (*v).clone()).collect();
+                out.extend(violations_to_feedback_events(&pv_owned));
+            }
         }
 
         tracing::warn!(
@@ -1117,7 +1136,19 @@ impl GatewayExecutionService {
             "response.validation.fail"
         );
 
+        if let Some(out) = feedback_out.as_deref_mut() {
+            out.extend(violations_to_feedback_events(&violations,
+            ));
+        }
+
         if !repair_enabled || max_repair_rounds == 0 {
+            // Persist validation feedback to the latest checkpoint so a later
+            // retry/resume can detect ignored feedback even when repair is
+            // disabled or exhausted.
+            self.persist_validation_feedback(
+                &result.session_id,
+                &violations,
+            );
             return Err(violations_to_final_error(
                 &violations,
                 &result.session_id,
@@ -1133,6 +1164,10 @@ impl GatewayExecutionService {
                     agent_id = %agent_id,
                     attempt = attempt,
                     "response.repair.exhausted: deadline reached"
+                );
+                self.persist_validation_feedback(
+                    &result.session_id,
+                    &violations,
                 );
                 return Err(violations_to_final_error(
                     &violations,
@@ -1175,6 +1210,7 @@ impl GatewayExecutionService {
                     source_agent_id,
                     workflow_id,
                     task_id,
+                    &violations_to_feedback_events(&violations),
                 )
                 .await
             {
@@ -1241,6 +1277,10 @@ impl GatewayExecutionService {
             ));
             result = repaired;
 
+            if let Some(out) = feedback_out.as_deref_mut() {
+                out.extend(violations_to_feedback_events(&violations));
+            }
+
             if violations.is_empty() {
                 tracing::info!(
                     target: "response_validation",
@@ -1272,6 +1312,10 @@ impl GatewayExecutionService {
                     attempt = attempt,
                     "response.repair.exhausted: deadline reached after respawn"
                 );
+                self.persist_validation_feedback(
+                    &result.session_id,
+                    &violations,
+                );
                 return Err(violations_to_final_error(
                     &violations,
                     &result.session_id,
@@ -1286,12 +1330,39 @@ impl GatewayExecutionService {
             agent_id = %agent_id,
             "response.repair.exhausted: max_loops reached"
         );
+        self.persist_validation_feedback(
+            &result.session_id,
+            &violations,
+        );
         Err(violations_to_final_error(
             &violations,
             &result.session_id,
             true,
             result.assistant_reply.as_deref(),
         ))
+    }
+
+    fn persist_validation_feedback(
+        &self,
+        session_id: &str,
+        violations: &[ValidationViolation],
+    ) {
+        let events = violations_to_feedback_events(violations);
+        if events.is_empty() {
+            return;
+        }
+        if let Err(e) = crate::runtime::checkpoint::append_feedback_to_latest_checkpoint(
+            self.config().as_ref(),
+            session_id,
+            &events,
+        ) {
+            tracing::warn!(
+                target: "response_validation",
+                session_id = %session_id,
+                error = %e,
+                "failed to persist validation feedback to checkpoint"
+            );
+        }
     }
 
     fn resolve_artifact_ref_to_id(
@@ -1398,6 +1469,7 @@ impl GatewayExecutionService {
                             source_agent_id,
                             workflow_id,
                             task_id,
+                            &[],
                         )
                         .await
                     {
@@ -1501,6 +1573,40 @@ mod tests {
             entry_point: None,
             io: None,
         }
+    }
+
+    #[test]
+    fn violations_to_feedback_events_maps_rules() {
+        let violations = vec![
+            ValidationViolation {
+                rule: "required_artifacts".into(),
+                message: "missing foo".into(),
+                repair_hint: "create foo".into(),
+            },
+            ValidationViolation {
+                rule: "output_schema".into(),
+                message: "bad json".into(),
+                repair_hint: "fix json".into(),
+            },
+        ];
+        let events = violations_to_feedback_events(&violations);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            FeedbackEvent::Validation {
+                rule: "required_artifacts".into(),
+                field_path: None,
+            }
+        );
+        assert_eq!(
+            events[1].signature_key(),
+            "validation:output_schema:*"
+        );
+    }
+
+    #[test]
+    fn empty_violations_yield_empty_feedback_events() {
+        assert!(violations_to_feedback_events(&[]).is_empty());
     }
 
     #[test]

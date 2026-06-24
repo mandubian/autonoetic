@@ -66,6 +66,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
         session_state: SessionState::Normal,
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         agent_id: "planner.default".to_string(),
         session_id: session_id.to_string(),
         turn_id: "turn-000001".to_string(),
@@ -89,6 +90,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
         suspended_at: None,
         suppress_until_turn: 0,
         trajectory_last_level: None,
+            feedback_events: vec![],
     };
     save_checkpoint(config, &cp).unwrap();
 }

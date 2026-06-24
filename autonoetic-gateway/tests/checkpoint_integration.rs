@@ -49,6 +49,7 @@ fn make_checkpoint(
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         loop_guard_state: default_guard_state(),
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
@@ -73,6 +74,7 @@ fn make_checkpoint(
         suspended_at: None,
         suppress_until_turn: 0,
         trajectory_last_level: None,
+            feedback_events: vec![],
     }
 }
 

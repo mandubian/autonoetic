@@ -153,11 +153,34 @@ pub(crate) fn loop_guard_from_config_and_manifest(
 ) -> LoopGuard {
     match config {
         Some(cfg) => {
-            let declaration = declaration
+            // Explicit parameter or manifest declaration = operator/agent-author intent;
+            // keep it capped to system ceilings for safety.
+            let manifest_decl = declaration
                 .cloned()
-                .or_else(|| load_manifest_loop_guard_declaration(agent_dir))
-                .or_else(|| Some(LoopGuardDeclaration::for_execution_mode(execution_mode)));
-            let effective = effective_loop_guard_config(&cfg.loop_guard, declaration.as_ref());
+                .or_else(|| load_manifest_loop_guard_declaration(agent_dir));
+            if let Some(decl) = manifest_decl {
+                let effective = effective_loop_guard_config(&cfg.loop_guard, Some(&decl));
+                return LoopGuard::with_config(&effective);
+            }
+
+            // No declaration: derive role-aware defaults from execution_mode.
+            // These may raise above the global system defaults so deterministic
+            // executors (test runners, script agents) get headroom appropriate
+            // to their shape.
+            let role_default = LoopGuardDeclaration::for_execution_mode(execution_mode);
+            let mut effective = cfg.loop_guard.clone();
+            if let Some(v) = role_default.max_loops_without_progress {
+                effective.max_loops_without_progress = v;
+            }
+            if let Some(v) = role_default.max_tool_failures {
+                effective.max_tool_failures = v;
+            }
+            if let Some(v) = role_default.max_consecutive_same_progress {
+                effective.max_consecutive_same_progress = v;
+            }
+            if let Some(v) = role_default.max_child_failures {
+                effective.max_child_failures = v;
+            }
             LoopGuard::with_config(&effective)
         }
         None => LoopGuard::new(5),
@@ -558,6 +581,21 @@ mod tier_filter_tests {
     }
 
     #[test]
+    fn test_child_promotion_federation_agent_allows_promotion_record_not_web_search() {
+        let mut manifest = test_manifest();
+        manifest.agent.id = "static_evaluator.default".to_string();
+        let filter = determine_tool_tier_filter(
+            &manifest,
+            Some("root/child-static-eval"),
+            false,
+            SessionState::Normal,
+            true,
+        );
+        assert!(filter.allows("promotion_record"));
+        assert!(!filter.allows("web_search"));
+    }
+
+    #[test]
     fn test_child_auditor_allows_promotion_record_and_workflow_without_full_specialized() {
         use autonoetic_types::capability::Capability;
         let mut manifest = test_manifest();
@@ -668,8 +706,8 @@ mod loop_guard_tests {
             None,
             ExecutionMode::Script,
         );
-        assert_eq!(guard.max_loops_without_progress, 4);
-        assert_eq!(guard.max_tool_failures, 6);
+        assert_eq!(guard.max_loops_without_progress, 15);
+        assert_eq!(guard.max_tool_failures, 12);
     }
 
     #[test]
