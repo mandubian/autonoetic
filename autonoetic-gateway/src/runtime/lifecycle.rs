@@ -321,7 +321,7 @@ pub struct AgentExecutor {
     pub resolved_inference:
         Option<crate::runtime::inference_profile::ResolvedInferenceProfile>,
 
-    /// Set to `true` when an LLM/tool budget *reservation or recording* failed
+    /// Set to `true` when a budget *pre-check, reservation, or recording* failed
     /// specifically against the **root-session-tree** budget
     /// (`self.root_session_budget`), not the per-session budget. The service
     /// layer reads this flag after the turn returns its budget-exhausted error

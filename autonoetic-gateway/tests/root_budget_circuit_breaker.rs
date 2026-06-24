@@ -5,13 +5,19 @@
 //! burning the already-spent tree budget. The graceful root budget circuit
 //! breaker reuses the emergency-stop cascade to cancel those descendants.
 //!
-//! These tests cover three behaviors:
-//!   1. Root-budget exhaustion with ≥2 in-flight descendants cancels them all,
-//!      writes an `EmergencyStopRecord` (budget reason / trigger), and tree
-//!      spend does not climb afterwards.
-//!   2. Idempotency: a second root-budget exhaustion (e.g. a sibling) does NOT
-//!      create a second cascade / second stop record.
-//!   3. Per-session budget exhaustion does NOT arm the breaker (the
+//! These tests cover:
+//!   1. Root-budget exhaustion with ≥2 in-flight descendants cancels them all
+//!      (descendant workflow tasks aborted) and writes a single
+//!      `EmergencyStopRecord` with the budget reason / `root_budget_exhausted`
+//!      trigger. Cancelling the descendants is what stops further tree-budget
+//!      burn; we assert the cancellation + stop record (the mechanism), not a
+//!      spend counter.
+//!   2. Idempotency (sequential): a second root-budget exhaustion (e.g. a
+//!      sibling) does NOT create a second cascade / second stop record.
+//!   3. Idempotency (concurrent): many siblings hitting the exhausted shared
+//!      budget at once still produce exactly one stop record — the atomic
+//!      in-process claim closes the check-then-act race.
+//!   4. Per-session budget exhaustion does NOT arm the breaker (the
 //!      `root_budget_exhausted` flag stays false), so no root cascade fires.
 
 mod support;
@@ -285,6 +291,53 @@ async fn root_budget_breaker_is_idempotent_per_root() -> anyhow::Result<()> {
     assert_eq!(
         after_second[0].stop_id, first_stop_id,
         "the single stop record is unchanged"
+    );
+
+    Ok(())
+}
+
+/// Idempotency under concurrency — the realistic case: a shared tree budget is
+/// exhausted, so many sibling sessions hit the limit at once and each fires the
+/// breaker concurrently. The atomic in-process claim must ensure exactly one
+/// cascade / one stop record (without it, the check-then-act on the DB lookup
+/// races and produces duplicates).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn root_budget_breaker_is_idempotent_under_concurrency() -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
+
+    let root_session = "root-c2-concurrent";
+    seed_workflow_with_two_running_children(&config, &store, root_session)?;
+
+    // Fan out N concurrent siblings that all hit the exhausted tree budget.
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let exec = execution.clone();
+        let root = root_session.to_string();
+        handles.push(tokio::spawn(async move {
+            let err = anyhow::anyhow!(
+                "Root session budget exceeded: max_llm_tokens (sibling {i})"
+            );
+            exec.trigger_root_budget_circuit_breaker(&root, &err).await;
+        }));
+    }
+    for h in handles {
+        h.await?;
+    }
+
+    let stops = store.list_emergency_stops_for_root_session(root_session)?;
+    assert_eq!(
+        stops.len(),
+        1,
+        "concurrent siblings must create exactly one stop record (atomic claim closes the race)"
     );
 
     Ok(())

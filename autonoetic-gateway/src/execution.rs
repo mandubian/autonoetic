@@ -513,6 +513,10 @@ pub struct GatewayExecutionService {
     persona: Option<String>,
     local_model_context_cache: Arc<LocalModelContextCache>,
     wake_hints: Arc<Mutex<HashMap<String, WakeHintState>>>,
+    /// Roots for which the budget circuit breaker is currently firing — an
+    /// atomic in-process claim so concurrent siblings hitting the exhausted
+    /// shared tree budget do not each fire a duplicate cascade (C2).
+    budget_breaker_roots: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl GatewayExecutionService {
@@ -574,6 +578,7 @@ impl GatewayExecutionService {
             persona,
             local_model_context_cache: Arc::new(LocalModelContextCache::new()),
             wake_hints: Arc::new(Mutex::new(HashMap::new())),
+            budget_breaker_roots: Arc::new(Mutex::new(std::collections::HashSet::new())),
         };
 
         // Spawn the drain task that turns HookSpawnRequests into actual agent runs.
@@ -1605,59 +1610,87 @@ impl GatewayExecutionService {
             return;
         };
 
-        // Fire exactly once per root (idempotent). A prior emergency stop — for
-        // any reason — means the cascade already ran or is running.
-        match store.list_emergency_stops_for_root_session(root_session_id) {
-            Ok(stops) if !stops.is_empty() => {
+        // Atomic in-process claim: exactly one concurrent sibling per root
+        // proceeds. This closes the check-then-act race on the DB lookup below —
+        // under a shared exhausted tree budget, multiple siblings hit the limit
+        // at once, and without this claim each would observe an empty stop list
+        // and fire a duplicate cascade.
+        {
+            let mut claimed = self.budget_breaker_roots.lock().await;
+            if !claimed.insert(root_session_id.to_string()) {
                 tracing::debug!(
                     target: "root_budget_breaker",
                     root_session_id = %root_session_id,
-                    existing_stop = %stops[0].stop_id,
-                    "skip: root already has an emergency stop (idempotent)"
-                );
-                return;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(
-                    target: "root_budget_breaker",
-                    root_session_id = %root_session_id,
-                    error = %e,
-                    "could not check existing emergency stops; not firing budget breaker"
+                    "skip: budget breaker already claimed by a concurrent sibling"
                 );
                 return;
             }
         }
 
-        let reason = format!(
-            "Root session budget exhausted — cancelling in-flight descendants to \
-             stop tree-budget burn (P-6.21). {}",
-            underlying
-        );
-        tracing::warn!(
-            target: "root_budget_breaker",
-            root_session_id = %root_session_id,
-            "Firing graceful root budget circuit breaker"
-        );
-        if let Err(e) = self
-            .emergency_stop_root_session_with_options(
-                root_session_id,
-                &reason,
-                "gateway",
-                "root_budget_circuit_breaker",
-                "root_budget_exhausted",
-                None,
-                true,
-            )
-            .await
-        {
+        // Run under the claim; release it on every exit (leak-free, and lets a
+        // later sibling retry if the cascade itself failed — a subsequent caller
+        // then finds the recorded stop via the DB check and no-ops).
+        async {
+            // A prior emergency stop — from any source — means the cascade
+            // already ran or is running; cross-restart idempotency too.
+            match store.list_emergency_stops_for_root_session(root_session_id) {
+                Ok(stops) if !stops.is_empty() => {
+                    tracing::debug!(
+                        target: "root_budget_breaker",
+                        root_session_id = %root_session_id,
+                        existing_stop = %stops[0].stop_id,
+                        "skip: root already has an emergency stop (idempotent)"
+                    );
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "root_budget_breaker",
+                        root_session_id = %root_session_id,
+                        error = %e,
+                        "could not check existing emergency stops; not firing budget breaker"
+                    );
+                    return;
+                }
+            }
+
+            let reason = format!(
+                "Root session budget exhausted — cancelling in-flight descendants to \
+                 stop tree-budget burn (P-6.21). {}",
+                underlying
+            );
             tracing::warn!(
                 target: "root_budget_breaker",
                 root_session_id = %root_session_id,
-                error = %e,
-                "root budget circuit breaker failed to cascade"
+                "Firing graceful root budget circuit breaker"
             );
+            if let Err(e) = self
+                .emergency_stop_root_session_with_options(
+                    root_session_id,
+                    &reason,
+                    "gateway",
+                    "root_budget_circuit_breaker",
+                    "root_budget_exhausted",
+                    None,
+                    true,
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "root_budget_breaker",
+                    root_session_id = %root_session_id,
+                    error = %e,
+                    "root budget circuit breaker failed to cascade"
+                );
+            }
         }
+        .await;
+
+        self.budget_breaker_roots
+            .lock()
+            .await
+            .remove(root_session_id);
     }
 
     async fn finalize_session(
