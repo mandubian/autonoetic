@@ -776,7 +776,16 @@ where
     match value {
         serde_json::Value::String(s) => Ok(s),
         serde_json::Value::Null => Err(Error::custom("expected string, got null")),
-        other => Ok(other.to_string()),
+        other => {
+            // Tolerance is observable, never silent (M1 doctrine, #619): a model
+            // passed a non-string JSON scalar where a string was expected and we
+            // coerced it. Route through the shared chokepoint.
+            crate::runtime::tool_call_processor::note_llm_normalization(
+                "lenient_string_coercion",
+                "coerced non-string JSON scalar to string",
+            );
+            Ok(other.to_string())
+        }
     }
 }
 
@@ -790,7 +799,15 @@ where
     Ok(match value {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s),
-        other => Some(other.to_string()),
+        other => {
+            // Observable tolerance (M1 doctrine, #619): coerced a non-string JSON
+            // scalar to its string form rather than silently accepting the quirk.
+            crate::runtime::tool_call_processor::note_llm_normalization(
+                "lenient_string_coercion",
+                "coerced non-string JSON scalar to string",
+            );
+            Some(other.to_string())
+        }
     })
 }
 
@@ -1507,6 +1524,24 @@ mod tests {
         }
         let args: Args = serde_json::from_str(r#"{"message": 42}"#).unwrap();
         assert_eq!(args.message, "42");
+    }
+
+    #[test]
+    fn test_deserialize_opt_string_lenient_coerces_and_preserves() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_opt_string_lenient")]
+            note: Option<String>,
+        }
+        // Non-string scalar is coerced (instrumented through note_llm_normalization).
+        let coerced: Args = serde_json::from_str(r#"{"note": true}"#).unwrap();
+        assert_eq!(coerced.note.as_deref(), Some("true"));
+        // Plain string is preserved verbatim (no coercion).
+        let plain: Args = serde_json::from_str(r#"{"note": "hi"}"#).unwrap();
+        assert_eq!(plain.note.as_deref(), Some("hi"));
+        // Null maps to None.
+        let null: Args = serde_json::from_str(r#"{"note": null}"#).unwrap();
+        assert_eq!(null.note, None);
     }
 
     #[test]

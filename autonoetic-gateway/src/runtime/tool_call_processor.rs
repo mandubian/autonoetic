@@ -19,12 +19,17 @@
 //! Instrumented here: `strip_gemma_token_artifacts` (vendor tokens),
 //! `canonical_tool_name` (tool-name aliases).
 //!
+//! Instrumented elsewhere through the same [`note_llm_normalization`] chokepoint:
+//! the lenient string coercions in `tools/mod.rs`, the non-exact `fuzzy_match`
+//! fallback (`runtime/fuzzy_match.rs`), and the shared markdown-fence stripper in
+//! `response_validation.rs`. Tool-name shorthands are still accepted but framed
+//! as a deprecation notice (`tool_name_alias_deprecated`).
+//!
 //! Deferred enforcement (tracked under #619, not in this change): move the
-//! Gemma stripping to the LLM driver boundary; consolidate markdown-fence
-//! stripping (`response_validation.rs`) to one chokepoint; replace tool-name
-//! aliasing with reject-with-repair-hint after a logged deprecation window;
-//! instrument the lenient `Option<String>` coercion (`tools/mod.rs`) and the
-//! `fuzzy_match` fallback through this same helper.
+//! Gemma stripping to the LLM driver boundary (the driver output is not a clean
+//! single chokepoint today — multiple drivers, streaming + non-streaming paths);
+//! replace tool-name aliasing with reject-with-repair-hint after a logged
+//! deprecation window.
 
 use crate::llm::ToolCall;
 use crate::runtime::disclosure::DisclosureState;
@@ -184,9 +189,19 @@ impl<'a> ToolCallProcessor<'a> {
             let approval_ref = extract_approval_ref_from_args(&tc.arguments);
             let tool_name = Self::canonical_tool_name(&tc.name).to_string();
             if tool_name != tc.name {
+                // C (#619): tool-name shorthands are STILL accepted here — a hard
+                // reject is a breaking change that requires a logged deprecation
+                // window first (the reject-with-repair-hint step is gated on that
+                // window, tracked in #619). For now we frame the tolerance as a
+                // deprecation notice so it is visible in traces without breaking
+                // agents that rely on the shorthand.
                 note_llm_normalization(
-                    "tool_name_alias",
-                    &format!("mapped tool name '{}' -> '{}'", tc.name, tool_name),
+                    "tool_name_alias_deprecated",
+                    &format!(
+                        "mapped deprecated tool-name shorthand '{}' -> '{}' (still accepted; \
+                         will be rejected in a future release)",
+                        tc.name, tool_name
+                    ),
                 );
             }
 
@@ -450,6 +465,13 @@ impl<'a> ToolCallProcessor<'a> {
         let tool_name = Self::canonical_tool_name(&tc.name);
         let policy = &self.policy;
 
+        // TODO(#619): hoist to driver boundary. Sanitizing here (and in
+        // `validate_tool_intent`) means the strip runs per call site rather than
+        // once where raw model output enters the gateway. The driver boundary is
+        // NOT a clean single point today: ToolCall is constructed at 6 sites
+        // across anthropic/gemini/openai/xml_tool_calls drivers, on both the
+        // streaming and non-streaming paths, and assistant text would need
+        // separate handling. Centralizing safely needs a dedicated change.
         let sanitized_args = strip_gemma_token_artifacts(&tc.arguments);
 
         let mut result = if self.mcp_runtime.has_tool(tool_name) {
@@ -683,6 +705,7 @@ fn validate_tool_intent(
     tool_name: &str,
     arguments_json: &str,
 ) -> Result<Option<String>, ToolError> {
+    // TODO(#619): hoist to driver boundary (see note in `execute_tool_call`).
     let sanitized_args = strip_gemma_token_artifacts(arguments_json);
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&sanitized_args) else {
         return Ok(None);

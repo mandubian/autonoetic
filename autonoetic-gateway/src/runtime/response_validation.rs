@@ -847,6 +847,15 @@ fn strip_markdown_code_fences(s: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(s);
     }
     if let Some(extracted) = extract_first_fenced_json(trimmed) {
+        // Observable tolerance (M1 doctrine, #619): emitted only when we actually
+        // changed the input by unwrapping markdown fences. Both call sites
+        // (output_schema validation and the fabricated-plan_id guard) go through
+        // this single helper, so instrumenting here covers both. `detail` is a
+        // redacted summary — never the reply body.
+        crate::runtime::tool_call_processor::note_llm_normalization(
+            "markdown_code_fence",
+            "stripped markdown code fences wrapping a JSON reply",
+        );
         return std::borrow::Cow::Owned(extracted);
     }
     std::borrow::Cow::Borrowed(s)
