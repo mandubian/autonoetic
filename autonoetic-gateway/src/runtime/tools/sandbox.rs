@@ -26,6 +26,20 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 
 pub struct SandboxExecTool;
 
+/// Compute the tool-level `ok` flag for a sandbox execution.
+///
+/// `ok` is true when the sandbox itself ran the command to completion with an
+/// exit code in the normal range (0–127). A non-zero exit in that range is a
+/// DOMAIN result (e.g. a failed unit-test suite), not a tool malfunction, and
+/// must not feed the LoopGuard failure budget or trajectory divergence. Exit
+/// codes >= 128 are signal-derived (e.g. SIGKILL/OOM 137, SIGTERM 143,
+/// SIGSYS/seccomp 159) and indicate a genuine sandbox-level fault, so they
+/// stay `ok: false`. No exit code at all means the process was killed by a
+/// signal without a normal exit.
+pub fn compute_sandbox_exec_ok(exit_code: Option<i32>) -> bool {
+    matches!(exit_code, Some(code) if (0..128).contains(&code))
+}
+
 pub struct LayerMount {
     pub layer_id: String,
     pub mount_path: String,
@@ -2119,12 +2133,27 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         let _sandbox_pid_guard = sandbox_exec_pid_guard(&runner, run_context);
         let output = runner.process.wait_with_output()?;
         crate::runtime::sealed_network_proxy::shutdown_sealed_proxy(sealed_proxy);
-        let ok = output.status.success();
+        let exit_code = output.status.code();
+        let command_succeeded = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // `ok` reports TOOL-execution success: the sandbox ran the command to
+        // completion. A non-zero exit code in the normal range is a DOMAIN
+        // result the caller must process (e.g. a unit-test suite that failed)
+        // — NOT a tool failure — so it must not be counted as a loop-guard
+        // failure or a trajectory divergence. A signal kill (no exit code) or
+        // any signal-derived exit code (128 + signal: SIGKILL/OOM 137,
+        // SIGTERM 143, SIGSYS/seccomp 159, …) is a genuine sandbox-level fault
+        // and stays `ok: false`, so repeated OOM/timeout kills are not mistaken
+        // for progress. `command_succeeded` carries the exit-0 signal for
+        // consumers that need it. (RFC: unit-test-runner-divergence-loop)
+        let ok = compute_sandbox_exec_ok(exit_code);
+
         let mut body = serde_json::json!({
             "ok": ok,
-            "exit_code": output.status.code(),
+            "command_succeeded": command_succeeded,
+            "exit_code": exit_code,
             "stdout": stdout,
             "stderr": stderr
         });
@@ -2472,7 +2501,34 @@ mod network_error_detection_tests {
     }
 }
 
+#[cfg(test)]
+mod exec_ok_tests {
+    use super::compute_sandbox_exec_ok;
 
+    #[test]
+    fn ok_true_for_normal_nonzero_exit() {
+        assert!(compute_sandbox_exec_ok(Some(1)));
+        assert!(compute_sandbox_exec_ok(Some(127)));
+    }
+
+    #[test]
+    fn ok_true_for_exit_zero() {
+        assert!(compute_sandbox_exec_ok(Some(0)));
+    }
+
+    #[test]
+    fn ok_false_for_signal_derived_exit() {
+        assert!(!compute_sandbox_exec_ok(Some(128)));
+        assert!(!compute_sandbox_exec_ok(Some(137)));
+        assert!(!compute_sandbox_exec_ok(Some(143)));
+        assert!(!compute_sandbox_exec_ok(Some(159)));
+    }
+
+    #[test]
+    fn ok_false_when_no_exit_code() {
+        assert!(!compute_sandbox_exec_ok(None));
+    }
+}
 
 #[cfg(test)]
 mod remote_access_declaration_tests {
