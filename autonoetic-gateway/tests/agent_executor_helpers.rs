@@ -442,3 +442,59 @@ async fn handle_tool_batch_suspends_on_human_escalation() {
     }
 }
 
+#[test]
+fn critical_sentinel_emits_operator_activity_not_user_interaction() {
+    use autonoetic_gateway::runtime::trajectory_health::{
+        DivergenceSignal, DivergenceSignalKind, SignalSeverity, TrajectoryHealth,
+    };
+    use autonoetic_types::operator_activity::{OperatorActivityKind, OperatorActivitySeverity};
+    use autonoetic_types::background::UserInteractionKind;
+
+    let temp = tempdir().expect("tempdir should create");
+    let mut executor = empty_executor().0;
+    let store = Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(temp.path())
+            .expect("store should open"),
+    );
+    executor.gateway_store = Some(store.clone());
+    executor.turn_counter = 7;
+
+    let health = TrajectoryHealth::Critical {
+        signals: vec![DivergenceSignal::new(
+            DivergenceSignalKind::FeedbackIgnored,
+            SignalSeverity::Critical,
+            3.0,
+            1.0,
+        )
+        .with_evidence("repeated output_schema violation")],
+    };
+
+    executor.emit_critical_sentinel_operator_activity(
+        &store,
+        "session-1",
+        "root-1".to_string(),
+        "turn-000007",
+        &health,
+    );
+
+    // A passive operator-activity advisory was recorded.
+    let activity = store
+        .list_operator_activity("root-1", None, 10, None)
+        .expect("list should succeed");
+    assert_eq!(activity.activities.len(), 1);
+    assert_eq!(activity.activities[0].kind, OperatorActivityKind::SentinelNotice);
+    assert_eq!(activity.activities[0].severity, OperatorActivitySeverity::Error);
+    assert!(activity.activities[0].summary.contains("Sentinel [critical]"));
+    assert!(activity.activities[0].summary.contains("test-agent"));
+
+    // No answer-demanding DivergenceSentinel UserInteraction was created.
+    let interactions = store
+        .get_pending_interactions_for_session("session-1")
+        .expect("list interactions should succeed");
+    let sentinel: Vec<_> = interactions
+        .into_iter()
+        .filter(|i| i.kind == UserInteractionKind::DivergenceSentinel)
+        .collect();
+    assert!(sentinel.is_empty(), "D.7a: Critical must not push a DivergenceSentinel UserInteraction");
+}
+

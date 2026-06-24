@@ -300,6 +300,7 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperatorActivityRecord> 
         "human_gate" => OperatorActivityKind::HumanGate,
         "session_lifecycle" => OperatorActivityKind::SessionLifecycle,
         "rate_limited" => OperatorActivityKind::RateLimited,
+        "sentinel_notice" => OperatorActivityKind::SentinelNotice,
         other => {
             return Err(rusqlite::Error::InvalidColumnType(
                 8,

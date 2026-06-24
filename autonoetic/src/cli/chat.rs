@@ -301,6 +301,9 @@ enum SlashCommand {
     ModelShow,
     ModelSet { preset: String, reason: Option<String> },
     ModelClear,
+    /// `/sentinel stop [reason...]` — operator-initiated emergency stop of the
+    /// current root session when the Sentinel has raised a critical advisory.
+    SentinelStop(Option<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -1184,6 +1187,22 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
             };
             Ok(SlashCommand::ModelSet { preset, reason })
         }
+        "/sentinel" => {
+            let mut parts = trimmed[9..].trim().split_whitespace();
+            match parts.next() {
+                Some("stop") => {
+                    let reason = parts.collect::<Vec<_>>().join(" ");
+                    Ok(SlashCommand::SentinelStop(
+                        if reason.is_empty() { None } else { Some(reason) },
+                    ))
+                }
+                Some(other) => Err(format!(
+                    "Unknown /sentinel subcommand '{}'. Try: stop.",
+                    other
+                )),
+                None => Err("Usage: /sentinel stop [reason...]".to_string()),
+            }
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -1208,6 +1227,8 @@ fn format_help_card() -> String {
         "  /model                 Show resolved LLM preset for this session",
         "  /model <preset> [why]  Override inference preset until cleared",
         "  /model clear           Remove session inference override",
+        "  /sentinel stop [reason]  Emergency-stop the root session (Sentinel intervention)",
+        "  Ctrl+X                 Shortcut for /sentinel stop",
         "  /cancel                Leave the current picker/prompt",
         "  /quit                  Exit chat",
     ]
@@ -2172,6 +2193,11 @@ fn handle_slash_command_submission(
             app.add_message(MessageRole::System, card);
             // Return true so the original `/waive ...` text is sent to the orchestrator
             // as a chat message; the orchestrator can then call `validation.waive`.
+            true
+        }
+        SlashCommand::SentinelStop(_) => {
+            // Handled directly in the async input loop so it can await the
+            // emergency-stop call. Returning true keeps the TUI alive.
             true
         }
     }
@@ -5918,6 +5944,9 @@ async fn handle_chat_test_mode(
                  Ok(SlashCommand::ModelShow | SlashCommand::ModelSet { .. } | SlashCommand::ModelClear) => {
                      println!("/model is not supported in test mode.");
                  }
+                 Ok(SlashCommand::SentinelStop(_)) => {
+                     println!("/sentinel stop is not supported in test mode.");
+                 }
                  Err(error) => {
                     println!("{}", error);
                 }
@@ -6841,6 +6870,49 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 app.add_message(MessageRole::User, input.clone());
                                                 let _ = tx.send((id, ChatOutbound::PolicyAuthor(text)));
                                             }
+                                            Ok(SlashCommand::SentinelStop(reason)) => {
+                                                let root_session_id = get_root_session_id(app);
+                                                let reason = reason.unwrap_or_else(|| {
+                                                    "operator triggered Sentinel stop from TUI".to_string()
+                                                });
+                                                if let Some(exec) = execution_for_interactions {
+                                                    match exec
+                                                        .emergency_stop_root_session(
+                                                            &root_session_id,
+                                                            &reason,
+                                                            "operator",
+                                                            "chat-tui",
+                                                            "sentinel_stop",
+                                                            None,
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(_) => {
+                                                            app.add_message(
+                                                                MessageRole::System,
+                                                                format!(
+                                                                    "Sentinel stop requested for root session: {}",
+                                                                    root_session_id
+                                                                ),
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            app.add_message(
+                                                                MessageRole::System,
+                                                                format!(
+                                                                    "Failed to Sentinel-stop root session {}: {}",
+                                                                    root_session_id, e
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                } else {
+                                                    app.add_message(
+                                                        MessageRole::System,
+                                                        "Execution service unavailable: cannot Sentinel-stop root session from chat TUI.".to_string(),
+                                                    );
+                                                }
+                                            }
                                             Ok(SlashCommand::ReturnToAgent { force, message }) => {
                                                 let id = app.next_id();
                                                 let Some(wb_overview) = app.active_workbench.as_ref() else {
@@ -7024,6 +7096,50 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         app.add_message(
                                             MessageRole::System,
                                             "Execution service unavailable: cannot cancel root session from chat TUI.".to_string(),
+                                        );
+                                    }
+                                }
+                                HandleKeyAction::SentinelStop(reason) => {
+                                    let root_session_id = get_root_session_id(app);
+                                    let reason = reason.unwrap_or_else(|| {
+                                        "operator triggered Sentinel stop from TUI".to_string()
+                                    });
+
+                                    if let Some(exec) = execution_for_interactions {
+                                        match exec
+                                            .emergency_stop_root_session(
+                                                &root_session_id,
+                                                &reason,
+                                                "operator",
+                                                "chat-tui",
+                                                "sentinel_stop",
+                                                None,
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!(
+                                                        "Sentinel stop requested for root session: {}",
+                                                        root_session_id
+                                                    ),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!(
+                                                        "Failed to Sentinel-stop root session {}: {}",
+                                                        root_session_id, e
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            "Execution service unavailable: cannot Sentinel-stop root session from chat TUI.".to_string(),
                                         );
                                     }
                                 }
@@ -7472,6 +7588,7 @@ enum HandleKeyAction {
     ApprovePlanInline(String),
     PauseSession,
     CancelSession,
+    SentinelStop(Option<String>),
     OpenPendingOverlay,
     OverlayApprove(usize),
     OverlayAnswerInteraction { index: usize, option_id: Option<String> },
@@ -7666,6 +7783,14 @@ fn handle_key(
         // Open pending approvals/interactions overlay
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Ok(HandleKeyAction::OpenPendingOverlay);
+        }
+
+        // Operator-initiated Sentinel intervention: emergency-stop the root session
+        // without waiting for a pushed prompt (Phase 2 D.7a).
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Ok(HandleKeyAction::SentinelStop(Some(
+                "operator triggered Sentinel stop from TUI".to_string(),
+            )));
         }
 
         _ => {}
