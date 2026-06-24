@@ -192,7 +192,51 @@ fn insert_if_missing(map: &mut Map<String, Value>, key: &str, value: Option<Valu
     }
 }
 
+/// P-5.14: classification is a pure function of gateway-observed state, and the
+/// `ToolErrorType` is the strongest such signal. For the variants that map to a
+/// failure class UNAMBIGUOUSLY, decide from the type alone — never let agent
+/// prose override it. Variants whose meaning genuinely depends on context
+/// (`Validation` → schema vs. contract, `Conflict` → install-conflict only in
+/// the revision context, etc.) return `None`, routing them to the logged prose
+/// fallback below, which preserves today's behavior for them.
+fn classify_by_type(error_type: &ToolErrorType) -> Option<WorkflowFailureMetadata> {
+    match error_type {
+        ToolErrorType::SandboxUnavailable => Some(WorkflowFailureMetadata::sandbox_unavailable()),
+        ToolErrorType::Permission => Some(WorkflowFailureMetadata::policy_denied()),
+        ToolErrorType::Timeout => Some(WorkflowFailureMetadata::timeout()),
+        // `Resource` is NOT unambiguous: a missing sandbox driver rides on a
+        // `Resource` error carrying the `[sandbox_driver_unavailable]` marker
+        // (the pre-typed representation), which must classify as
+        // `GateUnableToEvaluate` (do-not-retry), NOT `transient_infra`
+        // (retryable). Defer `Resource` to the prose fallback, which checks
+        // that marker before defaulting a plain resource error to transient.
+        ToolErrorType::Resource
+        | ToolErrorType::Validation
+        | ToolErrorType::Conflict
+        | ToolErrorType::QuotaExceeded
+        | ToolErrorType::NotFound
+        | ToolErrorType::Execution
+        | ToolErrorType::Fatal => None,
+    }
+}
+
 fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailureMetadata {
+    // P-5.14: typed classification first — the type is gateway-observed state
+    // and the authoritative signal. Prose is consulted only when the type is
+    // insufficient (`classify_by_type` returned `None`).
+    if let Some(metadata) = classify_by_type(&error_type) {
+        return metadata;
+    }
+
+    // Prose fallback (P-5.14 last-resort). Reached for error types without an
+    // unambiguous type-only mapping. Logged when reached, so reliance on prose
+    // (a potential discretion leak) is observable in traces.
+    tracing::debug!(
+        target: "failure_classification",
+        error_type = ?error_type,
+        "prose fallback used for failure classification (P-5.14 last-resort)"
+    );
+
     let lower = message.to_ascii_lowercase();
 
     if matches!(error_type, ToolErrorType::SandboxUnavailable)
@@ -454,5 +498,39 @@ mod tests {
         let err = decorate_tool_error(ToolError::resource("rate limited", None::<String>));
         assert_eq!(err.failure_class, Some(FailureClass::TransientInfra));
         assert_eq!(err.retryable, Some(true));
+    }
+
+    // P-5.14: classification is deterministic from an empty message —
+    // Permission/Timeout/SandboxUnavailable via the fast typed mapping, and
+    // Resource via the fallback's type branch (Resource is deliberately NOT in
+    // the fast map — see classify_by_type — yet still resolves with no prose).
+    #[test]
+    fn typed_classification_needs_no_message() {
+        assert_eq!(
+            classify_message("", ToolErrorType::Permission).failure_class,
+            Some(FailureClass::PolicyDenied)
+        );
+        assert_eq!(
+            classify_message("", ToolErrorType::Timeout).failure_class,
+            Some(FailureClass::Timeout)
+        );
+        assert_eq!(
+            classify_message("", ToolErrorType::Resource).failure_class,
+            Some(FailureClass::TransientInfra)
+        );
+        assert_eq!(
+            classify_message("", ToolErrorType::SandboxUnavailable).failure_class,
+            Some(FailureClass::GateUnableToEvaluate)
+        );
+    }
+
+    // P-5.14: prose is the last-resort fallback for error types without an
+    // unambiguous type-only mapping. An `Execution` error whose message says
+    // "active revision exists" still resolves to install_conflict via the
+    // string heuristics.
+    #[test]
+    fn prose_fallback_only_for_untyped() {
+        let metadata = classify_message("active revision exists for this agent", ToolErrorType::Execution);
+        assert_eq!(metadata.failure_class, Some(FailureClass::InstallConflict));
     }
 }
