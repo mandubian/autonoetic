@@ -207,6 +207,17 @@ impl TrajectoryMonitor {
             return (Some(signal), None);
         }
 
+        // Only emit FeedbackIncorporated when feedback was issued on a
+        // previous turn. Feedback recorded this turn has not yet had a chance
+        // to be incorporated, so a same-turn signal would be misleading.
+        let has_prior_feedback = self
+            .feedback_turns
+            .iter()
+            .any(|turn| *turn < turn_counter);
+        if !has_prior_feedback {
+            return (None, None);
+        }
+
         // Feedback was given earlier, but this turn's errors are different —
         // the agent is incorporating the feedback (even if not yet succeeding).
         let incorporated = DivergenceSignal::new(
@@ -1068,6 +1079,62 @@ mod tests {
             assert!(matches!(r.health, TrajectoryHealth::Healthy));
             assert_eq!(r.health.causal_action(), None);
         }
+    }
+
+    #[test]
+    fn feedback_incorporated_does_not_fire_same_turn_as_first_feedback() {
+        let mut mon = TrajectoryMonitor::new(cfg());
+        let state = quiet_guard_state();
+        let fb = FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        };
+
+        // Record feedback and supply a *different* current error on the same
+        // turn. This should NOT emit FeedbackIncorporated because the agent
+        // has not yet had a chance to act on the feedback.
+        mon.record_feedback(5, &[fb.clone()]);
+        let r = mon.tick(
+            5,
+            &[],
+            &[FeedbackEvent::ToolError {
+                tool: "content.write".into(),
+                error_type: ToolErrorType::Validation,
+                message_signature: "missing field".into(),
+            }],
+            None,
+            &state,
+        );
+        assert!(
+            matches!(r.health, TrajectoryHealth::Healthy),
+            "same-turn feedback must not produce FeedbackIncorporated: {:?}",
+            r.health
+        );
+
+        // On the next turn, a different error after prior feedback is
+        // incorporated (advisory).
+        let r = mon.tick(
+            6,
+            &[],
+            &[FeedbackEvent::ToolError {
+                tool: "content.write".into(),
+                error_type: ToolErrorType::Validation,
+                message_signature: "missing field".into(),
+            }],
+            None,
+            &state,
+        );
+        assert!(
+            matches!(r.health, TrajectoryHealth::Watching { .. }),
+            "FeedbackIncorporated should be advisory Watching: {:?}",
+            r.health
+        );
+        let signals = r.health.signals();
+        assert!(
+            signals.iter().any(|s| s.kind == DivergenceSignalKind::FeedbackIncorporated),
+            "expected FeedbackIncorporated signal: {:?}",
+            signals
+        );
     }
 
     #[test]

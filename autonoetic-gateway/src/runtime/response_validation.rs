@@ -1126,6 +1126,9 @@ impl GatewayExecutionService {
                 let pv_owned: Vec<ValidationViolation> = policy_violations.iter().map(|v| (*v).clone()).collect();
                 out.extend(violations_to_feedback_events(&pv_owned));
             }
+
+            // Continue enforcement with only non-schema violations.
+            violations = policy_violations.into_iter().cloned().collect();
         }
 
         tracing::warn!(
@@ -1137,8 +1140,7 @@ impl GatewayExecutionService {
         );
 
         if let Some(out) = feedback_out.as_deref_mut() {
-            out.extend(violations_to_feedback_events(&violations,
-            ));
+            out.extend(violations_to_feedback_events(&violations));
         }
 
         if !repair_enabled || max_repair_rounds == 0 {
