@@ -802,7 +802,7 @@ mod tests {
         );
         assert_eq!(
             lock.constitution_source,
-            "docs/constitution/versions/2026.06.16/constitution.md"
+            "docs/constitution/versions/2026.06.24/constitution.md"
         );
     }
 }
