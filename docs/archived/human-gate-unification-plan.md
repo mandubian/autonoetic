@@ -1,5 +1,21 @@
 # HumanGate Unification Plan
 
+> **ARCHIVED — 2026-06-24. Core shipped.** The unified `GateService`
+> (`runtime/human_gate.rs`) is live: all gate kinds, `gate.check()` pipeline,
+> all four credential bugs fixed, sandbox/web/credential/artifact/user_interaction
+> tools migrated, clarification child sessions (Phase 5, incl. the
+> `constitution_clarification_child_read_only.rs` test), and the `ask-agent`
+> CLI/TUI/JSON-RPC surface. The original goal — eliminate redundant approvals
+> and the per-tool dispersion — is met.
+>
+> **Deferred residual work (not blocking; cleanup / future):**
+> - Phase 3 tail — migrate `session.rs`, `user_profile.rs`, `agent_revision.rs`
+>   to `GateService` (they still call `store.create_approval()` directly; works today).
+> - Phase 4 — collapse the three resume branches into one
+>   `resume_from_human_gate()` helper (cleanliness; functionally complete).
+> - "Future: Agent-as-Decider" (P-2.20/P-2.21) — constitutional rules ratified,
+>   routing code not implemented.
+
 > Tracking issue: [#167](https://github.com/mandubian/autonoetic/issues/167)
 
 ## Implementation Status (v2026.05.10)

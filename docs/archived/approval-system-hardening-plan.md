@@ -1,5 +1,20 @@
 # Approval System Hardening Plan
 
+> **ARCHIVED — 2026-06-24. Shipped.** Phases 1–4 are implemented in the live
+> gateway: HMAC-signed checkpoints + action-equality at resume (Phase 1),
+> `GrantScope` / `GrantTarget` (all four kinds) / `expires_at` with `--scope`,
+> `--target`, `--ttl`/`--until` (Phase 2), similarity removal + `approvals
+> revoke` + `approvals stats` (Phase 3), and docs in
+> [`../wiki/approval-system.md`](../wiki/approval-system.md) (Phase 4).
+> Operational reference for the shipped behaviour lives there; this plan is kept
+> for design rationale only.
+>
+> **Two residual items remain, tracked as issues:**
+> - §1.1c — `background.checkpoint_tampered` causal event + auto-cancel on
+>   integrity/action-mismatch → [#606](https://github.com/mandubian/autonoetic/issues/606)
+> - §3.3 — orphan-checkpoint reaping on reject/withdraw + startup reaper →
+>   [#607](https://github.com/mandubian/autonoetic/issues/607)
+
 **Status:** Draft — 2026-04-24
 **Scope:** Harden the Gateway approval system (see `docs/approval-system.md`) against integrity, scoping, and operator-fatigue risks identified in the 2026-04-24 review.
 **Design goals (operator-facing):**

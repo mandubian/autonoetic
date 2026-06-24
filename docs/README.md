@@ -21,7 +21,7 @@ are in [`archived/`](archived/).
 
 - [`workflow-orchestration.md`](./workflow-orchestration.md) — Durable workflow/task lifecycle (live reference for mechanical orchestration).
 - [`human-agent-collaboration.md`](./human-agent-collaboration.md) — PlanFrame, workbench projection, reconciliation, semantic summaries, validation waivers, and the `/return` handoff.
-- [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) — GateService migration tracker (partial).
+- [`archived/human-gate-unification-plan.md`](./archived/human-gate-unification-plan.md) — GateService migration (archived; shipped — residual tool migrations + agent-as-decider deferred).
 - [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) — Unified gate constitutional rationale.
 - [`approval-notification-delivery.md`](./approval-notification-delivery.md) — Approval delivery paths.
 - [`agent-clarification-protocol.md`](./agent-clarification-protocol.md) — Clarification signal format.
@@ -80,7 +80,7 @@ See [`design/README.md`](design/README.md) for the full table. Highlights:
 Historical plans, reviews, and superseded architecture notes. Not
 source-of-truth. Notable completed work now archived from `design/`:
 
-- Promotion federation (plan + reviews) — see [`approval-system-hardening-plan.md`](./approval-system-hardening-plan.md)
+- Promotion federation (plan + reviews) — see [`archived/approval-system-hardening-plan.md`](./archived/approval-system-hardening-plan.md)
 - Sealed-network evaluation, recording mode, sealed evaluator replay
 - Progressive UX / auto-learning, context overflow mitigation
 - Cognitive capsule implementation plan (reference: [`cognitive-capsule.md`](./cognitive-capsule.md))

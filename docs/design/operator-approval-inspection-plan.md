@@ -7,7 +7,7 @@ phases that can ship independently.
 - Tracking issue: **#186**.
 - Constitution: `P-2.1`, `P-2.18`, `P-2.19`, `P-2.24`, `Ri-0.1`,
   `Ri-0.5`.
-- `docs/design/human-gate-unification-plan.md` (gate enrichment
+- `docs/archived/human-gate-unification-plan.md` (gate enrichment
   threads, ask-agent clarification child sessions).
 - `docs/archived/sealed-network-evaluation-plan.md` (the auditor's
   Shape-2 review covers the same code at install-time; this RFC

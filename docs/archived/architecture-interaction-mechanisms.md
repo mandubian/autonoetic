@@ -3,7 +3,7 @@
 > **DEPRECATED** — This document describes the legacy three-pipeline interaction
 > model. Since v2026.05.10, approvals, `user_ask`, and escalations are unified
 > under a single `GateService` abstraction (`runtime/human_gate.rs`).
-> See [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md)
+> See [`human-gate-unification-plan.md`](./human-gate-unification-plan.md)
 > for the current architecture.
 >
 > The comparison table below remains accurate for **observable behavior** (yield

@@ -4,7 +4,7 @@
 > access approval. The approval lifecycle itself (dedup, grants, enrichment,
 > resolution) is now handled by the unified `GateService`
 > (`runtime/human_gate.rs`). See
-> [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md).
+> [`archived/human-gate-unification-plan.md`](./archived/human-gate-unification-plan.md).
 
 This document describes the static analysis system for detecting remote/network access in sandboxed code execution.
 

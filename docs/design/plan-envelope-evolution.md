@@ -512,7 +512,7 @@ schema change. No new concept.
 - [`docs/plan-capability-grants.md`](../plan-capability-grants.md) — shipped
   feature doc. The plan-linked derivation becomes a fallback; the
   session-scoped discovery is the primary mechanism.
-- [`docs/approval-system-hardening-plan.md`](../approval-system-hardening-plan.md)
+- [`docs/archived/approval-system-hardening-plan.md`](../archived/approval-system-hardening-plan.md)
   — Phase 2 (scope model) is orthogonal and composes. The envelope uses the
   same `GrantScope`, `GrantTarget`, and `expires_at` infrastructure.
 - [`docs/remote-access-approval.md`](../remote-access-approval.md) — the static

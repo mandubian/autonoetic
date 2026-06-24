@@ -6,7 +6,7 @@
 > `GateService` (`runtime/human_gate.rs`) that centralizes dedup, grants,
 > `approval_ref` validation, enrichment threads, and secret redaction.
 >
-> See [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md)
+> See [`human-gate-unification-plan.md`](./human-gate-unification-plan.md)
 > for the unified architecture.
 > See [`constitution/versions/2026.05.10/constitution.md`](./constitution/versions/2026.05.10/constitution.md)
 > for the constitutional rules governing gates (P-2.18 through P-2.21, P-8.19).

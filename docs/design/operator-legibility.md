@@ -1,7 +1,7 @@
 # Operator Legibility — Realtime Control-Flow & Product Visibility
 
 > Status: **Draft RFC** — concept agreement; slicing into PRs.
-> Builds on: [`human-gate-unification-plan.md`](human-gate-unification-plan.md) (GateService),
+> Builds on: [`../archived/human-gate-unification-plan.md`](../archived/human-gate-unification-plan.md) (GateService),
 > [`human-agent-artifact-collaboration-plan.md`](human-agent-artifact-collaboration-plan.md) (PlanFrame + workbench),
 > [`operator-activity-feed-plan.md`](operator-activity-feed-plan.md).
 > Rooted in: [`separation-of-powers.md`](../separation-of-powers.md), [`gateway-architecture-principles.md`](../gateway-architecture-principles.md).
@@ -202,7 +202,7 @@ timeline honest.
 
 ### Consistency note
 
-This subsumes part of [`human-gate-unification-plan.md`](human-gate-unification-plan.md)
+This subsumes part of [`../archived/human-gate-unification-plan.md`](../archived/human-gate-unification-plan.md)
 Phase "agent-as-decider (P-2.20/P-2.21)" by giving the *operator*-approved plan
 a mechanical grant form, rather than delegating the decision to the agent. It
 keeps the human gate first-class.

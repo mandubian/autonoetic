@@ -329,7 +329,7 @@ If the experiment fails, P3+ is dropped and Layer 1 is enough.
 
 ## 8. References
 
-- `docs/design/human-gate-unification-plan.md` — the precedent factorization
+- `docs/archived/human-gate-unification-plan.md` — the precedent factorization
   effort this design follows
 - `autonoetic-gateway/src/runtime/guard.rs` — LoopGuard, the closest existing
   cousin
