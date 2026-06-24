@@ -222,7 +222,7 @@ fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
         session_id: Some("ses-new"),
         run_context: None,
         config: None,
-        context: DecisionContext::tier1("web fetch (network access)", "NetworkAccess policy"),
+        context: DecisionContext::tier1("credential request to localhost (network access)", "NetworkAccess policy"),
         summary: "fetch API".into(),
         approval_ref: None,
         pre_validated: false,
