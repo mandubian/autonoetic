@@ -195,6 +195,12 @@ fn insert_if_missing(map: &mut Map<String, Value>, key: &str, value: Option<Valu
 fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailureMetadata {
     let lower = message.to_ascii_lowercase();
 
+    if matches!(error_type, ToolErrorType::SandboxUnavailable)
+        || lower.contains("sandbox_driver_unavailable")
+        || (lower.contains("sandbox driver") && lower.contains("not found on path"))
+    {
+        return WorkflowFailureMetadata::sandbox_unavailable();
+    }
     if lower.contains("approval required") || lower.contains("approval_pending") {
         return WorkflowFailureMetadata::approval_pending();
     }
@@ -206,14 +212,6 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
     }
     if lower.contains("approval_rejected") || lower.contains("denied by policy") {
         return WorkflowFailureMetadata::policy_denied();
-    }
-    // A missing sandbox driver (e.g. `bwrap` not on PATH) is terminal for this
-    // node: retrying the same exec can never succeed. Match before the generic
-    // Resource→transient_infra fallthrough so it is not classified retryable. (#600)
-    if lower.contains("sandbox_driver_unavailable")
-        || (lower.contains("sandbox driver") && lower.contains("not found on path"))
-    {
-        return WorkflowFailureMetadata::sandbox_unavailable();
     }
     if lower.contains("timed out") || lower.contains("timeout") {
         return WorkflowFailureMetadata::timeout();
@@ -286,6 +284,7 @@ pub(crate) fn normalize_tool_result_json(result_json: &str) -> String {
                 "quota_exceeded" => ToolErrorType::QuotaExceeded,
                 "not_found" => ToolErrorType::NotFound,
                 "timeout" => ToolErrorType::Timeout,
+                "sandbox_unavailable" => ToolErrorType::SandboxUnavailable,
                 _ => ToolErrorType::Execution,
             };
             let message = object
@@ -441,8 +440,17 @@ mod tests {
     }
 
     #[test]
+    fn typed_sandbox_unavailable_is_terminal_unable_to_evaluate() {
+        let err = decorate_tool_error(ToolError::sandbox_unavailable(
+            "sandbox driver 'bwrap' not found on PATH",
+        ));
+        assert_eq!(err.error_type, ToolErrorType::SandboxUnavailable);
+        assert_eq!(err.failure_class, Some(FailureClass::GateUnableToEvaluate));
+        assert_eq!(err.retryable, Some(false));
+    }
+
+    #[test]
     fn plain_resource_error_stays_retryable() {
-        // Guard: the sandbox rule must not swallow ordinary resource errors.
         let err = decorate_tool_error(ToolError::resource("rate limited", None::<String>));
         assert_eq!(err.failure_class, Some(FailureClass::TransientInfra));
         assert_eq!(err.retryable, Some(true));

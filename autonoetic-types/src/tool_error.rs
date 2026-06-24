@@ -75,6 +75,7 @@ pub enum ToolErrorType {
     /// Timeout: operation exceeded its time limit.
     /// The agent can retry with backoff.
     Timeout,
+    SandboxUnavailable,
 }
 
 impl std::fmt::Display for ToolErrorType {
@@ -89,6 +90,7 @@ impl std::fmt::Display for ToolErrorType {
             ToolErrorType::QuotaExceeded => write!(f, "quota_exceeded"),
             ToolErrorType::NotFound => write!(f, "not_found"),
             ToolErrorType::Timeout => write!(f, "timeout"),
+            ToolErrorType::SandboxUnavailable => write!(f, "sandbox_unavailable"),
         }
     }
 }
@@ -314,6 +316,15 @@ impl ToolError {
         )
     }
 
+    pub fn sandbox_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            ToolErrorType::SandboxUnavailable,
+            message,
+            Some("Install the sandbox driver on this host or use a different agent/sandbox backend.".to_string()),
+            None,
+        )
+    }
+
     /// Returns true if this error is recoverable (agent can retry).
     pub fn is_recoverable(&self) -> bool {
         !matches!(self.error_type, ToolErrorType::Fatal)
@@ -409,6 +420,12 @@ macro_rules! tool_error {
     }};
     (timeout, $msg:expr) => {{
         return Ok($crate::tool_error::ToolError::timeout($msg, None::<String>).to_error_response());
+    }};
+    (sandbox_unavailable, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::sandbox_unavailable($msg).with_repair_hint($hint).to_error_response());
+    }};
+    (sandbox_unavailable, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::sandbox_unavailable($msg).to_error_response());
     }};
 }
 
@@ -579,6 +596,7 @@ impl From<tagged::Tagged> for ToolError {
             ToolErrorType::QuotaExceeded => Self::quota_exceeded(message, None::<String>),
             ToolErrorType::NotFound => Self::not_found(message, None::<String>),
             ToolErrorType::Timeout => Self::timeout(message, None::<String>),
+            ToolErrorType::SandboxUnavailable => Self::sandbox_unavailable(message),
         };
         err.with_enforced_rules(enforced_rules)
     }
@@ -662,6 +680,9 @@ impl From<anyhow::Error> for ToolError {
             } else if msg.starts_with("timeout:") {
                 let inner = msg.strip_prefix("timeout:").unwrap_or(&msg).trim();
                 return Self::timeout(inner.to_string(), None::<String>);
+            } else if msg.starts_with("sandbox_unavailable:") {
+                let inner = msg.strip_prefix("sandbox_unavailable:").unwrap_or(&msg).trim();
+                return Self::sandbox_unavailable(inner.to_string());
             }
         }
 
@@ -726,6 +747,14 @@ mod tests {
         assert_eq!(err.error_type, ToolErrorType::Resource);
         assert_eq!(err.message, "sandbox driver 'bwrap' not found");
         assert!(!err.message.starts_with(' '));
+    }
+
+    #[test]
+    fn sandbox_unavailable_prefix_maps_to_typed_error() {
+        let err: ToolError = anyhow::anyhow!("sandbox_unavailable: sandbox driver 'bwrap' not found on PATH — ... [sandbox_driver_unavailable]").into();
+        assert_eq!(err.error_type, ToolErrorType::SandboxUnavailable);
+        assert_eq!(err.message, "sandbox driver 'bwrap' not found on PATH — ... [sandbox_driver_unavailable]");
+        assert!(err.is_recoverable());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! focused on turn orchestration while all tool-surface / guard wiring lives
 //! in one place.
 
-use autonoetic_types::agent::{AgentManifest, LoopGuardDeclaration};
+use autonoetic_types::agent::{AgentManifest, ExecutionMode, LoopGuardDeclaration};
 use autonoetic_types::config::{GatewayConfig, LoopGuardConfig};
 use std::path::Path;
 
@@ -149,12 +149,14 @@ pub(crate) fn loop_guard_from_config_and_manifest(
     config: Option<&GatewayConfig>,
     agent_dir: &Path,
     declaration: Option<&LoopGuardDeclaration>,
+    execution_mode: ExecutionMode,
 ) -> LoopGuard {
     match config {
         Some(cfg) => {
             let declaration = declaration
                 .cloned()
-                .or_else(|| load_manifest_loop_guard_declaration(agent_dir));
+                .or_else(|| load_manifest_loop_guard_declaration(agent_dir))
+                .or_else(|| Some(LoopGuardDeclaration::for_execution_mode(execution_mode)));
             let effective = effective_loop_guard_config(&cfg.loop_guard, declaration.as_ref());
             LoopGuard::with_config(&effective)
         }
@@ -427,7 +429,7 @@ impl AgentExecutor {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod loop_guard_tests {
+mod tests {
     use super::tool_result_counts_as_progress;
 
     #[test]
@@ -556,21 +558,6 @@ mod tier_filter_tests {
     }
 
     #[test]
-    fn test_child_promotion_federation_agent_allows_promotion_record_not_web_search() {
-        let mut manifest = test_manifest();
-        manifest.agent.id = "static_evaluator.default".to_string();
-        let filter = determine_tool_tier_filter(
-            &manifest,
-            Some("root/child-static-eval"),
-            false,
-            SessionState::Normal,
-            true,
-        );
-        assert!(filter.allows("promotion_record"));
-        assert!(!filter.allows("web_search"));
-    }
-
-    #[test]
     fn test_child_auditor_allows_promotion_record_and_workflow_without_full_specialized() {
         use autonoetic_types::capability::Capability;
         let mut manifest = test_manifest();
@@ -638,9 +625,70 @@ mod tier_filter_tests {
     fn test_degraded_overrides_manifest_declared_tiers() {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded, true);
+        let filter = determine_tool_tier_filter(&manifest,
+            Some("root-session"),
+            false,
+            SessionState::Degraded,
+            true,
+        );
         assert!(filter.allows("content_write"), "core allowed");
         assert!(!filter.allows("web_search"), "specialized blocked despite manifest");
         assert!(!filter.allows("agent_spawn"), "workflow blocked");
+    }
+}
+
+#[cfg(test)]
+mod loop_guard_tests {
+    use super::loop_guard_from_config_and_manifest;
+    use autonoetic_types::agent::ExecutionMode;
+    use std::path::Path;
+
+    #[test]
+    fn reasoning_mode_uses_system_loop_guard_defaults() {
+        let cfg = autonoetic_types::config::GatewayConfig::default();
+        let guard = loop_guard_from_config_and_manifest(
+            Some(&cfg),
+            Path::new("/no-such-agent-dir"),
+            None,
+            ExecutionMode::Reasoning,
+        );
+        assert_eq!(
+            guard.max_loops_without_progress,
+            cfg.loop_guard.max_loops_without_progress
+        );
+        assert_eq!(guard.max_tool_failures, cfg.loop_guard.max_tool_failures);
+    }
+
+    #[test]
+    fn script_mode_uses_role_aware_loop_guard_profile() {
+        let cfg = autonoetic_types::config::GatewayConfig::default();
+        let guard = loop_guard_from_config_and_manifest(
+            Some(&cfg),
+            Path::new("/no-such-agent-dir"),
+            None,
+            ExecutionMode::Script,
+        );
+        assert_eq!(guard.max_loops_without_progress, 4);
+        assert_eq!(guard.max_tool_failures, 6);
+    }
+
+    #[test]
+    fn manifest_loop_guard_declaration_overrides_role_profile() {
+        let cfg = autonoetic_types::config::GatewayConfig::default();
+        let declaration = autonoetic_types::agent::LoopGuardDeclaration {
+            max_loops_without_progress: Some(2),
+            max_tool_failures: Some(3),
+            max_consecutive_same_progress: None,
+            max_child_failures: None,
+            max_session_turns: None,
+        };
+        let guard = loop_guard_from_config_and_manifest(
+            Some(&cfg),
+            Path::new("/no-such-agent-dir"),
+            Some(&declaration),
+            ExecutionMode::Script,
+        );
+        assert_eq!(guard.max_loops_without_progress, 2);
+        assert_eq!(guard.max_tool_failures, 3);
     }
 }

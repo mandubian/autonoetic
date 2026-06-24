@@ -738,6 +738,7 @@ fn infer_trace_error_type(
             ToolErrorType::QuotaExceeded => "quota_exceeded",
             ToolErrorType::NotFound => "not_found",
             ToolErrorType::Timeout => "timeout",
+            ToolErrorType::SandboxUnavailable => "sandbox_unavailable",
             ToolErrorType::Execution | ToolErrorType::Fatal => "runtime",
         };
         return Some(mapped.to_string());
