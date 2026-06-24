@@ -21,7 +21,7 @@ operator signing key — see "Recompute" below.
 ```
 < | P-6.21 | Tree-wide budget aggregated across all descendants of a root session. | gateway-constitution-roadmap.md | `runtime/root_session_budget.rs` `runtime/lifecycle.rs:1254` | ENFORCED |
 ---
-> | P-6.21 | Tree-wide budget aggregated across all descendants of a root session. On exhaustion the gateway cancels in-flight descendants (a graceful budget circuit breaker reusing the emergency-stop cascade), fired exactly once per root (idempotent), so descendants cannot keep spending an already-exhausted tree budget. | gateway-constitution-roadmap.md; this amendment | `runtime/root_session_budget.rs`, `execution.rs::trigger_root_budget_circuit_breaker`, `tests/root_budget_circuit_breaker.rs` | ENFORCED |
+> | P-6.21 | Tree-wide budget aggregated across all descendants of a root session. On exhaustion the gateway cancels in-flight descendants (a graceful budget circuit breaker reusing the emergency-stop cascade), fired exactly once per root (idempotent), so descendants cannot keep spending an already-exhausted tree budget. | gateway-constitution-roadmap.md; this amendment | `runtime/root_session_budget.rs`, `execution.rs::trigger_root_budget_circuit_breaker`, `root_budget_circuit_breaker.rs` | ENFORCED |
 ```
 
 ### P-7.5 — irrecoverable errors do not count (amended) · D.2 / #620
@@ -70,7 +70,7 @@ execution-blocking gate — only the LoopGuard halts. Only a confirmed
 `FeedbackIgnored` signal may drive `Diverging`/`Critical`; every other signal is
 capped at `Watching` (advisory). **Enforcement:** `trajectory_health.rs`
 (advisory-only `aggregate`, `FeedbackIgnored`, `is_advisory_only`); feedback
-events in `execution.rs`; `tests/trajectory_monitor_integration.rs`.
+events in `execution.rs`; `trajectory_monitor_integration.rs`.
 
 ### P-5.14 — no change · R1 / #627
 
