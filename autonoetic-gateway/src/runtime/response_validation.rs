@@ -46,6 +46,175 @@ pub fn violations_to_feedback_events(violations: &[ValidationViolation]) -> Vec<
         .collect()
 }
 
+/// Kinds of self-report claims an agent reply can make. Each variant maps to a
+/// deterministic verifier that reconciles the claim against observable gateway
+/// state. New fabrication modes become one enum variant instead of a new
+/// hand-written guard (Change A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimKind {
+    /// `status == "delegated"` asserts a child TaskRun was spawned.
+    Delegated,
+    /// `plan_id` mentioned anywhere in the reply asserts a PlanFrame exists.
+    PlanId,
+    /// `promotion_record` claim asserts a matching evaluator/auditor trace exists.
+    PromotionVerdict,
+    /// `artifact_ref` cited in the reply asserts the artifact store contains it.
+    ArtifactBuilt,
+    /// Declared capability envelope (e.g. NetworkAccess hosts) must match
+    /// detected authority-op patterns.
+    CapabilityEnvelope,
+}
+
+/// Result of reconciling one claim kind against gateway state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimVerdict {
+    /// Claim is present and checks out against observable state.
+    Ok,
+    /// Claim is absent from the reply or the gateway cannot verify it right now.
+    Unverified,
+    /// Claim is present and demonstrably false.
+    Fabricated(String),
+}
+
+/// Context needed to verify any claim kind.
+pub struct ClaimCtx<'a> {
+    pub assistant_reply: Option<&'a str>,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub gateway_store: Option<&'a crate::scheduler::gateway_store::GatewayStore>,
+    pub config: Option<&'a GatewayConfig>,
+    pub agent_id: &'a str,
+    pub session_id: &'a str,
+    pub gateway_dir: &'a Path,
+    pub agent_is_spawn_capable: bool,
+}
+
+impl ClaimKind {
+    /// All claim kinds the validator walks over. Keeping this list closed makes
+    /// "every claimable field has a verifier" statically checkable.
+    pub fn all() -> &'static [ClaimKind] {
+        &[
+            ClaimKind::Delegated,
+            ClaimKind::PlanId,
+            ClaimKind::PromotionVerdict,
+            ClaimKind::ArtifactBuilt,
+            ClaimKind::CapabilityEnvelope,
+        ]
+    }
+
+    /// Human-readable path to the claim in the reply.
+    pub fn field_path(&self) -> &'static str {
+        match self {
+            ClaimKind::Delegated => "status",
+            ClaimKind::PlanId => "plan_id",
+            ClaimKind::PromotionVerdict => "promotion_record",
+            ClaimKind::ArtifactBuilt => "artifact_ref",
+            ClaimKind::CapabilityEnvelope => "capability_envelope",
+        }
+    }
+
+    /// Reconcile this claim kind against the provided context.
+    pub fn verify(&self, ctx: &ClaimCtx) -> ClaimVerdict {
+        match self {
+            ClaimKind::Delegated => verify_delegated_claim(ctx),
+            ClaimKind::PlanId => verify_plan_id_claim(ctx),
+            // Remaining variants are future scope; their fields are not yet
+            // mechanically reconciled here, so report Unverified rather than
+            // Fabricated.
+            ClaimKind::PromotionVerdict => ClaimVerdict::Unverified,
+            ClaimKind::ArtifactBuilt => ClaimVerdict::Unverified,
+            ClaimKind::CapabilityEnvelope => ClaimVerdict::Unverified,
+        }
+    }
+}
+
+/// Convert a fabricated verdict into the corresponding validation violation.
+fn claim_verdict_to_violation(kind: ClaimKind, verdict: ClaimVerdict) -> Option<ValidationViolation> {
+    match (kind, verdict) {
+        (_, ClaimVerdict::Ok | ClaimVerdict::Unverified) => None,
+        (ClaimKind::Delegated, ClaimVerdict::Fabricated(_)) => {
+            Some(delegated_without_spawn_violation())
+        }
+        (ClaimKind::PlanId, ClaimVerdict::Fabricated(plan_id)) => {
+            Some(fabricated_plan_id_violation(&plan_id))
+        }
+        // Future claim kinds: map to their violation constructors here.
+        (kind, ClaimVerdict::Fabricated(detail)) => Some(ValidationViolation {
+            rule: format!("{:?}", kind).to_lowercase(),
+            message: detail,
+            repair_hint: "Reconcile this claim against observable state.".into(),
+        }),
+    }
+}
+
+fn verify_delegated_claim(ctx: &ClaimCtx) -> ClaimVerdict {
+    if !ctx.agent_is_spawn_capable || !reply_is_delegated(ctx.assistant_reply) {
+        return ClaimVerdict::Unverified;
+    }
+    let spawned = match ctx.workflow_id {
+        None => Some(false),
+        Some(wid) => match ctx.config {
+            None => None,
+            Some(cfg) => match crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                cfg,
+                ctx.gateway_store,
+                wid,
+            ) {
+                Ok(tasks) => Some(tasks.iter().any(|t| Some(t.task_id.as_str()) != ctx.task_id)),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "response_validation",
+                        workflow_id = %wid,
+                        error = %e,
+                        "delegated-spawn claim: task listing failed; treating as unverified"
+                    );
+                    None
+                }
+            },
+        },
+    };
+    match spawned {
+        Some(true) => ClaimVerdict::Ok,
+        Some(false) => ClaimVerdict::Fabricated(
+            "reported status \"delegated\" but no child agent was spawned this turn".into(),
+        ),
+        None => ClaimVerdict::Unverified,
+    }
+}
+
+fn verify_plan_id_claim(ctx: &ClaimCtx) -> ClaimVerdict {
+    let Some(claimed) = reply_claimed_plan_id(ctx.assistant_reply) else {
+        return ClaimVerdict::Unverified;
+    };
+    let Some(store) = ctx.gateway_store else {
+        return ClaimVerdict::Unverified;
+    };
+    match store.load_plan_frame(&claimed) {
+        Ok(Some(_)) => ClaimVerdict::Ok,
+        Ok(None) => ClaimVerdict::Fabricated(claimed),
+        Err(e) => {
+            tracing::warn!(
+                target: "response_validation",
+                plan_id = %claimed,
+                error = %e,
+                "plan-id claim: load failed; treating as unverified"
+            );
+            ClaimVerdict::Unverified
+        }
+    }
+}
+
+/// Reconcile all claims found in a reply and return any violations.
+pub fn reconcile_claims(ctx: &ClaimCtx) -> Vec<ValidationViolation> {
+    let mut violations = Vec::new();
+    for &kind in ClaimKind::all() {
+        if let Some(v) = claim_verdict_to_violation(kind, kind.verify(ctx)) {
+            violations.push(v);
+        }
+    }
+    violations
+}
+
 /// Parse an `OutputPolicy` from metadata.
 pub fn parse_output_policy(
     metadata: Option<&serde_json::Value>,
@@ -981,52 +1150,31 @@ impl GatewayExecutionService {
         // task-listing on the cheap status check so it only runs for actual
         // delegation claims; if listing fails, skip the guard rather than risk a
         // false positive from a transient/operational error.
-        if agent_is_spawn_capable && reply_is_delegated(result.assistant_reply.as_deref()) {
-            let spawned_child: Option<bool> = match workflow_id {
-                None => Some(false), // no workflow at all → nothing was spawned
-                Some(wid) => match crate::scheduler::workflow_store::list_task_runs_for_workflow(
-                    self.config().as_ref(),
-                    self.gateway_store().as_deref(),
-                    wid,
-                ) {
-                    Ok(tasks) => Some(tasks.iter().any(|t| Some(t.task_id.as_str()) != task_id)),
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "response_validation",
-                            workflow_id = %wid,
-                            error = %e,
-                            "delegated-spawn guard: task listing failed; skipping guard"
-                        );
-                        None
-                    }
-                },
-            };
-            if spawned_child == Some(false) {
-                violations.push(delegated_without_spawn_violation());
-            }
-        }
+        //
         // Fabricated-plan-id guard: PlanFrames are optional, so this does NOT
         // require a plan — it only fires when a reply explicitly names a `plan_id`
         // that doesn't exist (a weak model inventing one, e.g. `plan-a1b2c3d4`,
         // and claiming `awaiting_approval` without calling `planframe_propose`).
         // Gate the DB lookup on the cheap reply check; skip on lookup error to
         // avoid a false positive.
-        if let Some(claimed) = reply_claimed_plan_id(result.assistant_reply.as_deref()) {
-            if let Some(store) = self.gateway_store().as_deref() {
-                match store.load_plan_frame(&claimed) {
-                    Ok(Some(_)) => {} // real plan → truthful
-                    Ok(None) => violations.push(fabricated_plan_id_violation(&claimed)),
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "response_validation",
-                            plan_id = %claimed,
-                            error = %e,
-                            "plan-id guard: load failed; skipping guard"
-                        );
-                    }
-                }
-            }
-        }
+        //
+        // Both guards are implemented as typed `ClaimKind` verifiers so new
+        // self-report fabrications become one enum variant instead of a new
+        // hand-written guard (Change A).
+        let config = self.config();
+        let gateway_store = self.gateway_store();
+        let claim_ctx = ClaimCtx {
+            assistant_reply: result.assistant_reply.as_deref(),
+            workflow_id,
+            task_id,
+            gateway_store: gateway_store.as_deref(),
+            config: Some(config.as_ref()),
+            agent_id,
+            session_id: &result.session_id,
+            gateway_dir: &gateway_dir,
+            agent_is_spawn_capable,
+        };
+        violations.extend(reconcile_claims(&claim_ctx));
         if violations.is_empty() {
             tracing::debug!(
                 target: "response_validation",
@@ -2060,5 +2208,154 @@ mod tests {
     #[test]
     fn delegated_without_spawn_violation_shape() {
         assert_eq!(delegated_without_spawn_violation().rule, "delegated_without_spawn");
+    }
+
+    #[test]
+    fn claim_delegated_unverified_when_not_spawn_capable() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"delegated"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::Delegated.verify(&ctx), ClaimVerdict::Unverified);
+    }
+
+    #[test]
+    fn claim_delegated_unverified_when_no_delegated_status() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"ok"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: true,
+        };
+        assert_eq!(ClaimKind::Delegated.verify(&ctx), ClaimVerdict::Unverified);
+    }
+
+    #[test]
+    fn claim_delegated_fabricated_when_no_workflow() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"delegated"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: true,
+        };
+        assert!(
+            matches!(ClaimKind::Delegated.verify(&ctx), ClaimVerdict::Fabricated(_)),
+            "delegated status with no workflow should be fabricated"
+        );
+    }
+
+    #[test]
+    fn claim_plan_id_unverified_when_no_plan_id() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"ok"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::PlanId.verify(&ctx), ClaimVerdict::Unverified);
+    }
+
+    #[test]
+    fn claim_plan_id_fabricated_when_plan_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"awaiting_approval","plan_id":"plan-missing"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(
+            ClaimKind::PlanId.verify(&ctx),
+            ClaimVerdict::Fabricated("plan-missing".into())
+        );
+    }
+
+    #[test]
+    fn claim_plan_id_ok_when_plan_exists() {
+        use autonoetic_types::plan_frame::{PlanFrame, PlanStatus};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let plan = PlanFrame {
+            plan_id: "plan-real".into(),
+            version: 1,
+            parent_version: None,
+            workflow_id: "wf-1".into(),
+            root_session_id: "root".into(),
+            title: "t".into(),
+            objective: "o".into(),
+            status: PlanStatus::AwaitingApproval,
+            steps: vec![],
+            validation_policy: Default::default(),
+            capability_envelope: vec![],
+            approved_by: None,
+            approved_at: None,
+            created_by_agent_id: "agent".into(),
+            reason: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store.save_plan_frame(&plan).unwrap();
+
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"awaiting_approval","plan_id":"plan-real"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::PlanId.verify(&ctx), ClaimVerdict::Ok);
+    }
+
+    #[test]
+    fn reconcile_claims_returns_fabricated_plan_id_violation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"awaiting_approval","plan_id":"plan-fake"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        let violations = reconcile_claims(&ctx);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "unknown_plan_id");
+        assert!(violations[0].message.contains("plan-fake"));
     }
 }
