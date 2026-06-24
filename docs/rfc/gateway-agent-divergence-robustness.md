@@ -88,9 +88,10 @@ Two things are true at once, and rev. 1 conflated them:
 The most acute form of this mislabelling is on the **TUI**: a `Critical` verdict
 (with `notify_operator=true`, the default) calls `create_user_interaction` with
 `kind: DivergenceSentinel`, rendering a `🔔` card with a signal dump and the
-prompt *"💬 Type your answer below"* — options `[Acknowledge, Stop]`. It is
-non-blocking, but it *looks* like a clarification the operator must answer, and
-the operator cannot: *Acknowledge* is a no-op and *Stop* is an emergency halt.
+prompt *"💬 Type your answer below"* — options `[Acknowledge, Stop]` plus a
+freeform note field. It is non-blocking, but it *looks* like a clarification the
+operator must answer, and the operator cannot: *Acknowledge* is a no-op and
+*Stop* is an emergency halt.
 This is a notification wearing a clarification's clothes — a `UserInteraction`
 (a **decision atom**, per `docs/archived/human-gate-unification-plan.md`) used to
 deliver what is really passive **information**. D.7 addresses the surface; D.2
@@ -459,23 +460,39 @@ not suspended (the LoopGuard is the only hard stop), so there is no decision the
 operator must make for the agent to continue. Expressing it as a
 `UserInteraction` is therefore a category error.
 
+The change splits into two halves with different risk profiles.
+
+**D.7a — Gateway surface swap (Sentinel-facing; Low risk).**
+
 1. **Stop creating a `DivergenceSentinel` `UserInteraction`.** Route the
    `Critical` operator surface to a **passive advisory** instead — an
    `operator_activity` feed entry + a dismissable TUI banner. It carries the
    same signal evidence, but demands no answer and costs the operator nothing
    to ignore. (`operator_alert` audit logging stays as-is.)
-2. **No `Acknowledge`/`Stop` prompt.** Those are the worst pair: a no-op and a
-   nuclear option. If the operator wants to act, they invoke an
-   **operator-initiated** intervention affordance (a TUI keybinding that opens
-   the divergence detail + the same Stop/continue actions) — pulled, not pushed.
+2. **No `Acknowledge`/`Stop` prompt** (the popup today also carries a freeform
+   note field — drop all of it). Those are the worst pair: a no-op and a nuclear
+   option. If the operator wants to act, they invoke an **operator-initiated**
+   intervention affordance (a TUI keybinding that opens the divergence detail +
+   the same Stop/continue actions) — pulled, not pushed.
 3. **Interactive gates only for genuine decisions.** A `UserInteraction` /
    `GateKind::UserInput` may still be raised when there is a real,
    outcome-changing choice the operator can make (e.g. an agent's own
    `user_ask`). Divergence is not such a case.
-4. **Planner doctrine (Path 2).** A `[Sentinel Notice]` agent-message must
-   prompt the planner to **self-correct or replan**, not to bounce the decision
-   to the operator via `user_ask`. Adjust planner SKILL guidance so a divergence
-   notice does not become a second operator clarification.
+
+This is a deterministic surface swap across three touch-points
+(`lifecycle.rs` creation, `operator_activity.rs` feed, `chat.rs` rendering)
+with no model-behaviour dependency — genuinely low risk, pin with a test.
+
+**D.7b — Planner doctrine (behaviour-change; Medium risk — needs an eval).**
+
+A `[Sentinel Notice]` agent-message must prompt the planner to **self-correct
+or replan**, not to bounce the decision to the operator via `user_ask`. Adjust
+planner SKILL guidance so a divergence notice does not become a second operator
+clarification. **This is a real behaviour change, not a code swap:** a planner
+that still bounces Sentinel notices to `user_ask` defeats D.7a entirely, so it
+needs its own validation (a small eval over divergence-notice prompts
+confirming the planner self-corrects rather than asks the operator). Treat it
+as the riskier half and gate it on that eval.
 
 **Why this is the decisive fix for the lived complaint:** D.2 and D.6 make the
 escalation *rare*; D.7 makes it *non-intrusive when it does happen*. Together
@@ -517,23 +534,34 @@ feels; the Sentinel-facing changes stop the *mislabelling*.
 | D.1 | Feedback-event tracking + incorporation signal | Sentinel | P0 | Low — additive; new signal | B (clean `ok` semantics) |
 | D.6 | Aggregation: only confirmed repetition is gate-worthy | Sentinel | P0 | Low — rule change in `aggregate` | D.1, D.2 |
 | D.3 | Pin "Sentinel never blocks" invariant (test only) | Sentinel | P0 | Trivial — already true; document + test | — |
-| D.7 | Divergence = advisory, not a `UserInteraction` popup | Sentinel | **P0** | Low — swap the escalation surface; planner doctrine tweak | — |
+| D.7a | Divergence surface swap (advisory, not a `UserInteraction` popup) | Sentinel | **P0** | Low — deterministic surface swap; pin with test | — |
+| D.7b | Planner doctrine: a Sentinel notice → self-correct, not `user_ask` | Sentinel | P1 | **Med — behaviour change; needs an eval** | D.7a |
 | D.5 | Suppress-on-progress grace | Sentinel | P1 | Low — additive suppression | D.1 |
 | A | Self-report reconciliation primitive | Cleanup | P1 | Med — lift hand-written claim guards into typed surface | — |
 | B | Extend `ok`/`command_succeeded` to `sandbox.rs` | Cleanup | P1 | Low — `artifact_exec` pattern already landed | — |
 | C | Egress validation (advisory first) | Cleanup | P2 | Med — new validation surface | A (reuse claim verifiers) |
 
-**Minimum viable de-pollution:** **D.2 + D.4 + E** stop healthy work from being
-*blocked*; **D.1 + D.6 + D.3** stop it from being *mislabelled*; **D.7** stops
-the mislabel from being pushed at the operator as an unanswerable clarification
-popup. Those answer the lived complaint. A, B, C reduce upstream noise and make the
-classifier's job easier.
+**The honest minimum, if only one change lands, is D.2.** It is the lowest-risk
+change that touches the actual blocker: extending `is_irrecoverable` in
+`register_failure` immediately stops the most demoralizing real failure — the
+LoopGuard tripping (and the Sentinel mislabelling) when the agent is stuck on
+the gateway's own permission/quota/sandbox block.
 
-**If only one change lands first, it is D.2.** It is the lowest-risk change that
-touches the actual blocker: extending `is_irrecoverable` in `register_failure`
-immediately stops the most demoralizing real failure — the LoopGuard tripping
-(and the Sentinel mislabelling) when the agent is stuck on the gateway's own
-permission/quota/sandbox block.
+**Dependency-free first relief is D.2 + E** (Phase 1) — neither depends on
+another change, and together they remove most real LoopGuard trips on healthy
+work.
+
+**The full de-pollution set is the whole table, but sequenced, not
+simultaneous,** because of the dependency column:
+
+- *Stop the blocking:* D.2 + E first; **D.4 comes later** — it needs D.1's
+  feedback signatures, so it cannot sit in a true Phase 1 despite being
+  blocking-relief. (This is the one item to keep out of any "minimum" claim.)
+- *Stop the mislabelling:* D.1 + D.6 + D.3 + D.7a; D.7b follows once its planner
+  eval passes.
+
+A, B, C reduce upstream noise and make the classifier's job easier, but are not
+part of the minimum.
 
 ---
 
@@ -653,7 +681,7 @@ Highest relief, lowest risk. No Sentinel changes required.
 **Exit criterion:** a permission/quota/sandbox-unavailable loop no longer trips
 the LoopGuard and is labelled `Blocked`, not `Diverging`.
 
-### Phase 2 — Stop the mislabelling (Sentinel) · D.1 + D.6 + D.3 + D.7
+### Phase 2 — Stop the mislabelling (Sentinel) · D.1 + D.6 + D.3 + D.7a (D.7b gated on eval)
 
 1. `FeedbackEvent` recording + signatures in `execution.rs`; `feedback_incorporated`
    signal in `trajectory_health.rs`. *(Depends on Phase 3's `ok` semantics only
@@ -661,14 +689,18 @@ the LoopGuard and is labelled `Blocked`, not `Diverging`.
 2. Revise `aggregate` (`trajectory_health.rs:219`) to the three-rule form (D.6),
    consuming `blocked_state` (Phase 1) and `feedback_ignored`.
 3. Pin the "Sentinel never blocks" invariant with a regression test (D.3).
-4. **D.7:** replace the `DivergenceSentinel` `UserInteraction` with a passive
-   `operator_activity` advisory + dismissable TUI banner; remove the
-   `Acknowledge`/`Stop` prompt in favour of an operator-initiated intervention
-   keybinding; adjust planner SKILL doctrine so a `[Sentinel Notice]` triggers
-   self-correction, not a `user_ask` bounce.
-5. Tests: §5.1 `feedback_incorporated` / `aggregate`, §5.2 same-violation and
+4. **D.7a (gateway surface):** replace the `DivergenceSentinel` `UserInteraction`
+   with a passive `operator_activity` advisory + dismissable TUI banner; remove
+   the `Acknowledge`/`Stop` prompt (and its freeform note) in favour of an
+   operator-initiated intervention keybinding. Deterministic; pin with a test.
+5. **D.7b (planner doctrine — gated on its own eval):** adjust planner SKILL
+   guidance so a `[Sentinel Notice]` triggers self-correction/replan, not a
+   `user_ask` bounce. Ship only once a small divergence-notice eval confirms the
+   planner self-corrects rather than asking the operator (a planner that still
+   bounces defeats D.7a).
+6. Tests: §5.1 `feedback_incorporated` / `aggregate`, §5.2 same-violation and
    non-repetition cases; assert no `UserInteraction` of `kind:
-   DivergenceSentinel` is created on `Critical`.
+   DivergenceSentinel` is created on `Critical` (D.7a); planner-doctrine eval (D.7b).
 
 **Exit criterion:** distinct-error repair loops are never labelled `Critical`;
 only confirmed post-feedback repetition is; and no divergence verdict pushes an
