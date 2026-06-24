@@ -15,12 +15,37 @@ proposes the principled replacements.
 1. **Recoverable error → bounded retry, *unless an output is possible*.** A
    recoverable failure may be retried, but the bound must be principled:
    progress toward a result earns more attempts; flailing does not.
-2. **Non-recoverable error → stop.** Then, depending on criticality, escalate to
-   the operator/authority — but **only with enough analysis/context to actually
-   decide.** *An approval/escalation without a strong explanation is useless.*
+2. **Non-recoverable error → stop.** Then, depending on criticality, escalate —
+   but **only with enough analysis/context to actually decide.** *An
+   approval/escalation without a strong explanation is useless.*
 3. **Async child that loops while its parent moves on → must be governed.** A
    child whose result no one will consume is ungoverned waste; abandonment must
    be a deliberate, recorded, resource-reclaiming act.
+
+**Founding invariant (the deepest of the three — Principle 2 is its corollary):
+the gateway enables choices; it never makes them.** Every gate *output* — every
+point where the gateway *asks* a decider for a decision or *exposes* state a
+decider will act on — carries a typed `DecisionContext` sufficient to choose
+correctly. This is universal, not selective: it holds for every `GateKind`
+(`Approval`, `UserInput`, `Escalation`) and every decider. Two consequences
+that this RFC treats as law:
+
+- **Decider symmetry.** In Autonoetic, *all* deciders — human operators and
+  agents alike — are governed by one rights/rules framework; they differ only in
+  **authority and voting weight** (a democratic model that does not exist yet but
+  is the design's destination). Context is therefore owed to the *decider role*,
+  not to "the operator": a human and an agent resolving the same gate receive the
+  **same** `DecisionContext`. (This is the proactive complement of P-2.21, which
+  already says an agent-decider with *insufficient context* must escalate rather
+  than guess — here the gateway's job is to make sure that never happens by
+  supplying the context up front.)
+- **The gateway never decides on a decider's behalf.** Its obligation is to
+  deliver the data that makes the right choice *possible*, never to substitute
+  its own judgment for the decider's. (Where the gateway *must* exercise reserved
+  judgment, that is a tracked **DISCRETION LEAK**, not a feature.) This is the
+  mirror of the decider's own duty under **O-1** (a decision owes a motivation):
+  O-1 binds the decider to give a reason; this invariant binds the gateway to
+  give the context.
 
 **Related:**
 - `docs/rfc/gateway-agent-divergence-robustness.md` — the Sentinel/LoopGuard
@@ -135,28 +160,52 @@ To avoid the divergence RFC's rev-1 mistake of "fixing" things that work:
 
 ## 3. Proposed changes
 
-### Change E1 — Escalation context standard *(Principle 2; highest user-felt)*
+### Change E1 — Universal `DecisionContext` on every gate *(the Founding invariant; highest user-felt)*
 
-**Files:** `human_gate.rs` (`GateRequest` contract), `web.rs`, `credential.rs`.
+**Files:** `human_gate.rs` (the `GateRequest`/`GateResult` contract — the
+single chokepoint), then every gate-producing site: `web.rs`, `credential.rs`,
+`sandbox.rs`/`artifact_exec.rs`, `user_interaction.rs`, `session.rs`,
+`agent_revision.rs`, the planner/plan-approval path, and any future gate.
 
-Make a **decision context mandatory and typed** on every operator-facing gate.
-A gate may not be created with a boilerplate rationale. Define a tiered standard:
+**This is the universal form of the Founding invariant, not a web/credential
+patch.** A `DecisionContext` is **mandatory and typed on every gate output** —
+every `GateKind` (`Approval`, `UserInput`, `Escalation`), to every decider
+(human or agent). Nothing is *asked* (a gate raised) or *exposed* (state surfaced
+for a decision) without it. The enforcement point is structural: `GateRequest`
+carries a required `DecisionContext` value (not a free-form string), so a gate
+with no real context **fails to construct** rather than reaching a decider —
+mechanical, not reviewer-discretion.
 
-- **Tier 1 (self-explanatory):** action + concrete target. (e.g. a profile read.)
-- **Tier 2 (network/credential/API):** action + target + **intent** (what the
-  agent is trying to do) + **what is at stake** (which secret / which payload /
-  which query) + **why gated** (the policy, in prose) + **recommended action**.
-- **Tier 3 (code execution):** Tier 2 + analysis + detected patterns (the
-  existing `sandbox.exec` `operator_reason`).
+A `DecisionContext` always answers four questions, with depth graduated by
+stakes (the tiers are *floors*, applied to every gate, never an opt-in):
 
-Apply Tier 2 to all `web.*` and `credential.*` gates (bring them to the
-`sandbox.exec` bar). Enforce mechanically: `GateKind::Approval` carries a
-required `DecisionContext` struct (not a free-form string), so a thin gate fails
-to compile rather than reaching the operator.
+- **What** — the concrete action + target (never a bare method name + host).
+- **Why gated** — the policy/rule that forced the gate, in prose, with its ID.
+- **What is at stake** — which secret / payload / query / capability / budget,
+  and the reversibility and blast radius.
+- **Recommended action + how to decide** — what the gateway would expect a
+  correct decider to weigh; for an agent-decider, what would make it escalate.
 
-**Why first:** this is the most direct relief for the lived "approvals are
-useless / tedious" complaint, and it is low-risk (additive context, no
-control-flow change).
+Stake tiers (floor depth, applied universally):
+
+- **Tier 1 (self-explanatory):** What + Why gated. (e.g. a profile read.)
+- **Tier 2 (network/credential/API):** + intent + at-stake + recommended action.
+- **Tier 3 (code execution / elevated authority / irreversible):** Tier 2 +
+  analysis + detected patterns (the existing `sandbox.exec` `operator_reason` is
+  the bar — generalize it as the `DecisionContext` builder, not a one-off).
+
+**Decider symmetry is part of the contract:** the same `DecisionContext` is
+delivered whether the gate is resolved by a human operator (TUI/CLI), an
+agent-decider (`P-2.20`/`P-2.21`, the same `approve_request`/`reject_request`
+API), or a future policy/voting body. The gateway renders the *same* data; only
+authority/voting weight differs across deciders.
+
+**Why first:** it is the most direct relief for the "approvals are useless /
+tedious" complaint, it is low-risk (additive context, no control-flow change),
+and — because it is enforced at the `GateRequest` chokepoint — it closes the
+class permanently: no future gate can regress to a thin one. The known thin
+offenders (`web.*`, `credential.*`) are simply the first migrations; the
+chokepoint is what makes it universal.
 
 ### Change R1 — One typed error classification *(Principle 1)*
 
@@ -229,7 +278,7 @@ The test of M1: a new model quirk should be absorbed by an *existing* normalizer
 
 | # | Change | Principle | Priority | Risk |
 |---|---|---|---|---|
-| E1 | Escalation context standard (web + credential to Tier 2) | 2 | **P0** | Low — additive context; typed `DecisionContext` |
+| E1 | Universal `DecisionContext` on every gate (chokepoint + migrate all sites) | Founding invariant | **P0** | Low — additive context; required typed `DecisionContext` at the `GateRequest` chokepoint |
 | C2 | Budget exhaustion cascades to descendants | 3 | **P0** | Low — correctness fix; reuse emergency-stop cancel |
 | R1 | One typed error classification | 1 | P1 | Low–Med — replace string heuristics; fallback logged |
 | C1 | Graceful child abandonment (reaper aborts handle) | 3 | P1 | Med — touches reaper + join paths; checkpoint-then-cancel |
@@ -242,9 +291,11 @@ The test of M1: a new model quirk should be absorbed by an *existing* normalizer
 
 ## 5. Test plan
 
-- **E1:** every `web.*` / `credential.*` gate carries a non-boilerplate
-  `DecisionContext` (intent + stake + policy + recommended action); a unit test
-  asserts no gate is constructed with an empty/boilerplate context.
+- **E1:** every gate of **any** `GateKind` carries a non-boilerplate
+  `DecisionContext` (what + why-gated + at-stake + recommended action); a unit
+  test asserts no gate is constructed with empty/boilerplate context, and a
+  decider-symmetry test asserts a human and an agent-decider receive the same
+  context for the same gate.
 - **R1:** `classify()` returns the correct `FailureClass` per `ToolErrorType`
   with no message string needed; the string fallback is hit only for untyped
   legacy errors and logs when it is.
@@ -267,13 +318,21 @@ Each phase is a self-contained PR with its own tests; phases are independent
 unless noted. Per-phase tracking issues mirror the changes and link to the
 umbrella.
 
-### Phase 1 — Escalation context standard (E1)
-- Add a typed `DecisionContext` to `GateRequest`/`GateKind::Approval`
-  (`human_gate.rs`); reject empty/boilerplate at construction.
-- Populate Tier 2 context for every `web.*` gate (`web.rs`) and `credential.*`
-  gate (`credential.rs`): intent, stake, policy-in-prose, recommended action.
-- Tests: no gate with boilerplate context; operator-facing render shows the new
-  fields. **Exit:** web/credential approvals are decidable without external context.
+### Phase 1 — Universal `DecisionContext` (E1)
+- Add a required typed `DecisionContext` to `GateRequest` covering **all**
+  `GateKind`s (`Approval`, `UserInput`, `Escalation`) in `human_gate.rs`; a gate
+  with empty/boilerplate context **fails to construct** (the chokepoint that
+  makes the invariant universal and regression-proof).
+- Generalize the existing `sandbox.exec` `operator_reason` builder into the
+  shared Tier-3 `DecisionContext` builder.
+- Migrate every gate-producing site to supply it — first the known thin
+  offenders (`web.*`, `credential.*`), then the rest (`user_interaction.rs`,
+  `session.rs`, `agent_revision.rs`, plan-approval).
+- Decider-symmetry test: the same `DecisionContext` is delivered to a human
+  decider and an agent-decider (`P-2.20`/`P-2.21`) for the same gate.
+- Tests: no gate of **any** kind constructs with boilerplate context; render
+  shows What / Why-gated / At-stake / Recommended-action. **Exit:** no gate,
+  to any decider, is asked or exposed without sufficient context to decide.
 
 ### Phase 2 — Budget cascade (C2)
 - On root-budget exhaustion, cancel in-flight descendants via the graceful-cancel
