@@ -11,12 +11,16 @@ with the signing key, then validate.
 
 ## Hard prerequisites before signing
 1. **Determinism (#614) — DONE:** E1 (#622), C2 (#625), R1 (#627), C1 (#628),
-   M1 (#629) merged. The clauses below marked READY are safe to apply now.
-2. **Divergence (#608) — PENDING:** clauses marked PENDING depend on **#610**
-   (D.1/D.6 feedback, D.3 Sentinel-never-blocks). Do not apply them until #610
-   merges and its causal-event IDs are final.
+   M1 (#629) merged.
+2. **Divergence (#608) — DONE for every clause this amendment touches:** the
+   feedback-aware signal (D.1/D.6) and the Sentinel-never-blocks invariant (D.3)
+   merged via **PR #623** ("Phase 2 — feedback-event tracking, D.6 aggregation,
+   Sentinel non-blocking invariant"). Issue #610 stays open only for **D.7** (the
+   divergence advisory-vs-popup surface swap) and #612/#613 for polish/corpus —
+   **none of those are clauses in this amendment**, so they do not block it.
 3. **Signing key:** `AUTONOETIC_CONSTITUTION_SIGNING_SK_B64` (operator-held). The
-   lock signature cannot be recomputed without it.
+   lock signature cannot be recomputed without it. **This is now the ONLY
+   remaining prerequisite** — all amended clauses' enforcing code is merged.
 
 ## Clause changes
 
@@ -88,31 +92,41 @@ with the signing key, then validate.
   code into compliance (type-first classification). **No text change**; optionally
   add `classify_by_type` to the enforcement col.
 
-### PENDING — do not apply until #610 (divergence) merges
+### READY — divergence code merged via PR #623 (Phase 2)
 
-**8. NEW sub-rule near P-7.19 — feedback-aware non-progress.** *(D.1/D.6)*
-- Draft: "The loop guard / Sentinel also recognises **repeated identical failure
-  after feedback was given** as a non-progress condition; distinct evolving
-  errors (productive repair) do not count." Reconcile exact wording + the
-  causal-event IDs with #610 when it lands.
+**8. NEW sub-rule near P-7.19 — feedback-aware non-progress.** *(D.1/D.6 / #623)*
+- New: "The Sentinel recognises **repeated identical failure after feedback was
+  given** (`FeedbackIgnored`) as the only non-progress signal that may drive a
+  `Diverging`/`Critical` verdict; distinct evolving errors (productive repair) do
+  not count, and every other signal is capped at `Watching` (advisory)."
+- Enforcement col: `trajectory_health.rs` (`DivergenceSignal::FeedbackIgnored`,
+  `is_advisory_only`, the revised `aggregate`), feedback events recorded in
+  `execution.rs` / persisted on checkpoints.
 
-**9. NEW — "the Sentinel is observational; it never blocks execution."** *(D.3)*
-- Draft (Ri-x or §O invariant): "The Sentinel observes and classifies trajectory
-  (Blocked / Diverging / Watching) and notifies, but never raises an
-  execution-blocking gate. Only the LoopGuard halts execution." Pin with the D.3
-  test. Reconcile with #610.
+**9. NEW — "the Sentinel is observational; it never blocks execution."** *(D.3 / #623)*
+- New (Ri-x or §O invariant): "The Sentinel observes and classifies trajectory
+  (`Healthy`/`Watching`/`Diverging`/`Critical`), emits `divergence.*` events and
+  a non-blocking operator alert, but never raises an execution-blocking gate.
+  Only the LoopGuard halts execution."
+- Enforcement col: `trajectory_health.rs` (advisory-only aggregation),
+  `tests/trajectory_monitor_integration.rs` (non-blocking invariant).
+
+> Note: D.7 (replace the `DivergenceSentinel` UserInteraction popup with a
+> passive advisory) is **still open** under #610 but is **not** a clause in this
+> amendment — it changes an operator surface, not constitutional text.
 
 ## enforcement_register entries to add (code)
 Add/extend entries mapping these new causal events / checks to their clause:
 `operator_alert.blocked_state` → P-7.5 (D.2); the budget breaker stop →
 P-6.21 (C2); the reaper handle-abort → P-7.16 (C1); `DecisionContext`
-enforcement → the new E1 right; (pending) feedback events + Sentinel verdicts →
-the new P-7.19 sub-rule / Sentinel right. Verify `contract_health` shows no
-`unattributed` for the new events.
+enforcement → the new E1 right; feedback events (`FeedbackIgnored`) + Sentinel
+verdicts → the new P-7.19 sub-rule / Sentinel-observational right (D.1/D.6/D.3,
+merged via #623). Verify `contract_health` shows no `unattributed` for the new
+events.
 
-## Operator execution (one pass, after #610 merges)
+## Operator execution (one pass — all clauses' code is merged; ready when you have the key)
 ```bash
-# 1. Create the new version dir and apply ALL clause edits above (READY + PENDING).
+# 1. Create the new version dir and apply ALL clause edits above (clauses 1-9, all READY).
 cp -r docs/constitution/versions/2026.06.22 docs/constitution/versions/<APPLY_DATE>
 $EDITOR docs/constitution/versions/<APPLY_DATE>/constitution.md   # apply clauses 1-9
 # Move the prepared RATIFY draft into the new version dir (and fill in the version/date):

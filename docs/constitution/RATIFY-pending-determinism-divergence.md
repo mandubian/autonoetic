@@ -11,13 +11,15 @@
 Constitutional amendments for the gateway determinism + divergence-robustness
 work (umbrellas #614 determinism, #608 divergence). Makes already-enforced
 gateway behaviour lawful in signed text: irrecoverable-error handling, budget
-cascade, graceful child abandonment, a new decider-context right, and (pending)
-the feedback-aware non-progress signal and the Sentinel-never-blocks invariant.
+cascade, graceful child abandonment, a new decider-context right, the
+feedback-aware non-progress signal, and the Sentinel-never-blocks invariant.
 
-**Prerequisites:** determinism clauses are READY (E1 #622, C2 #625, R1 #627,
-C1 #628, M1 #629 all merged). Divergence clauses are PENDING **#610** (D.1/D.6
-feedback, D.3 Sentinel-never-blocks) — apply them only once #610 merges and its
-causal-event IDs are final. Signing requires `AUTONOETIC_CONSTITUTION_SIGNING_SK_B64`.
+**Prerequisites:** every amended clause's enforcing code is merged — determinism
+(E1 #622, C2 #625, R1 #627, C1 #628, M1 #629) and the divergence clauses
+(D.1/D.6 feedback + D.3 Sentinel-never-blocks via **#623**). The **only**
+remaining prerequisite is the signing key `AUTONOETIC_CONSTITUTION_SIGNING_SK_B64`.
+(Divergence issue #610 stays open only for D.7 — the popup→advisory surface swap —
+which is not a clause here.)
 
 ## Amendments
 
@@ -94,18 +96,29 @@ Already mandates "agent prose is the last-resort fallback only." R1 brings the
 code into compliance (type-first classification, `classify_by_type`). Optionally
 add `classify_by_type` to the enforcement column; no text change.
 
-### PENDING #610 (divergence) — apply only after #610 merges
+### NEW sub-rule near P-7.19 — feedback-aware non-progress (new) · READY (D.1/D.6 / #623)
 
-- **NEW sub-rule near P-7.19** — feedback-aware non-progress: repeated identical
-  failure after feedback is a non-progress condition; distinct evolving errors
-  (productive repair) are not. (D.1/D.6 — reconcile event IDs with #610.)
-- **NEW — Sentinel is observational, never blocks** — the Sentinel classifies
-  trajectory and notifies but never raises an execution-blocking gate; only the
-  LoopGuard halts execution. (D.3 — pin with its test.)
+Only `FeedbackIgnored` (repeated identical failure after feedback) may drive a
+`Diverging`/`Critical` verdict; distinct evolving errors (productive repair) do
+not count, and every other signal is capped at `Watching` (advisory).
+**Implementation:** PR #623 — `trajectory_health.rs` (`FeedbackIgnored`,
+`is_advisory_only`, revised `aggregate`); feedback events in `execution.rs`.
+
+### NEW — the Sentinel is observational; it never blocks execution (new) · READY (D.3 / #623)
+
+The Sentinel observes/classifies trajectory, emits `divergence.*` events + a
+non-blocking operator alert, but never raises an execution-blocking gate; only
+the LoopGuard halts execution.
+**Implementation:** PR #623 — `trajectory_health.rs` (advisory-only aggregation),
+`tests/trajectory_monitor_integration.rs` (non-blocking invariant).
+
+> D.7 (replace the `DivergenceSentinel` UserInteraction popup with a passive
+> advisory) is still open under #610 — an operator-surface change, not a clause
+> here.
 
 ## Related
 
 - Umbrellas: #614 (determinism), #608 (divergence)
-- Implementation: #622 (E1), #625 (C2), #627 (R1), #628 (C1), #629 (M1); pending #610 (D.1/D.3/D.6)
+- Implementation: #622 (E1), #625 (C2), #627 (R1), #628 (C1), #629 (M1), #623 (D.1/D.3/D.6)
 - Amendment package: `docs/constitution/pending-amendment-determinism-divergence.md`
 - Follow-up: #630 (Gemma→driver + alias hard-reject)
