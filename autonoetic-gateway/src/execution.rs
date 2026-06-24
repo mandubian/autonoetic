@@ -1571,6 +1571,95 @@ impl GatewayExecutionService {
         .await
     }
 
+    /// Root-session-tree budget circuit breaker (C2 / #616).
+    ///
+    /// When the root-tree budget (P-6.21) is exhausted, the parent's next LLM
+    /// call is blocked — but in-flight descendant sessions keep running and keep
+    /// burning the already-spent tree budget. This fires the *graceful* emergency
+    /// stop cascade exactly once per root to cancel those descendants
+    /// (checkpoints + last-word notice + aborts workflow tasks + kills sandbox
+    /// children + writes an `EmergencyStopRecord`). Siblings that subsequently
+    /// hit the exhausted budget see the existing stop via the pre-flight guard
+    /// (`lifecycle.rs` root-session emergency-stop check) and yield `EmergencyStop`.
+    ///
+    /// **Idempotent:** if a stop already exists for the root, this is a no-op, so
+    /// repeated sibling exhaustion does not create a second cascade.
+    ///
+    /// Only ever called from the root-budget error paths (keyed off
+    /// `runtime.root_budget_exhausted`), never from per-session budget.
+    ///
+    /// `pub` so integration tests can exercise the cascade directly (the
+    /// production call site needs a real LLM-driven turn to reach budget
+    /// exhaustion).
+    pub async fn trigger_root_budget_circuit_breaker(
+        &self,
+        root_session_id: &str,
+        underlying: &anyhow::Error,
+    ) {
+        let Some(store) = self.gateway_store() else {
+            tracing::debug!(
+                target: "root_budget_breaker",
+                root_session_id = %root_session_id,
+                "skip: no gateway store"
+            );
+            return;
+        };
+
+        // Fire exactly once per root (idempotent). A prior emergency stop — for
+        // any reason — means the cascade already ran or is running.
+        match store.list_emergency_stops_for_root_session(root_session_id) {
+            Ok(stops) if !stops.is_empty() => {
+                tracing::debug!(
+                    target: "root_budget_breaker",
+                    root_session_id = %root_session_id,
+                    existing_stop = %stops[0].stop_id,
+                    "skip: root already has an emergency stop (idempotent)"
+                );
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "root_budget_breaker",
+                    root_session_id = %root_session_id,
+                    error = %e,
+                    "could not check existing emergency stops; not firing budget breaker"
+                );
+                return;
+            }
+        }
+
+        let reason = format!(
+            "Root session budget exhausted — cancelling in-flight descendants to \
+             stop tree-budget burn (P-6.21). {}",
+            underlying
+        );
+        tracing::warn!(
+            target: "root_budget_breaker",
+            root_session_id = %root_session_id,
+            "Firing graceful root budget circuit breaker"
+        );
+        if let Err(e) = self
+            .emergency_stop_root_session_with_options(
+                root_session_id,
+                &reason,
+                "gateway",
+                "root_budget_circuit_breaker",
+                "root_budget_exhausted",
+                None,
+                true,
+            )
+            .await
+        {
+            tracing::warn!(
+                target: "root_budget_breaker",
+                root_session_id = %root_session_id,
+                error = %e,
+                "root budget circuit breaker failed to cascade"
+            );
+        }
+    }
+
     async fn finalize_session(
         &self,
         runtime: &mut AgentExecutor,
@@ -2660,7 +2749,18 @@ impl GatewayExecutionService {
             //   1) With task_id — load checkpoint and let resume_from_checkpoint
             //      handle the approval status (approved / rejected / pending).
             //   2) Without task_id — same checkpoint / fresh-start logic.
-            let (outcome, resume_initial_message, consumed_checkpoint_turn_id) = if task_id.is_some() {
+            // Run the turn-execution dispatch into a Result so a root-session
+            // budget exhaustion (C2 / #616) can fire the one-time graceful root
+            // budget circuit breaker before the error propagates. We intentionally
+            // do NOT use `?` on the dispatch expression directly: on `Err`, the
+            // executor has flagged `runtime.root_budget_exhausted` iff the failing
+            // budget check was the ROOT-tree budget (never per-session budget).
+            let dispatch_result: anyhow::Result<(
+                crate::runtime::lifecycle::TurnOutcome,
+                String,
+                Option<String>,
+            )> = async {
+            Ok(if task_id.is_some() {
                 let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint(
                     &self.config,
                     session_id,
@@ -2761,6 +2861,24 @@ impl GatewayExecutionService {
                     );
                     let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                     (outcome, runtime.initial_user_message.clone(), None)
+                }
+            })
+            }.await;
+
+            let (outcome, resume_initial_message, consumed_checkpoint_turn_id) = match dispatch_result {
+                Ok(triple) => triple,
+                Err(e) => {
+                    // Root-session-tree budget exhausted: fire the graceful root
+                    // budget circuit breaker exactly once (idempotent) to cancel
+                    // in-flight descendants so they stop burning the already-spent
+                    // tree budget (P-6.21). Per-session budget exhaustion never
+                    // sets this flag, so it never cascades.
+                    if runtime.root_budget_exhausted {
+                        let root = crate::runtime::content_store::root_session_id(session_id)
+                            .to_string();
+                        self.trigger_root_budget_circuit_breaker(&root, &e).await;
+                    }
+                    return Err(e);
                 }
             };
 

@@ -320,6 +320,14 @@ pub struct AgentExecutor {
     /// Resolved inference profile for this spawn (preset + concrete llm_config).
     pub resolved_inference:
         Option<crate::runtime::inference_profile::ResolvedInferenceProfile>,
+
+    /// Set to `true` when an LLM/tool budget *reservation or recording* failed
+    /// specifically against the **root-session-tree** budget
+    /// (`self.root_session_budget`), not the per-session budget. The service
+    /// layer reads this flag after the turn returns its budget-exhausted error
+    /// to fire the one-time graceful "root budget circuit breaker" (C2 / #616).
+    /// Per-session budget exhaustion never sets this flag, so it never cascades.
+    pub root_budget_exhausted: bool,
 }
 
 use crate::runtime::tool_dispatch::{
@@ -400,6 +408,7 @@ impl AgentExecutor {
             discovered_tools_writer: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pressure_high_warned: false,
             resolved_inference: None,
+            root_budget_exhausted: false,
         }
     }
 
@@ -877,6 +886,23 @@ impl AgentExecutor {
         err: anyhow::Error,
     ) -> anyhow::Error {
         let _ = self.save_yield_checkpoint(history, turn_id, reason, pending);
+        err
+    }
+
+    /// Root-session-tree budget exhaustion (C2 / #616). Identical to
+    /// [`Self::save_and_yield`] with `YieldReason::BudgetExhausted`, but also
+    /// records that the failure came from the **root** budget so the service
+    /// layer can fire the one-time graceful root budget circuit breaker once the
+    /// turn returns. Keyed off WHICH check failed — only the
+    /// `self.root_session_budget` paths call this — never the per-session budget.
+    fn save_and_yield_root_budget(
+        &mut self,
+        history: &[Message],
+        turn_id: &str,
+        err: anyhow::Error,
+    ) -> anyhow::Error {
+        self.root_budget_exhausted = true;
+        let _ = self.save_yield_checkpoint(history, turn_id, YieldReason::BudgetExhausted, None);
         err
     }
 
@@ -2070,15 +2096,9 @@ impl AgentExecutor {
                 {
                     return Err(self.save_and_yield(history, &turn_id, YieldReason::BudgetExhausted, None, e));
                 }
-                if let Some(root_budget) = self.root_session_budget.as_ref() {
+                if let Some(root_budget) = self.root_session_budget.clone() {
                     if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
-                        return Err(self.save_and_yield(
-                            history,
-                            &turn_id,
-                            YieldReason::BudgetExhausted,
-                            None,
-                            e,
-                        ));
+                        return Err(self.save_and_yield_root_budget(history, &turn_id, e));
                     }
                 }
                 let response = self.llm.complete(&req).await;
@@ -2124,14 +2144,10 @@ impl AgentExecutor {
                                     e,
                                 ));
                             }
-                            if let Some(root_budget) = self.root_session_budget.as_ref() {
+                            if let Some(root_budget) = self.root_session_budget.clone() {
                                 if let Err(e) = root_budget.reserve_llm_round(root_session_id) {
-                                    return Err(self.save_and_yield(
-                                        history,
-                                        &turn_id,
-                                        YieldReason::BudgetExhausted,
-                                        None,
-                                        e,
+                                    return Err(self.save_and_yield_root_budget(
+                                        history, &turn_id, e,
                                     ));
                                 }
                             }
@@ -2219,7 +2235,7 @@ impl AgentExecutor {
                 }
             }
 
-            if let Some(root_budget) = self.root_session_budget.as_ref() {
+            if let Some(root_budget) = self.root_session_budget.clone() {
                 if !skip_llm {
                     if let Err(e) = root_budget.record_llm_completion_with_unpriced_override(
                         root_session_id,
@@ -2228,13 +2244,7 @@ impl AgentExecutor {
                         estimated_cost_usd,
                         allow_unpriced_budget,
                     ) {
-                        return Err(self.save_and_yield(
-                            history,
-                            &turn_id,
-                            YieldReason::BudgetExhausted,
-                            None,
-                            e,
-                        ));
+                        return Err(self.save_and_yield_root_budget(history, &turn_id, e));
                     }
                 }
             }
@@ -2713,15 +2723,9 @@ impl AgentExecutor {
             }
 
             // Root session tree budget check (R+4 / P-6.21)
-            if let Some(root_budget) = self.root_session_budget.as_ref() {
+            if let Some(root_budget) = self.root_session_budget.clone() {
                 if let Err(e) = root_budget.check_pre_llm(root_session_id) {
-                    return Err(self.save_and_yield(
-                        history,
-                        turn_id,
-                        YieldReason::BudgetExhausted,
-                        None,
-                        e,
-                    ));
+                    return Err(self.save_and_yield_root_budget(history, turn_id, e));
                 }
             }
 
@@ -2784,19 +2788,13 @@ impl AgentExecutor {
                 }
             }
 
-            if let Some(root_budget) = self.root_session_budget.as_ref() {
+            if let Some(root_budget) = self.root_session_budget.clone() {
                 let root =
                     crate::runtime::content_store::root_session_id(&session_id).to_string();
                 if let Err(e) = root_budget
                     .reserve_tool_invocations(&root, tool_calls.len() as u64)
                 {
-                    return Err(self.save_and_yield(
-                        history,
-                        turn_id,
-                        YieldReason::BudgetExhausted,
-                        None,
-                        e,
-                    ));
+                    return Err(self.save_and_yield_root_budget(history, turn_id, e));
                 }
             }
 
