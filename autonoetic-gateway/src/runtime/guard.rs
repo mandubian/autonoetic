@@ -136,6 +136,18 @@ pub struct LoopGuard {
     pub last_progress_fingerprint: Option<(String, u64)>,
     pub consecutive_progress_count: u32,
     pub child_failure_count: u32,
+    /// Repair-loop-aware accounting (RFC D.4). When `repair_mode` is true,
+    /// `check_loop` counts against the repair budget instead of
+    /// `max_loops_without_progress`, so a healthy repair cycle does not trip
+    /// the outer LoopGuard.
+    #[serde(default)]
+    pub repair_mode: bool,
+    /// Loops consumed while inside a repair cycle.
+    #[serde(default)]
+    pub repair_loops: u32,
+    /// Maximum loops allowed inside a single repair cycle.
+    #[serde(default)]
+    pub max_repair_loops: u32,
     /// Sliding window of fingerprint hashes for the last
     /// `max_window_size` successful tool calls. Used by trip condition #3
     /// (rotating-polling detector).
@@ -170,6 +182,9 @@ impl LoopGuard {
             child_failure_count: 0,
             recent_fingerprints: VecDeque::new(),
             trip_reason: None,
+            repair_mode: false,
+            repair_loops: 0,
+            max_repair_loops: 0,
         }
     }
 
@@ -193,6 +208,9 @@ impl LoopGuard {
             child_failure_count: 0,
             recent_fingerprints: VecDeque::new(),
             trip_reason: None,
+            repair_mode: false,
+            repair_loops: 0,
+            max_repair_loops: 0,
         }
     }
 
@@ -203,6 +221,22 @@ impl LoopGuard {
         //    iteration started.
         if let Some(reason) = self.trip_reason.clone() {
             return Err(format_trip_error(&reason));
+        }
+
+        // RFC D.4: repair-loop-aware accounting. While the session is inside a
+        // response-validation repair cycle, count against the repair budget
+        // instead of the outer `max_loops_without_progress`. Healthy repair
+        // (distinct violations each iteration) should not trip the LoopGuard.
+        if self.repair_mode {
+            if self.max_repair_loops > 0 && self.repair_loops >= self.max_repair_loops {
+                let reason = LoopGuardTripReason::NoMeaningfulProgress {
+                    cycles: self.repair_loops,
+                };
+                self.trip_reason = Some(reason.clone());
+                return Err(format_trip_error(&reason));
+            }
+            self.repair_loops += 1;
+            return Ok(());
         }
 
         if self.current_loops >= self.max_loops_without_progress {
@@ -270,6 +304,30 @@ impl LoopGuard {
             }
         }
         false
+    }
+
+    /// Enter repair-loop-aware accounting. While in repair mode,
+    /// `check_loop` does not increment `current_loops`; it increments
+    /// `repair_loops` instead and enforces `max_repair_loops`.
+    pub fn enter_repair_mode(&mut self, max_repair_loops: u32) {
+        self.repair_mode = true;
+        self.repair_loops = 0;
+        self.max_repair_loops = max_repair_loops;
+    }
+
+    /// Exit repair mode. Preserves the outer `current_loops` so a failed
+    /// repair does not erase legitimate progress pressure.
+    pub fn exit_repair_mode(&mut self) {
+        self.repair_mode = false;
+        self.repair_loops = 0;
+    }
+
+    /// A successful repair resets both the outer loop counter and the repair
+    /// window, because the agent just produced a valid output.
+    pub fn reset_after_successful_repair(&mut self) {
+        self.current_loops = 0;
+        self.repair_mode = false;
+        self.repair_loops = 0;
     }
 
     pub fn is_irrecoverable(error_type: &ToolErrorType) -> bool {
@@ -464,6 +522,9 @@ impl Default for LoopGuard {
             child_failure_count: 0,
             recent_fingerprints: VecDeque::new(),
             trip_reason: None,
+            repair_mode: false,
+            repair_loops: 0,
+            max_repair_loops: 0,
         }
     }
 }
@@ -1274,5 +1335,57 @@ mod tests {
             guard.check_loop().is_ok(),
             "counter should be 1 after reset + 1 failure"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // RFC D.4 — repair-loop-aware accounting
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn repair_mode_does_not_increment_current_loops() {
+        let mut guard = LoopGuard::new(3);
+        guard.enter_repair_mode(10);
+        for _ in 0..5 {
+            assert!(guard.check_loop().is_ok());
+        }
+        assert_eq!(guard.current_loops, 0, "current_loops must not grow in repair mode");
+        assert_eq!(guard.repair_loops, 5, "repair_loops should track repair iterations");
+    }
+
+    #[test]
+    fn repair_mode_enforces_max_repair_loops() {
+        let mut guard = LoopGuard::new(100);
+        guard.enter_repair_mode(2);
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_err(), "repair should trip at max_repair_loops");
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(LoopGuardTripReason::NoMeaningfulProgress { .. })
+        ));
+    }
+
+    #[test]
+    fn reset_after_successful_repair_clears_loops() {
+        let mut guard = LoopGuard::new(5);
+        guard.current_loops = 4;
+        guard.enter_repair_mode(10);
+        guard.check_loop().unwrap();
+        guard.reset_after_successful_repair();
+        assert_eq!(guard.current_loops, 0);
+        assert!(!guard.repair_mode);
+        assert_eq!(guard.repair_loops, 0);
+    }
+
+    #[test]
+    fn exit_repair_mode_preserves_outer_loops() {
+        let mut guard = LoopGuard::new(5);
+        guard.current_loops = 4;
+        guard.enter_repair_mode(10);
+        guard.check_loop().unwrap();
+        guard.exit_repair_mode();
+        assert_eq!(guard.current_loops, 4, "outer current_loops must be preserved");
+        assert!(!guard.repair_mode);
+        assert_eq!(guard.repair_loops, 0);
     }
 }

@@ -3243,7 +3243,7 @@ impl AgentExecutor {
             'trajectory_monitor: {
                 use crate::runtime::trajectory_monitor::fingerprint_tool_call;
                 use crate::runtime::trajectory_health::{
-                    build_event_payload, DIVERGENCE_CATEGORY,
+                    build_event_payload, TrajectoryHealth, DIVERGENCE_CATEGORY,
                 };
                 use autonoetic_types::causal_chain::EntryStatus;
 
@@ -3297,7 +3297,25 @@ impl AgentExecutor {
                     &self.guard.snapshot(),
                 );
 
-                if result.level_changed {
+                // RFC D.5 — extend Sentinel suppression when the agent is
+                // incorporating feedback. The tick result requests a new target
+                // turn; apply it if it extends the current suppression window.
+                if let Some(requested) = result.suppress_until_turn {
+                    use std::sync::atomic::Ordering;
+                    let current = self.suppress_until_turn.load(Ordering::Relaxed);
+                    if requested > current {
+                        self.suppress_until_turn.store(requested, Ordering::Relaxed);
+                    }
+                }
+
+                // RFC D.5 — when suppression is active, skip all Sentinel
+                // escalation surfaces (causal event, planner message, operator
+                // notification) for this turn.
+                use std::sync::atomic::Ordering;
+                let suppressed =
+                    self.turn_counter < self.suppress_until_turn.load(Ordering::Relaxed);
+
+                if result.level_changed && !suppressed {
                     if let Some(payload) = build_event_payload(&result.health) {
                         let action = result.health.causal_action().unwrap_or("observed");
                         if let Err(e) = tracer.log_event(
@@ -3316,19 +3334,12 @@ impl AgentExecutor {
                     }
 
                     // ── P2: Planner messaging & operator escalation ──────
-                    use crate::runtime::trajectory_health::TrajectoryHealth;
-                    use std::sync::atomic::Ordering;
-
-                    let suppressed =
-                        self.turn_counter < self.suppress_until_turn.load(Ordering::Relaxed);
                     let cfg = self.config.as_ref();
 
                     match &result.health {
                         TrajectoryHealth::Diverging { .. }
                         | TrajectoryHealth::Critical { .. }
-                        | TrajectoryHealth::Blocked { .. }
-                            if !suppressed =>
-                        {
+                        | TrajectoryHealth::Blocked { .. } => {
                             if let Some(store) = self.gateway_store.as_ref() {
                                 let root_sid = crate::runtime::content_store::root_session_id(&session_id).to_string();
                                 Self::send_divergence_notice(

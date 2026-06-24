@@ -225,6 +225,22 @@ fn check_task_statuses(
                         entry["checkpoint_state"] = cp.state;
                     }
                 }
+                // RFC C — advisory claim reconciliation on the child→parent
+                // result path (non-blocking).
+                if t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
+                    if let Some(gw_dir) = gateway_dir {
+                        let _ = crate::runtime::response_validation::advisory_reconcile_child_result_summary(
+                            t.result_summary.as_deref(),
+                            &t.session_id,
+                            session_id.unwrap_or_else(|| t.parent_session_id.as_str()),
+                            &t.agent_id,
+                            gw_dir,
+                            store,
+                            Some(config),
+                        );
+                    }
+                }
+
                 // Check for implicit artifact created for this task
                 if t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
                     if let (Some(gw_dir), Some(sid)) = (gateway_dir, session_id) {
@@ -891,6 +907,22 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
 
             match task.status {
                 autonoetic_types::workflow::TaskRunStatus::Succeeded => {
+                    // RFC C — advisory claim reconciliation on the child→parent
+                    // result path. This is intentionally non-blocking: the full
+                    // child `SpawnResult` was already validated against
+                    // `io.returns` before the task was marked complete. We
+                    // re-check the summary that crosses to the parent to catch
+                    // any fabricated claim that survived truncation.
+                    let _ = crate::runtime::response_validation::advisory_reconcile_child_result_summary(
+                        task.result_summary.as_deref(),
+                        &task.session_id,
+                        session_id.unwrap_or_else(|| task.parent_session_id.as_str()),
+                        &task.agent_id,
+                        &agents_dir.join(".gateway"),
+                        gateway_store.as_deref(),
+                        Some(gw_config),
+                    );
+
                     completed_tasks.push(entry.clone());
                     if let Some(ref summary) = task.result_summary {
                         let role = task.agent_id.split('.').next().unwrap_or("unknown");

@@ -2509,6 +2509,16 @@ pub struct TrajectoryConfig {
     /// Serves as a safety bound on planner self-suppression.
     #[serde(default = "default_trajectory_suppress_max_turns")]
     pub suppress_max_turns: u32,
+
+    /// RFC D.5 — suppress-on-progress grace. Number of consecutive turns with
+    /// feedback being incorporated that triggers suppression.
+    #[serde(default = "default_progress_grace_window")]
+    pub progress_grace_window: u32,
+
+    /// RFC D.5 — how many turns to suppress Sentinel escalation once progress
+    /// grace has been earned.
+    #[serde(default = "default_progress_grace_turns")]
+    pub progress_grace_turns: u32,
 }
 
 fn default_trajectory_enabled() -> bool {
@@ -2531,6 +2541,14 @@ fn default_trajectory_suppress_max_turns() -> u32 {
     10
 }
 
+fn default_progress_grace_window() -> u32 {
+    2
+}
+
+fn default_progress_grace_turns() -> u32 {
+    3
+}
+
 impl Default for TrajectoryConfig {
     fn default() -> Self {
         Self {
@@ -2544,6 +2562,8 @@ impl Default for TrajectoryConfig {
             notify_planner: default_trajectory_notify_planner(),
             notify_operator: default_trajectory_notify_operator(),
             suppress_max_turns: default_trajectory_suppress_max_turns(),
+            progress_grace_window: default_progress_grace_window(),
+            progress_grace_turns: default_progress_grace_turns(),
         }
     }
 }
