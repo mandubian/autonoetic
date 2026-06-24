@@ -70,10 +70,13 @@ pub fn is_degraded_mode_tool_blocked(
 
 /// Emit a single structured trace whenever the gateway tolerates a model
 /// non-conformance by normalizing its output (M1 doctrine: tolerance must be
-/// *observable*, never silent). `kind` is a stable label; `detail` is the
-/// before→after summary.
-fn note_llm_normalization(kind: &'static str, detail: &str) {
-    tracing::debug!(
+/// *observable*, never silent). `kind` is a stable label; `detail` is a short,
+/// **redacted** summary of what was normalized — never include raw tool
+/// arguments or results (they can carry secrets). Emitted at `info` so it is
+/// visible under the default `EnvFilter` (global INFO), not only under DEBUG —
+/// observability is the whole point.
+pub(crate) fn note_llm_normalization(kind: &'static str, detail: &str) {
+    tracing::info!(
         target: "llm_normalization",
         kind,
         detail,
@@ -82,7 +85,9 @@ fn note_llm_normalization(kind: &'static str, detail: &str) {
 }
 
 fn strip_gemma_token_artifacts(s: &str) -> String {
-    let re = regex::Regex::new(r"<\|[^>]*\|>").unwrap();
+    // Compile once: this runs on hot paths (every tool call's args/results).
+    static GEMMA_TOKEN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = GEMMA_TOKEN_RE.get_or_init(|| regex::Regex::new(r"<\|[^>]*\|>").unwrap());
     let out = re
         .replace_all(s, |caps: &regex::Captures| -> String {
             let token = &caps[0];
