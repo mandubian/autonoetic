@@ -816,8 +816,10 @@ pub async fn reap_orphaned_sessions(
                 Err(_) => continue,
             };
             // Task ids we mark Cancelled below; their live Tokio handles are
-            // aborted after the loop (C2/#618 — close the zombie window where
-            // the DB said Cancelled but the future kept running).
+            // aborted after the loop (C1/#618 — close the zombie window where
+            // the DB said Cancelled but the future kept running). Abort is
+            // best-effort: a handle may not be registered (e.g. after a gateway
+            // restart), in which case the DB cancel still stands.
             let mut cancelled_task_ids: Vec<String> = Vec::new();
             for mut task in tasks {
                 if task.session_id != child_session_id {
@@ -838,8 +840,7 @@ pub async fn reap_orphaned_sessions(
                 task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
                 task.updated_at = now_rfc.clone();
                 task.result_summary = Some(
-                    "child_abandoned: parent session terminated; live handle aborted (R+12)"
-                        .to_string(),
+                    "child_abandoned: parent session terminated (R+12)".to_string(),
                 );
                 let _ = crate::scheduler::workflow_store::save_task_run(
                     &config,

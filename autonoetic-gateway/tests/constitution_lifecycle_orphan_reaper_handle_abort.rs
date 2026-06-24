@@ -131,8 +131,12 @@ async fn orphan_reaper_aborts_in_flight_handle_for_abandoned_child() {
         .await
         .expect("reaper should succeed");
 
-    // The reaper must have aborted (and removed) the live handle.
-    let join_result = join.await;
+    // The reaper must have aborted (and removed) the live handle. Bound the
+    // await so a regression (handle not aborted) fails fast instead of hanging
+    // CI forever on the never-ending future.
+    let join_result = tokio::time::timeout(std::time::Duration::from_secs(5), join)
+        .await
+        .expect("reaper should have aborted the handle; await timed out (regression)");
     assert!(
         join_result.is_err() && join_result.unwrap_err().is_cancelled(),
         "the in-flight task handle for an abandoned child should be aborted by the reaper"
