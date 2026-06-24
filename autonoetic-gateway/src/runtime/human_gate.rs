@@ -135,9 +135,9 @@ impl DecisionContext {
     /// primary enforcement.
     pub fn is_sufficient(&self) -> bool {
         let bad = |s: &str| {
-            let t = s.trim();
+            let t = s.trim().to_ascii_lowercase();
             t.is_empty()
-                || t.eq_ignore_ascii_case("user question")
+                || t == "user question"
                 || t.ends_with("requires approval")
         };
         !bad(&self.what) && !bad(&self.why_gated)
@@ -390,7 +390,7 @@ impl GateService {
         // 5. Create new approval row.
         let gate_id = self.create_approval_row(req, action)?;
 
-        // 5b. Seed enrichment thread with reason + targets.
+        // 5b. Seed enrichment thread with the summary + targets.
         {
             let targets_str = if targets.is_empty() {
                 String::new()
@@ -1935,6 +1935,16 @@ mod tests {
         assert!(
             !DecisionContext::tier1("user question", "x").is_sufficient(),
             "'user question' boilerplate must be insufficient"
+        );
+
+        // Boilerplate detection is case-insensitive (capitalized variants too).
+        assert!(
+            !DecisionContext::tier1("Web.fetch x Requires Approval", "").is_sufficient(),
+            "capitalized 'Requires Approval' boilerplate must be insufficient"
+        );
+        assert!(
+            !DecisionContext::tier1("User Question", "x").is_sufficient(),
+            "capitalized 'User Question' boilerplate must be insufficient"
         );
 
         // Empty fields are insufficient.
