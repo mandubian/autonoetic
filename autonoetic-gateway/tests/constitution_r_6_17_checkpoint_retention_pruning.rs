@@ -27,6 +27,7 @@ fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
         turn_id: format!("turn-{turn:04}"),
@@ -50,6 +51,7 @@ fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
         suspended_at: None,
         suppress_until_turn: 0,
         trajectory_last_level: None,
+            feedback_events: vec![],
     }
 }
 

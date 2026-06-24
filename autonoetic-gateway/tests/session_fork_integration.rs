@@ -29,6 +29,7 @@ fn test_checkpoint(
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
@@ -64,6 +65,7 @@ fn test_checkpoint(
         suspended_at: None,
         suppress_until_turn: 0,
         trajectory_last_level: None,
+            feedback_events: vec![],
     }
 }
 

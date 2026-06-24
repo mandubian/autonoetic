@@ -168,6 +168,7 @@ mod session_resume_tests {
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
             agent_id: "a".into(),
             session_id: "s".into(),
             turn_id: "turn-1".into(),
@@ -193,6 +194,7 @@ mod session_resume_tests {
             suspended_at: None,
             suppress_until_turn: 0,
             trajectory_last_level: None,
+            feedback_events: vec![],
         };
         let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
         assert_eq!(id, "tid-99");

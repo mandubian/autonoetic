@@ -21,6 +21,7 @@ use autonoetic_gateway::runtime::trajectory_monitor::TrajectoryMonitor;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::config::TrajectoryConfig;
+use autonoetic_types::trajectory::FeedbackEvent;
 
 fn test_manifest() -> AgentManifest {
     AgentManifest {
@@ -68,13 +69,17 @@ fn drive_to_diverging(
     mon: &mut TrajectoryMonitor,
     state: &mut LoopGuard,
 ) -> autonoetic_gateway::runtime::trajectory_monitor::TickResult {
-    state.current_loops = 4;
-    let _ = mon.tick(4, &[], None, &state);
-    state.current_loops = 4;
-    state
-        .tool_failure_counts
-        .insert("sandbox.exec".into(), 4);
-    mon.tick(6, &[], None, &state)
+    // Under RFC D.6 only FeedbackIgnored can drive Diverging/Critical.
+    // Build the ignored signal by issuing feedback on turn 4 and repeating
+    // the same feedback event on turn 6.
+    let fb = FeedbackEvent::Validation {
+        rule: "output_schema".into(),
+        field_path: None,
+    };
+    mon.record_feedback(4, &[fb.clone()]);
+    mon.record_feedback(5, &[fb.clone()]);
+    mon.tick(5, &[], &[], None, state);
+    mon.tick(6, &[], &[fb], None, state)
 }
 
 // ── Test 1: sentinel.suppress accepts reason and emits causal event ──────────

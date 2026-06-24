@@ -236,6 +236,7 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
@@ -271,6 +272,7 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         suspended_at: None,
         suppress_until_turn: 0,
         trajectory_last_level: None,
+            feedback_events: vec![],
     };
     save_checkpoint(&f.config, &ckpt).unwrap();
 
@@ -623,6 +625,7 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
@@ -658,6 +661,7 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         suspended_at: None,
         suppress_until_turn: 0,
         trajectory_last_level: None,
+            feedback_events: vec![],
     };
     save_checkpoint(&f.config, &ckpt).unwrap();
 

@@ -26,6 +26,7 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
         turn_id: "turn-0001".to_string(),
@@ -51,6 +52,7 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
         suspended_at: None,
         suppress_until_turn: 0,
         trajectory_last_level: None,
+        feedback_events: vec![],
     }
 }
 
@@ -65,7 +67,7 @@ async fn r_6_14_emergency_stop_checkpoint_cannot_auto_resume() -> anyhow::Result
 
     let execution = GatewayExecutionService::new(config, None);
     let err = execution
-        .respawn_from_checkpoint("any-agent", session_id, None, None, None, None)
+        .respawn_from_checkpoint("any-agent", session_id, None, None, None, None, &[])
         .await
         .expect_err("EmergencyStop checkpoint must never auto-resume");
 

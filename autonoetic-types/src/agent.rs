@@ -276,10 +276,13 @@ pub struct RemoteAccessDeclaration {
     pub package_manager_commands: Vec<String>,
 }
 
-/// Optional per-agent circuit-breaker limits declared in SKILL metadata.
+/// Optional per-agent circuit-breaker limits declared in SKILL metadata, or
+/// derived from the agent's execution shape.
 ///
-/// Gateway applies these as stricter bounds within system ceilings.
-/// Any declared value above system config is capped to the system value.
+/// Explicit manifest declarations are applied as stricter bounds within system
+/// ceilings (operator-controlled safety). Role-aware defaults derived from
+/// `execution_mode` are applied directly, so deterministic executors can be
+/// granted more headroom than the global reasoning defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoopGuardDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,8 +303,8 @@ impl LoopGuardDeclaration {
         match mode {
             ExecutionMode::Reasoning => Self::default(),
             ExecutionMode::Script => Self {
-                max_loops_without_progress: Some(4),
-                max_tool_failures: Some(6),
+                max_loops_without_progress: Some(15),
+                max_tool_failures: Some(12),
                 max_consecutive_same_progress: Some(1),
                 max_child_failures: Some(5),
                 max_session_turns: None,

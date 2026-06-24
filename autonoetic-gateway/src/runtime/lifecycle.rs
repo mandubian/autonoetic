@@ -39,6 +39,8 @@ use crate::runtime::budget_tracker::{
 };
 use crate::runtime::context_governor::resolver::resolve_context_window_for_run;
 use crate::runtime::trajectory_monitor::{ToolObservation, TrajectoryMonitor};
+use autonoetic_types::tool_error::ToolErrorType;
+use autonoetic_types::trajectory::FeedbackEvent;
 
 // ---------------------------------------------------------------------------
 // TurnOutcome
@@ -343,6 +345,27 @@ fn is_signal_derived_exit(value: &serde_json::Value) -> bool {
             .get("exit_code")
             .and_then(|v| v.as_i64())
             .map_or(false, |code| code >= 128)
+}
+
+/// Best-effort normalization of an error message so semantically identical
+/// errors compare equal even when incidental details (ids, paths, timestamps)
+/// vary. Used to build stable `FeedbackEvent::ToolError` signatures.
+fn normalize_error_signature(message: &str) -> String {
+    let mut s = message.to_lowercase();
+    // Replace UUID-like hex strings.
+    s = regex::Regex::new(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+        .map(|re| re.replace_all(&s, "[uuid]").into_owned())
+        .unwrap_or(s);
+    // Replace long hex tokens.
+    s = regex::Regex::new(r"\b[0-9a-f]{16,}\b")
+        .map(|re| re.replace_all(&s, "[hex]").into_owned())
+        .unwrap_or(s);
+    // Replace numeric values.
+    s = regex::Regex::new(r"\b\d+\b")
+        .map(|re| re.replace_all(&s, "[n]").into_owned())
+        .unwrap_or(s);
+    // Collapse whitespace.
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl AgentExecutor {
@@ -816,6 +839,7 @@ impl AgentExecutor {
             session_state: self.session_state,
             tool_tier_escalated: self.tool_tier_escalated,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: self.blocked_state_event_emitted,
             agent_id: self.manifest.agent.id.clone(),
             session_id: self.session_id.clone().unwrap_or_default(),
             turn_id: turn_id.to_string(),
@@ -843,6 +867,7 @@ impl AgentExecutor {
             suspended_at: None,
             suppress_until_turn: self.suppress_until_turn.load(std::sync::atomic::Ordering::Relaxed),
             trajectory_last_level: self.trajectory_monitor.last_level_as_string(),
+            feedback_events: self.trajectory_monitor.feedback_snapshot(),
         }
     }
 
@@ -3095,6 +3120,7 @@ impl AgentExecutor {
 
             // No approval or interaction required — commit assistant message + tool results to history.
             history.push(assistant_msg);
+            let mut tool_feedback_events: Vec<FeedbackEvent> = Vec::new();
             for (id, _name, result) in &results {
                 history.push(Message::tool_result(
                     id.clone(),
@@ -3106,18 +3132,30 @@ impl AgentExecutor {
                         let error_type = parsed.get("error_type")
                             .and_then(|v| v.as_str())
                             .and_then(|s| match s {
-                                "validation" => Some(autonoetic_types::tool_error::ToolErrorType::Validation),
-                                "permission" => Some(autonoetic_types::tool_error::ToolErrorType::Permission),
-                                "resource" => Some(autonoetic_types::tool_error::ToolErrorType::Resource),
-                                "execution" => Some(autonoetic_types::tool_error::ToolErrorType::Execution),
-                                "fatal" => Some(autonoetic_types::tool_error::ToolErrorType::Fatal),
-                                "conflict" => Some(autonoetic_types::tool_error::ToolErrorType::Conflict),
-                                "quota_exceeded" => Some(autonoetic_types::tool_error::ToolErrorType::QuotaExceeded),
-                                "not_found" => Some(autonoetic_types::tool_error::ToolErrorType::NotFound),
-                                "timeout" => Some(autonoetic_types::tool_error::ToolErrorType::Timeout),
-                                "sandbox_unavailable" => Some(autonoetic_types::tool_error::ToolErrorType::SandboxUnavailable),
+                                "validation" => Some(ToolErrorType::Validation),
+                                "permission" => Some(ToolErrorType::Permission),
+                                "resource" => Some(ToolErrorType::Resource),
+                                "execution" => Some(ToolErrorType::Execution),
+                                "fatal" => Some(ToolErrorType::Fatal),
+                                "conflict" => Some(ToolErrorType::Conflict),
+                                "quota_exceeded" => Some(ToolErrorType::QuotaExceeded),
+                                "not_found" => Some(ToolErrorType::NotFound),
+                                "timeout" => Some(ToolErrorType::Timeout),
+                                "sandbox_unavailable" => Some(ToolErrorType::SandboxUnavailable),
                                 _ => None,
                             });
+                        if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id) {
+                            if let Some(et) = error_type.clone() {
+                                let message_signature = normalize_error_signature(
+                                    parsed.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                                );
+                                tool_feedback_events.push(FeedbackEvent::ToolError {
+                                    tool: tc.name.clone(),
+                                    error_type: et,
+                                    message_signature,
+                                });
+                            }
+                        }
                         let signal_derived = is_signal_derived_exit(&parsed);
                         let irrecoverable = error_type
                             .as_ref()
@@ -3126,32 +3164,35 @@ impl AgentExecutor {
                             || signal_derived;
                         if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
                         {
-                            let counted = self.guard.register_failure(
-                                &tc.name,
-                                &tc.arguments,
-                                error_type.as_ref(),
-                            );
-                            if !counted && !self.blocked_state_event_emitted {
-                                let payload = serde_json::json!({
-                                    "tool": tc.name,
-                                    "error_type": error_type.as_ref().map(|e| e.to_string()),
-                                    "exit_code": parsed.get("exit_code").and_then(|v| v.as_i64()),
-                                    "signal_derived": signal_derived,
-                                    "message": "The agent is blocked by a gateway-side irrecoverable condition, not diverging.",
-                                });
-                                if let Err(e) = tracer.log_event(
-                                    "operator_alert",
-                                    "blocked_state",
-                                    autonoetic_types::causal_chain::EntryStatus::Success,
-                                    Some(payload),
-                                ) {
-                                    tracing::warn!(
-                                        target: "autonoetic::trajectory",
-                                        error = %e,
-                                        "Failed to log blocked_state operator alert"
-                                    );
+                            if irrecoverable {
+                                if !self.blocked_state_event_emitted {
+                                    let payload = serde_json::json!({
+                                        "tool": tc.name,
+                                        "error_type": error_type.as_ref().map(|e| e.to_string()),
+                                        "exit_code": parsed.get("exit_code").and_then(|v| v.as_i64()),
+                                        "signal_derived": signal_derived,
+                                        "message": "The agent is blocked by a gateway-side irrecoverable condition, not diverging.",
+                                    });
+                                    if let Err(e) = tracer.log_event(
+                                        "operator_alert",
+                                        "blocked_state",
+                                        autonoetic_types::causal_chain::EntryStatus::Success,
+                                        Some(payload),
+                                    ) {
+                                        tracing::warn!(
+                                            target: "autonoetic::trajectory",
+                                            error = %e,
+                                            "Failed to log blocked_state operator alert"
+                                        );
+                                    }
+                                    self.blocked_state_event_emitted = true;
                                 }
-                                self.blocked_state_event_emitted = true;
+                            } else {
+                                self.guard.register_failure(
+                                    &tc.name,
+                                    &tc.arguments,
+                                    error_type.as_ref(),
+                                );
                             }
                         }
                     } else if tool_result_counts_as_progress(result) {
@@ -3243,9 +3284,15 @@ impl AgentExecutor {
                     })
                     .collect();
 
+                if !tool_feedback_events.is_empty() {
+                    self.trajectory_monitor
+                        .record_feedback(self.turn_counter, &tool_feedback_events);
+                }
+
                 let result = self.trajectory_monitor.tick(
                     self.turn_counter,
                     &observations,
+                    &tool_feedback_events,
                     self.last_context_utilization,
                     &self.guard.snapshot(),
                 );
@@ -3279,6 +3326,7 @@ impl AgentExecutor {
                     match &result.health {
                         TrajectoryHealth::Diverging { .. }
                         | TrajectoryHealth::Critical { .. }
+                        | TrajectoryHealth::Blocked { .. }
                             if !suppressed =>
                         {
                             if let Some(store) = self.gateway_store.as_ref() {

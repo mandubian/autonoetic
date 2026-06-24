@@ -1503,6 +1503,7 @@ impl GatewayExecutionService {
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
                 discovered_tools: Default::default(),
+                blocked_state_event_emitted: false,
                 agent_id: lead.to_string(),
                 session_id: root_session_id.to_string(),
                 turn_id: format!("emergency-{stop_id}"),
@@ -1528,6 +1529,7 @@ impl GatewayExecutionService {
                 suspended_at: None,
                 suppress_until_turn: 0,
                 trajectory_last_level: None,
+                feedback_events: vec![],
             }
         };
         cp.yield_reason = YieldReason::EmergencyStop {
@@ -2845,6 +2847,7 @@ impl GatewayExecutionService {
                         // state, etc.) but replace the guard with a fresh one so that
                         // accumulated failure budgets don't immediately re-trip.
                         checkpoint.restore_into(&mut runtime);
+
                         runtime.guard = crate::runtime::tool_dispatch::loop_guard_from_config_and_manifest(
                             runtime.config.as_deref(),
                             &runtime.agent_dir,
@@ -3022,6 +3025,7 @@ impl GatewayExecutionService {
                     workflow_id,
                     task_id,
                     agent_is_spawn_capable,
+                    None,
                 )
                 .await
             {
@@ -3213,6 +3217,7 @@ impl GatewayExecutionService {
         source_agent_id: Option<&str>,
         workflow_id: Option<&str>,
         task_id: Option<&str>,
+        initial_feedback: &[autonoetic_types::trajectory::FeedbackEvent],
     ) -> anyhow::Result<SpawnResult> {
         use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
 
@@ -3296,6 +3301,15 @@ impl GatewayExecutionService {
         );
 
         checkpoint.restore_into(&mut runtime);
+
+        // Replay validation/tool feedback into the restored monitor so the
+        // repair turn can be checked for ignored feedback.
+        if !initial_feedback.is_empty() {
+            let turn = runtime.turn_counter;
+            runtime
+                .trajectory_monitor
+                .record_feedback(turn, initial_feedback);
+        }
 
         // Build history from checkpoint, optionally appending an additional message
         let mut history = checkpoint.history.clone();
