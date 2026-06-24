@@ -115,6 +115,9 @@ the new P-7.19 sub-rule / Sentinel right. Verify `contract_health` shows no
 # 1. Create the new version dir and apply ALL clause edits above (READY + PENDING).
 cp -r docs/constitution/versions/2026.06.22 docs/constitution/versions/<APPLY_DATE>
 $EDITOR docs/constitution/versions/<APPLY_DATE>/constitution.md   # apply clauses 1-9
+# Move the prepared RATIFY draft into the new version dir (and fill in the version/date):
+git mv docs/constitution/RATIFY-pending-determinism-divergence.md \
+       docs/constitution/versions/<APPLY_DATE>/RATIFY.md
 
 # 2. Recompute the lock (digest + signature) — REQUIRES the signing key:
 python3 docs/constitution/recompute_lock.py --version <APPLY_DATE> \
