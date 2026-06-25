@@ -264,12 +264,11 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
    → handle directly (knowledge_recall, knowledge_search, synthesis)
 
 9. Structural design / task breakdown
-   → architect.default
+    → architect.default
 
 10. Unknown intent — no foundational agent clearly fits
-   → discovery.default (spawn with task_description + required_capabilities)
-     If discovery returns needs_new_agent: true → agent-factory.default
-```
+    → discovery.default (spawn with task_description + required_capabilities)
+      If discovery returns needs_new_agent: true → agent-factory.default
 
 <!-- extended -->
 

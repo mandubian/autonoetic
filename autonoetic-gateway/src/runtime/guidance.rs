@@ -108,24 +108,44 @@ pub fn compose_guidance(blocks: &[GuidanceBlock], ctx: &GuidanceContext) -> Stri
 
 /// Cross-cutting guidance blocks not owned by any single tool (#466). Tool- and
 /// role-specific doctrine lives with its tool's `guidance()`; this is for
-/// genuinely universal doctrine (e.g. the clarification principle).
+/// universal doctrine plus role-gated builtins that should not be duplicated
+/// across every agent's SKILL.md (e.g. the clarification principle and the
+/// planner Sentinel self-correction rule).
 pub fn builtin_blocks() -> Vec<GuidanceBlock> {
-    vec![GuidanceBlock {
-        // Universal clarification principle (#466 recurring-section migration).
-        // Each role keeps its own *triggers* (what counts as blocked); this is
-        // the shared "ask-or-default, don't fabricate" rule.
-        id: "clarification.ask_or_default",
-        when: GuidanceCondition::Always,
-        priority: 5,
-        prose: "**Don't fabricate a missing fact.** When you're blocked on something only the \
+    vec![
+        GuidanceBlock {
+            // Universal clarification principle (#466 recurring-section migration).
+            // Each role keeps its own *triggers* (what counts as blocked); this is
+            // the shared "ask-or-default, don't fabricate" rule.
+            id: "clarification.ask_or_default",
+            when: GuidanceCondition::Always,
+            priority: 5,
+            prose: "**Don't fabricate a missing fact.** When you're blocked on something only the \
 caller or operator can supply — a missing required parameter, a genuinely ambiguous instruction, or \
 conflicting requirements — do not guess and do not spin discovery tools (`agent_list`, \
 `workflow_state`, repeated re-reads) to manufacture the answer. Return `clarification_needed` (or use \
 `user_ask` if you hold that tool) and end the turn — the reply must still satisfy your declared \
 output schema (required fields, types). Otherwise proceed with a sensible, documented default — a \
 reasonable default or a clearly-better interpretation does not warrant a round-trip."
-            .to_string(),
-    }]
+                .to_string(),
+        },
+        GuidanceBlock {
+            // D.7b planner doctrine: Sentinel notices are advisory self-correction signals.
+            // Only applies to lead planners; other agents rely on their own SKILL.md doctrine
+            // or the LoopGuard directly.
+            id: "sentinel.self_correct_planner",
+            when: GuidanceCondition::Role("planner"),
+            priority: 10,
+            prose: "**Sentinel notices are advisory — self-correct, don't ask.** When the gateway emits a `sentinel_notice` \
+(repetition, ignored feedback, loop pressure, or trajectory divergence), treat it as a hint to replan, \
+NOT as a reason to ask the operator. Stop repeating the same action; inspect `workflow_state` and, for \
+`planner.collaborative`, `planframe_get` to reconcile with ground truth; change shape (yield for children, \
+use `debugger.default`, apply feedback, amend the plan). Use `user_ask` or `clarification_needed` only for \
+genuine missing facts the operator must supply. The operator can stop the session via `/sentinel stop` or \
+`Ctrl+X` if they want to."
+                .to_string(),
+        },
+    ]
 }
 
 /// Stable discriminant string for a capability, matched by

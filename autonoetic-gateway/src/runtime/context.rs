@@ -727,6 +727,53 @@ mod agentskills_bridging_tests {
         );
     }
 
+    #[test]
+    fn planner_system_prompt_includes_sentinel_self_correction_guidance() {
+        // D.7b: planner role must receive the Sentinel self-correction builtin
+        // guidance block so it treats sentinel_notice as an advisory signal
+        // rather than bouncing to the operator.
+        use crate::runtime::guidance::{builtin_blocks, compose_guidance, GuidanceContext};
+        use autonoetic_types::capability::Capability;
+
+        let caps = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 0,
+        }];
+        let ctx = GuidanceContext {
+            capabilities: &caps,
+            active_tool_names: &[],
+            model_family: None,
+            role: Some("planner"),
+        };
+        let guidance = compose_guidance(&builtin_blocks(), &ctx);
+        assert!(
+            guidance.contains("Sentinel notices are advisory"),
+            "planner guidance must include Sentinel self-correction doctrine: {guidance}"
+        );
+        assert!(
+            guidance.contains("self-correct, don't ask"),
+            "planner guidance must direct self-correction rather than operator escalation: {guidance}"
+        );
+    }
+
+    #[test]
+    fn non_planner_system_prompt_excludes_sentinel_self_correction_guidance() {
+        // D.7b: the planner-specific Sentinel guidance must not leak to other roles.
+        use crate::runtime::guidance::{builtin_blocks, compose_guidance, GuidanceContext};
+
+        let ctx = GuidanceContext {
+            capabilities: &[],
+            active_tool_names: &[],
+            model_family: None,
+            role: Some("coder"),
+        };
+        let guidance = compose_guidance(&builtin_blocks(), &ctx);
+        assert!(
+            !guidance.contains("Sentinel notices are advisory"),
+            "coder should not receive planner Sentinel guidance: {guidance}"
+        );
+    }
+
     fn default_test_manifest() -> AgentManifest {
         AgentManifest {
             version: "1.0".to_string(),
