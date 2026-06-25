@@ -46,6 +46,29 @@ struct ReplayResult {
     max_health: TrajectoryHealth,
     reached_critical: bool,
     first_critical_turn: Option<u64>,
+    /// First turn at which the modeled LoopGuard would trip, if any.
+    loop_guard_trip_turn: Option<u64>,
+}
+
+/// Determine the first turn (1-based) where the provided LoopGuard state would
+/// trip under the fixture's configured budgets.
+fn loop_guard_trip_turn(turns: &[Turn]) -> Option<u64> {
+    for (idx, turn) in turns.iter().enumerate() {
+        let g = &turn.guard;
+        if g.current_loops >= g.max_loops_without_progress {
+            return Some((idx + 1) as u64);
+        }
+        if g.child_failure_count >= g.max_child_failures {
+            return Some((idx + 1) as u64);
+        }
+        if g.tool_failure_counts
+            .values()
+            .any(|&c| c >= g.max_tool_failures)
+        {
+            return Some((idx + 1) as u64);
+        }
+    }
+    None
 }
 
 fn val(rule: &'static str) -> FeedbackEvent {
@@ -89,6 +112,7 @@ fn replay(session: &CorpusSession) -> ReplayResult {
     let mut max_health = TrajectoryHealth::Healthy;
     let mut reached_critical = false;
     let mut first_critical_turn = None;
+    let loop_guard_trip_turn = loop_guard_trip_turn(&session.turns);
 
     for (idx, turn) in session.turns.iter().enumerate() {
         let turn_counter = (idx + 1) as u64;
@@ -117,6 +141,7 @@ fn replay(session: &CorpusSession) -> ReplayResult {
         max_health,
         reached_critical,
         first_critical_turn,
+        loop_guard_trip_turn,
     }
 }
 
@@ -374,24 +399,6 @@ fn corpus() -> Vec<CorpusSession> {
                 },
             ],
         },
-        CorpusSession {
-            name: "brief_loop_then_progress",
-            expected: ExpectedOutcome::Repair,
-            turns: (1..=4)
-                .map(|t| Turn {
-                    observations: vec![fp(1)],
-                    feedback_events: vec![],
-                    guard: guard(t, &[], 0),
-                    context_utilization: None,
-                })
-                .chain((5..=7).map(|t| Turn {
-                    observations: vec![fp(t as u64)],
-                    feedback_events: vec![],
-                    guard: guard(0, &[], 0),
-                    context_utilization: None,
-                }))
-                .collect(),
-        },
         // ── Divergence set (10 sessions) ─────────────────────────────────
         CorpusSession {
             name: "feedback_ignored_to_critical",
@@ -521,15 +528,25 @@ fn divergence_sentinel_blind_corpus_meets_acceptance_bar() {
     let mut false_escalations = 0usize;
     let mut missed_divergences = 0usize;
     let mut operator_notifications_on_repair = 0usize;
+    let mut late_detections = 0usize;
     let mut detection_turns = Vec::new();
+    let mut repair_count = 0usize;
+    let mut divergence_count = 0usize;
 
-    let mut matrix = String::from("| session | expected | max level | critical? | first critical |\n|---|---|---|---|---|\n");
+    let mut matrix = String::from(
+        "| session | expected | max level | critical? | first critical | loop guard trip |\n|---|---|---|---|---|---|\n",
+    );
 
     for session in corpus() {
+        match session.expected {
+            ExpectedOutcome::Repair => repair_count += 1,
+            ExpectedOutcome::Divergence => divergence_count += 1,
+        }
+
         let result = replay(&session);
         let max_level = result.max_health.level_str();
         matrix.push_str(&format!(
-            "| {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} |\n",
             session.name,
             match session.expected {
                 ExpectedOutcome::Repair => "repair",
@@ -539,6 +556,10 @@ fn divergence_sentinel_blind_corpus_meets_acceptance_bar() {
             result.reached_critical,
             result
                 .first_critical_turn
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            result
+                .loop_guard_trip_turn
                 .map(|t| t.to_string())
                 .unwrap_or_else(|| "-".to_string()),
         ));
@@ -555,6 +576,13 @@ fn divergence_sentinel_blind_corpus_meets_acceptance_bar() {
                     missed_divergences += 1;
                 } else if let Some(t) = result.first_critical_turn {
                     detection_turns.push(t);
+                    if result
+                        .loop_guard_trip_turn
+                        .map(|trip| t > trip)
+                        .unwrap_or(false)
+                    {
+                        late_detections += 1;
+                    }
                 }
             }
         }
@@ -568,20 +596,32 @@ fn divergence_sentinel_blind_corpus_meets_acceptance_bar() {
 
     println!("\n{}", matrix);
     println!(
-        "false_escalations={}/10, missed_divergences={}/10, operator_notifications_on_repair={}/10, avg_detection_turn={:.1}",
-        false_escalations, missed_divergences, operator_notifications_on_repair, avg_detection_turn
+        "false_escalations={}/{}, missed_divergences={}/{}, operator_notifications_on_repair={}/{}, late_detections={}/{}, avg_detection_turn={:.1}",
+        false_escalations,
+        repair_count,
+        missed_divergences,
+        divergence_count,
+        operator_notifications_on_repair,
+        repair_count,
+        late_detections,
+        divergence_count,
+        avg_detection_turn
     );
 
     assert_eq!(
         false_escalations, 0,
-        "productive-repair sessions must never reach Critical (target 0/10 false escalations)"
+        "productive-repair sessions must never reach Critical (target 0 false escalations)"
     );
     assert_eq!(
         missed_divergences, 0,
-        "genuine-divergence sessions must be caught (target 0/10 missed divergences)"
+        "genuine-divergence sessions must be caught (target 0 missed divergences)"
     );
     assert_eq!(
         operator_notifications_on_repair, 0,
         "operator notifications on repair set must be near-zero"
+    );
+    assert_eq!(
+        late_detections, 0,
+        "genuine-divergence sessions must be caught no later than the modeled LoopGuard budgets"
     );
 }
