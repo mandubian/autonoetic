@@ -87,6 +87,12 @@ impl GatewayStore {
         let rows: Vec<SessionTimelineEntry> = stmt
             .query_map(rusqlite::params_from_iter(p), map_row)?
             .collect::<Result<Vec<_>, _>>()?;
+        // Release the connection lock before issuing additional store reads.
+        // `stmt` borrows `conn`, so we must drop it explicitly; otherwise the
+        // `conn` MutexGuard stays live until end-of-scope and any nested store
+        // method that re-locks `self.conn` will deadlock.
+        drop(stmt);
+        drop(conn);
 
         let has_more = rows.len() > limit as usize;
         let entries: Vec<SessionTimelineEntry> = rows.into_iter().take(limit as usize).collect();
@@ -96,10 +102,13 @@ impl GatewayStore {
             None
         };
 
+        let spawn_lineage = self.list_session_spawn_lineage(root_session_id)?;
+
         Ok(SessionTimelineListResult {
             entries,
             next_cursor,
             has_more,
+            spawn_lineage,
         })
     }
 

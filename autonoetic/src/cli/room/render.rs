@@ -10,6 +10,16 @@ use std::collections::HashSet;
 use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry};
 
+/// Short agent id for spawn badges — `coder.default` → `coder`.
+pub fn agent_id_short(agent_id: &str) -> &str {
+    agent_id
+        .strip_suffix(".default")
+        .unwrap_or(agent_id)
+        .split('.')
+        .next()
+        .unwrap_or(agent_id)
+}
+
 /// Altitude glyph — the at-a-glance importance marker.
 pub fn altitude_glyph(altitude: Altitude) -> &'static str {
     match altitude {
@@ -1768,7 +1778,9 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
         headline,
         detail,
         turn_id: entry.turn_id.clone(),
-        turn_index: None, // The TUI fills in a 1-based ordinal once turns are scanned.
+        source_session_id: Some(entry.source_session_id.clone()),
+        turn_index: None, // The TUI fills in from turn_id via turn_number_of (turn_counter).
+        turn_label: None, // Child spawn badge (e.g. `3→coder`) filled by the TUI.
         in_flight: false, // The TUI fills this in once it knows turn lifecycle.
         show_reasoning,
     }
@@ -1912,9 +1924,15 @@ pub struct RowSpec {
     pub detail: Option<String>,
     /// Turn this event belongs to (if any). Used to draw turn boundaries.
     pub turn_id: Option<String>,
-    /// 1-based ordinal of this turn in the session (first `turn_id` seen = 1).
-    /// Filled by the TUI after scanning the timeline; `None` when untagged.
+    /// Session that produced this row (`source_session_id` from the timeline).
+    pub source_session_id: Option<String>,
+    /// Turn counter number parsed from `turn_id` (`turn-000003` → 3). Matches
+    /// gateway `turn_counter` / `session.fork --at-turn N`. `None` when untagged
+    /// or the id is not a canonical `turn-NNNNNN` string.
     pub turn_index: Option<u32>,
+    /// Display override for spawned child rows — e.g. `3→coder` or `3.2`.
+    /// When set, used instead of bare `turn_index` in labels and turn dividers.
+    pub turn_label: Option<String>,
     /// True when the turn containing this row is still in flight (no matching
     /// `turn.end` has been seen yet). The TUI uses this to show a spinner.
     pub in_flight: bool,
@@ -4212,7 +4230,9 @@ mod tests {
             headline: "headline here".into(),
             detail: Some("and a detail".into()),
             turn_id: None,
+            source_session_id: None,
             turn_index: None,
+            turn_label: None,
             in_flight: false,
             show_reasoning: true,
         };
@@ -4316,7 +4336,9 @@ mod tests {
             headline: "tool sandbox_exec".into(),
             detail: Some("hello world".into()),
             turn_id: None,
+            source_session_id: None,
             turn_index: None,
+            turn_label: None,
             in_flight: false,
             show_reasoning: true,
         };

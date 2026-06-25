@@ -18,6 +18,7 @@ mod notifications;
 mod operator_activity;
 pub use operator_activity::OperatorActivityInsert;
 mod observability;
+mod session_spawn_lineage;
 mod session_timeline;
 pub mod plan_frames;
 pub mod post_promotion_reviews;

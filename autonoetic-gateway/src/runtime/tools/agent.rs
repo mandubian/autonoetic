@@ -200,7 +200,7 @@ the single join already does that."
         gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
-        _turn_id: Option<&str>,
+        turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
@@ -546,6 +546,8 @@ the single join already does that."
             &uuid::Uuid::new_v4().to_string()[..8]
         );
 
+        let spawned_at_turn = turn_id.and_then(crate::runtime::checkpoint::turn_number_from_id);
+
         let ts = Utc::now().to_rfc3339();
         let spawn_reason_preview: String = kickoff_message.chars().take(200).collect();
         let persist_result: anyhow::Result<String> = (|| {
@@ -594,7 +596,7 @@ the single join already does that."
                 parent_session_id: resolved_session_id.clone(),
                 status: TaskRunStatus::Running,
                 created_at: ts.clone(),
-                updated_at: ts,
+                updated_at: ts.clone(),
                 source_agent_id: Some(source_agent_id.clone()),
                 result_summary: None,
                 join_group: None,
@@ -622,6 +624,7 @@ the single join already does that."
                         "target_agent_id": target_agent_id,
                         "child_session_id": child_delegation_path,
                         "parent_session_id": resolved_session_id,
+                        "spawned_at_turn": spawned_at_turn,
                         "spawn_reason": spawn_reason_preview,
                         "spawn_reason_full": kickoff_message,
                     }),
@@ -641,6 +644,7 @@ the single join already does that."
                     "child_session_id": child_delegation_path,
                     "parent_session_id": resolved_session_id,
                     "source_agent_id": source_agent_id,
+                    "spawned_at_turn": spawned_at_turn,
                 }),
             );
 
@@ -664,6 +668,25 @@ the single join already does that."
                             "Set up hierarchical content namespace for child agent"
                         );
                     }
+                }
+            }
+
+            if let (Some(gs), Some(turn)) = (gateway_store.as_deref(), spawned_at_turn) {
+                if let Err(e) = gs.upsert_session_spawn_lineage(
+                    &child_delegation_path,
+                    &resolved_session_id,
+                    root,
+                    turn,
+                    &target_agent_id,
+                    &ts,
+                ) {
+                    tracing::warn!(
+                        target: "session_spawn_lineage",
+                        error = %e,
+                        child_session_id = %child_delegation_path,
+                        spawned_at_turn = turn,
+                        "Failed to record spawn lineage for child session"
+                    );
                 }
             }
 

@@ -323,6 +323,11 @@ pub fn turn_id_for(turn: u64) -> String {
     format!("turn-{:06}", turn)
 }
 
+/// Parse the numeric turn from a canonical `turn-000003` id.
+pub fn turn_number_from_id(turn_id: &str) -> Option<u64> {
+    turn_id.strip_prefix("turn-").and_then(|n| n.parse::<u64>().ok())
+}
+
 fn checkpoint_path(config: &GatewayConfig, session_id: &str, turn_id: &str) -> PathBuf {
     checkpoints_dir(config)
         .join(sanitize_path_component(session_id))

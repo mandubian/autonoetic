@@ -469,11 +469,49 @@ pub async fn handle_run(
 async fn wait_for_gateway_ready(port: u16, timeout: std::time::Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     let addr = format!("127.0.0.1:{port}");
+    let secret = std::env::var("AUTONOETIC_SHARED_SECRET").ok();
     while tokio::time::Instant::now() < deadline {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+        if gateway_ping(&addr, secret.as_deref()).await {
             return true;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     false
+}
+
+async fn gateway_ping(addr: &str, secret: Option<&str>) -> bool {
+    use autonoetic_gateway::router::JsonRpcResponse;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
+        return false;
+    };
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "ready",
+        "method": "ping",
+        "params": {},
+        "auth_token": secret,
+    });
+    let Ok(encoded) = serde_json::to_string(&req) else {
+        return false;
+    };
+    if stream.write_all(encoded.as_bytes()).await.is_err() {
+        return false;
+    }
+    if stream.write_all(b"\n").await.is_err() {
+        return false;
+    }
+    if stream.flush().await.is_err() {
+        return false;
+    }
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).await.is_err() {
+        return false;
+    }
+    let Ok(response) = serde_json::from_str::<JsonRpcResponse>(line.trim_end()) else {
+        return false;
+    };
+    response.error.is_none() && response.result == Some(serde_json::json!("pong"))
 }

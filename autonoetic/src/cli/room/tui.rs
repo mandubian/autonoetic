@@ -11,7 +11,9 @@ use super::client::RoomClient;
 use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
 use autonoetic_types::principal::Principal;
-use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry, SessionTimelineListResult};
+use autonoetic_types::session_timeline::{
+    Altitude, SessionRole, SessionSpawnLineageEntry, SessionTimelineEntry, SessionTimelineListResult,
+};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
@@ -46,6 +48,8 @@ const MAX_NARRATIVE_ROW_LINES: usize = 24;
 
 /// Expanded footer height while composing a multi-line message.
 const COMPOSE_PANEL_HEIGHT: u16 = 7;
+/// Height of the attention footer: mode hint, pending strip, selected detail.
+const FOOTER_HEIGHT: u16 = 3;
 
 /// Seconds the operator has to press `q`/`Ctrl+C` again after arming quit.
 const QUIT_ARM_SECS: u64 = 3;
@@ -94,7 +98,7 @@ fn disarm_estop(armed_until: &mut Option<Instant>, status: &mut Option<String>) 
 
 /// Rows visible in the main timeline list for the current terminal height.
 fn main_list_page_step(terminal_height: u16, compose_open: bool) -> usize {
-    let chrome = 2u16 + if compose_open { COMPOSE_PANEL_HEIGHT } else { 0 };
+    let chrome = 1 + FOOTER_HEIGHT + if compose_open { COMPOSE_PANEL_HEIGHT } else { 0 };
     terminal_height.saturating_sub(chrome).max(1) as usize
 }
 
@@ -696,6 +700,216 @@ fn truncate_str(s: &str, max: usize) -> String {
     } else {
         format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
     }
+}
+
+fn action_hint_for_gate_kind(kind: GateKind) -> &'static str {
+    match kind {
+        GateKind::Approval => "y approve · n reject",
+        GateKind::Interaction => "Enter/i/r answer",
+        GateKind::Plan => "Enter/p review · y approve · n revise",
+        GateKind::WikiProposal => "y accept · n reject",
+        GateKind::Escalation => "y acknowledge · n reject",
+    }
+}
+
+fn action_hint_for_kind_str(kind: &str) -> &'static str {
+    match kind {
+        "APPROVAL" => "y approve · n reject",
+        "ASK" => "Enter/i/r answer",
+        "PLAN" => "Enter/p review · y approve · n revise",
+        "ESCALATION" => "y acknowledge · n reject",
+        _ => "y/n",
+    }
+}
+
+fn build_attention_strip_line(rows: &[ApprovalRow], width: usize) -> Line<'static> {
+    let pending: Vec<&ApprovalRow> = rows.iter().filter(|r| r.is_pending).collect();
+    let resolved_count = rows.iter().filter(|r| !r.is_pending).count();
+
+    if pending.is_empty() && resolved_count == 0 {
+        return Line::from(Span::styled(
+            " No pending interactions",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let mut spans = vec![Span::raw(" ")];
+    let label = if !pending.is_empty() {
+        format!("⚠ {} pending", pending.len())
+    } else {
+        format!("✓ {} resolved", resolved_count)
+    };
+    let label_color = if !pending.is_empty() { Color::Yellow } else { Color::Green };
+    let label_width = label.width();
+    spans.push(Span::styled(
+        label,
+        Style::default().fg(label_color).add_modifier(Modifier::BOLD),
+    ));
+
+    let mut current_width = 1 + label_width;
+    let available = width.saturating_sub(1);
+
+    for r in pending.iter().take(6) {
+        let sep = " · ";
+        let item = format!("{} {}", r.kind, r.summary);
+        let item_w = item.width();
+        let sep_w = sep.width();
+        if current_width + sep_w + item_w > available {
+            spans.push(Span::styled(" · …", Style::default().fg(Color::DarkGray)));
+            break;
+        }
+        spans.push(Span::styled(sep.to_string(), Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(item, Style::default().fg(Color::Yellow)));
+        current_width += sep_w + item_w;
+    }
+
+    Line::from(spans)
+}
+
+fn build_attention_detail_line(
+    gate: Option<&GateRef>,
+    rows: &[ApprovalRow],
+    width: usize,
+) -> Line<'static> {
+    let relevant = gate
+        .and_then(|g| rows.iter().find(|r| r.id == g.id))
+        .or_else(|| rows.iter().find(|r| r.is_pending))
+        .or_else(|| rows.first());
+
+    let Some(r) = relevant else {
+        return Line::from(Span::styled(
+            " Press A for approvals list · y/n or Enter to act on selected item",
+            Style::default().fg(Color::DarkGray),
+        ));
+    };
+
+    let action_hint = gate
+        .map(|g| action_hint_for_gate_kind(g.kind))
+        .unwrap_or_else(|| action_hint_for_kind_str(r.kind));
+    let state_label = if r.is_pending { "pending" } else { "resolved" };
+    let state_color = if r.is_pending { Color::Yellow } else { Color::Green };
+
+    let kind_span = Span::styled(
+        format!(" {} ", r.kind),
+        Style::default().fg(state_color).add_modifier(Modifier::BOLD),
+    );
+    let action_span = Span::styled(
+        format!("— {} ", action_hint),
+        Style::default().fg(Color::DarkGray),
+    );
+    let state_span = Span::styled(
+        format!("[{}]", state_label),
+        Style::default().fg(state_color),
+    );
+
+    // Width-aware truncation of the summary so the state tag stays visible.
+    let overhead = kind_span.content.width() + action_span.content.width() + state_span.content.width() + 1;
+    let available = width.saturating_sub(overhead);
+    let summary = if r.summary.width() > available {
+        truncate_str(&r.summary, available)
+    } else {
+        r.summary.clone()
+    };
+    let summary_span = Span::styled(format!("{} ", summary), Style::default().fg(Color::White));
+
+    Line::from(vec![kind_span, summary_span, action_span, state_span])
+}
+
+fn build_footer(
+    slash: Option<&str>,
+    compose: Option<&ComposeInput>,
+    input: Option<&GateInput>,
+    status: Option<&str>,
+    gate: Option<&GateRef>,
+    approval_rows: &[ApprovalRow],
+    footer_w: usize,
+    info_panel: Option<&InfoPanel>,
+    turn_hint: Option<String>,
+) -> Paragraph<'static> {
+    // Line 1: mode-specific content (preserves the old one-line footer behaviour).
+    let line1 = if let Some(buf) = slash {
+        Line::from(Span::styled(
+            format!(" : /{buf}▏   [Enter run · Esc cancel]   {}", super::slash::HELP_TEXT),
+            Style::default().fg(Color::Magenta),
+        ))
+    } else if compose.is_some() {
+        Line::from(Span::styled(
+            " Enter send · Shift+Enter newline · ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy · Esc cancel",
+            Style::default().fg(Color::Green),
+        ))
+    } else if let Some(gi) = input {
+        let label = gate_input_label(gi);
+        let choices = gi
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 24)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let hint = if gi.options.is_empty() {
+            "[Enter submit · Esc cancel]".to_string()
+        } else if gi.allow_freeform {
+            format!("{choices}   [number choose · or type a reply · Esc cancel]")
+        } else {
+            format!("{choices}   [number choose · Esc cancel]")
+        };
+        let err = status
+            .filter(|s| s.starts_with('✗'))
+            .map(|s| format!("   {s}"))
+            .unwrap_or_default();
+        Line::from(Span::styled(
+            format!(" {label}: {}▏{err}   {hint}", gi.buffer),
+            Style::default().fg(Color::Cyan),
+        ))
+    } else if let Some(s) = status {
+        let color = if s.starts_with('✗') {
+            Color::Red
+        } else if s.starts_with('✓') {
+            Color::Green
+        } else {
+            Color::Yellow
+        };
+        Line::from(Span::styled(format!(" {s}"), Style::default().fg(color)))
+    } else {
+        let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
+        let nav = "q quit · j↓ k↑ · /help · c content · o artifact · ? info";
+        let nav_display = if footer_w < 50 {
+            "j↓ k↑ · /help · ?"
+        } else if footer_w < 70 {
+            "q · j↓ k↑ · /help · o · ?"
+        } else {
+            nav
+        };
+        let center = turn_hint.unwrap_or_else(|| "—".to_string());
+        let right = if info_panel.is_some() {
+            "info: j/k scroll · Esc close".to_string()
+        } else if !gate_hint.is_empty() {
+            gate_hint
+        } else {
+            String::new()
+        };
+        let nav_w = nav_display.width();
+        let center_w = center.width();
+        let right_w = right.width();
+        let total = nav_w + center_w + right_w + 4;
+        let text = if total <= footer_w && !right.is_empty() {
+            let pad1 = (footer_w - total) / 3;
+            let pad2 = footer_w - nav_w - center_w - right_w - pad1;
+            format!(" {nav_display}{}{center}{}{right}", " ".repeat(pad1), " ".repeat(pad2))
+        } else if total <= footer_w {
+            let pad = footer_w - nav_w - center_w;
+            format!(" {nav_display}{}{center}", " ".repeat(pad))
+        } else {
+            let right_part = if right.is_empty() { String::new() } else { format!("  {right}") };
+            format!(" {nav_display}{right_part}")
+        };
+        Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
+    };
+
+    let line2 = build_attention_strip_line(approval_rows, footer_w);
+    let line3 = build_attention_detail_line(gate, approval_rows, footer_w);
+
+    Paragraph::new(Text::from(vec![line1, line2, line3]))
 }
 
 fn fetch_approval_rows(client: &RoomClient, root_session_id: &str) -> Vec<ApprovalRow> {
@@ -1816,6 +2030,7 @@ pub fn run(
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
     let mut session_async_processing = false;
+    let mut spawn_lineage: HashMap<String, SessionSpawnLineageEntry> = HashMap::new();
     // Last rendered frame — input is drained before the next timeline fetch.
     let mut view_rows: Vec<RenderedRow> = Vec::new();
     let mut view_indexed: Vec<(RenderedRow, RowSource)> = Vec::new();
@@ -1953,6 +2168,7 @@ pub fn run(
                                                 limit,
                                                 &new_id,
                                                 &mut force_timeline_refresh,
+                                                &mut spawn_lineage,
                                             );
                                             status = Some(format!("→ switched to session {new_id}"));
                                         }
@@ -2065,6 +2281,7 @@ pub fn run(
                                                     limit,
                                                     &resolved_id,
                                                     &mut force_timeline_refresh,
+                                                    &mut spawn_lineage,
                                                 );
                                                 status = Some(format!("→ resumed session {resolved_id}"));
                                             }
@@ -2097,6 +2314,7 @@ pub fn run(
                                                     limit,
                                                     &new_id,
                                                     &mut force_timeline_refresh,
+                                                    &mut spawn_lineage,
                                                 );
                                                 session_pick_list = None;
                                         wiki_request_ids = None;
@@ -2418,6 +2636,14 @@ pub fn run(
                                     continue;
                                 }
                                 _ => {
+                                    // Let compose / slash triggers fall through to the
+                                    // main handler — the full-screen gate overlay must
+                                    // not block the operator from messaging the session.
+                                    if matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I')
+                                        | KeyCode::Char('/') | KeyCode::Char(':'))
+                                    {
+                                        // fall through
+                                    } else {
                                     let ctrl_c = key.code == KeyCode::Char('c')
                                         && key.modifiers.contains(KeyModifiers::CONTROL);
                                     if ctrl_c {
@@ -2427,6 +2653,7 @@ pub fn run(
                                         arm_quit(&mut quit_armed_until, &mut status);
                                     }
                                     continue;
+                                    }
                                 }
                             }
                         } else {
@@ -2444,6 +2671,11 @@ pub fn run(
                                 && key.modifiers.contains(KeyModifiers::CONTROL);
                             if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
                                 // fall through to global quit
+                            } else if matches!(key.code, KeyCode::Char('i') | KeyCode::Char('I')
+                                | KeyCode::Char('/') | KeyCode::Char(':'))
+                            {
+                                approvals_popup = None;
+                                // fall through to compose / slash handlers
                             } else {
                                 let row_count = popup.rows.len();
                                 match key.code {
@@ -2597,6 +2829,7 @@ pub fn run(
                                             limit,
                                             &picked_id,
                                             &mut force_timeline_refresh,
+                                            &mut spawn_lineage,
                                         );
                                         status = Some(format!("→ switched to session {picked_id}"));
                                     } else {
@@ -2836,6 +3069,7 @@ pub fn run(
                                                 limit,
                                                 &new_id,
                                                 &mut force_timeline_refresh,
+                                                &mut spawn_lineage,
                                             );
                                             session_pick_list = None;
                                         wiki_request_ids = None;
@@ -2855,7 +3089,7 @@ pub fn run(
                             }
                         }
                         // i: compose a free-form message into the session (#405).
-                        KeyCode::Char('i') => {
+                        KeyCode::Char('i') | KeyCode::Char('I') => {
                             if let Some(g) =
                                 view_gate.as_ref().filter(|g| g.kind == GateKind::Interaction)
                             {
@@ -2873,6 +3107,8 @@ pub fn run(
                                 });
                                 status = None;
                             } else {
+                                gate_modal = None;
+                                approvals_popup = None;
                                 detail = None;
                                 compose = Some(ComposeInput::new());
                                 status = None;
@@ -3364,6 +3600,7 @@ pub fn run(
             let early_spinner = SPINNER_FRAMES[spinner_frame];
             let early_stats = compute_session_stats(&entries);
             let early_gate_count = count_active_gates(&entries, &resolved);
+            let early_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
             let early_pending_plans =
                 unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
             let early_safe_selected = selected.min(view_rows.len().saturating_sub(1));
@@ -3431,6 +3668,52 @@ pub fn run(
                         .as_ref()
                         .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                     None,
+                    &early_approval_rows,
+                )
+            })?;
+        }
+
+        if view_rows.is_empty() {
+            if status.is_none() {
+                status = Some("Loading timeline…".to_string());
+            }
+            let boot_stats = compute_session_stats(&entries);
+            terminal.draw(|f| {
+                draw(
+                    f,
+                    root_session_id,
+                    floor,
+                    squash,
+                    follow,
+                    &view_rows,
+                    selected,
+                    detail.as_ref(),
+                    detail_scroll,
+                    detail_h_scroll,
+                    input.as_ref(),
+                    compose.as_ref(),
+                    slash.as_deref(),
+                    status.as_deref(),
+                    view_gate.as_ref(),
+                    SPINNER_FRAMES[spinner_frame],
+                    &view_turn_boundaries,
+                    show_reasoning,
+                    &boot_stats,
+                    0,
+                    None,
+                    None,
+                    info_scroll,
+                    0,
+                    artifact_viewer.as_ref(),
+                    artifact_file_view.as_ref(),
+                    live_content_pane.as_ref(),
+                    content_view.as_ref(),
+                    gate_modal.as_ref(),
+                    gate_modal
+                        .as_ref()
+                        .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
+                    approvals_popup.as_ref(),
+                    &[],
                 )
             })?;
         }
@@ -3442,10 +3725,7 @@ pub fn run(
             force_timeline_refresh = false;
             // Fetch at most one page per poll via the gateway API. On error (gateway
             // down), surface it and keep retrying — don't crash the UI.
-            match rpc(
-            client,
-            "session.timeline.list",
-            serde_json::json!({
+            let timeline_params = serde_json::json!({
                 "root_session_id": &*root_session_id,
                 "after_event_id": cursor,
                 "limit": limit,
@@ -3455,36 +3735,50 @@ pub fn run(
                 // `resolved` unpopulated — making already-decided gates look
                 // re-decidable. Fetch everything; filter is purely a view concern.
                 "min_altitude": "detail",
-            }),
-        ) {
-            Ok(value) => match serde_json::from_value::<SessionTimelineListResult>(value) {
-                Ok(page) => {
-                    if let Some(last) = page.entries.last() {
-                        cursor = Some(last.event_id.clone());
-                    }
-                    for e in &page.entries {
-                        if matches!(
-                            e.event_type.as_str(),
-                            "approval.approved" | "approval.rejected" | "approval.cancelled"
-                        ) {
-                            if let Some(id) = &e.refs.approval_request_id {
-                                resolved.insert(id.clone());
+            });
+            let timeline_result = rpc(
+                client,
+                "session.timeline.list",
+                timeline_params,
+            );
+            match timeline_result {
+                Ok(value) => match serde_json::from_value::<SessionTimelineListResult>(value) {
+                    Ok(page) => {
+                        if !page.spawn_lineage.is_empty() {
+                            spawn_lineage = page
+                                .spawn_lineage
+                                .into_iter()
+                                .map(|e| (e.child_session_id.clone(), e))
+                                .collect();
+                        }
+                        if let Some(last) = page.entries.last() {
+                            cursor = Some(last.event_id.clone());
+                        }
+                        for e in &page.entries {
+                            if matches!(
+                                e.event_type.as_str(),
+                                "approval.approved" | "approval.rejected" | "approval.cancelled"
+                            ) {
+                                if let Some(id) = &e.refs.approval_request_id {
+                                    resolved.insert(id.clone());
+                                }
+                            }
+                            if e.event_type == "plan.approved" {
+                                if let Some(key) = plan_gate_key(e) {
+                                    resolved.insert(key);
+                                }
                             }
                         }
-                        if e.event_type == "plan.approved" {
-                            if let Some(key) = plan_gate_key(e) {
-                                resolved.insert(key);
-                            }
+                        entries.extend(page.entries);
+                        if status.as_deref().map(|s| s.starts_with("✗ gateway")).unwrap_or(false)
+                        {
+                            status = None; // recovered
                         }
                     }
-                    entries.extend(page.entries);
-                    if status.as_deref().map(|s| s.starts_with("✗ gateway")).unwrap_or(false) {
-                        status = None; // recovered
-                    }
-                }
-                Err(e) => status = Some(format!("✗ bad timeline response: {e}")),
-            },
-            Err(e) => status = Some(format!("✗ gateway: {e}")),
+                    Err(e) => status = Some(format!("✗ bad timeline response: {e}")),
+                },
+                Err(e) if e.to_string() == "__room_quit__" => break 'room,
+                Err(e) => status = Some(format!("✗ gateway: {e}")),
             }
         }
 
@@ -3540,7 +3834,19 @@ pub fn run(
             >= Duration::from_millis(SESSION_STATUS_POLL_MS)
         {
             last_session_status_poll = Instant::now();
-            session_async_processing = session_is_async_processing(client, root_session_id);
+            match rpc(
+                client,
+                "session.status",
+                serde_json::json!({ "session_id": &*root_session_id }),
+            ) {
+                Ok(value) => {
+                    session_async_processing = value
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == "processing");
+                }
+                Err(_) => session_async_processing = false,
+            }
         }
         let mut extra_inflight_rows = HashSet::new();
         if let Some(gate) = find_active_gate(&entries, &resolved, &acted) {
@@ -3561,6 +3867,8 @@ pub fn run(
             &open_turns,
             show_reasoning,
             &extra_inflight_rows,
+            &*root_session_id,
+            &spawn_lineage,
         );
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
         let pending_plan_count =
@@ -3681,9 +3989,9 @@ pub fn run(
         let term_size = terminal.size()?;
         let compose_open = compose.is_some() && detail.is_none();
         let list_area_height = if compose_open {
-            term_size.height.saturating_sub(1 + 1 + COMPOSE_PANEL_HEIGHT as u16)
+            term_size.height.saturating_sub(1 + FOOTER_HEIGHT + COMPOSE_PANEL_HEIGHT)
         } else {
-            term_size.height.saturating_sub(1 + 1)
+            term_size.height.saturating_sub(1 + FOOTER_HEIGHT)
         };
         let list_height = list_area_height as usize;
         let width = term_size.width as usize;
@@ -3718,6 +4026,7 @@ pub fn run(
             compute_viewport_offset(safe_selected, list_height, &row_heights)
         };
         let gate_count = count_active_gates(&entries, &resolved);
+        let approval_rows = collect_approval_rows(&entries, &resolved, &acted);
         let info_panel = if info_panel_open {
             Some(build_info_panel(
                 root_session_id,
@@ -3773,6 +4082,7 @@ pub fn run(
                     .as_ref()
                     .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                 approvals_popup.as_ref(),
+                &approval_rows,
             )
         })?;
 
@@ -3791,32 +4101,6 @@ pub fn run(
     Ok(())
 }
 
-
-/// Annotate a row list with turn-boundary flags and in-flight markers. The
-/// in-flight spinner is reserved for the **most recent** row of each open
-/// turn — earlier rows keep their normal altitude glyph so the operator can
-/// read the chain.
-///
-/// `open_turns` is the set of turn_ids with a `turn.start` but no matching
-/// `turn.end` yet. `show_reasoning=false` hides rows whose headline carries
-/// the 💭 marker (`agent.reasoning` rows).
-///
-/// Returns the per-row `turn_boundaries` map (true → draw divider above the
-/// row) so the renderer can decorate the boundary.
-/// True when an async `event.ingest` for this session is still running.
-fn session_is_async_processing(client: &RoomClient, session_id: &str) -> bool {
-    match rpc(
-        client,
-        "session.status",
-        serde_json::json!({ "session_id": session_id }),
-    ) {
-        Ok(value) => value
-            .get("status")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s == "processing"),
-        Err(_) => false,
-    }
-}
 
 /// Newest rendered row that matches an unresolved gate (plan / approval / ask).
 fn newest_gate_row_index(
@@ -3857,18 +4141,37 @@ fn last_line_row_index(indexed: &[(RenderedRow, RowSource)]) -> Option<usize> {
         .find_map(|(i, (row, _))| matches!(row, RenderedRow::Line(_)).then_some(i))
 }
 
+fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>) -> String {
+    let short = render::agent_id_short(&lineage.target_agent_id);
+    match local_turn {
+        Some(n) if n > 1 => format!("{}.{}", lineage.spawned_at_turn, n),
+        _ => format!("{}→{}", lineage.spawned_at_turn, short),
+    }
+}
+
+/// Annotate a row list with turn-boundary flags and in-flight markers. The
+/// in-flight spinner is reserved for the **most recent** row of each open
+/// turn — earlier rows keep their normal altitude glyph so the operator can
+/// read the chain.
+///
+/// `open_turns` is the set of turn_ids with a `turn.start` but no matching
+/// `turn.end` yet. `show_reasoning=false` hides rows whose headline carries
+/// the 💭 marker (`agent.reasoning` rows).
+///
+/// Returns the per-row `turn_boundaries` map (true → draw divider above the
+/// row) so the renderer can decorate the boundary.
 fn annotate_turns_and_in_flight(
     rows: &mut [(RenderedRow, RowSource)],
     visible: &[SessionTimelineEntry],
     open_turns: &HashSet<String>,
     show_reasoning: bool,
     extra_inflight_rows: &HashSet<usize>,
+    root_session_id: &str,
+    spawn_lineage: &HashMap<String, SessionSpawnLineageEntry>,
 ) -> HashMap<usize, bool> {
     let mut last_turn: Option<String> = None;
     let mut last_row_for_turn: HashMap<String, usize> = HashMap::new();
     let mut collapsed_open_turn_rows: HashSet<usize> = HashSet::new();
-    let mut turn_ordinals: HashMap<String, u32> = HashMap::new();
-    let mut next_turn_index: u32 = 0;
     let mut turn_boundaries: HashMap<usize, bool> = HashMap::new();
     for (i, (row, _)) in rows.iter().enumerate() {
         if let RenderedRow::Line(spec) = row {
@@ -3898,14 +4201,18 @@ fn annotate_turns_and_in_flight(
     for (i, (row, _)) in rows.iter_mut().enumerate() {
         match row {
             RenderedRow::Line(spec) => {
-                if let Some(t) = &spec.turn_id {
-                    let ordinal = *turn_ordinals.entry(t.clone()).or_insert_with(|| {
-                        next_turn_index += 1;
-                        next_turn_index
-                    });
-                    spec.turn_index = Some(ordinal);
-                } else {
-                    spec.turn_index = None;
+                let local_turn = spec
+                    .turn_id
+                    .as_deref()
+                    .and_then(turn_number_of);
+                spec.turn_index = local_turn.map(|n| n as u32);
+                if let Some(src_id) = spec.source_session_id.as_deref() {
+                    if src_id != root_session_id {
+                        if let Some(lineage) = spawn_lineage.get(src_id) {
+                            spec.turn_label =
+                                Some(child_turn_label(lineage, local_turn));
+                        }
+                    }
                 }
                 let open_turn_row = spec.turn_id.as_ref().is_some_and(|t| {
                     open_turns.contains(t) && last_row_for_turn.get(t).copied() == Some(i)
@@ -4396,8 +4703,16 @@ fn detail_for(entries: &[SessionTimelineEntry], src: RowSource) -> Vec<String> {
 /// Build the styled `Line`s for a single row. Capped at `MAX_ROW_LINES`
 /// Actor label column — includes a `T{n}` prefix when the row belongs to a turn.
 fn format_row_label(spec: &RowSpec, label_w: usize) -> String {
-    let label_text = match spec.turn_index {
-        Some(n) => {
+    let label_text = match (&spec.turn_label, spec.turn_index) {
+        (Some(l), _) => {
+            let prefix = format!("T{l}·");
+            let inner_budget = label_w.saturating_sub(prefix.chars().count() + 2);
+            format!(
+                "[{prefix}{}]",
+                truncate(&spec.actor_label, inner_budget)
+            )
+        }
+        (None, Some(n)) => {
             let prefix = format!("T{n}·");
             let inner_budget = label_w.saturating_sub(prefix.chars().count() + 2);
             format!(
@@ -4405,7 +4720,7 @@ fn format_row_label(spec: &RowSpec, label_w: usize) -> String {
                 truncate(&spec.actor_label, inner_budget)
             )
         }
-        None => format!(
+        (None, None) => format!(
             "[{}]",
             truncate(&spec.actor_label, label_w.saturating_sub(2))
         ),
@@ -4432,7 +4747,11 @@ fn build_rich_row_lines(
     let mut lines: Vec<Line<'static>> = Vec::new();
     if turn_boundaries.contains_key(&row_index) {
         let total_w = content_w + glyph_w + label_w + rail_w + 2;
-        let bar = if let Some(n) = spec.turn_index {
+        let bar = if let Some(l) = &spec.turn_label {
+            let prefix = format!("── turn {l} ");
+            let fill = total_w.saturating_sub(prefix.chars().count());
+            format!("{prefix}{}", "─".repeat(fill))
+        } else if let Some(n) = spec.turn_index {
             let prefix = format!("── turn {n} ");
             let fill = total_w.saturating_sub(prefix.chars().count());
             format!("{prefix}{}", "─".repeat(fill))
@@ -4932,9 +5251,11 @@ fn switch_session(
     _limit: u32,
     new_id: &str,
     force_timeline_refresh: &mut bool,
+    spawn_lineage: &mut HashMap<String, SessionSpawnLineageEntry>,
 ) {
     *root_session_id = new_id.to_string();
     entries.clear();
+    spawn_lineage.clear();
     *cursor = None;
     *selected = 0;
     *detail = None;
@@ -5548,6 +5869,7 @@ fn draw(
     gate_modal: Option<&GateModal>,
     gate_modal_entry: Option<&SessionTimelineEntry>,
     approvals_popup: Option<&ApprovalsPopup>,
+    approval_rows: &[ApprovalRow],
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -5555,14 +5877,14 @@ fn draw(
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(COMPOSE_PANEL_HEIGHT),
-            Constraint::Length(1),
+            Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(f.area())
     } else {
         Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(f.area())
     };
@@ -5603,11 +5925,27 @@ fn draw(
             } else {
                 " Esc/Enter close"
             };
-            f.render_widget(
-                Paragraph::new(format!("{action_hint} · q quit (2×){scroll_hint}"))
-                    .style(Style::default().fg(Color::DarkGray)),
-                chunks[footer_idx],
+            let turn_hint = rows.get(selected).and_then(|r| match r {
+                RenderedRow::Line(s) => s
+                    .turn_label
+                    .as_deref()
+                    .map(|l| format!("turn {l}"))
+                    .or_else(|| s.turn_index.map(|n| format!("turn {n}"))),
+                _ => None,
+            });
+            let detail_status = format!("{action_hint} · q quit (2×){scroll_hint}");
+            let footer = build_footer(
+                None,
+                None,
+                None,
+                Some(&detail_status),
+                gate,
+                approval_rows,
+                chunks[footer_idx].width as usize,
+                info_panel,
+                turn_hint,
             );
+            f.render_widget(footer, chunks[footer_idx]);
             return;
         }
     }
@@ -5725,97 +6063,25 @@ fn draw(
         draw_compose_input(f, c, chunks[2]);
     }
 
-    let footer = if let Some(buf) = slash {
-        Paragraph::new(format!(
-            " : /{buf}▏   [Enter run · Esc cancel]   {HELP}",
-            HELP = super::slash::HELP_TEXT
-        ))
-        .style(Style::default().fg(Color::Magenta))
-    } else if compose.is_some() {
-        Paragraph::new(
-            " Enter send · Shift+Enter newline · ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy · Esc cancel",
-        )
-        .style(Style::default().fg(Color::Green))
-    } else if let Some(gi) = input {
-        let label = gate_input_label(gi);
-        // For an interaction with pre-digested choices, list them so a number
-        // key picks one (the §3.5 one-tap path); free-text stays available when
-        // the question allows it.
-        let choices = gi
-            .options
-            .iter()
-            .enumerate()
-            // Flatten/truncate labels so a multi-line or long label can't break
-            // the one-line footer.
-            .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 24)))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let hint = if gi.options.is_empty() {
-            "[Enter submit · Esc cancel]".to_string()
-        } else if gi.allow_freeform {
-            format!("{choices}   [number choose · or type a reply · Esc cancel]")
-        } else {
-            format!("{choices}   [number choose · Esc cancel]")
-        };
-        let err = status
-            .filter(|s| s.starts_with('✗'))
-            .map(|s| format!("   {s}"))
-            .unwrap_or_default();
-        Paragraph::new(format!(" {label}: {}▏{err}   {hint}", gi.buffer))
-            .style(Style::default().fg(Color::Cyan))
-    } else if let Some(s) = status {
-        // Show the last action's status result prominently in the footer.
-        let color = if s.starts_with('✗') {
-            Color::Red
-        } else if s.starts_with('✓') {
-            Color::Green
-        } else {
-            Color::Yellow
-        };
-        Paragraph::new(format!(" {s}"))
-            .style(Style::default().fg(color))
-    } else {
-        let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
-        let turn_hint = rows.get(safe_selected).and_then(|r| match r {
-            RenderedRow::Line(s) => s.turn_index.map(|n| format!("turn {n}")),
-            _ => None,
-        });
-        let footer_w = chunks[footer_idx].width as usize;
-        let nav = "q quit · j↓ k↑ · /help · c content · o artifact · ? info";
-        let nav_display = if footer_w < 50 {
-            "j↓ k↑ · /help · ?"
-        } else if footer_w < 70 {
-            "q · j↓ k↑ · /help · o · ?"
-        } else {
-            nav
-        };
-        let center = turn_hint.unwrap_or_else(|| "—".to_string());
-        let right = if info_panel.is_some() {
-            "info: j/k scroll · Esc close".to_string()
-        } else if !gate_hint.is_empty() {
-            gate_hint
-        } else {
-            String::new()
-        };
-        let nav_w = nav_display.width();
-        let center_w = center.width();
-        let right_w = right.width();
-        let total = nav_w + center_w + right_w + 4;
-        if total <= footer_w && !right.is_empty() {
-            let pad1 = (footer_w - total) / 3;
-            let pad2 = footer_w - nav_w - center_w - right_w - pad1;
-            Paragraph::new(format!(" {nav_display}{}{center}{}{right}", " ".repeat(pad1), " ".repeat(pad2)))
-                .style(Style::default().fg(Color::DarkGray))
-        } else if total <= footer_w {
-            let pad = footer_w - nav_w - center_w;
-            Paragraph::new(format!(" {nav_display}{}{center}", " ".repeat(pad)))
-                .style(Style::default().fg(Color::DarkGray))
-        } else {
-            let right_part = if right.is_empty() { String::new() } else { format!("  {right}") };
-            Paragraph::new(format!(" {nav_display}{right_part}"))
-                .style(Style::default().fg(Color::DarkGray))
-        }
-    };
+    let turn_hint = rows.get(safe_selected).and_then(|r| match r {
+        RenderedRow::Line(s) => s
+            .turn_label
+            .as_deref()
+            .map(|l| format!("turn {l}"))
+            .or_else(|| s.turn_index.map(|n| format!("turn {n}"))),
+        _ => None,
+    });
+    let footer = build_footer(
+        slash,
+        compose,
+        input,
+        status,
+        gate,
+        approval_rows,
+        chunks[footer_idx].width as usize,
+        info_panel,
+        turn_hint,
+    );
     f.render_widget(footer, chunks[footer_idx]);
 
     // Overlays render last (on top of everything) so they are never painted over.
@@ -6095,7 +6361,9 @@ fn draw(
     }
 
     if let Some(modal) = gate_modal {
-        draw_gate_modal(f, modal, gate_modal_entry, input, status);
+        if compose.is_none() {
+            draw_gate_modal(f, modal, gate_modal_entry, input, status);
+        }
     }
 
     if let Some(popup) = approvals_popup {
@@ -6557,9 +6825,77 @@ mod tests {
 
     #[test]
     fn main_list_page_step_accounts_for_chrome() {
-        assert_eq!(main_list_page_step(24, false), 22);
-        assert_eq!(main_list_page_step(24, true), 15);
+        assert_eq!(main_list_page_step(24, false), 20);
+        assert_eq!(main_list_page_step(24, true), 13);
         assert_eq!(main_list_page_step(1, false), 1);
+    }
+
+    #[test]
+    fn attention_strip_line_shows_pending_count_and_summaries() {
+        let rows = vec![
+            ApprovalRow {
+                id: "a1".into(),
+                kind: "APPROVAL",
+                is_pending: true,
+                summary: "fetch foo.com".into(),
+            },
+            ApprovalRow {
+                id: "i1".into(),
+                kind: "ASK",
+                is_pending: true,
+                summary: "which provider?".into(),
+            },
+        ];
+        let line = build_attention_strip_line(&rows, 120);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("⚠ 2 pending"), "{text}");
+        assert!(text.contains("APPROVAL fetch foo.com"), "{text}");
+        assert!(text.contains("ASK which provider?"), "{text}");
+    }
+
+    #[test]
+    fn attention_strip_line_falls_back_to_resolved_count() {
+        let rows = vec![ApprovalRow {
+            id: "a1".into(),
+            kind: "APPROVAL",
+            is_pending: false,
+            summary: "done".into(),
+        }];
+        let line = build_attention_strip_line(&rows, 120);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("✓ 1 resolved"), "{text}");
+    }
+
+    #[test]
+    fn attention_detail_line_uses_selected_gate() {
+        let rows = vec![
+            ApprovalRow {
+                id: "a1".into(),
+                kind: "APPROVAL",
+                is_pending: true,
+                summary: "fetch foo.com".into(),
+            },
+            ApprovalRow {
+                id: "i1".into(),
+                kind: "ASK",
+                is_pending: true,
+                summary: "which provider?".into(),
+            },
+        ];
+        let gate = GateRef { kind: GateKind::Interaction, id: "i1".into() };
+        let line = build_attention_detail_line(Some(&gate), &rows, 120);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("ASK"), "{text}");
+        assert!(text.contains("which provider?"), "{text}");
+        assert!(text.contains("Enter/i/r answer"), "{text}");
+        assert!(text.contains("[pending]"), "{text}");
+    }
+
+    #[test]
+    fn attention_detail_line_hints_when_empty() {
+        let line = build_attention_detail_line(None, &[], 120);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("Press A for approvals list"), "{text}");
     }
 
     #[test]
@@ -6651,7 +6987,9 @@ mod tests {
                 headline: "x".into(),
                 detail: None,
                 turn_id: None,
+                source_session_id: None,
                 turn_index: None,
+                turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -6806,7 +7144,9 @@ mod tests {
                 headline: "x".into(),
                 detail: None,
                 turn_id: None,
+                source_session_id: None,
                 turn_index: None,
+                turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -6847,7 +7187,9 @@ mod tests {
                 headline: "x".into(),
                 detail: None,
                 turn_id: None,
+                source_session_id: None,
                 turn_index: None,
+                turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -6892,7 +7234,9 @@ mod tests {
                 headline: "tool done".into(),
                 detail: None,
                 turn_id: None,
+                source_session_id: None,
                 turn_index: None,
+                turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -7186,7 +7530,33 @@ mod tests {
                 headline: headline.into(),
                 detail: None,
                 turn_id: turn.map(str::to_string),
+                source_session_id: None,
                 turn_index: None,
+                turn_label: None,
+                in_flight: false,
+                show_reasoning: true,
+            }),
+            RowSource::Single(0),
+        )
+    }
+
+    fn spec_with_child_session(
+        turn: Option<&str>,
+        source_session_id: &str,
+        headline: &str,
+    ) -> (RenderedRow, RowSource) {
+        (
+            RenderedRow::Line(render::RowSpec {
+                altitude: Altitude::Normal,
+                actor: render::ActorKind::Specialist,
+                tone: RowTone::Default,
+                actor_label: "coder".into(),
+                headline: headline.into(),
+                detail: None,
+                turn_id: turn.map(str::to_string),
+                source_session_id: Some(source_session_id.to_string()),
+                turn_index: None,
+                turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
             }),
@@ -7196,20 +7566,22 @@ mod tests {
 
     #[test]
     fn in_flight_marker_only_on_most_recent_row_of_open_turn() {
-        // 3 rows in turn-A, all un-closed. Only the LAST should get the
+        // 3 rows in turn-000001, all un-closed. Only the LAST should get the
         // spinner — earlier rows keep their normal altitude glyph.
         let mut rows = vec![
-            spec_with_turn(Some("A"), "first"),
-            spec_with_turn(Some("A"), "second"),
-            spec_with_turn(Some("A"), "third"),
+            spec_with_turn(Some("turn-000001"), "first"),
+            spec_with_turn(Some("turn-000001"), "second"),
+            spec_with_turn(Some("turn-000001"), "third"),
         ];
-        let open: HashSet<String> = ["A".into()].into_iter().collect();
+        let open: HashSet<String> = ["turn-000001".into()].into_iter().collect();
         let boundaries = annotate_turns_and_in_flight(
             &mut rows,
             &[],
             &open,
             true,
             &HashSet::new(),
+            "root",
+            &HashMap::new(),
         );
         // Boundary only at the start of the turn (i=0).
         assert!(boundaries.contains_key(&0));
@@ -7235,15 +7607,18 @@ mod tests {
     }
 
     #[test]
-    fn turn_index_increments_for_each_distinct_turn_id() {
+    fn turn_index_parsed_from_turn_id_not_view_ordinal() {
+        // Labels follow turn_counter (parsed from turn_id), not the Nth distinct
+        // turn_id visible in the current view — turn 5 stays "5" even when turns
+        // 3–4 have no surviving rows.
         let mut rows = vec![
-            spec_with_turn(Some("A"), "t1"),
-            spec_with_turn(Some("A"), "t1b"),
-            spec_with_turn(Some("B"), "t2"),
+            spec_with_turn(Some("turn-000001"), "t1"),
+            spec_with_turn(Some("turn-000001"), "t1b"),
+            spec_with_turn(Some("turn-000002"), "t2"),
             spec_with_turn(None, "no turn"),
-            spec_with_turn(Some("C"), "t3"),
+            spec_with_turn(Some("turn-000005"), "t5"),
         ];
-        annotate_turns_and_in_flight(&mut rows, &[], &HashSet::new(), true, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
         let indices: Vec<Option<u32>> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7251,7 +7626,50 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(indices, vec![Some(1), Some(1), Some(2), None, Some(3)]);
+        assert_eq!(indices, vec![Some(1), Some(1), Some(2), None, Some(5)]);
+    }
+
+    #[test]
+    fn child_spawn_rows_label_parent_planner_turn() {
+        let child = "root-session/coder.default-abc123";
+        let mut rows = vec![
+            spec_with_child_session(Some("turn-000001"), child, "wrote tests"),
+            spec_with_child_session(Some("turn-000002"), child, "fixed lint"),
+        ];
+        let lineage = HashMap::from([(
+            child.to_string(),
+            SessionSpawnLineageEntry {
+                child_session_id: child.to_string(),
+                parent_session_id: "root-session".to_string(),
+                spawned_at_turn: 3,
+                target_agent_id: "coder.default".to_string(),
+            },
+        )]);
+        annotate_turns_and_in_flight(
+            &mut rows,
+            &[],
+            &HashSet::new(),
+            true,
+            &HashSet::new(),
+            "root-session",
+            &lineage,
+        );
+        let labels: Vec<Option<String>> = rows
+            .iter()
+            .map(|(r, _)| match r {
+                RenderedRow::Line(s) => s.turn_label.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec![Some("3→coder".into()), Some("3.2".into())]);
+    }
+
+    #[test]
+    fn turn_number_of_parses_canonical_turn_ids() {
+        assert_eq!(turn_number_of("turn-000001"), Some(1));
+        assert_eq!(turn_number_of("turn-000042"), Some(42));
+        assert_eq!(turn_number_of("turn-"), None);
+        assert_eq!(turn_number_of("not-a-turn"), None);
     }
 
     #[test]
@@ -7267,7 +7685,9 @@ mod tests {
                     headline: "📋 PLAN AWAITING APPROVAL".into(),
                     detail: None,
                     turn_id: Some("A".into()),
+                    source_session_id: None,
                     turn_index: None,
+                    turn_label: None,
                     in_flight: false,
                     show_reasoning: true,
                 }),
@@ -7276,7 +7696,7 @@ mod tests {
         ];
         let open: HashSet<String> = HashSet::new();
         let extra: HashSet<usize> = [1].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &extra);
+        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &extra, "root", &HashMap::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7295,7 +7715,7 @@ mod tests {
             spec_with_turn(Some("B"), "late"),
         ];
         let open: HashSet<String> = HashSet::new();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &HashSet::new(), "root", &HashMap::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7315,7 +7735,7 @@ mod tests {
             spec_with_turn(Some("A"), "\u{1F4AD} thinking out loud"),
         ];
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, false, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &open, false, &HashSet::new(), "root", &HashMap::new());
         let shown: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -7357,7 +7777,7 @@ mod tests {
         ];
         let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &visible, &open, true, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &visible, &open, true, &HashSet::new(), "root", &HashMap::new());
 
         assert_eq!(rows.len(), 1);
         assert!(
@@ -7395,7 +7815,7 @@ mod tests {
             entry("turn.end", Some("A")),
         ];
         let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
-        annotate_turns_and_in_flight(&mut rows, &visible, &HashSet::new(), true, &HashSet::new());
+        annotate_turns_and_in_flight(&mut rows, &visible, &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
 
         assert!(
             matches!(

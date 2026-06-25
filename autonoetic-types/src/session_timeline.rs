@@ -178,12 +178,25 @@ fn default_timeline_limit() -> u32 {
     100
 }
 
+/// Parent planner turn at which a child session was spawned (`agent.spawn`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSpawnLineageEntry {
+    pub child_session_id: String,
+    pub parent_session_id: String,
+    pub spawned_at_turn: u64,
+    pub target_agent_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTimelineListResult {
     pub entries: Vec<SessionTimelineEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub has_more: bool,
+    /// Spawn lineage for child sessions under this root — lets channels label
+    /// parallel sub-agent rows with the parent planner turn (e.g. `3→coder`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawn_lineage: Vec<SessionSpawnLineageEntry>,
 }
 
 /// Parameters for `session.list` — discover existing root sessions so the

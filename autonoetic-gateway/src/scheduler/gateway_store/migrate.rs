@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 56;
+const SCHEMA_VERSION_LATEST: i64 = 57;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -541,7 +541,42 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_fork_lineage_v54(conn)?;
     apply_drop_approval_similarity_v55(conn)?;
     apply_agent_revision_detected_network_hosts_v56(conn)?;
+    apply_session_spawn_lineage_v57(conn)?;
 
+    Ok(())
+}
+
+fn apply_session_spawn_lineage_v57(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 57 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_spawn_lineage (
+            child_session_id TEXT PRIMARY KEY,
+            parent_session_id TEXT NOT NULL,
+            root_session_id TEXT NOT NULL,
+            spawned_at_turn INTEGER NOT NULL,
+            target_agent_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_spawn_lineage_root
+            ON session_spawn_lineage(root_session_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            57_i64,
+            "session_spawn_lineage",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 
