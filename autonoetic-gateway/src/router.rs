@@ -3378,6 +3378,8 @@ impl JsonRpcRouter {
                     confirm_phrase: Option<String>,
                     #[serde(default)]
                     acknowledged_capabilities: Vec<String>,
+                    #[serde(default)]
+                    decider_session_id: Option<String>,
                 }
 
                 let params: ApproveParams = match serde_json::from_value(req.params) {
@@ -3424,6 +3426,7 @@ impl JsonRpcRouter {
                     crate::scheduler::ApproveOptions {
                         acknowledged_capabilities: params.acknowledged_capabilities,
                         confirm_phrase: params.confirm_phrase,
+                        decider_session_id: params.decider_session_id,
                         ..Default::default()
                     },
                 ) {
@@ -3555,6 +3558,8 @@ impl JsonRpcRouter {
                     request_id: String,
                     decided_by: String,
                     reason: Option<String>,
+                    #[serde(default)]
+                    decider_session_id: Option<String>,
                 }
 
                 let params: RejectParams = match serde_json::from_value(req.params) {
@@ -3580,13 +3585,17 @@ impl JsonRpcRouter {
                 let store = self.execution.gateway_store();
                 let hooks = self.execution.hook_executor();
 
-                match crate::scheduler::reject_request(
+                match crate::scheduler::reject_request_with_options(
                     config.as_ref(),
                     store.as_deref(),
                     params.request_id.trim(),
                     params.decided_by.trim(),
                     params.reason,
                     Some(hooks.as_ref()),
+                    crate::scheduler::ApproveOptions {
+                        decider_session_id: params.decider_session_id,
+                        ..Default::default()
+                    },
                 ) {
                     Ok(decision) => {
                         {

@@ -200,6 +200,17 @@ pub enum Capability {
         agent_id: String,
         capabilities: Vec<Capability>,
     },
+
+    /// Resolve approval/escalation gates created by other agents.
+    /// The `kinds` field declares which gate kinds the agent may resolve
+    /// (`approval`, `escalation`, or both). An agent without `GateDecider`
+    /// cannot call `approve_request` or `reject_request`. Decider agents are
+    /// subject to the same dwell time, confirmation phrase, and hardening
+    /// rules as human operators (P-2.24).
+    GateDecider {
+        #[serde(default = "default_patterns_all")]
+        kinds: Vec<String>,
+    },
 }
 
 /// Operations that confer **authority** rather than mere participation.
@@ -372,6 +383,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "PlanFrameAccess",
         "WikiContribute",
         "PromoteWith",
+        "GateDecider",
     ]
 }
 
@@ -403,6 +415,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
         Capability::WikiContribute => "WikiContribute".to_string(),
         Capability::PromoteWith { .. } => "PromoteWith".to_string(),
+        Capability::GateDecider { .. } => "GateDecider".to_string(),
     }
 }
 
@@ -484,6 +497,10 @@ fn capability_broadening(
         (
             Capability::PlanFrameAccess { patterns: a },
             Capability::PlanFrameAccess { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::GateDecider { kinds: a },
+            Capability::GateDecider { kinds: b },
         ) => scope_broadening(capability_type, a, b),
         (
             Capability::CodeExecution {
@@ -801,6 +818,7 @@ mod tests {
                     scopes: vec!["self.*".into()],
                 }],
             },
+            Capability::GateDecider { kinds: vec![] },
         ];
         for cap in &samples {
             let name = capability_type_name(cap);

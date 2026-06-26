@@ -51,6 +51,12 @@ pub enum GateKind {
     /// Operator escalation (guidance needed).
     Escalation {
         reason: String,
+        /// For agent-decider escalations (P-2.21): the original gate that the
+        /// agent could not decide.
+        original_gate_id: Option<String>,
+        /// True when this escalation was created by an agent-decider exercising
+        /// the P-2.21 escalation-on-uncertainty path.
+        agent_decider: bool,
     },
     /// Agent proposes a wiki page addition/update.
     WikiProposal {
@@ -494,7 +500,12 @@ impl GateService {
     // -----------------------------------------------------------------------
 
     fn check_escalation(&self, req: &GateRequest<'_>) -> Result<GateResult> {
-        let GateKind::Escalation { ref reason } = req.kind else {
+        let GateKind::Escalation {
+            ref reason,
+            ref original_gate_id,
+            ref agent_decider,
+        } = req.kind
+        else {
             unreachable!()
         };
 
@@ -510,12 +521,21 @@ impl GateService {
                 context: String::new(),
                 urgency: "normal".to_string(),
                 suggested_actions: Vec::new(),
-                payload: None,
+                payload: original_gate_id.as_ref().map(|id| {
+                    serde_json::json!({
+                        "original_gate_id": id,
+                        "agent_decider": agent_decider,
+                    })
+                }),
             };
             if let Some(pending_id) = self.find_pending_for_targets(sid, &escalate_action, &[])? {
                 return Ok(GateResult::AlreadyPending {
                     gate_id: pending_id,
-                    enforced_rules: vec!["P-2.3", "P-2.18"],
+                    enforced_rules: if *agent_decider {
+                        vec!["P-2.21"]
+                    } else {
+                        vec!["P-2.3", "P-2.18"]
+                    },
                 });
             }
         }
@@ -533,12 +553,25 @@ impl GateService {
             context: String::new(),
             urgency: "normal".to_string(),
             suggested_actions: Vec::new(),
-            payload: None,
+            payload: original_gate_id.as_ref().map(|id| {
+                serde_json::json!({
+                    "original_gate_id": id,
+                    "agent_decider": agent_decider,
+                })
+            }),
         };
 
         let gate_id = self.create_approval_row(req, &action)?;
 
-        let _ = self.add_gate_message(&gate_id, "system", &format!("Escalation: {}", reason));
+        let seed = if let Some(ref orig) = original_gate_id {
+            format!(
+                "Escalation to human (agent-decider {} could not decide gate {}): {}",
+                req.manifest.agent.id, orig, reason
+            )
+        } else {
+            format!("Escalation: {}", reason)
+        };
+        let _ = self.add_gate_message(&gate_id, "system", &seed);
 
         let response_json = serde_json::json!({
             "ok": false,
@@ -552,7 +585,11 @@ impl GateService {
         Ok(GateResult::Suspended {
             gate_id,
             response_json,
-            enforced_rules: vec!["P-2.18"],
+            enforced_rules: if *agent_decider {
+                vec!["P-2.21"]
+            } else {
+                vec!["P-2.18"]
+            },
         })
     }
 
@@ -1170,6 +1207,123 @@ impl GateService {
     pub fn get_gate_messages(&self, gate_id: &str) -> Result<Vec<GateMessage>> {
         self.store.get_gate_messages(gate_id)
     }
+
+    // -----------------------------------------------------------------------
+    // Agent-decider paths (P-2.20 / P-2.21)
+    // -----------------------------------------------------------------------
+
+    /// P-2.21: an agent-decider that cannot determine a verdict escalates to a
+    /// human operator rather than rejecting. Creates a new `GateKind::Escalation`
+    /// gate referencing the original gate ID. The original gate remains pending.
+    ///
+    /// The caller must hold the `GateDecider` capability and must not be in the
+    /// spawn tree of the gate it is escalating (R-10.7).
+    pub fn escalate_to_human(
+        &self,
+        gate_id: &str,
+        reason: &str,
+        manifest: &AgentManifest,
+        decider_session_id: Option<&str>,
+    ) -> Result<GateResult> {
+        let original = self
+            .store
+            .get_approval(gate_id)?
+            .ok_or_else(|| anyhow::anyhow!("Original gate '{}' not found", gate_id))?;
+
+        let decider_sid = decider_session_id.unwrap_or("");
+
+        // P-2.20: caller must have GateDecider capability.
+        let policy = crate::policy::PolicyEngine::new(manifest.clone());
+        if !policy.can_decide_gate("escalation").is_allowed() {
+            anyhow::bail!(
+                "Agent '{}' lacks GateDecider capability for escalation (P-2.20)",
+                manifest.agent.id
+            );
+        }
+
+        // R-10.7: agent-decider may not decide a gate created by itself or a descendant.
+        if is_session_in_spawn_tree(decider_sid, &original.session_id, &self.store) {
+            anyhow::bail!(
+                "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
+                decider_sid,
+                original.session_id
+            );
+        }
+
+        // Record the agent's reasoning on the original gate's enrichment thread.
+        let _ = self.add_gate_message(
+            gate_id,
+            &format!("agent:{}", manifest.agent.id),
+            &format!("Escalating to human: {}", reason),
+        );
+
+        let req = GateRequest {
+            kind: GateKind::Escalation {
+                reason: reason.to_string(),
+                original_gate_id: Some(gate_id.to_string()),
+                agent_decider: true,
+            },
+            manifest,
+            session_id: Some(&original.session_id),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier1(
+                format!(
+                    "Agent-decider {} escalates gate {} to human operator",
+                    manifest.agent.id, gate_id
+                ),
+                "P-2.21 escalation-on-uncertainty",
+            ),
+            summary: format!("Agent-decider escalation for gate {}", gate_id),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+
+        self.check(req)
+    }
+
+    /// P-2.20 / R-10.7: verify an agent-decider is allowed to resolve a gate.
+    /// Returns the gate kind label ("approval" or "escalation") on success.
+    pub fn verify_agent_decider(
+        &self,
+        gate_id: &str,
+        manifest: &AgentManifest,
+        decider_session_id: Option<&str>,
+    ) -> Result<&'static str> {
+        let original = self
+            .store
+            .get_approval(gate_id)?
+            .ok_or_else(|| anyhow::anyhow!("Gate '{}' not found", gate_id))?;
+
+        let decider_sid = decider_session_id.unwrap_or("");
+
+        let kind_label = if matches!(original.action, ScheduledAction::SessionEscalate { .. }) {
+            "escalation"
+        } else {
+            "approval"
+        };
+
+        let policy = crate::policy::PolicyEngine::new(manifest.clone());
+        if !policy.can_decide_gate(kind_label).is_allowed() {
+            anyhow::bail!(
+                "Agent '{}' lacks GateDecider capability for {} gates (P-2.20)",
+                manifest.agent.id,
+                kind_label
+            );
+        }
+
+        if is_session_in_spawn_tree(decider_sid, &original.session_id, &self.store) {
+            anyhow::bail!(
+                "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
+                decider_sid,
+                original.session_id
+            );
+        }
+
+        Ok(kind_label)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,6 +1368,50 @@ fn extract_host_from_target(target: &str) -> String {
     } else {
         target.to_string()
     }
+}
+
+/// True when `gate_session_id` is the same session as, or a descendant of,
+/// `decider_session_id` in the spawn tree. Used to enforce R-10.7: an agent
+/// may not decide a gate created by itself or a descendant.
+///
+/// Session IDs are hierarchical (`root/child/grandchild`), so the prefix check
+/// covers the descendant case. When `decider_session_id` is empty, only the
+/// exact-match path remains meaningful.
+pub fn is_session_in_spawn_tree(
+    decider_session_id: &str,
+    gate_session_id: &str,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> bool {
+    if decider_session_id.is_empty() || gate_session_id.is_empty() {
+        return decider_session_id == gate_session_id;
+    }
+
+    // Fast path: hierarchical session IDs.
+    if gate_session_id == decider_session_id
+        || gate_session_id.starts_with(&format!("{}/", decider_session_id))
+    {
+        return true;
+    }
+
+    // Fallback: walk the recorded spawn lineage.
+    let root = crate::runtime::content_store::root_session_id(gate_session_id);
+    if let Ok(entries) = store.list_session_spawn_lineage(root) {
+        let mut current = gate_session_id;
+        while current != root {
+            let parent = entries
+                .iter()
+                .find(|e| e.child_session_id == current)
+                .map(|e| e.parent_session_id.as_str());
+            match parent {
+                Some(p) if p == decider_session_id => return true,
+                Some(p) if p == current || p == root => break,
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+    }
+
+    false
 }
 
 // ---------------------------------------------------------------------------

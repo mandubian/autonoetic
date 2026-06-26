@@ -138,6 +138,9 @@ pub struct ApproveOptions {
     /// R++4: Confirmation phrase for destructive approval classes. Must match
     /// the `confirm_phrase` stored on the approval request exactly (case-insensitive).
     pub confirm_phrase: Option<String>,
+    /// Session ID of the agent-decider, when the decider is an agent. Used for
+    /// R-10.7 spawn-tree trust-boundary enforcement.
+    pub decider_session_id: Option<String>,
 }
 
 /// Pre-computed metadata from the decision entry point that `apply_decision`
@@ -938,20 +941,41 @@ pub fn reject_request(
     reason: Option<String>,
     hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<ApprovalDecision> {
-    let decision = decide_request(
+    reject_request_with_options(
+        config,
+        gateway_store,
+        request_id,
+        decided_by,
+        reason,
+        hook_executor,
+        ApproveOptions::default(),
+    )
+}
+
+pub fn reject_request_with_options(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request_id: &str,
+    decided_by: &str,
+    reason: Option<String>,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
+    options: ApproveOptions,
+) -> anyhow::Result<ApprovalDecision> {
+    let decision = decide_request_with_options(
         config,
         gateway_store,
         request_id,
         decided_by,
         reason,
         ApprovalStatus::Rejected,
+        options.clone(),
     )?;
 
     let context = DecisionContext {
         wiki_materialized_meta: None,
         hook_executor,
     };
-    apply_decision(config, gateway_store, &decision, &ApproveOptions::default(), &context)?;
+    apply_decision(config, gateway_store, &decision, &options, &context)?;
 
     Ok(decision)
 }
@@ -1472,6 +1496,81 @@ fn decide_request_with_options(
         );
     }
 
+    // P-2.20 / R-10.7: agent-decider capability and spawn-tree boundary check.
+    // Human operators (decided_by not matching a loaded agent manifest) bypass this.
+    if let Some(store) = gateway_store {
+        if let Some(agent_id) = parse_agent_decider_id(decided_by) {
+            let gateway_dir = crate::execution::gateway_root_dir(config);
+            let repo = crate::agent::repository::AgentRepository::from_config(config);
+            match repo.get_sync_from_store(agent_id, &gateway_dir, Some(store)) {
+                Ok(loaded) => {
+                    let policy = crate::policy::PolicyEngine::new(loaded.manifest.clone());
+                    let kind_label = if matches!(request.action, ScheduledAction::SessionEscalate { .. }) {
+                        "escalation"
+                    } else {
+                        "approval"
+                    };
+                    if !policy.can_decide_gate(kind_label).is_allowed() {
+                        anyhow::bail!(
+                            "Agent '{}' lacks GateDecider capability for {} gates (P-2.20)",
+                            agent_id,
+                            kind_label
+                        );
+                    }
+
+                    let decider_sid = options.decider_session_id.as_deref().unwrap_or("");
+                    if crate::runtime::human_gate::is_session_in_spawn_tree(
+                        decider_sid,
+                        &request.session_id,
+                        store,
+                    ) {
+                        anyhow::bail!(
+                            "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
+                            decider_sid,
+                            request.session_id
+                        );
+                    }
+
+                    // Emit P-2.20 causal event for the verified agent-decider decision.
+                    let event = autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        agent_id: loaded.manifest.agent.id.clone(),
+                        session_id: request.session_id.clone(),
+                        turn_id: None,
+                        event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "background.approval".to_string(),
+                        action: format!("agent_decider.{}_gate", kind_label),
+                        status: status.as_str().to_string(),
+                        enforced_rules: vec!["P-2.20".to_string()],
+                        target: Some(request.request_id.clone()),
+                        payload: Some(
+                            serde_json::json!({
+                                "request_id": request.request_id,
+                                "decided_by": decided_by,
+                                "agent_id": loaded.manifest.agent.id,
+                                "gate_kind": kind_label,
+                            })
+                            .to_string(),
+                        ),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: reason.clone(),
+                    };
+                    let _ = store.create_causal_event(&event);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        target: "approval",
+                        decided_by = %decided_by,
+                        error = %e,
+                        "Decided_by does not resolve to a loaded agent; treating as human operator"
+                    );
+                }
+            }
+        }
+    }
+
     // §O symmetric obligation (#359 / #395): a principal decider owes a
     // motivation for a BLOCKING-tier decision (reject/abort, or approval of an
     // elevated-authority / external-irreversible action). Checked before commit.
@@ -1528,6 +1627,23 @@ fn decide_request_with_options(
     }
 
     Ok(decision)
+}
+
+/// Parse a `decided_by` string into an agent ID when the decider is an agent.
+/// Accepts the canonical `agent:<agent_id>` form, or a bare agent ID if it
+/// resolves to a loaded agent manifest. Returns `None` for human operators.
+fn parse_agent_decider_id(decided_by: &str) -> Option<&str> {
+    let trimmed = decided_by.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(id) = trimmed.strip_prefix("agent:") {
+        let id = id.trim();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
