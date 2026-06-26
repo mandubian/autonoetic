@@ -3867,7 +3867,15 @@ pub fn record_checkpoint_integrity_violation(
         evidence_ref: None,
         reason: Some(reason.to_string()),
     };
-    let _ = store.create_causal_event(&event);
+    if let Err(e) = store.create_causal_event(&event) {
+        tracing::error!(
+            target: "checkpoint",
+            session_id = %session_id,
+            approval_request_id = ?resolved_rid,
+            error = %e,
+            "failed to persist checkpoint_tampered causal event — audit trail may be incomplete"
+        );
+    }
 
     tracing::error!(
         target: "checkpoint",

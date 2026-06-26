@@ -588,16 +588,29 @@ impl GatewayStore {
         &self,
         request_id: &str,
     ) -> Result<bool> {
+        const DECIDED_BY: &str = "gateway:integrity_check";
+        let decided_by_kind =
+            autonoetic_types::principal::decider_principal_kind(DECIDED_BY).map(|k| k.tag());
         let now = chrono::Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
-        let rows = conn.execute(
-            "UPDATE approvals \
-             SET status = 'cancelled', decided_by = 'gateway:integrity_check', \
-                 decided_at = ?1, decision_reason = 'integrity_violation' \
-             WHERE request_id = ?2 AND status NOT IN ('cancelled', 'rejected')",
-            params![now, request_id],
-        )?;
-        Ok(rows > 0)
+        let ctx = {
+            let conn = self.conn.lock().unwrap();
+            let rows = conn.execute(
+                "UPDATE approvals \
+                 SET status = 'cancelled', decided_by = ?1, decided_at = ?2, \
+                     decision_reason = 'integrity_violation', decided_by_kind = ?3 \
+                 WHERE request_id = ?4 AND status NOT IN ('cancelled', 'rejected')",
+                params![DECIDED_BY, now, decided_by_kind, request_id],
+            )?;
+            if rows == 0 {
+                return Ok(false);
+            }
+            resolution_context(&conn, request_id)
+        };
+        // Record the cancellation on the canonical session timeline, matching
+        // record_decision / cancel_approval so §O accountability stays
+        // consistent (#606 review).
+        self.emit_gate_resolution(request_id, "cancelled", DECIDED_BY, ctx);
+        Ok(true)
     }
 
     pub fn insert_session_grant(
