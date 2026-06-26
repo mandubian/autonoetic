@@ -379,6 +379,86 @@ pub(crate) fn script_causal_event(
     });
 }
 
+/// Cap on script stdout mirrored into the `agent.message` timeline row. The
+/// timeline is a preview surface; the full, unredacted stdout already lives in
+/// `execution_traces` (queryable via `execution_search`), so we mirror a
+/// readable slice — matching the agent-narrative cap (`TIMELINE_AGENT_NARRATIVE_MAX_CHARS`).
+const TIMELINE_SCRIPT_STDOUT_MAX_CHARS: usize = 8_000;
+
+/// Emit an `agent.message` live-digest timeline row carrying a script agent's
+/// stdout, so the room TUI shows script output inline at the default (`Normal`)
+/// altitude — the same way a reasoning agent's narrative reaches the operator.
+///
+/// Why `agent.message` and not `tool.completed`: the room TUI reads
+/// `live_digest_events` (not `causal_events`) and its default floor is
+/// `Normal`; `tool.completed` is `Detail` (hidden at the default floor), so
+/// surfacing the run as `tool.completed` would leave it invisible without the
+/// operator dialing the floor down. A script's stdout *is* its reply — the
+/// direct analog of a reasoning agent's end-turn text, which `log_llm_completion`
+/// mirrors onto the timeline as `agent.message` (`session_tracer.rs:698`). We
+/// reuse that event so a `print("toto")` reads as a conversational line.
+///
+/// The stdout is redacted (`redact_embedded_secrets`, matching `agent.message`)
+/// and capped. Empty output is skipped, mirroring the reasoning path.
+pub(crate) fn emit_script_message_timeline(
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: &str,
+    session_id: &str,
+    stdout: &str,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let message = stdout.trim();
+    if message.is_empty() {
+        return;
+    }
+    let role = crate::runtime::session_timeline::derive_role(agent_id);
+    let altitude = crate::runtime::session_timeline::altitude_for("agent.message", &role);
+    let capped = cap_chars(
+        &autonoetic_types::redaction::redact_embedded_secrets(message),
+        TIMELINE_SCRIPT_STDOUT_MAX_CHARS,
+    );
+    let payload = serde_json::json!({ "message": capped });
+    let principal = autonoetic_types::principal::Principal::agent(agent_id.to_string());
+    let row = crate::scheduler::gateway_store::LiveDigestEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        root_session_id: crate::runtime::live_digest::base_session_id(session_id).to_string(),
+        source_session_id: session_id.to_string(),
+        turn_id: None,
+        source_agent_id: Some(agent_id.to_string()),
+        source_node_id: crate::execution::gateway_actor_id(),
+        event_type: "agent.message".to_string(),
+        payload: serde_json::to_string(&payload).ok(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        principal_kind: Some(principal.kind_to_storage()),
+        principal_id: Some(principal.id.clone()),
+        role: Some(role.to_storage()),
+        altitude: Some(altitude.as_str().to_string()),
+        refs_json: None,
+    };
+    if let Err(e) = store.create_live_digest_event(&row) {
+        tracing::debug!(
+            target: "live_digest",
+            error = %e,
+            "script agent.message timeline emit failed"
+        );
+    }
+}
+
+/// Truncate to `max` visible chars, appending an ellipsis (which counts toward
+/// the cap) when truncation occurs — matches the timeline preview cap style.
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let truncated: String = s.chars().take(max - 1).collect();
+    format!("{truncated}…")
+}
+
 /// Resolve credential env vars from a runtime.lock's `credentials` section.
 ///
 /// For each `LockedCredentialMount`, looks up credentials by service name in
@@ -700,5 +780,78 @@ mod tests {
             normalize_script_input_payload(&kickoff, Some(&metadata)),
             task
         );
+    }
+
+    #[test]
+    fn script_stdout_surfaces_as_agent_message_on_timeline() {
+        use crate::scheduler::gateway_store::GatewayStore;
+        use autonoetic_types::session_timeline::Altitude;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // A child script session under root "root-1": base_session_id splits on
+        // '/', so the row lands under the root the room TUI renders.
+        emit_script_message_timeline(
+            Some(&store),
+            "weather.default",
+            "root-1/weather.default-abc",
+            "toto\n",
+        );
+
+        let page = store
+            .list_session_timeline("root-1", None, 10, None, None)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1, "stdout should emit one timeline row");
+        let row = &page.entries[0];
+        assert_eq!(row.event_type, "agent.message");
+        assert_eq!(row.altitude, Altitude::Normal, "must show at the default floor");
+        assert_eq!(row.source_session_id, "root-1/weather.default-abc");
+        let payload: serde_json::Value =
+            serde_json::from_str(row.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["message"], "toto", "trailing newline is trimmed");
+    }
+
+    #[test]
+    fn script_empty_stdout_emits_no_timeline_row() {
+        use crate::scheduler::gateway_store::GatewayStore;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        emit_script_message_timeline(Some(&store), "a.default", "root-2/a", "   \n  ");
+        let page = store
+            .list_session_timeline("root-2", None, 10, None, None)
+            .unwrap();
+        assert!(
+            page.entries.is_empty(),
+            "empty/whitespace-only stdout should not emit a row"
+        );
+    }
+
+    #[test]
+    fn script_stdout_timeline_row_is_capped_and_redacted() {
+        use crate::scheduler::gateway_store::GatewayStore;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let big = "x".repeat(TIMELINE_SCRIPT_STDOUT_MAX_CHARS + 5_000);
+        emit_script_message_timeline(Some(&store), "a.default", "root-3/a", &big);
+
+        let page = store
+            .list_session_timeline("root-3", None, 10, None, None)
+            .unwrap();
+        let row = &page.entries[0];
+        let payload: serde_json::Value =
+            serde_json::from_str(row.payload.as_deref().unwrap()).unwrap();
+        let msg = payload["message"].as_str().unwrap();
+        assert_eq!(
+            msg.chars().count(),
+            TIMELINE_SCRIPT_STDOUT_MAX_CHARS,
+            "timeline mirrors a capped preview; full stdout lives in execution_traces"
+        );
+        assert!(msg.ends_with('…'));
     }
 }

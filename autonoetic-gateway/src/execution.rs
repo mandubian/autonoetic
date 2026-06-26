@@ -2670,6 +2670,18 @@ impl GatewayExecutionService {
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }
+                        // Mirror the script's stdout onto the live-digest
+                        // timeline as an `agent.message` so it shows inline in
+                        // the room TUI at the default altitude. Without this,
+                        // script output is captured only in `execution_traces`
+                        // (execution.search) and `causal_events`, neither of
+                        // which the room reads — see issue #644.
+                        crate::runtime::script_execute::emit_script_message_timeline(
+                            self.gateway_store.as_deref(),
+                            agent_id,
+                            session_id,
+                            &output,
+                        );
                         let ended_at = chrono::Utc::now().to_rfc3339();
                         let _ = gs.finalize_session_transcript(session_id, &ended_at, "completed");
                     }
