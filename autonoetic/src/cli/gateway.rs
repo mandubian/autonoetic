@@ -454,6 +454,7 @@ pub async fn handle_gateway_approvals(
                     grant_expires_at: expires_at,
                     acknowledged_capabilities: acknowledge_capabilities.clone(),
                     confirm_phrase: confirm_phrase.clone(),
+                    ..Default::default()
                 },
             )?;
             println!(

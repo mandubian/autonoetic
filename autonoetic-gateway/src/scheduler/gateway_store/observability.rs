@@ -696,6 +696,36 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Resolve the agent identity that owns a session. Used to authenticate a
+    /// caller-supplied `decider_session_id` against the recorded owner before
+    /// applying R-10.7 trust-boundary checks. Consults `session_transcripts`
+    /// first (covers root and child sessions), then falls back to
+    /// `session_spawn_lineage.target_agent_id` for child sessions whose
+    /// transcript has not yet been written. Returns `None` when the session is
+    /// not recorded anywhere (treated as untrusted by callers).
+    pub fn session_owner_agent(&self, session_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        let agent: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM session_transcripts WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if agent.is_some() {
+            return Ok(agent);
+        }
+        let lineage_agent: Option<String> = conn
+            .query_row(
+                "SELECT target_agent_id FROM session_spawn_lineage WHERE child_session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(lineage_agent)
+    }
+
     pub fn finalize_session_transcript(
         &self,
         session_id: &str,

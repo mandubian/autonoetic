@@ -859,6 +859,21 @@ impl PolicyEngine {
         }
         PolicyDecision::deny("Ri-0.13")
     }
+
+    /// Check if the agent is allowed to resolve a gate of the given kind.
+    /// `kind` is the gate kind label, e.g. "approval" or "escalation".
+    pub fn can_decide_gate(&self, kind: &str) -> PolicyDecision {
+        for cap in &self.manifest.capabilities {
+            if let Capability::GateDecider { kinds } = cap {
+                for pattern in kinds {
+                    if pattern == "*" || pattern == kind {
+                        return PolicyDecision::allow("P-2.20");
+                    }
+                }
+            }
+        }
+        PolicyDecision::deny("P-2.20")
+    }
 }
 
 #[cfg(test)]
@@ -1217,5 +1232,34 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
         assert!(!policy.can_create_github_issue("").is_allowed());
+    }
+
+    #[test]
+    fn test_can_decide_gate_requires_capability() {
+        let manifest = manifest_with_caps(vec![Capability::GateDecider {
+            kinds: vec!["approval".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.can_decide_gate("approval").is_allowed());
+        assert!(!policy.can_decide_gate("escalation").is_allowed());
+    }
+
+    #[test]
+    fn test_can_decide_gate_wildcard_allows_any_kind() {
+        let manifest = manifest_with_caps(vec![Capability::GateDecider {
+            kinds: vec!["*".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.can_decide_gate("approval").is_allowed());
+        assert!(policy.can_decide_gate("escalation").is_allowed());
+    }
+
+    #[test]
+    fn test_can_decide_gate_denied_without_capability() {
+        let manifest = manifest_with_caps(vec![Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(!policy.can_decide_gate("approval").is_allowed());
     }
 }

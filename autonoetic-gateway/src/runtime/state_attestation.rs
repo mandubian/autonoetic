@@ -251,6 +251,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
         Capability::WikiContribute => "WikiContribute",
         Capability::PromoteWith { .. } => "PromoteWith",
+        Capability::GateDecider { .. } => "GateDecider",
     }
     .to_string()
 }

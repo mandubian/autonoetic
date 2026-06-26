@@ -358,6 +358,8 @@ fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
     let result = svc.check(GateRequest {
         kind: GateKind::Escalation {
             reason: "Policy ambiguity".into(),
+            original_gate_id: None,
+            agent_decider: false,
         },
         manifest: &manifest,
         session_id: Some("ses-esc"),
