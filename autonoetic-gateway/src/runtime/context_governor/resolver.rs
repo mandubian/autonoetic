@@ -17,9 +17,7 @@ pub fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
             return Some(w);
         }
     }
-    std::env::var("AUTONOETIC_LLM_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+    crate::runtime::budget_tracker::llm_context_window_env_tokens()
 }
 
 /// Manifest/env first, then gateway `llm_presets` via `llm_preset_mapping`.
