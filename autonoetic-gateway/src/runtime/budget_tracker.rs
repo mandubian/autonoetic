@@ -70,15 +70,26 @@ pub(crate) fn emit_context_pressure_high_if_warranted(
     );
 }
 
+/// Parsed `AUTONOETIC_LLM_CONTEXT_WINDOW` override, cached for the process
+/// lifetime (#591). The override is fixed at startup, so we read and parse it
+/// once instead of on every context-window resolution. Shared by the context
+/// governor resolver to avoid a second per-call env read.
+pub(crate) fn llm_context_window_env_tokens() -> Option<u32> {
+    static CACHED: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("AUTONOETIC_LLM_CONTEXT_WINDOW")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    })
+}
+
 pub(crate) fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
     if let Some(cfg) = &manifest.llm_config {
         if let Some(w) = cfg.context_window_tokens {
             return Some(w);
         }
     }
-    std::env::var("AUTONOETIC_LLM_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+    llm_context_window_env_tokens()
 }
 
 /// Manifest/env first; if still unknown and provider is OpenRouter, use the public models API cache.
