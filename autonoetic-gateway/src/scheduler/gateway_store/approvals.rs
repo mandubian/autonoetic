@@ -557,6 +557,49 @@ impl GatewayStore {
         .map_err(Into::into)
     }
 
+    /// Find the most recent still-open (pending or approved) approval bound to
+    /// a session. Used by checkpoint integrity handling (#606) to locate the
+    /// approval that must be cancelled when a tampered/mismatched checkpoint is
+    /// detected on resume and the request id is not otherwise known.
+    pub fn find_latest_open_approval_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT request_id FROM approvals \
+             WHERE session_id = ?1 AND status IN ('pending', 'approved') \
+             ORDER BY created_at DESC LIMIT 1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Forcefully move an approval to `cancelled` with reason
+    /// `integrity_violation`, regardless of whether it is currently `pending`
+    /// or `approved`. Unlike [`cancel_approval`], this is not guarded by a
+    /// `status = 'pending'` predicate: a checkpoint integrity violation
+    /// detected on resume means the (possibly already-approved) approval is no
+    /// longer trustworthy and must be revoked. Already-terminal approvals
+    /// (rejected/cancelled) are left untouched.
+    pub fn cancel_approval_for_integrity_violation(
+        &self,
+        request_id: &str,
+    ) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE approvals \
+             SET status = 'cancelled', decided_by = 'gateway:integrity_check', \
+                 decided_at = ?1, decision_reason = 'integrity_violation' \
+             WHERE request_id = ?2 AND status NOT IN ('cancelled', 'rejected')",
+            params![now, request_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     pub fn insert_session_grant(
         &self,
         root_session_id: &str,

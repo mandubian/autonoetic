@@ -1886,6 +1886,40 @@ impl GatewayExecutionService {
         })
     }
 
+    /// Handle a detected checkpoint integrity violation (#606): emit a durable
+    /// `background.checkpoint`/`checkpoint_tampered` causal event, cancel the
+    /// bound approval with reason `integrity_violation`, and surface an
+    /// operator-visible alert.
+    ///
+    /// `approval_request_id` is `Some` when the violation is detected after the
+    /// checkpoint loaded successfully (an action-mismatch / TOCTOU
+    /// substitution). When it is `None` (HMAC tamper — the checkpoint could not
+    /// be read) the bound approval is located by session.
+    fn handle_checkpoint_integrity_violation(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        approval_request_id: Option<&str>,
+        reason: &str,
+    ) {
+        if let Some(store) = self.gateway_store.as_ref() {
+            record_checkpoint_integrity_violation(
+                store,
+                session_id,
+                agent_id,
+                approval_request_id,
+                reason,
+            );
+        } else {
+            tracing::error!(
+                target: "checkpoint",
+                session_id = %session_id,
+                reason = %reason,
+                "checkpoint integrity violation — no GatewayStore available to record it"
+            );
+        }
+    }
+
     /// Resume from a loaded checkpoint by dispatching on its `yield_reason`.
     ///
     /// Handles all checkpoint-based resume paths (ApprovalRequired,
@@ -1985,11 +2019,11 @@ impl GatewayExecutionService {
                     // the approval row is swapped between suspend and resume.
                     if let Some(ref cp_action) = checkpoint.pending_action {
                         if cp_action != &req.action {
-                            tracing::error!(
-                                target: "checkpoint",
-                                session_id = %session_id,
-                                approval_request_id = %rid,
-                                "Action mismatch between checkpoint and approval row — possible substitution attack"
+                            self.handle_checkpoint_integrity_violation(
+                                session_id,
+                                &runtime.manifest.agent.id,
+                                Some(rid),
+                                "checkpoint action mismatch — possible substitution attack",
                             );
                             anyhow::bail!(
                                 "checkpoint action mismatch: the action stored in the checkpoint does not match the approved action (session '{}')",
@@ -2796,7 +2830,7 @@ impl GatewayExecutionService {
                 Option<String>,
             )> = async {
             Ok(if task_id.is_some() {
-                let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint(
+                let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint_strict(
                     &self.config,
                     session_id,
                 )?;
@@ -2831,7 +2865,7 @@ impl GatewayExecutionService {
                 }
             } else {
                 let checkpoint =
-                    crate::runtime::checkpoint::load_latest_checkpoint(&self.config, session_id)?;
+                    crate::runtime::checkpoint::load_latest_checkpoint_strict(&self.config, session_id)?;
                 if let Some(checkpoint) = checkpoint {
                     if matches!(
                         checkpoint.yield_reason,
@@ -2913,6 +2947,17 @@ impl GatewayExecutionService {
                         let root = crate::runtime::content_store::root_session_id(session_id)
                             .to_string();
                         self.trigger_root_budget_circuit_breaker(&root, &e).await;
+                    }
+                    // Checkpoint integrity violation (HMAC tamper) on the
+                    // latest checkpoint: record the audit trail and revoke the
+                    // bound approval before aborting the resume (#606).
+                    if crate::runtime::checkpoint::is_integrity_error(&e) {
+                        self.handle_checkpoint_integrity_violation(
+                            session_id,
+                            agent_id,
+                            None,
+                            "checkpoint HMAC verification failed on resume",
+                        );
                     }
                     return Err(e);
                 }
@@ -3748,6 +3793,89 @@ impl GatewayExecutionService {
 
 pub fn gateway_actor_id() -> String {
     std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string())
+}
+
+/// Record a checkpoint integrity violation (#606) against the given store:
+/// emit a durable `background.checkpoint`/`checkpoint_tampered` causal event,
+/// revoke the bound approval with reason `integrity_violation`, and surface an
+/// operator-visible alert.
+///
+/// `approval_request_id` is `Some` for action-mismatch (checkpoint loaded, but
+/// the bound action differs); `None` for HMAC tamper (checkpoint unreadable),
+/// in which case the bound approval is located by session. Exposed as a free
+/// function so the behaviour is unit-testable without an executor.
+pub fn record_checkpoint_integrity_violation(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    session_id: &str,
+    agent_id: &str,
+    approval_request_id: Option<&str>,
+    reason: &str,
+) {
+    // Resolve the bound approval request id (or locate it by session).
+    let resolved_rid = approval_request_id
+        .map(|s| s.to_string())
+        .or_else(|| {
+            store
+                .find_latest_open_approval_for_session(session_id)
+                .ok()
+                .flatten()
+        });
+
+    // Revoke the approval. Force-cancel so an already-approved row (the
+    // action-mismatch case) is also moved to a terminal state.
+    if let Some(ref rid) = resolved_rid {
+        match store.cancel_approval_for_integrity_violation(rid) {
+            Ok(false) => tracing::warn!(
+                target: "checkpoint",
+                session_id = %session_id,
+                approval_request_id = %rid,
+                "integrity-bound approval was already terminal"
+            ),
+            Err(e) => tracing::warn!(
+                target: "checkpoint",
+                session_id = %session_id,
+                approval_request_id = %rid,
+                error = %e,
+                "failed to cancel integrity-bound approval"
+            ),
+            _ => {}
+        }
+    }
+
+    // Durable audit trail.
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "background.checkpoint".to_string(),
+        action: "checkpoint_tampered".to_string(),
+        status: "integrity_violation".to_string(),
+        enforced_rules: vec![],
+        target: resolved_rid.clone(),
+        payload: Some(
+            serde_json::json!({
+                "session_id": session_id,
+                "approval_request_id": resolved_rid,
+                "reason": reason,
+            })
+            .to_string(),
+        ),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some(reason.to_string()),
+    };
+    let _ = store.create_causal_event(&event);
+
+    tracing::error!(
+        target: "checkpoint",
+        session_id = %session_id,
+        approval_request_id = ?resolved_rid,
+        reason = %reason,
+        "CHECKPOINT INTEGRITY VIOLATION — bound approval revoked, resume aborted"
+    );
 }
 
 pub fn gateway_root_dir(config: &GatewayConfig) -> std::path::PathBuf {

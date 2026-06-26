@@ -508,6 +508,76 @@ pub fn load_latest_checkpoint(
     Ok(latest.map(|(_, c)| c))
 }
 
+/// Strict variant of [`load_latest_checkpoint`] used on the resume path.
+///
+/// Unlike the tolerant `load_latest_checkpoint` (which silently skips a
+/// tampered checkpoint file and falls back to a fresh start), this surfaces a
+/// [`CheckpointIntegrityError`] when the **highest-turn** checkpoint file on
+/// disk has a broken HMAC signature. Surfacing the tamper at resume is what
+/// lets the gateway record a durable audit trail and cancel the bound approval
+/// (#606) instead of silently abandoning the suspended turn.
+///
+/// Returns `Ok(None)` only when no checkpoint files exist for the session.
+pub fn load_latest_checkpoint_strict(
+    config: &GatewayConfig,
+    session_id: &str,
+) -> anyhow::Result<Option<SessionCheckpoint>> {
+    let dir = checkpoints_dir(config).join(sanitize_path_component(session_id));
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+
+    // Order by turn parsed from the *filename* (untrusted payloads cannot be
+    // used to order once tampering is in play) so the active/latest checkpoint
+    // is checked first.
+    let mut entries: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name.strip_suffix(".checkpoint.json") else {
+            continue;
+        };
+        let turn = turn_number_from_id(stem).unwrap_or(0);
+        entries.push((turn, entry.path()));
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (turn, path) in &entries {
+        let json = match std::fs::read_to_string(path) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        // Signed envelope: detect tamper before trusting the payload.
+        if let Ok(envelope) = serde_json::from_str::<SignedCheckpoint>(&json) {
+            let key = checkpoint_hmac_key(config);
+            if !crate::server::ofp::hmac_verify(
+                &key,
+                envelope.payload_json.as_bytes(),
+                &envelope.hmac_hex,
+            ) {
+                return Err(CheckpointIntegrityError {
+                    session_id: session_id.to_string(),
+                    turn_id: turn_id_for(*turn),
+                    message: "HMAC mismatch on latest checkpoint".to_string(),
+                }
+                .into());
+            }
+            if let Ok(checkpoint) =
+                serde_json::from_str::<SessionCheckpoint>(&envelope.payload_json)
+            {
+                return Ok(Some(checkpoint));
+            }
+            continue;
+        }
+        // Legacy unsigned format.
+        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+            return Ok(Some(checkpoint));
+        }
+    }
+    Ok(None)
+}
+
 /// Mark the latest checkpoint as being inside a response-validation repair
 /// cycle. The next respawn will restore the LoopGuard in repair mode so the
 /// repair iterations do not count against `max_loops_without_progress`.
@@ -1112,6 +1182,73 @@ mod tests {
         assert!(
             latest.is_none(),
             "tampered checkpoint should be skipped by load_latest_checkpoint"
+        );
+
+        // --- load_latest_checkpoint_strict surfaces the tamper (#606) ---
+        let strict_err = load_latest_checkpoint_strict(&config, session_id)
+            .expect_err("strict loader should surface a tampered latest checkpoint");
+        assert!(
+            is_integrity_error(&strict_err),
+            "strict loader error should be a CheckpointIntegrityError: {:?}",
+            strict_err
+        );
+    }
+
+    #[test]
+    fn load_latest_checkpoint_strict_loads_valid_latest() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let session_id = "session-strict-valid";
+
+        // Save two valid checkpoints; the strict loader must return the latest.
+        for turn in [1u64, 2] {
+            let checkpoint = SessionCheckpoint {
+                history: vec![Message::user("hello")],
+                turn_counter: turn,
+                loop_guard_state: LoopGuard::default(),
+                session_state: autonoetic_types::agent::SessionState::Normal,
+                tool_tier_escalated: false,
+                discovered_tools: Default::default(),
+                blocked_state_event_emitted: false,
+                agent_id: "test-agent".to_string(),
+                session_id: session_id.to_string(),
+                turn_id: turn_id_for(turn),
+                workflow_id: None,
+                task_id: None,
+                runtime_lock_hash: None,
+                llm_config_snapshot: None,
+                tool_registry_version: None,
+                yield_reason: YieldReason::Hibernation,
+                content_store_refs: vec![],
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                pending_tool_state: None,
+                llm_rounds_consumed: 0,
+                tool_invocations_consumed: 0,
+                tokens_consumed: 0,
+                estimated_cost_usd: 0.0,
+                compression_metadata: None,
+                capsule_state: None,
+                assistant_message: None,
+                pending_action: None,
+                suspended_at: None,
+                suppress_until_turn: 0,
+                trajectory_last_level: None,
+                feedback_events: vec![],
+            };
+            save_checkpoint(&config, &checkpoint).unwrap();
+        }
+
+        let latest = load_latest_checkpoint_strict(&config, session_id)
+            .expect("valid checkpoints should load")
+            .expect("a checkpoint should exist");
+        assert_eq!(latest.turn_counter, 2, "strict loader returns the latest turn");
+
+        // No checkpoints at all -> Ok(None).
+        assert!(
+            load_latest_checkpoint_strict(&config, "no-such-session")
+                .unwrap()
+                .is_none(),
+            "strict loader returns Ok(None) when no checkpoint files exist"
         );
     }
 
