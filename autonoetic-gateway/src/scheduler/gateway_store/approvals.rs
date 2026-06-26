@@ -557,6 +557,62 @@ impl GatewayStore {
         .map_err(Into::into)
     }
 
+    /// Find the most recent still-open (pending or approved) approval bound to
+    /// a session. Used by checkpoint integrity handling (#606) to locate the
+    /// approval that must be cancelled when a tampered/mismatched checkpoint is
+    /// detected on resume and the request id is not otherwise known.
+    pub fn find_latest_open_approval_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT request_id FROM approvals \
+             WHERE session_id = ?1 AND status IN ('pending', 'approved') \
+             ORDER BY created_at DESC LIMIT 1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Forcefully move an approval to `cancelled` with reason
+    /// `integrity_violation`, regardless of whether it is currently `pending`
+    /// or `approved`. Unlike [`cancel_approval`], this is not guarded by a
+    /// `status = 'pending'` predicate: a checkpoint integrity violation
+    /// detected on resume means the (possibly already-approved) approval is no
+    /// longer trustworthy and must be revoked. Already-terminal approvals
+    /// (rejected/cancelled) are left untouched.
+    pub fn cancel_approval_for_integrity_violation(
+        &self,
+        request_id: &str,
+    ) -> Result<bool> {
+        const DECIDED_BY: &str = "gateway:integrity_check";
+        let decided_by_kind =
+            autonoetic_types::principal::decider_principal_kind(DECIDED_BY).map(|k| k.tag());
+        let now = chrono::Utc::now().to_rfc3339();
+        let ctx = {
+            let conn = self.conn.lock().unwrap();
+            let rows = conn.execute(
+                "UPDATE approvals \
+                 SET status = 'cancelled', decided_by = ?1, decided_at = ?2, \
+                     decision_reason = 'integrity_violation', decided_by_kind = ?3 \
+                 WHERE request_id = ?4 AND status NOT IN ('cancelled', 'rejected')",
+                params![DECIDED_BY, now, decided_by_kind, request_id],
+            )?;
+            if rows == 0 {
+                return Ok(false);
+            }
+            resolution_context(&conn, request_id)
+        };
+        // Record the cancellation on the canonical session timeline, matching
+        // record_decision / cancel_approval so §O accountability stays
+        // consistent (#606 review).
+        self.emit_gate_resolution(request_id, "cancelled", DECIDED_BY, ctx);
+        Ok(true)
+    }
+
     pub fn insert_session_grant(
         &self,
         root_session_id: &str,
