@@ -636,13 +636,25 @@ pub fn delete_approval_bound_checkpoint(
     }
     let mut deleted = 0usize;
     for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(target: "checkpoint", session_id = %session_id, error = %e, "skipping unreadable dir entry during reap");
+                continue;
+            }
+        };
         let name = entry.file_name();
         if !name.to_string_lossy().ends_with(".checkpoint.json") {
             continue;
         }
         let path = entry.path();
-        let json = std::fs::read_to_string(&path)?;
+        let json = match std::fs::read_to_string(&path) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!(target: "checkpoint", path = %path.display(), error = %e, "skipping unreadable checkpoint during reap");
+                continue;
+            }
+        };
         let bound = verify_and_deserialize_checkpoint(config, &json)
             .map(|cp| {
                 matches!(
@@ -652,8 +664,7 @@ pub fn delete_approval_bound_checkpoint(
                 )
             })
             .unwrap_or(false);
-        if bound {
-            let _ = std::fs::remove_file(&path);
+        if bound && std::fs::remove_file(&path).is_ok() {
             deleted += 1;
         }
     }

@@ -120,7 +120,9 @@ fn apply(
         decided_at: chrono::Utc::now().to_rfc3339(),
         decided_by: "operator".to_string(),
         reason: Some("test".to_string()),
-        root_session_id: Some(session_id.to_string()),
+        root_session_id: Some(
+            session_id.split('/').next().unwrap_or(session_id).to_string(),
+        ),
         workflow_id: None,
         task_id: None,
         approval_level: ApprovalLevel::Operator,
