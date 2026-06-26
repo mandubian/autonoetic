@@ -40,7 +40,7 @@ pub fn build_timeline_event(
         source_session_id: session_id,
         turn_id,
         source_agent_id: Some(principal.id.clone()),
-        source_node_id: std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string()),
+        source_node_id: crate::execution::gateway_actor_id(),
         event_type: event_type.to_string(),
         payload: payload.and_then(|v| serde_json::to_string(&v).ok()),
         created_at: chrono::Utc::now().to_rfc3339(),
