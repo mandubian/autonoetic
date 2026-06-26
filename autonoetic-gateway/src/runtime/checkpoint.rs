@@ -621,6 +621,121 @@ pub fn delete_checkpoint(
     Ok(())
 }
 
+/// Delete the checkpoint file(s) for a session whose `yield_reason` binds them
+/// to `approval_id`. Called when an approval is rejected or cancelled so the
+/// suspended turn's signed checkpoint file does not leak on disk (#607).
+/// Returns the number of files deleted.
+pub fn delete_approval_bound_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+    approval_id: &str,
+) -> anyhow::Result<usize> {
+    let dir = checkpoints_dir(config).join(sanitize_path_component(session_id));
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut deleted = 0usize;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !name.to_string_lossy().ends_with(".checkpoint.json") {
+            continue;
+        }
+        let path = entry.path();
+        let json = std::fs::read_to_string(&path)?;
+        let bound = verify_and_deserialize_checkpoint(config, &json)
+            .map(|cp| {
+                matches!(
+                    cp.yield_reason,
+                    YieldReason::ApprovalRequired { ref approval_request_id }
+                        if approval_request_id == approval_id
+                )
+            })
+            .unwrap_or(false);
+        if bound {
+            let _ = std::fs::remove_file(&path);
+            deleted += 1;
+        }
+    }
+    if deleted > 0 {
+        tracing::debug!(
+            target: "checkpoint",
+            session_id = %session_id,
+            approval_request_id = %approval_id,
+            count = deleted,
+            "Reaped orphan checkpoint(s) after reject/cancel"
+        );
+    }
+    Ok(deleted)
+}
+
+/// Startup reaper: scan every session checkpoint directory and delete
+/// checkpoint files whose bound approval is in a terminal state (rejected /
+/// cancelled) or whose approval row no longer exists. Clears orphans left
+/// behind by a crash or restart during reject/cancel (#607). Tampered or
+/// unrecognizable files are left untouched (those are surfaced separately by
+/// the integrity path). Returns the number of files reaped.
+pub fn reap_orphan_checkpoints(
+    config: &GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<usize> {
+    use autonoetic_types::background::ApprovalStatus;
+
+    let root = checkpoints_dir(config);
+    if !root.is_dir() {
+        return Ok(0);
+    }
+    let mut reaped = 0usize;
+    for session_entry in std::fs::read_dir(&root)? {
+        let session_entry = session_entry?;
+        if !session_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = session_entry.path();
+        for cp_entry in std::fs::read_dir(&dir)? {
+            let cp_entry = cp_entry?;
+            let name = cp_entry.file_name();
+            if !name.to_string_lossy().ends_with(".checkpoint.json") {
+                continue;
+            }
+            let path = cp_entry.path();
+            let json = match std::fs::read_to_string(&path) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            let Some(cp) = verify_and_deserialize_checkpoint(config, &json) else {
+                continue;
+            };
+            let YieldReason::ApprovalRequired {
+                approval_request_id,
+            } = cp.yield_reason
+            else {
+                continue;
+            };
+            let orphan = match store.get_approval(&approval_request_id) {
+                Ok(Some(req)) => req
+                    .status
+                    .as_ref()
+                    .map(|s| matches!(s, ApprovalStatus::Rejected | ApprovalStatus::Cancelled))
+                    .unwrap_or(false),
+                Ok(None) => true,
+                Err(_) => false,
+            };
+            if orphan && std::fs::remove_file(&path).is_ok() {
+                reaped += 1;
+            }
+        }
+    }
+    if reaped > 0 {
+        tracing::info!(
+            target: "checkpoint",
+            count = reaped,
+            "Startup reaper removed orphan checkpoint files"
+        );
+    }
+    Ok(reaped)
+}
+
 /// Prune old checkpoints for a session, keeping the last N.
 pub fn prune_checkpoints(
     config: &GatewayConfig,

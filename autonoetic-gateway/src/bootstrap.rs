@@ -55,6 +55,14 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
     crate::sandbox::init_sdk_deployed_path(gateway_dir);
 
     let store = GatewayStore::open(gateway_dir)?;
+
+    // Startup reaper: clear orphan checkpoint files left behind by a crash or
+    // restart during approval reject/cancel (#607). Best-effort — a failure
+    // never blocks startup.
+    if let Err(e) = crate::runtime::checkpoint::reap_orphan_checkpoints(config, &store) {
+        tracing::warn!(target: "checkpoint", error = %e, "Startup checkpoint reaper failed");
+    }
+
     let mut activated = 0usize;
 
     for entry in std::fs::read_dir(&config.agents_dir)? {

@@ -198,6 +198,29 @@ pub fn apply_decision(
     options: &ApproveOptions,
     context: &DecisionContext,
 ) -> anyhow::Result<()> {
+    // Reap the orphaned checkpoint for rejected/cancelled approvals (#607):
+    // the suspended turn is dead, so its signed checkpoint file would leak on
+    // disk otherwise. (Approved approvals keep their checkpoint — it is
+    // consumed on resume.)
+    if matches!(
+        decision.status,
+        ApprovalStatus::Rejected | ApprovalStatus::Cancelled
+    ) {
+        if let Err(e) = crate::runtime::checkpoint::delete_approval_bound_checkpoint(
+            config,
+            &decision.session_id,
+            &decision.request_id,
+        ) {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                session_id = %decision.session_id,
+                error = %e,
+                "Failed to reap orphan checkpoint after reject/cancel"
+            );
+        }
+    }
+
     let Some(store) = gateway_store else {
         return Ok(());
     };
