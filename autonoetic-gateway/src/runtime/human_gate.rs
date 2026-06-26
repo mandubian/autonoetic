@@ -532,7 +532,7 @@ impl GateService {
                 return Ok(GateResult::AlreadyPending {
                     gate_id: pending_id,
                     enforced_rules: if *agent_decider {
-                        vec!["P-2.21"]
+                        vec!["P-2.3", "P-2.18", "P-2.21"]
                     } else {
                         vec!["P-2.3", "P-2.18"]
                     },
@@ -586,7 +586,7 @@ impl GateService {
             gate_id,
             response_json,
             enforced_rules: if *agent_decider {
-                vec!["P-2.21"]
+                vec!["P-2.18", "P-2.21"]
             } else {
                 vec!["P-2.18"]
             },
@@ -1230,8 +1230,6 @@ impl GateService {
             .get_approval(gate_id)?
             .ok_or_else(|| anyhow::anyhow!("Original gate '{}' not found", gate_id))?;
 
-        let decider_sid = decider_session_id.unwrap_or("");
-
         // P-2.20: caller must have GateDecider capability.
         let policy = crate::policy::PolicyEngine::new(manifest.clone());
         if !policy.can_decide_gate("escalation").is_allowed() {
@@ -1241,14 +1239,15 @@ impl GateService {
             );
         }
 
-        // R-10.7: agent-decider may not decide a gate created by itself or a descendant.
-        if is_session_in_spawn_tree(decider_sid, &original.session_id, &self.store) {
-            anyhow::bail!(
-                "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
-                decider_sid,
-                original.session_id
-            );
-        }
+        // R-10.7: authenticate the caller-supplied decider session against the
+        // recorded owner, then ensure it is not in the spawn tree of the gate.
+        let decider_sid = decider_session_id.unwrap_or("");
+        verify_decider_session_binding(
+            decider_sid,
+            &manifest.agent.id,
+            &original.session_id,
+            &self.store,
+        )?;
 
         // Record the agent's reasoning on the original gate's enrichment thread.
         let _ = self.add_gate_message(
@@ -1297,8 +1296,6 @@ impl GateService {
             .get_approval(gate_id)?
             .ok_or_else(|| anyhow::anyhow!("Gate '{}' not found", gate_id))?;
 
-        let decider_sid = decider_session_id.unwrap_or("");
-
         let kind_label = if matches!(original.action, ScheduledAction::SessionEscalate { .. }) {
             "escalation"
         } else {
@@ -1314,13 +1311,15 @@ impl GateService {
             );
         }
 
-        if is_session_in_spawn_tree(decider_sid, &original.session_id, &self.store) {
-            anyhow::bail!(
-                "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
-                decider_sid,
-                original.session_id
-            );
-        }
+        // R-10.7: authenticate the caller-supplied decider session against the
+        // recorded owner, then ensure it is not in the spawn tree of the gate.
+        let decider_sid = decider_session_id.unwrap_or("");
+        verify_decider_session_binding(
+            decider_sid,
+            &manifest.agent.id,
+            &original.session_id,
+            &self.store,
+        )?;
 
         Ok(kind_label)
     }
@@ -1412,6 +1411,57 @@ pub fn is_session_in_spawn_tree(
     }
 
     false
+}
+
+/// R-10.7 trust-boundary verification for an agent-decider.
+///
+/// `decider_session_id` is caller-supplied (ultimately from a JSON-RPC
+/// request), so it must be authenticated against recorded session ownership
+/// *before* the spawn-tree check — otherwise an agent could evade R-10.7 by
+/// supplying an unrelated session ID, or by omitting it entirely (which would
+/// disable the descendant check). Three conditions are enforced:
+///
+/// 1. `decider_session_id` must be present (non-empty).
+/// 2. It must be bound to `agent_id` (the decider's claimed identity).
+/// 3. It must not be in the spawn tree of `gate_session_id`.
+pub fn verify_decider_session_binding(
+    decider_session_id: &str,
+    agent_id: &str,
+    gate_session_id: &str,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> Result<()> {
+    if decider_session_id.is_empty() {
+        anyhow::bail!(
+            "Agent-decider '{}' did not supply a decider_session_id (R-10.7)",
+            agent_id
+        );
+    }
+    match store.session_owner_agent(decider_session_id)? {
+        Some(owner) if owner == agent_id => {}
+        Some(owner) => {
+            anyhow::bail!(
+                "decider_session_id '{}' is bound to agent '{}', not '{}' (R-10.7)",
+                decider_session_id,
+                owner,
+                agent_id
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "decider_session_id '{}' is not a recorded session bound to agent '{}' (R-10.7)",
+                decider_session_id,
+                agent_id
+            );
+        }
+    }
+    if is_session_in_spawn_tree(decider_session_id, gate_session_id, store) {
+        anyhow::bail!(
+            "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
+            decider_session_id,
+            gate_session_id
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

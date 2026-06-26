@@ -1518,18 +1518,16 @@ fn decide_request_with_options(
                         );
                     }
 
+                    // R-10.7: authenticate the caller-supplied decider session
+                    // against the recorded owner, then ensure it is not in the
+                    // spawn tree of the gate's session.
                     let decider_sid = options.decider_session_id.as_deref().unwrap_or("");
-                    if crate::runtime::human_gate::is_session_in_spawn_tree(
+                    crate::runtime::human_gate::verify_decider_session_binding(
                         decider_sid,
+                        &loaded.manifest.agent.id,
                         &request.session_id,
                         store,
-                    ) {
-                        anyhow::bail!(
-                            "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
-                            decider_sid,
-                            request.session_id
-                        );
-                    }
+                    )?;
 
                     // Emit P-2.20 causal event for the verified agent-decider decision.
                     let event = autonoetic_types::causal_chain::CausalEventRecord {
@@ -1630,8 +1628,10 @@ fn decide_request_with_options(
 }
 
 /// Parse a `decided_by` string into an agent ID when the decider is an agent.
-/// Accepts the canonical `agent:<agent_id>` form, or a bare agent ID if it
-/// resolves to a loaded agent manifest. Returns `None` for human operators.
+///
+/// Only the canonical `agent:<agent_id>` form is recognized; anything else is
+/// treated as a human operator. The resolved `agent_id` is then used to load a
+/// manifest for the `GateDecider` capability check (P-2.20).
 fn parse_agent_decider_id(decided_by: &str) -> Option<&str> {
     let trimmed = decided_by.trim();
     if trimmed.is_empty() {

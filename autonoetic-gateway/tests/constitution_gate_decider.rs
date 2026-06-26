@@ -122,6 +122,33 @@ fn seed_decider_revision(
     Ok(())
 }
 
+/// Record a session as owned by `agent_id` so the R-10.7 binding check can
+/// authenticate the caller-supplied `decider_session_id`.
+fn seed_decider_session(
+    store: &GatewayStore,
+    session_id: &str,
+    agent_id: &str,
+) -> anyhow::Result<()> {
+    use autonoetic_types::causal_chain::SessionTranscriptRecord;
+    let root = session_id.split('/').next().unwrap_or(session_id);
+    store.upsert_session_transcript(&SessionTranscriptRecord {
+        transcript_id: format!("tr-{}", session_id),
+        session_id: session_id.to_string(),
+        root_session_id: root.to_string(),
+        agent_id: agent_id.to_string(),
+        revision_id: None,
+        user_id: None,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        ended_at: None,
+        status: "active".to_string(),
+        turn_count: 1,
+        transcript_handle: None,
+        excerpt: None,
+        origin_node_id: None,
+    })?;
+    Ok(())
+}
+
 fn sandbox_action() -> ScheduledAction {
     ScheduledAction::SandboxExec {
         command: "echo test".to_string(),
@@ -185,6 +212,7 @@ fn agent_with_gate_decider_can_approve_other_agents_gate() -> anyhow::Result<()>
     };
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "decider.default")?;
+    seed_decider_session(&store, "other-session", "decider.default")?;
     create_pending_approval(&store,
         "apr-decider",
         "coder.default",
@@ -285,6 +313,10 @@ fn agent_decider_cannot_decide_own_spawn_tree_gate() -> anyhow::Result<()> {
     };
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "selfdecider.default")?;
+    // The decider session must be bound to the decider agent for the R-10.7
+    // ownership check; it is a parent of the gate's session, so the spawn-tree
+    // violation still triggers.
+    seed_decider_session(&store, "root-session", "selfdecider.default")?;
 
     // Gate created in a descendant session of the would-be decider.
     create_pending_approval(
@@ -320,6 +352,114 @@ fn agent_decider_cannot_decide_own_spawn_tree_gate() -> anyhow::Result<()> {
 }
 
 #[test]
+fn agent_decider_cannot_spoof_session_id_to_bypass_r_10_7() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    write_agent_dir(
+        &agents_dir,
+        "spoofer.default",
+        &[Capability::GateDecider {
+            kinds: vec!["approval".to_string()],
+        }],
+    );
+
+    let cfg = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    seed_decider_revision(&agents_dir, &gateway_dir, &store, "spoofer.default")?;
+
+    // "legit-session" is owned by a *different* agent.
+    seed_decider_session(&store, "legit-session", "other-agent.default")?;
+
+    // Gate sits in the spoofer's own spawn tree, which would be blocked by the
+    // real decider session — but the spoofer tries to bypass R-10.7 by claiming
+    // "legit-session" (owned by another agent) as its decider session.
+    create_pending_approval(
+        &store,
+        "apr-spoof",
+        "spoofer.default",
+        "root-session/spoofer-abc",
+    )?;
+
+    let err = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-spoof",
+        "agent:spoofer.default",
+        Some("approving".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: Some("legit-session".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("spoofed session ID must not bypass R-10.7 binding");
+
+    assert!(
+        err.to_string().contains("R-10.7"),
+        "spoofed decider session should be rejected by binding check: {}",
+        err
+    );
+
+    Ok(())
+}
+
+#[test]
+fn agent_decider_without_session_id_is_rejected_r_10_7() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let agents_dir = temp.path().join("agents");
+    let gateway_dir = agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    write_agent_dir(
+        &agents_dir,
+        "noid.default",
+        &[Capability::GateDecider {
+            kinds: vec!["approval".to_string()],
+        }],
+    );
+
+    let cfg = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let store = GatewayStore::open(&gateway_dir)?;
+    seed_decider_revision(&agents_dir, &gateway_dir, &store, "noid.default")?;
+    create_pending_approval(&store, "apr-noid", "coder.default", "root-session/coder-abc")?;
+
+    let err = approve_request_with_options(
+        &cfg,
+        Some(&store),
+        "apr-noid",
+        "agent:noid.default",
+        Some("approving".to_string()),
+        None,
+        None,
+        None,
+        ApproveOptions {
+            decider_session_id: None,
+            ..Default::default()
+        },
+    )
+    .expect_err("missing decider_session_id must fail closed (R-10.7)");
+
+    assert!(
+        err.to_string().contains("R-10.7"),
+        "missing decider_session_id should be rejected: {}",
+        err
+    );
+
+    Ok(())
+}
+
+#[test]
 fn agent_decider_can_reject_with_capability() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
@@ -340,6 +480,7 @@ fn agent_decider_can_reject_with_capability() -> anyhow::Result<()> {
     };
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "rejecter.default")?;
+    seed_decider_session(&store, "other-session", "rejecter.default")?;
     create_pending_approval(&store, "apr-reject", "coder.default", "root-session/coder-abc")?;
 
     // Rejection is a blocking decision, so decider motivation is required.
@@ -383,6 +524,7 @@ fn agent_decider_escalates_to_human_when_uncertain() -> anyhow::Result<()> {
     };
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "escalator.default")?;
+    seed_decider_session(&store, "other-session", "escalator.default")?;
 
     // Create an approval gate.
     create_pending_approval(&store, "apr-escalate", "coder.default", "root-session/coder-xyz")?;
