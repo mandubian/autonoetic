@@ -6,7 +6,7 @@
 use crate::log_redaction::redact_text_for_logs;
 use serde_json::Value;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Root session id — portion before the first `/`.
@@ -48,23 +48,23 @@ pub struct LiveDigestWriter {
     is_resumed: bool,
     /// Buffer for the current turn. Flushed atomically at end_turn().
     turn_buffer: Option<String>,
+    /// Byte high-water mark into the shared `digest.md`: everything before this
+    /// offset has already been scanned into `seen_turn_count` /
+    /// `last_logged_agent` (#587). The digest is append-only, so each
+    /// `start_turn` only needs to scan the bytes appended since this offset —
+    /// turning the old whole-file rescan (O(n²) over a session) into O(n).
+    scan_offset: u64,
+    /// Count of `**Turn ` markers seen in the shared file up to `scan_offset`.
+    /// Mirrors what a full-file rescan would return, kept current incrementally
+    /// so turn numbers stay monotonic across writers sharing the file (planner +
+    /// children).
+    seen_turn_count: u32,
+    /// Last agent header seen in the shared file up to `scan_offset`. Drives the
+    /// group-chat context-switch header without re-reading the whole file.
+    last_logged_agent: Option<String>,
 }
 
 /// Get the last agent that was logged to the digest file.
-fn get_last_logged_agent(path: &Path) -> Option<String> {
-    if !path.exists() {
-        return None;
-    }
-    if let Ok(content) = std::fs::read_to_string(path) {
-        for line in content.lines().rev() {
-            if let Some(agent) = extract_agent_from_header(line) {
-                return Some(agent);
-            }
-        }
-    }
-    None
-}
-
 /// Extract agent_id from a digest header line (e.g., "### 👑 planner.default" or "### planner.default")
 fn extract_agent_from_header(line: &str) -> Option<String> {
     let trimmed = line.trim();
@@ -131,10 +131,7 @@ impl LiveDigestWriter {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("digest.md");
 
-        let (digest_turn_seq, is_resumed) = if path.exists() {
-            let existing_turns = count_turn_headers(&path)?;
-            (existing_turns, false)
-        } else {
+        if !path.exists() {
             let mut f = std::fs::File::create(&path)?;
             writeln!(f, "# Live session digest: `{}`", base)?;
             writeln!(f)?;
@@ -143,8 +140,11 @@ impl LiveDigestWriter {
                 "Structured narrative (actions, tool results, errors, annotations). Workflow structure: see `workflow_graph.md` in this folder."
             )?;
             writeln!(f)?;
-            (0, false)
-        };
+        }
+
+        // Seed shared-file state with a single full scan (one-time O(n)); every
+        // subsequent `start_turn` only scans the appended tail (#587).
+        let (seen_turn_count, last_logged_agent, scan_offset) = scan_digest_tail(&path, 0)?;
 
         Ok(Self {
             path,
@@ -153,12 +153,15 @@ impl LiveDigestWriter {
             workflow_task_id: workflow_task_id.map(str::to_string),
             workflow_id: workflow_id.map(str::to_string),
             depth,
-            digest_turn_seq,
+            digest_turn_seq: seen_turn_count,
             tools_in_open_turn: 0,
             session_tool_total: 0,
             session_error_total: 0,
-            is_resumed,
+            is_resumed: false,
             turn_buffer: None,
+            scan_offset,
+            seen_turn_count,
+            last_logged_agent,
         })
     }
 
@@ -195,6 +198,19 @@ impl LiveDigestWriter {
             }
         }
         self.turn_buffer = None;
+        Ok(())
+    }
+
+    /// Fold any digest tail appended (by this or another writer) since our last
+    /// scan into the cached turn count and last-agent header (#587). Cheap: only
+    /// the newly appended bytes are read.
+    fn sync_shared_state(&mut self) -> anyhow::Result<()> {
+        let (added_turns, last_agent, new_offset) = scan_digest_tail(&self.path, self.scan_offset)?;
+        self.seen_turn_count += added_turns;
+        if last_agent.is_some() {
+            self.last_logged_agent = last_agent;
+        }
+        self.scan_offset = new_offset;
         Ok(())
     }
 
@@ -241,7 +257,10 @@ impl LiveDigestWriter {
     }
 
     pub fn start_turn(&mut self) -> anyhow::Result<()> {
-        let shared_turn_count = count_turn_headers(&self.path)?;
+        // Pick up turns/headers other writers appended since our last scan, then
+        // reconcile our local sequence with the shared file (#587).
+        self.sync_shared_state()?;
+        let shared_turn_count = self.seen_turn_count;
         if shared_turn_count > self.digest_turn_seq {
             self.digest_turn_seq = shared_turn_count;
         }
@@ -266,7 +285,7 @@ impl LiveDigestWriter {
         }
 
         // Group chat model: only write header on context switch
-        let last_agent = get_last_logged_agent(&self.path);
+        let last_agent = self.last_logged_agent.clone();
         let agent_with_emoji = format!("{} {}", get_agent_emoji(agent), agent);
 
         if last_agent.as_deref() != Some(agent) {
@@ -674,10 +693,46 @@ pub fn append_validation_error_best_effort(
     let _ = writeln!(f);
 }
 
-fn count_turn_headers(path: &Path) -> anyhow::Result<u32> {
-    let s = std::fs::read_to_string(path)?;
-    let n = s.lines().filter(|l| l.contains("**Turn ")).count();
-    Ok(n as u32)
+/// Scan the digest from byte offset `from` to EOF, returning
+/// `(turn_markers_seen, last_agent_header, new_offset)` for that tail (#587).
+///
+/// The digest is append-only, so callers advance `from` to the returned
+/// `new_offset` and only ever pay for bytes added since the last scan — keeping
+/// per-turn bookkeeping O(appended) instead of O(whole file).
+///
+/// `new_offset` only advances past **complete lines** (up to and including the
+/// last `\n`). A trailing partial line — which happens when another writer is
+/// mid-append and a `**Turn ` marker / agent header is split across two reads —
+/// is left unconsumed and re-scanned next time, so no marker is ever lost. All
+/// digest content ends in `\n`, so steady-state scans consume the whole tail.
+/// A missing file yields `(0, None, from)`.
+fn scan_digest_tail(path: &Path, from: u64) -> anyhow::Result<(u32, Option<String>, u64)> {
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, None, from)),
+        Err(e) => return Err(e.into()),
+    };
+    f.seek(SeekFrom::Start(from))?;
+    let mut buf = String::new();
+    f.read_to_string(&mut buf)?;
+
+    // Only consume up to the last newline; defer any incomplete trailing line.
+    let consumed = match buf.rfind('\n') {
+        Some(idx) => idx + 1,
+        None => 0,
+    };
+
+    let mut turns = 0u32;
+    let mut last_agent = None;
+    for line in buf[..consumed].lines() {
+        if line.contains("**Turn ") {
+            turns += 1;
+        }
+        if let Some(agent) = extract_agent_from_header(line) {
+            last_agent = Some(agent);
+        }
+    }
+    Ok((turns, last_agent, from + consumed as u64))
 }
 
 fn cell(s: &str) -> String {
@@ -1004,6 +1059,46 @@ mod tests {
             body.contains("*Context:* task `task-smoke-1` · workflow `wf-smoke` · session `root/coder.default-1`"),
             "child section should link task, workflow, and session: {body}"
         );
+    }
+
+    #[test]
+    fn many_turns_are_sequentially_numbered_incrementally() {
+        // Exercises the incremental tail-scan path (#587): over many turns the
+        // numbering must stay correct and match a full rescan of the file.
+        let tmp = tempdir().unwrap();
+        let gw = tmp.path().join(".gateway");
+        let mut w = LiveDigestWriter::open(&gw, "long", "agent.a", None, None).unwrap();
+        for _ in 0..50 {
+            w.start_turn().unwrap();
+            w.record_action("Called `echo`").unwrap();
+            w.end_turn().unwrap();
+        }
+        let body = std::fs::read_to_string(w.path()).unwrap();
+        let counted = body.lines().filter(|l| l.contains("**Turn ")).count();
+        assert_eq!(counted, 50, "every turn should be written exactly once");
+        assert!(body.contains("**Turn 1**"));
+        assert!(body.contains("**Turn 50**"));
+        assert!(!body.contains("**Turn 51**"));
+    }
+
+    #[test]
+    fn scan_defers_incomplete_trailing_line() {
+        // A concurrent writer can leave a partial last line (a `**Turn ` marker
+        // split across two appends). The scanner must NOT consume past it, or
+        // the marker is lost forever once the rest is appended (#587 review).
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("d.md");
+        // One complete turn line + a partial second line (no trailing newline).
+        std::fs::write(&p, "**Turn 1**\n**Tur").unwrap();
+        let (t1, _a1, off1) = scan_digest_tail(&p, 0).unwrap();
+        assert_eq!(t1, 1, "only the complete Turn line counts");
+        assert_eq!(off1, 11, "offset stops after the first newline, not mid-line");
+
+        // The partial line is now completed by an appender.
+        let mut f = OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(b"n 2**\n").unwrap();
+        let (t2, _a2, _off2) = scan_digest_tail(&p, off1).unwrap();
+        assert_eq!(t2, 1, "the formerly-partial Turn 2 line is counted exactly once");
     }
 
     #[test]
