@@ -3791,8 +3791,27 @@ impl GatewayExecutionService {
     }
 }
 
+/// Process-lifetime cache for the resolved gateway node id (#586). Populated
+/// once at startup via [`init_gateway_node_id`]; falls back to a lazy
+/// `env::var` read on first access for code paths that don't go through the
+/// server `run()` (e.g. in-process tests).
+static GATEWAY_NODE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Cache the resolved node id for the lifetime of the process. Called once at
+/// gateway startup after identity resolution. Idempotent — later calls are
+/// no-ops so the first (authoritative) value wins.
+pub fn init_gateway_node_id(node_id: &str) {
+    let _ = GATEWAY_NODE_ID.set(node_id.to_string());
+}
+
+/// Resolved gateway node id. Cached for the process lifetime so hot-path
+/// timeline/event builders avoid a per-event `std::env::var` syscall (#586).
 pub fn gateway_actor_id() -> String {
-    std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string())
+    GATEWAY_NODE_ID
+        .get_or_init(|| {
+            std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string())
+        })
+        .clone()
 }
 
 /// Record a checkpoint integrity violation (#606) against the given store:

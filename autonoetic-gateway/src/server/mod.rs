@@ -37,6 +37,10 @@ impl GatewayServer {
         std::env::set_var("AUTONOETIC_NODE_ID", &node_id);
         std::env::set_var("AUTONOETIC_NODE_NAME", &node_name);
 
+        // Cache the resolved node id for the process lifetime so hot-path timeline/
+        // event builders avoid a per-event `std::env::var` syscall (#586).
+        crate::execution::init_gateway_node_id(&node_id);
+
         // Initialize sandbox config (config is authoritative by default; env overrides
         // are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true).
         crate::sandbox::init_sandbox_config(&self.config.sandbox);

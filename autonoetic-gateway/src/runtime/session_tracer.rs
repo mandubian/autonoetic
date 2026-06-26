@@ -414,8 +414,7 @@ impl SessionTracer {
             source_session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             source_agent_id: Some(self.agent_id.clone()),
-            source_node_id: std::env::var("AUTONOETIC_NODE_ID")
-                .unwrap_or_else(|_| "gateway".to_string()),
+            source_node_id: crate::execution::gateway_actor_id(),
             event_type: event_type.to_string(),
             payload: payload.and_then(|v| serde_json::to_string(&v).ok()),
             created_at: chrono::Utc::now().to_rfc3339(),

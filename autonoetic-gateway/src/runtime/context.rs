@@ -526,8 +526,7 @@ impl AgentExecutor {
             .unwrap_or_default();
 
         let budget_meters = self.snapshot_budget_meters();
-        let gateway_node_id =
-            std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string());
+        let gateway_node_id = crate::execution::gateway_actor_id();
 
         let attestation = crate::runtime::state_attestation::compose_and_sign(
             crate::runtime::state_attestation::AttestationInputs {
