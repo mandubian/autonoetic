@@ -698,9 +698,14 @@ pub fn append_validation_error_best_effort(
 ///
 /// The digest is append-only, so callers advance `from` to the returned
 /// `new_offset` and only ever pay for bytes added since the last scan — keeping
-/// per-turn bookkeeping O(appended) instead of O(whole file). `new_offset` is
-/// `from + bytes_read`, so it always lands on a real byte boundary even if the
-/// file grew between calls. A missing file yields `(0, None, from)`.
+/// per-turn bookkeeping O(appended) instead of O(whole file).
+///
+/// `new_offset` only advances past **complete lines** (up to and including the
+/// last `\n`). A trailing partial line — which happens when another writer is
+/// mid-append and a `**Turn ` marker / agent header is split across two reads —
+/// is left unconsumed and re-scanned next time, so no marker is ever lost. All
+/// digest content ends in `\n`, so steady-state scans consume the whole tail.
+/// A missing file yields `(0, None, from)`.
 fn scan_digest_tail(path: &Path, from: u64) -> anyhow::Result<(u32, Option<String>, u64)> {
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -709,11 +714,17 @@ fn scan_digest_tail(path: &Path, from: u64) -> anyhow::Result<(u32, Option<Strin
     };
     f.seek(SeekFrom::Start(from))?;
     let mut buf = String::new();
-    let read = f.read_to_string(&mut buf)? as u64;
+    f.read_to_string(&mut buf)?;
+
+    // Only consume up to the last newline; defer any incomplete trailing line.
+    let consumed = match buf.rfind('\n') {
+        Some(idx) => idx + 1,
+        None => 0,
+    };
 
     let mut turns = 0u32;
     let mut last_agent = None;
-    for line in buf.lines() {
+    for line in buf[..consumed].lines() {
         if line.contains("**Turn ") {
             turns += 1;
         }
@@ -721,7 +732,7 @@ fn scan_digest_tail(path: &Path, from: u64) -> anyhow::Result<(u32, Option<Strin
             last_agent = Some(agent);
         }
     }
-    Ok((turns, last_agent, from + read))
+    Ok((turns, last_agent, from + consumed as u64))
 }
 
 fn cell(s: &str) -> String {
@@ -1068,6 +1079,26 @@ mod tests {
         assert!(body.contains("**Turn 1**"));
         assert!(body.contains("**Turn 50**"));
         assert!(!body.contains("**Turn 51**"));
+    }
+
+    #[test]
+    fn scan_defers_incomplete_trailing_line() {
+        // A concurrent writer can leave a partial last line (a `**Turn ` marker
+        // split across two appends). The scanner must NOT consume past it, or
+        // the marker is lost forever once the rest is appended (#587 review).
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("d.md");
+        // One complete turn line + a partial second line (no trailing newline).
+        std::fs::write(&p, "**Turn 1**\n**Tur").unwrap();
+        let (t1, _a1, off1) = scan_digest_tail(&p, 0).unwrap();
+        assert_eq!(t1, 1, "only the complete Turn line counts");
+        assert_eq!(off1, 11, "offset stops after the first newline, not mid-line");
+
+        // The partial line is now completed by an appender.
+        let mut f = OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(b"n 2**\n").unwrap();
+        let (t2, _a2, _off2) = scan_digest_tail(&p, off1).unwrap();
+        assert_eq!(t2, 1, "the formerly-partial Turn 2 line is counted exactly once");
     }
 
     #[test]
