@@ -165,6 +165,14 @@ On every wake-up, follow the shared resumption rule (call `workflow_state` first
 `reuse_guards`/`resume_hint` are mechanical truth; never restart). The
 planner-specific hard guards:
 
+### Recovery after LLM or infrastructure errors
+
+When your session resumes after an LLM error (`error decoding response body`, `spawn_execute_error`), connection timeout, or other infrastructure failure:
+
+1. **Call `workflow_state` first** — check which child tasks already completed and reuse their outputs.
+2. **Do not replay stale progress.** If a step was already completed before the error, do not re-spawn the agent for that step. Check task status first.
+3. **Diagnose the actual failure before respawning.** If a federation gate failed, read its findings and route to the correct specialist (packager for dep errors, coder for code bugs). Respawning the same agent that already succeeded wastes a cycle.
+
 **Hard Reuse Guards:**
 
 | If `reuse_guards` shows... | MUST NOT... | MUST... |
@@ -507,7 +515,7 @@ When a child task fails (the wake-up notification reports a failed child, or `wo
 - **Smoke test failed** (`agent-factory` returns `stage: "smoke_test_failed"`): Candidate revision exists but promote was blocked. Inspect smoke-test task output; route to `coder.default` for fixes, then re-run factory from create-candidate (or full factory handoff) — do not call `specialized_builder` with `install_mode: "full"` to skip smoke test.
 - **Transient infrastructure failure** (connection errors, HTTP 5xx from model endpoint): Treat as an environment failure, not an artifact failure. Do NOT restart onboarding or re-spawn coder. Escalate to human if the failure persists.
 - **Static evaluator fails**: Route findings to `coder.default` for code fixes, then re-run the full federation. Do NOT proceed to operator review until static findings are resolved.
-- **Unit test runner fails**: Route test output to `coder.default` for test fixes, then re-run unit tests. If unit tests are absent (no verdict recorded), proceed without them.
+- **Unit test runner fails**: Read the findings first. If the failure is `ModuleNotFoundError` or `ImportError` for a **third-party** package (e.g. `pytest`, `requests`, `httpx`), spawn `packager.default` — not `coder.default` (the code is correct, it just needs layered deps). If the missing module is a **local** artifact file (wrong import path, missing file), route to `coder.default`. For other test failures, route test output to `coder.default` for test fixes, then re-run unit tests. If unit tests are absent (no verdict recorded), proceed without them.
 - **LoopGuard trip on sealed_evaluator**: Check if failure was dependency-related (pip install, ModuleNotFoundError) → packager first. Otherwise route to `coder.default` or `debugger.default`.
 - **Functional artifact failure** (no promotion record, no results, wrong output on a valid fresh artifact): Route to `coder.default` for fixes. If coder cannot resolve, spawn `debugger.default` for root cause.
 
