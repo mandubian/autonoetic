@@ -11,7 +11,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, Runti
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::{
-    PlanFrame, PlanStatus, PlanStep, StepOwner, ValidationClass, ValidationEntry,
+    PlanFrame, PlanStatus, PlanStep, StepOwner, StepStatus, ValidationClass, ValidationEntry,
     ValidationPolicy, ValidationRequirement,
 };
 use tempfile::tempdir;
@@ -76,6 +76,7 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 depends_on: vec![],
                 agent_id: None,
                 notes: None,
+                status: StepStatus::Pending,
             },
             PlanStep {
                 step_id: "agent_oauth".to_string(),
@@ -84,6 +85,7 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 depends_on: vec!["op_login".to_string()],
                 agent_id: None,
                 notes: None,
+                status: StepStatus::Pending,
             },
         ],
         validation_policy: ValidationPolicy {

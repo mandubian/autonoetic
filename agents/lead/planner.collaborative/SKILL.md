@@ -370,6 +370,15 @@ re-ask the operator about, something already granted.
 
 1. Call `planframe_get` to confirm status is `approved`.
 2. Execute steps via `agent_spawn` using step `agent_id` when set.
+   - **Include `step_id` in spawn `metadata`** so the gateway can enforce `depends_on` ordering:
+     ```json
+     agent_spawn({"agent_id":"coder.default","message":"...","metadata":{"step_id":"s2"}})
+     ```
+   - **Mark each step `completed` via `planframe_amend`** before spawning agents for the next step:
+     ```json
+     planframe_amend({"plan_id":"...","steps":[{"step_id":"s2","step_status":"completed"}]})
+     ```
+   - The gateway blocks spawns whose `depends_on` steps are not `completed`.
 3. When an artifact is ready for operator co-editing, `artifact_project` and tell the
    operator the workbench path. End your turn while they edit unless a child still runs.
 4. On `workbench_reconciled` / `/return`, read the semantic summary, then

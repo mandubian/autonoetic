@@ -6,8 +6,8 @@ use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::{
-    plan_envelope_diff, PlanFrame, PlanFrameSummary, PlanRef, PlanStatus, PlanStep, StepOwner,
-    ValidationEntry, ValidationPolicy,
+    plan_envelope_diff, validate_step_dag, PlanFrame, PlanFrameSummary, PlanRef, PlanStatus,
+    PlanStep, StepOwner, StepStatus, ValidationEntry, ValidationPolicy,
 };
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
@@ -368,6 +368,7 @@ impl NativeTool for PlanFrameProposeTool {
                 depends_on: s.depends_on.unwrap_or_default(),
                 agent_id: s.agent_id,
                 notes: s.notes,
+                status: StepStatus::Pending,
             })
             .collect();
 
@@ -399,6 +400,16 @@ impl NativeTool for PlanFrameProposeTool {
         };
 
         let capability_envelope = parse_capability_envelope_input(args.capability_envelope)?;
+
+        // Validate the step dependency graph before persisting.
+        if let Err(dag_err) = validate_step_dag(&steps) {
+            return Ok(ToolError::validation(
+                &dag_err,
+                Some("Fix depends_on entries so they reference existing step_ids with no cycles."),
+            )
+            .with_code("invalid_step_dependencies")
+            .to_error_response());
+        }
 
         let plan = PlanFrame {
             plan_id: plan_id.clone(),
@@ -1005,6 +1016,8 @@ impl NativeTool for PlanFrameAmendTool {
             agent_id: Option<String>,
             depends_on: Option<Vec<String>>,
             notes: Option<String>,
+            #[serde(default)]
+            step_status: Option<String>,
         }
 
         #[derive(Deserialize)]
@@ -1056,6 +1069,27 @@ impl NativeTool for PlanFrameAmendTool {
                     .iter()
                     .map(|s| (s.step_id.as_str(), s))
                     .collect();
+
+                // Validate step_status strings — reject typos early.
+                const VALID_STATUSES: &[&str] =
+                    &["pending", "in_progress", "completed", "failed", "skipped"];
+                for s in &steps {
+                    if let Some(ref ss) = s.step_status {
+                        if !VALID_STATUSES.contains(&ss.as_str()) {
+                            return Ok(ToolError::validation(
+                                &format!(
+                                    "Unknown step_status `{}` for step `{}`. Valid values: {}",
+                                    ss, s.step_id,
+                                    VALID_STATUSES.join(", "),
+                                ),
+                                Some("Use one of the valid step_status values."),
+                            )
+                            .with_code("invalid_step_status")
+                            .to_error_response());
+                        }
+                    }
+                }
+
                 steps
                     .into_iter()
                     .map(|s| {
@@ -1078,6 +1112,14 @@ impl NativeTool for PlanFrameAmendTool {
                                 .unwrap_or_default(),
                         };
                         let notes = s.notes.or_else(|| prev.and_then(|p| p.notes.clone()));
+                        let status = match s.step_status.as_deref() {
+                            Some("in_progress") => StepStatus::InProgress,
+                            Some("completed") => StepStatus::Completed,
+                            Some("failed") => StepStatus::Failed,
+                            Some("skipped") => StepStatus::Skipped,
+                            Some("pending") => StepStatus::Pending,
+                            _ => prev.map(|p| p.status).unwrap_or(StepStatus::Pending),
+                        };
                         PlanStep {
                             step_id: s.step_id,
                             title: s.title,
@@ -1085,12 +1127,23 @@ impl NativeTool for PlanFrameAmendTool {
                             depends_on,
                             agent_id,
                             notes,
+                            status,
                         }
                     })
                     .collect()
             }
             None => current.steps.clone(),
         };
+
+        // Validate the step dependency graph before persisting.
+        if let Err(dag_err) = validate_step_dag(&steps) {
+            return Ok(ToolError::validation(
+                &dag_err,
+                Some("Fix depends_on entries so they reference existing step_ids with no cycles."),
+            )
+            .with_code("invalid_step_dependencies")
+            .to_error_response());
+        }
 
         let validation_policy = match args.validation_policy {
             Some(vp) => ValidationPolicy {

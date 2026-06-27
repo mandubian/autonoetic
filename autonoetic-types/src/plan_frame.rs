@@ -60,6 +60,34 @@ impl Default for StepOwner {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+impl StepStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StepStatus::Pending => "pending",
+            StepStatus::InProgress => "in_progress",
+            StepStatus::Completed => "completed",
+            StepStatus::Failed => "failed",
+            StepStatus::Skipped => "skipped",
+        }
+    }
+}
+
+impl Default for StepStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanStep {
     pub step_id: String,
@@ -72,6 +100,8 @@ pub struct PlanStep {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
+    pub status: StepStatus,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -227,6 +257,113 @@ impl PlanStep {
         }
         infer_agent_id_from_step_title(&self.title)
     }
+}
+
+/// Validate that `depends_on` entries form a well-formed DAG:
+/// - All referenced `step_id`s exist
+/// - No self-dependencies
+/// - No cycles
+///
+/// Returns `Ok(())` if valid, or `Err(message)` with a human-readable description
+/// of the first problem found.
+pub fn validate_step_dag(steps: &[PlanStep]) -> Result<(), String> {
+    let ids: std::collections::HashSet<&str> =
+        steps.iter().map(|s| s.step_id.as_str()).collect();
+
+    // Check for duplicate step_ids.
+    if ids.len() != steps.len() {
+        let mut seen = std::collections::HashSet::new();
+        for s in steps {
+            if !seen.insert(s.step_id.as_str()) {
+                return Err(format!(
+                    "duplicate step_id `{}` — step_ids must be unique within a plan",
+                    s.step_id
+                ));
+            }
+        }
+    }
+
+    // Check references and self-deps.
+    for s in steps {
+        for dep in &s.depends_on {
+            if dep == &s.step_id {
+                return Err(format!(
+                    "step `{}` depends on itself",
+                    s.step_id
+                ));
+            }
+            if !ids.contains(dep.as_str()) {
+                return Err(format!(
+                    "step `{}` depends on `{}` which does not exist in this plan",
+                    s.step_id, dep
+                ));
+            }
+        }
+    }
+
+    // Cycle detection via DFS.
+    let mut visited = std::collections::HashMap::new();
+    for step in steps {
+        if dfs_has_cycle(step.step_id.as_str(), steps, &mut visited) {
+            return Err(format!(
+                "cycle detected in plan step dependencies involving `{}`",
+                step.step_id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn dfs_has_cycle(
+    start: &str,
+    steps: &[PlanStep],
+    visited: &mut std::collections::HashMap<String, u8>,
+) -> bool {
+    // visited: 0 = unvisited, 1 = in progress (on stack), 2 = done
+    match visited.get(start) {
+        Some(&2) => return false,
+        Some(&1) => return true,
+        _ => {}
+    }
+    visited.insert(start.to_string(), 1);
+
+    let step = steps.iter().find(|s| s.step_id == start);
+    if let Some(s) = step {
+        for dep in &s.depends_on {
+            if dfs_has_cycle(dep, steps, visited) {
+                return true;
+            }
+        }
+    }
+
+    visited.insert(start.to_string(), 2);
+    false
+}
+
+/// Find steps that `step_id` depends on but which are not yet `Completed`.
+/// Returns a list of `(dep_step_id, status)` tuples for unsatisfied deps.
+pub fn unsatisfied_dependencies(
+    plan: &PlanFrame,
+    step_id: &str,
+) -> Vec<(String, StepStatus)> {
+    let step = plan.steps.iter().find(|s| s.step_id == step_id);
+    let Some(step) = step else {
+        return Vec::new();
+    };
+
+    step.depends_on
+        .iter()
+        .filter_map(|dep_id| {
+            plan.steps.iter().find(|s| &s.step_id == dep_id).map(|dep| {
+                if dep.status != StepStatus::Completed {
+                    Some((dep.step_id.clone(), dep.status))
+                } else {
+                    None
+                }
+            }).flatten()
+        })
+        .collect()
 }
 
 impl PlanFrame {
@@ -601,6 +738,7 @@ mod tests {
                 depends_on: vec![],
                 agent_id: None,
                 notes: None,
+                status: StepStatus::Pending,
             }],
             validation_policy: ValidationPolicy::default(),
             capability_envelope: Vec::new(),
@@ -647,6 +785,7 @@ mod tests {
             depends_on: vec![],
             agent_id: agent.map(str::to_string),
             notes: None,
+            status: StepStatus::Pending,
         }
     }
 

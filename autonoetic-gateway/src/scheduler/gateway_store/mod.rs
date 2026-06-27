@@ -456,6 +456,16 @@ impl GatewayStore {
         plan_frames::list_pending_plan_frames_for_root(&conn, root_session_id)
     }
 
+    /// List the latest **approved** revision of each plan for a root session.
+    /// Used by the agent_spawn depends_on enforcement to find the active plan.
+    pub fn list_latest_plan_frames_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::list_latest_plan_frames_for_root(&conn, root_session_id)
+    }
+
     // -------------------------------------------------------------------------
     // Workbenches
     // -------------------------------------------------------------------------
