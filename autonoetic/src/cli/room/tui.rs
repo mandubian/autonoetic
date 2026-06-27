@@ -1071,6 +1071,78 @@ folded: std::collections::HashMap<String, bool>,
 }
 
 impl LiveContentPane {
+    /// Return the node indices that are currently visible given folding state.
+    fn visible_indices(&self) -> Vec<usize> {
+        let mut visible = Vec::new();
+        let mut last_plan_id: Option<String> = None;
+        for (idx, node) in self.nodes.iter().enumerate() {
+            match node {
+                LiveContentNode::Plan {
+                    plan_id,
+                    is_latest,
+                    ..
+                } => {
+                    last_plan_id = Some(plan_id.clone());
+                    if *is_latest || !self.is_folded(plan_id) {
+                        visible.push(idx);
+                    }
+                }
+                _ => {
+                    if let Some(ref pid) = last_plan_id {
+                        if self.is_folded(pid) {
+                            continue;
+                        }
+                    }
+                    visible.push(idx);
+                }
+            }
+        }
+        visible
+    }
+
+    /// Move selection to the nearest visible node at or before the current
+    /// selection. Called after folding state changes.
+    fn clamp_selection_to_visible(&mut self) {
+        let visible = self.visible_indices();
+        if visible.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if let Some(pos) = visible.iter().position(|&idx| idx >= self.selected) {
+            self.selected = visible[pos];
+        } else {
+            self.selected = *visible.last().unwrap();
+        }
+    }
+
+    /// Move selection to the next visible node, wrapping at the end.
+    fn select_next_visible(&mut self) {
+        let visible = self.visible_indices();
+        if visible.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if let Some(pos) = visible.iter().position(|&idx| idx > self.selected) {
+            self.selected = visible[pos];
+        } else {
+            self.selected = *visible.last().unwrap();
+        }
+    }
+
+    /// Move selection to the previous visible node, wrapping at the start.
+    fn select_prev_visible(&mut self) {
+        let visible = self.visible_indices();
+        if visible.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if let Some(pos) = visible.iter().rposition(|&idx| idx < self.selected) {
+            self.selected = visible[pos];
+        } else {
+            self.selected = visible[0];
+        }
+    }
+
     /// Toggle the older-version fold for the plan_id of the currently selected node.
     fn toggle_fold(&mut self) {
         let plan_id = match self.nodes.get(self.selected) {
@@ -1091,6 +1163,7 @@ impl LiveContentPane {
         };
         let entry = self.folded.entry(plan_id).or_insert(true);
         *entry = !*entry;
+        self.clamp_selection_to_visible();
     }
 
     /// Whether older revisions of `plan_id` are currently folded.
@@ -3407,18 +3480,24 @@ pub fn run(
                                 if sections.is_empty() {
                                     status = Some("no content found for this session".to_string());
                                 } else {
-                                    // Preserve existing fold state across rebuilds (e.g. on 'c').
+                                    // Preserve existing fold state and selection across rebuilds (e.g. on 'c').
                                     let folded = live_content_pane
                                         .as_ref()
                                         .map(|p| p.folded.clone())
                                         .unwrap_or_default();
-                                    live_content_pane = Some(LiveContentPane {
+                                    let prev_selected = live_content_pane
+                                        .as_ref()
+                                        .map(|p| p.selected)
+                                        .unwrap_or(0);
+                                    let mut pane = LiveContentPane {
                                         nodes: all_nodes,
                                         sections,
-                                        selected: 0,
+                                        selected: prev_selected,
                                         scroll: 0,
                                         folded,
-                                    });
+                                    };
+                                    pane.clamp_selection_to_visible();
+                                    live_content_pane = Some(pane);
                                     status = Some("content: j/k navigate · Enter/o open · x fold/unfold older versions · Esc close".to_string());
                                 }
                             }
@@ -3551,7 +3630,7 @@ pub fn run(
                             if let Some(view) = content_view.as_mut() {
                                 view.scroll = view.scroll.saturating_add(1);
                             } else if let Some(pane) = live_content_pane.as_mut() {
-                                pane.selected = (pane.selected + 1).min(pane.nodes.len().saturating_sub(1));
+                                pane.select_next_visible();
                             } else if artifact_file_view.is_some() {
                                 artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_add(1);
                             } else if artifact_viewer.is_some() {
@@ -3571,7 +3650,7 @@ pub fn run(
                             if let Some(view) = content_view.as_mut() {
                                 view.scroll = view.scroll.saturating_sub(1);
                             } else if let Some(pane) = live_content_pane.as_mut() {
-                                pane.selected = pane.selected.saturating_sub(1);
+                                pane.select_prev_visible();
                             } else if artifact_file_view.is_some() {
                                 artifact_file_view.as_mut().unwrap().scroll = artifact_file_view.as_ref().unwrap().scroll.saturating_sub(1);
                             } else if artifact_viewer.is_some() {
@@ -6501,7 +6580,7 @@ fn draw(
                         } else {
                             String::new()
                         };
-                        format!("  {label} v{version}{status}{latest_tag}{expand_hint}")
+                        format!("  {label} v{version} [{status}]{latest_tag}{expand_hint}")
                     }
                     LiveContentNode::PlanStep { title } => {
                         format!("    ▶ {title}")
