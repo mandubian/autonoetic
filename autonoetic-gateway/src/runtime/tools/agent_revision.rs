@@ -2974,6 +2974,7 @@ do not re-issue."
                             &args.revision_id,
                             &added_capabilities,
                             &broadened_capabilities,
+                            &outgoing_revision_id,
                         )?
                     {
                         if let Some(guard) = single_flight_guard.as_mut() {

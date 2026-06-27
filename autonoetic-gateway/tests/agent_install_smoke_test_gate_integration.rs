@@ -432,7 +432,7 @@ fn existing_agent_failed_smoke_evidence_blocks_promotion() {
     // test was silently ignored when promoting into an occupied slot (the
     // coder.default → Fibonacci incident root cause).
     let h = setup_harness(true, false, true);
-    let wf_id = create_smoke_test_task(&h, "smoke-existing-fail", TaskRunStatus::Failed, None);
+    let wf_id = create_smoke_test_task(&h, "smoke-existing-fail", TaskRunStatus::Failed, None, None);
     let result = invoke_promote(&h, Some(&wf_id), Some("smoke-existing-fail"), None);
 
     assert_eq!(result["ok"], false, "unexpected: {:?}", result);
@@ -448,7 +448,7 @@ fn existing_agent_volunteered_successful_smoke_is_verified_and_promotes() {
     // #657 positive path: volunteering a successful smoke test for an existing
     // agent is verified (not ignored) and does not block promotion.
     let h = setup_harness(true, false, true);
-    let wf_id = create_smoke_test_task(&h, "smoke-existing-ok", TaskRunStatus::Succeeded, None);
+    let wf_id = create_smoke_test_task(&h, "smoke-existing-ok", TaskRunStatus::Succeeded, None, None);
     let result = invoke_promote(&h, Some(&wf_id), Some("smoke-existing-ok"), None);
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
@@ -460,7 +460,7 @@ fn half_supplied_smoke_evidence_is_rejected() {
     // #657: supplying one id without the other is a clear error, not a silent
     // skip.
     let h = setup_harness(true, false, true);
-    let wf_id = create_smoke_test_task(&h, "smoke-half-ok", TaskRunStatus::Succeeded, None);
+    let wf_id = create_smoke_test_task(&h, "smoke-half-ok", TaskRunStatus::Succeeded, None, None);
     let result = invoke_promote(&h, Some(&wf_id), None, None);
 
     assert_eq!(result["ok"], false, "unexpected: {:?}", result);
