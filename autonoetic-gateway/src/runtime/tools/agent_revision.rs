@@ -4070,7 +4070,18 @@ fn verify_smoke_test_task(
     }
 
     if let Some(expected) = expected_input.map(str::trim).filter(|s| !s.is_empty()) {
-        let actual = task.message.as_deref().unwrap_or("").trim();
+        // Compare against the RAW spawn message persisted in metadata, not the
+        // wrapped `task.message` (which carries [Context]/[Metadata] framing).
+        // Fall back to `task.message` only for tasks spawned before the raw
+        // message was persisted (issue #648).
+        let raw_spawn_message = task
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("_autonoetic_spawn_message"))
+            .and_then(|v| v.as_str());
+        let actual = raw_spawn_message
+            .unwrap_or_else(|| task.message.as_deref().unwrap_or(""))
+            .trim();
         if actual != expected {
             anyhow::bail!(
                 "Smoke-test task '{}' message does not match smoke_test_input (expected {:?}, got {:?})",
