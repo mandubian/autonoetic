@@ -266,6 +266,7 @@ fn create_smoke_test_task(
     task_id: &str,
     status: TaskRunStatus,
     message: Option<&str>,
+    raw_spawn_message: Option<&str>,
 ) -> String {
     let workflow = autonoetic_gateway::scheduler::workflow_store::ensure_workflow_for_root_session(
         &h.config,
@@ -284,6 +285,25 @@ fn create_smoke_test_task(
     )
     .unwrap();
 
+    // When `raw_spawn_message` is set, simulate the spawn path's behavior: it
+    // wraps `task.message` with delegation framing but persists the RAW message
+    // as `_autonoetic_spawn_message` in metadata (issue #648). Otherwise store
+    // the caller's `message` verbatim with only the revision tag.
+    let (stored_message, spawn_metadata) = match raw_spawn_message {
+        Some(raw) => {
+            let wrapped = format!("{}\n\nDelegation metadata: {{}}", raw);
+            let md = serde_json::json!({
+                "_autonoetic_spawn_revision_id": REVISION_ID,
+                "_autonoetic_spawn_message": raw,
+            });
+            (Some(wrapped), md)
+        }
+        None => (
+            message.map(|m| m.to_string()),
+            serde_json::json!({ "_autonoetic_spawn_revision_id": REVISION_ID }),
+        ),
+    };
+
     let task = TaskRun {
         task_id: task_id.to_string(),
         workflow_id: workflow.workflow_id.clone(),
@@ -296,10 +316,8 @@ fn create_smoke_test_task(
         source_agent_id: Some("agent-factory.default".to_string()),
         result_summary: None,
         join_group: None,
-        message: message.map(|m| m.to_string()),
-        metadata: Some(serde_json::json!({
-            "_autonoetic_spawn_revision_id": REVISION_ID,
-        })),
+        message: stored_message,
+        metadata: Some(spawn_metadata),
         retry_count: 0,
         last_failure_class: None,
         retry_policy: None,
@@ -368,7 +386,7 @@ fn capability_bearing_new_agent_blocks_without_smoke_test() {
 #[test]
 fn capability_bearing_new_agent_promotes_with_passed_smoke_test() {
     let h = setup_harness(true, false, false);
-    let wf_id = create_smoke_test_task(&h, "smoke-pass-001", TaskRunStatus::Succeeded, None);
+    let wf_id = create_smoke_test_task(&h, "smoke-pass-001", TaskRunStatus::Succeeded, None, None);
     let result = invoke_promote(&h, Some(&wf_id), Some("smoke-pass-001"), None);
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
@@ -379,7 +397,7 @@ fn capability_bearing_new_agent_promotes_with_passed_smoke_test() {
 #[test]
 fn capability_bearing_new_agent_blocks_with_failed_smoke_test() {
     let h = setup_harness(true, false, false);
-    let wf_id = create_smoke_test_task(&h, "smoke-fail-001", TaskRunStatus::Failed, None);
+    let wf_id = create_smoke_test_task(&h, "smoke-fail-001", TaskRunStatus::Failed, None, None);
     let result = invoke_promote(&h, Some(&wf_id), Some("smoke-fail-001"), None);
 
     assert_eq!(result["ok"], false, "unexpected: {:?}", result);
@@ -412,6 +430,7 @@ fn operator_directed_requires_smoke_test_input() {
         "smoke-cred-001",
         TaskRunStatus::Succeeded,
         Some("buy 1 share"),
+        None,
     );
     let result = invoke_promote(&h, Some(&wf_id), Some("smoke-cred-001"), None);
 
@@ -428,6 +447,7 @@ fn operator_directed_promotes_with_matching_input() {
         "smoke-cred-002",
         TaskRunStatus::Succeeded,
         Some(input),
+        None,
     );
     let result = invoke_promote(
         &h,
@@ -437,6 +457,37 @@ fn operator_directed_promotes_with_matching_input() {
     );
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
+    assert_eq!(result["status"], "promoted");
+}
+
+#[test]
+fn operator_directed_promotes_when_spawn_message_is_wrapped() {
+    // Regression for #648: the spawn path wraps `task.message` with delegation
+    // framing ([Context]/[Metadata]) but persists the RAW message as
+    // `_autonoetic_spawn_message` in metadata. The smoke gate must compare
+    // `smoke_test_input` against the raw message, not the wrapped task message —
+    // otherwise promote loops on a spurious mismatch for any smoke test that
+    // carried context/metadata (always, for OperatorDirected agents).
+    let h = setup_harness(true, true, false);
+    let input = "buy 1 share of AAPL";
+    let wf_id = create_smoke_test_task(
+        &h,
+        "smoke-wrap-001",
+        TaskRunStatus::Succeeded,
+        None,
+        Some(input), // helper wraps task.message + tags metadata with the raw message
+    );
+    let result = invoke_promote(
+        &h,
+        Some(&wf_id),
+        Some("smoke-wrap-001"),
+        Some(input),
+    );
+
+    assert_eq!(
+        result["ok"], true,
+        "wrapped spawn message must still match smoke_test_input: {:?}", result
+    );
     assert_eq!(result["status"], "promoted");
 }
 

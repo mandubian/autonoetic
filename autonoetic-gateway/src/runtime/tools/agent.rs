@@ -556,37 +556,22 @@ the single join already does that."
             // verify the task after it completes, even when the caller supplied
             // no metadata or non-object metadata.
             let mut spawn_metadata = match args.metadata.clone() {
-                Some(serde_json::Value::Object(mut obj)) => {
-                    if let Some(ref rev_id) = args.revision_id {
-                        obj.insert(
-                            "_autonoetic_spawn_revision_id".to_string(),
-                            serde_json::json!(rev_id),
-                        );
-                    }
-                    serde_json::Value::Object(obj)
-                }
+                Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
                 Some(other) => {
                     let mut obj = serde_json::Map::new();
                     obj.insert("_original_metadata".to_string(), other);
-                    if let Some(ref rev_id) = args.revision_id {
-                        obj.insert(
-                            "_autonoetic_spawn_revision_id".to_string(),
-                            serde_json::json!(rev_id),
-                        );
-                    }
                     serde_json::Value::Object(obj)
                 }
-                None => {
-                    let mut obj = serde_json::Map::new();
-                    if let Some(ref rev_id) = args.revision_id {
-                        obj.insert(
-                            "_autonoetic_spawn_revision_id".to_string(),
-                            serde_json::json!(rev_id),
-                        );
-                    }
-                    serde_json::Value::Object(obj)
-                }
+                None => serde_json::Value::Object(serde_json::Map::new()),
             };
+            if let Some(ref rev_id) = args.revision_id {
+                spawn_metadata["_autonoetic_spawn_revision_id"] = serde_json::json!(rev_id);
+            }
+            // Persist the RAW spawn message (before [Context]/[Metadata] framing
+            // is added for the child) so the smoke-test gate can compare the
+            // operator's `smoke_test_input` against what was actually sent,
+            // independent of the presentation-layer wrapping (issue #648).
+            spawn_metadata["_autonoetic_spawn_message"] = serde_json::json!(args.message);
 
             let task = TaskRun {
                 task_id: task_id.clone(),
