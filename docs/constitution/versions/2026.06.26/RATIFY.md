@@ -54,24 +54,27 @@ and the status moves to `ENFORCED`.
 - `2026.06.24/constitution.md` reverted to its signed state (`d21e3dee`) so the
   `2026.06.24` lock remains valid as a historical baseline.
 
-## Recompute (operator — REQUIRED before the constitution tests pass)
+## Recompute (only if the constitution text or signer material changes)
 
-The lock digest is pre-computed in `gateway-constitution.lock.json`; the
-signature is **not** (signing needs the operator key). Until signed, the
-constitution-init tests are red **by design** and the gateway will refuse to
-start (`require_signature=true`).
+This version ships a **signed** `gateway-constitution.lock.json` (digest +
+Ed25519 signature by `autonoetic:constitution:v1`) — the tests are green and
+the gateway boots as-is. Re-running `recompute_lock.py` is only required when:
+
+- the `constitution.md` text is edited (any byte change drifts the digest), or
+- the signer key is rotated (`--generate-key`; then also update `trusted_signers`
+  in `autonoetic-types/src/config.rs`, `config/config-template.yaml`, and
+  `docs/config-reference.md`).
 
 ```bash
 python3 docs/constitution/recompute_lock.py --version 2026.06.26 \
   --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
 cargo test -p autonoetic-gateway constitution_lock_matches_canonical_digest_and_counts
 cargo test -p autonoetic-gateway --test constitution_r_8_6_retention_policy_startup
-cargo test -p autonoetic-gateway
 git add docs/constitution/versions/2026.06.26/gateway-constitution.lock.json && git commit
 ```
 
-Expected post-signing values:
-- `constitution_digest`: `a7ec7b39cd084ce7b9ac62ec307f5dde893d21a907f044856af1bd9ad9559887`
+Expected lock values:
+- `constitution_digest`: `e546b3e7cfdfaffc59a07f38b034b17719830cb7c39041bb9fe90c40a158576b`
 - `rule_enforcement_count`: 176 · `right_enforcement_count`: 16
 - `signer_id`: `autonoetic:constitution:v1` (public key
   `lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=` — unchanged from 2026.06.24)

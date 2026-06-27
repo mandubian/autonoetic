@@ -107,7 +107,7 @@ principal that resolves a gate — so that whoever holds authority over an
 agent owes duties mirroring the agent's own (#359). The bind-direction is
 uniform by section, so no per-row tag is needed — everything under §0
 binds the gateway, everything under §1–§11 binds the agent, and everything
-under §O binds the decider. The **rights/obligations ratio** (14 rights against
+under §O binds the decider. The **rights/obligations ratio** (16 rights against
 176 rules) is itself a design signal: a constitution heavy on rules
 and light on rights is one to watch, and amendments that widen the gap
 deserve scrutiny.
@@ -553,10 +553,11 @@ file's history. Silent erosion is the failure mode to guard against.
 With P-10.9 enforced, `constitution_digest` changes whenever this file's
 canonical content changes. A digest change is the mechanical signal that
 the law changed, and federated peers observe it through the OFP handshake.
-The digest is pinned in
-`docs/constitution/versions/2026.06.22/gateway-constitution.lock.json`
-(versioned manifest). Gateway startup verifies this lock against canonical
-extraction and refuses to boot on mismatch.
+The digest is pinned in the active version's
+`gateway-constitution.lock.json` under `docs/constitution/versions/` (versioned
+manifest; `docs/constitution/CURRENT` records the active version). Gateway
+startup verifies this lock against canonical extraction and refuses to boot on
+mismatch.
 
 ### The constitution is self-referential
 
