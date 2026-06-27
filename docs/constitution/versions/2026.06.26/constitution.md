@@ -107,7 +107,7 @@ principal that resolves a gate — so that whoever holds authority over an
 agent owes duties mirroring the agent's own (#359). The bind-direction is
 uniform by section, so no per-row tag is needed — everything under §0
 binds the gateway, everything under §1–§11 binds the agent, and everything
-under §O binds the decider. The **rights/obligations ratio** (14 rights against
+under §O binds the decider. The **rights/obligations ratio** (16 rights against
 176 rules) is itself a design signal: a constitution heavy on rules
 and light on rights is one to watch, and amendments that widen the gap
 deserve scrutiny.
@@ -202,8 +202,8 @@ approve via `runtime/checkpoint.rs::SessionCheckpoint`.
 | P-2.17 | The auditor and evaluator backing a promotion must be **distinct agent identities** (not merely distinct sessions of the same agent). A single agent recording both evaluator and auditor passes is rejected. | gateway-constitution-roadmap.md | `autonoetic-gateway/src/runtime/tools/agent_revision.rs` `AgentRevisionPromoteTool::execute` (identity comparison in promotion gate) | ENFORCED |
 | P-2.18 | All execution suspension points awaiting external input (approvals, user interactions, escalations) use the unified `GateService`. Gate creation, dedup, session grant checks, and enrichment follow the same persistence and audit rules regardless of `GateKind`. Tools create gates via `GateService.check()` and must not bypass it with direct store operations. | constitution-gate-amendments.md | `runtime/human_gate.rs` | ENFORCED |
 | P-2.19 | Gate enrichment messages (`gate_messages`) are append-only and recorded on the causal chain. Enrichment content is subject to the same redaction rules as tool results (P-4.13). Every enrichment message records sender identity and timestamp. Enrichment threads are visible to the affected agent via `Ri-0.1`. | constitution-gate-amendments.md | `runtime/human_gate.rs::add_gate_message`, `gate_messages_jsonrpc_integration.rs` | ENFORCED |
-| P-2.20 | Agents acting as gate deciders require the `GateDecider` capability. The capability scope declares which gate kinds the agent may resolve (`approval`, `escalation`, or both). An agent without `GateDecider` cannot call `approve_request` or `reject_request`. Decider agents are subject to the same dwell time, confirmation phrase, and hardening rules as human operators (P-2.24). | constitution-gate-amendments.md | `scheduler/approval.rs::decide_request_with_options` | PENDING |
-| P-2.21 | When an agent-decider cannot determine whether to approve or reject a gate (insufficient context, policy ambiguity, or high-risk action beyond its scope), it must escalate to a human operator rather than reject. Escalation creates a new `GateKind::Escalation` gate referencing the original gate ID. The original gate remains pending until the human operator resolves both. | constitution-gate-amendments.md | `runtime/human_gate.rs::check_escalation` | PENDING |
+| P-2.20 | Agents acting as gate deciders require the `GateDecider` capability. The capability scope declares which gate kinds the agent may resolve (`approval`, `escalation`, or both). An agent without `GateDecider` cannot call `approve_request` or `reject_request`. Decider agents are subject to the same dwell time, confirmation phrase, and hardening rules as human operators (P-2.24). | constitution-gate-amendments.md | `autonoetic-types/src/capability.rs::Capability::GateDecider`, `policy.rs::PolicyEngine::can_decide_gate`, `scheduler/approval.rs::decide_request_with_options` | ENFORCED |
+| P-2.21 | When an agent-decider cannot determine whether to approve or reject a gate (insufficient context, policy ambiguity, or high-risk action beyond its scope), it must escalate to a human operator rather than reject. Escalation creates a new `GateKind::Escalation` gate referencing the original gate ID. The original gate remains pending until the human operator resolves both. | constitution-gate-amendments.md | `runtime/human_gate.rs::GateService::escalate_to_human`, `runtime/human_gate.rs::check_escalation` | ENFORCED |
 | P-2.22 | When a revision carries federation-role verdicts, promotion runs the **FullJury** gate: it additionally requires an approved operator escalation for the artifact+revision pair, and the federation roles must be distinct identities. | gateway-constitution-roadmap.md | `runtime/tools/agent_revision.rs` (FullJury gate; emits `enforced_rules` P-2.8/P-2.17/P-2.22), `constitution_federation_e2e.rs` | ENFORCED |
 | P-2.23 | Session approval grants expire after a configured TTL; an expired grant no longer auto-approves, and the next matching action re-prompts. | approved-resources-caching.md | `scheduler/approval.rs:1114` (TTL check), `scheduler.rs:78` (sweep), `constitution_approval_grant_ttl.rs` | ENFORCED |
 | P-2.24 | Operator approval hardening on high-risk gates: (a) a minimum dwell time before the confirm action enables; (b) a typed confirmation string for destructive classes (bundle promotion, credential register); (c) structural-similarity dedup scoring surfaced at approval creation. Decider agents are bound by the same hardening (P-2.20). | gateway-constitution-roadmap.md | `runtime/approval_hardening.rs`, `scheduler/approval.rs`, `constitution_approval_hardening.rs` | ENFORCED |
@@ -553,10 +553,11 @@ file's history. Silent erosion is the failure mode to guard against.
 With P-10.9 enforced, `constitution_digest` changes whenever this file's
 canonical content changes. A digest change is the mechanical signal that
 the law changed, and federated peers observe it through the OFP handshake.
-The digest is pinned in
-`docs/constitution/versions/2026.06.22/gateway-constitution.lock.json`
-(versioned manifest). Gateway startup verifies this lock against canonical
-extraction and refuses to boot on mismatch.
+The digest is pinned in the active version's
+`gateway-constitution.lock.json` under `docs/constitution/versions/` (versioned
+manifest; `docs/constitution/CURRENT` records the active version). Gateway
+startup verifies this lock against canonical extraction and refuses to boot on
+mismatch.
 
 ### The constitution is self-referential
 

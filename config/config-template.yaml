@@ -26,14 +26,14 @@ node_name: "gateway"
 #   <agents_dir>/.gateway/constitution/
 # You can point source_path/lock_path there for fully runtime-local enforcement.
 constitution:
-  source_path: "docs/constitution/versions/2026.06.24/constitution.md"
-  lock_path: "docs/constitution/versions/2026.06.24/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.06.26/constitution.md"
+  lock_path: "docs/constitution/versions/2026.06.26/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 # constitution:
-#   source_path: ".gateway/constitution/versions/2026.06.24/constitution.md"
-#   lock_path: ".gateway/constitution/versions/2026.06.24/gateway-constitution.lock.json"
+#   source_path: ".gateway/constitution/versions/2026.06.26/constitution.md"
+#   lock_path: ".gateway/constitution/versions/2026.06.26/gateway-constitution.lock.json"
 #   require_signature: true
 #   trusted_signers:
 #     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
