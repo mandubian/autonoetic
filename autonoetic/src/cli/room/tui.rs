@@ -36,7 +36,13 @@ use std::time::{Duration, Instant};
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// Main-loop frame budget — input is drained at 0 ms; this caps idle spin rate.
 const FRAME_MS: u64 = 50;
-/// How often to pull new timeline events from the gateway (not every frame).
+/// Idle frame budget when no turns are open and no async work is happening.
+/// This dramatically lowers CPU by letting the process sleep longer.
+const IDLE_FRAME_MS: u64 = 250;
+/// How often to pull new timeline events from the gateway when idle (no open
+/// turns, no async processing). Keeps CPU low on long completed sessions.
+const IDLE_TIMELINE_POLL_MS: u64 = 2000;
+/// Timeline poll rate when the session may be active.
 const TIMELINE_POLL_MS: u64 = 400;
 /// How often to poll `session.status` for async ingest still `processing`.
 const SESSION_STATUS_POLL_MS: u64 = 2000;
@@ -2077,6 +2083,12 @@ pub fn run(
     let mut view_viewport_offset = 0usize;
     let mut view_list_height = 0usize;
     let mut view_turn_boundaries: HashMap<usize, bool> = HashMap::new();
+    // Idle-frame optimization: only rebuild and redraw when something changed.
+    let mut needs_redraw = true;
+    let mut cached_open_turns: HashSet<String> = HashSet::new();
+    let mut cached_floor = floor;
+    let mut cached_squash = squash;
+    let mut cached_show_reasoning = show_reasoning;
 
     'room: loop {
         // Drain pending input before any blocking gateway work so arrows / wheel
@@ -3676,6 +3688,9 @@ pub fn run(
                 _ => {}
             }
         }
+        if repaint_after_input {
+            needs_redraw = true;
+        }
 
         // Paint immediately after input so detail panes and scroll don't wait on
         // a blocking timeline RPC or a full row-height pass over the list.
@@ -3804,8 +3819,14 @@ pub fn run(
             })?;
         }
 
+        let mut entries_changed = false;
+        let timeline_poll_ms = if cached_open_turns.is_empty() && !session_async_processing {
+            IDLE_TIMELINE_POLL_MS
+        } else {
+            TIMELINE_POLL_MS
+        };
         if force_timeline_refresh
-            || last_timeline_poll.elapsed() >= Duration::from_millis(TIMELINE_POLL_MS)
+            || last_timeline_poll.elapsed() >= Duration::from_millis(timeline_poll_ms)
         {
             last_timeline_poll = Instant::now();
             force_timeline_refresh = false;
@@ -3836,6 +3857,7 @@ pub fn run(
                                 .into_iter()
                                 .map(|e| (e.child_session_id.clone(), e))
                                 .collect();
+                            entries_changed = true;
                         }
                         if let Some(last) = page.entries.last() {
                             cursor = Some(last.event_id.clone());
@@ -3855,85 +3877,136 @@ pub fn run(
                                 }
                             }
                         }
-                        entries.extend(page.entries);
+                        if !page.entries.is_empty() {
+                            entries_changed = true;
+                            entries.extend(page.entries);
+                        }
                         if status.as_deref().map(|s| s.starts_with("✗ gateway")).unwrap_or(false)
                         {
                             status = None; // recovered
+                            needs_redraw = true;
                         }
                     }
-                    Err(e) => status = Some(format!("✗ bad timeline response: {e}")),
+                    Err(e) => {
+                        status = Some(format!("✗ bad timeline response: {e}"));
+                        needs_redraw = true;
+                    }
                 },
                 Err(e) if e.to_string() == "__room_quit__" => break 'room,
-                Err(e) => status = Some(format!("✗ gateway: {e}")),
+                Err(e) => {
+                    status = Some(format!("✗ gateway: {e}"));
+                    needs_redraw = true;
+                }
             }
         }
 
-        // `entries` holds everything (fetched at `detail`); the display floor is
-        // applied here as a pure view filter. RowSource indices below therefore
-        // index into `visible`, so gate selection and drill-down use it too.
-        let visible: Vec<SessionTimelineEntry> =
-            entries.iter().filter(|e| e.altitude >= floor).cloned().collect();
-        // Detect in-flight turns: any turn_id we've seen `turn.start` for but
-        // not yet `turn.end` is still open. The TUI marks the most recent row
-        // in such a turn with a spinner.
-        let mut open_turns: HashSet<String> = HashSet::new();
-        for e in &entries {
-            match e.event_type.as_str() {
-                "turn.start" => {
-                    if let Some(t) = &e.turn_id {
-                        open_turns.insert(t.clone());
-                    }
-                }
-                "turn.end" => {
-                    if let Some(t) = &e.turn_id {
-                        open_turns.remove(t);
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Rows + their source mapping (lets Enter drill into the underlying event).
-        let linked_escalation_approvals =
-            render::linked_promotion_escalation_approval_ids(&visible);
-        let mut indexed: Vec<(RenderedRow, RowSource)> = if squash {
-            render::coalesce_indexed(&visible)
-        } else {
-            visible
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| {
-                    !render::is_redundant_promotion_escalation_approval(
-                        e,
-                        &linked_escalation_approvals,
-                    )
-                })
-                .map(|(i, e)| (RenderedRow::Line(render::render_spec(e)), RowSource::Single(i)))
-                .collect()
-        };
-        // Annotate each row with turn membership + the in-flight bit, and
-        // track the previous turn_id so the renderer can draw a faint
-        // divider when the turn changes. The in-flight spinner is reserved
-        // for the **most recent** row in an open turn — earlier rows of the
-        // same turn stay in their normal altitude glyph so the operator can
-        // read the chain.
+        // Session status poll runs even when we skip rendering so the TUI keeps
+        // tracking whether the root session is actively processing.
+        let mut session_async_processing_changed = false;
         if last_session_status_poll.elapsed()
             >= Duration::from_millis(SESSION_STATUS_POLL_MS)
         {
             last_session_status_poll = Instant::now();
-            match rpc(
+            let new_async = match rpc(
                 client,
                 "session.status",
                 serde_json::json!({ "session_id": &*root_session_id }),
             ) {
-                Ok(value) => {
-                    session_async_processing = value
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| s == "processing");
-                }
-                Err(_) => session_async_processing = false,
+                Ok(value) => value
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == "processing"),
+                Err(_) => false,
+            };
+            if new_async != session_async_processing {
+                session_async_processing = new_async;
+                session_async_processing_changed = true;
+                needs_redraw = true;
             }
         }
+
+        // Recompute open turns only when the timeline changed; otherwise reuse
+        // the cached set to avoid scanning all entries every frame.
+        if entries_changed || cached_open_turns.is_empty() {
+            cached_open_turns.clear();
+            for e in &entries {
+                match e.event_type.as_str() {
+                    "turn.start" => {
+                        if let Some(t) = &e.turn_id {
+                            cached_open_turns.insert(t.clone());
+                        }
+                    }
+                    "turn.end" => {
+                        if let Some(t) = &e.turn_id {
+                            cached_open_turns.remove(t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // View configuration (floor/squash/reasoning) only changes through input,
+        // which already sets needs_redraw, but keep explicit trackers so a
+        // programmatic change cannot be accidentally skipped.
+        if floor != cached_floor
+            || squash != cached_squash
+            || show_reasoning != cached_show_reasoning
+        {
+            cached_floor = floor;
+            cached_squash = squash;
+            cached_show_reasoning = show_reasoning;
+            needs_redraw = true;
+        }
+
+        // Only animate the spinner when something is actually in flight. Idle
+        // sessions therefore freeze the spinner and skip redraws entirely.
+        let has_in_flight_visual = !cached_open_turns.is_empty() || session_async_processing;
+        if has_in_flight_visual {
+            spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
+            needs_redraw = true;
+        }
+        let spinner_glyph = SPINNER_FRAMES[spinner_frame];
+
+        let should_render = needs_redraw
+            || entries_changed
+            || session_async_processing_changed
+            || has_in_flight_visual;
+
+        if should_render {
+            // `entries` holds everything (fetched at `detail`); the display floor is
+            // applied here as a pure view filter. RowSource indices below therefore
+            // index into `visible`, so gate selection and drill-down use it too.
+            let visible: Vec<SessionTimelineEntry> =
+                entries.iter().filter(|e| e.altitude >= floor).cloned().collect();
+            // Detect in-flight turns: any turn_id we've seen `turn.start` for but
+            // not yet `turn.end` is still open. The TUI marks the most recent row
+            // in such a turn with a spinner.
+            let open_turns = cached_open_turns.clone();
+            // Rows + their source mapping (lets Enter drill into the underlying event).
+            let linked_escalation_approvals =
+                render::linked_promotion_escalation_approval_ids(&visible);
+            let mut indexed: Vec<(RenderedRow, RowSource)> = if squash {
+                render::coalesce_indexed(&visible)
+            } else {
+                visible
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        !render::is_redundant_promotion_escalation_approval(
+                            e,
+                            &linked_escalation_approvals,
+                        )
+                    })
+                    .map(|(i, e)| (RenderedRow::Line(render::render_spec(e)), RowSource::Single(i)))
+                    .collect()
+            };
+            // Annotate each row with turn membership + the in-flight bit, and
+            // track the previous turn_id so the renderer can draw a faint
+            // divider when the turn changes. The in-flight spinner is reserved
+            // for the **most recent** row in an open turn — earlier rows of the
+            // same turn stay in their normal altitude glyph so the operator can
+            // read the chain.
         let mut extra_inflight_rows = HashSet::new();
         if let Some(gate) = find_active_gate(&entries, &resolved, &acted) {
             if let Some(row_idx) =
@@ -4068,8 +4141,6 @@ pub fn run(
 
         let gate = active_gate(&entries, &visible, indexed.get(selected), &resolved, &acted);
 
-        spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
-        let spinner_glyph = SPINNER_FRAMES[spinner_frame];
         let session_stats = compute_session_stats(&entries);
 
         let term_size = terminal.size()?;
@@ -4181,8 +4252,16 @@ pub fn run(
         view_viewport_offset = viewport_offset;
         view_list_height = list_height;
         view_turn_boundaries = turn_boundaries;
+        needs_redraw = false;
+    }
 
-        let _ = event::poll(Duration::from_millis(FRAME_MS))?;
+    let _ = event::poll(Duration::from_millis(
+        if cached_open_turns.is_empty() && !session_async_processing {
+            IDLE_FRAME_MS
+        } else {
+            FRAME_MS
+        }
+    ))?;
     }
     Ok(())
 }
