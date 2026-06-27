@@ -1448,7 +1448,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "middleware": { "type": "object" },
                     "base_revision_id": { "type": "string" },
                     "summary": { "type": "string" },
-                    "replace": { "type": "boolean", "description": "Set to true to archive the existing active revision and install this as the new one. Required when updating an already-installed agent." },
+                    "replace": { "type": "boolean", "description": "Set to true when updating an already-installed agent. The existing active revision is archived automatically at promote time — atomically, when the new revision becomes active — not at create time, so a candidate that is never promoted (smoke-test failure / operator reject / eval gate) leaves the live revision untouched. Required when updating an already-installed agent." },
                     "credential_services": { "type": "array", "items": { "type": "string" }, "description": "Service names whose credentials the agent needs at spawn time. The env-var name is derived deterministically from the service name (e.g. 'moltbook' → MOLTBOOK_SECRET). Only meaningful for script-mode agents." },
                     "open_web": { "type": "boolean", "description": "Set true only for genuine open-web agents that require NetworkAccess hosts: [\"*\"]. Default false." }
                 },
@@ -1642,11 +1642,11 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         }
         // NOTE: with `replace: true` the existing Ready revision is intentionally
         // left in place here. `atomic_promote` archives the outgoing revision
-        // atomically (agent_registry.rs:474-481) in the SAME transaction that
-        // repoints the alias and sets the new revision Ready. Archiving at create
-        // time would leave the alias pointing at an Archived revision with no
-        // Ready backing if the candidate is never promoted (smoke-test failure,
-        // operator reject, eval gate, or an abandoned run) — see issue #652.
+        // atomically in the SAME transaction that repoints the alias and sets
+        // the new revision Ready. Archiving at create time would leave the alias
+        // pointing at an Archived revision with no Ready backing if the candidate
+        // is never promoted (smoke-test failure, operator reject, eval gate, or
+        // an abandoned run) — see issue #652.
 
         // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
         let (
