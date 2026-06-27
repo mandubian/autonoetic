@@ -1628,31 +1628,25 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 );
             }
         }
-        if !ready_revisions.is_empty() {
-            if args.replace {
-                for rev_id in &ready_revisions {
-                    gateway_store
-                        .update_agent_revision_status(
-                            rev_id,
-                            autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
-                        )
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to archive existing revision {}: {}", rev_id, e)
-                        })?;
-                }
-            } else {
-                return Ok(ToolError::fatal(
-                    format!(
-                        "Agent '{}' already has a promoted revision ({}). \
-                         Use agent_revision_list / agent_revision_inspect (or agent_inspect if you hold ReadAccess) to check before installing. \
-                         If you need to update, pass replace: true to archive the existing revision first.",
-                        args.agent_id,
-                        ready_revisions.join(", ")
-                    ),
-                    None::<String>,
-                ).to_error_response());
-            }
+        if !ready_revisions.is_empty() && !args.replace {
+            return Ok(ToolError::fatal(
+                format!(
+                    "Agent '{}' already has a promoted revision ({}). \
+                     Use agent_revision_list / agent_revision_inspect (or agent_inspect if you hold ReadAccess) to check before installing. \
+                     If you need to update, pass replace: true to install a new candidate; the existing revision is archived atomically at promote time.",
+                    args.agent_id,
+                    ready_revisions.join(", ")
+                ),
+                None::<String>,
+            ).to_error_response());
         }
+        // NOTE: with `replace: true` the existing Ready revision is intentionally
+        // left in place here. `atomic_promote` archives the outgoing revision
+        // atomically (agent_registry.rs:474-481) in the SAME transaction that
+        // repoints the alias and sets the new revision Ready. Archiving at create
+        // time would leave the alias pointing at an Archived revision with no
+        // Ready backing if the candidate is never promoted (smoke-test failure,
+        // operator reject, eval gate, or an abandoned run) — see issue #652.
 
         // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
         let (
