@@ -371,6 +371,215 @@ fn parse_frontmatter_capabilities(
     Ok(caps)
 }
 
+// =============================================================================
+// Revision shape + slot-reassignment detection (issues #657 / #658).
+//
+// A promotion into an EXISTING agent slot may be a categorical reassignment —
+// replacing the agent that occupies the slot with a different kind of agent —
+// rather than an in-place version bump. Two gates key off this:
+//
+//   * The smoke-test gate (#657) treats a shape-changing replacement like a
+//     new agent: the candidate must be smoke-tested before it can replace the
+//     live revision. Independently, any caller-supplied smoke-test evidence is
+//     always verified, even for an unchanged slot.
+//   * The reassignment approval gate (#658) requires a distinct operator
+//     approval (surfacing execution_mode / description / capability-shrinkage
+//     changes) so a slot replacement cannot hide behind a routine-looking
+//     "capability broadened" approval, or behind no approval at all on pure
+//     capability shrinkage.
+// =============================================================================
+
+/// The observable "shape" of a revision relevant to reassignment detection.
+/// Two revisions with the same shape are in-place upgrades; a differing shape
+/// is a categorical slot reassignment.
+#[derive(Debug, Clone, Default)]
+struct RevisionShape {
+    execution_mode: ExecutionMode,
+    script_entry: Option<String>,
+    description: String,
+    capabilities: Vec<Capability>,
+}
+
+impl RevisionShape {
+    /// Extract the shape from a parsed SKILL.md frontmatter (the same lenient
+    /// raw frontmatter the promotion gate already uses). Capabilities reuse
+    /// `parse_frontmatter_capabilities` for consistency with the gate.
+    fn from_frontmatter(frontmatter: &serde_yaml::Value) -> Self {
+        let json = serde_json::to_value(frontmatter).unwrap_or_default();
+        let auto = json
+            .get("metadata")
+            .and_then(|m| m.get("autonoetic"))
+            .cloned()
+            .unwrap_or_default();
+        let execution_mode = auto
+            .get("execution_mode")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "script" => Some(ExecutionMode::Script),
+                "reasoning" => Some(ExecutionMode::Reasoning),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let script_entry = auto
+            .get("script_entry")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let description = auto
+            .get("agent")
+            .and_then(|a| a.get("description"))
+            .and_then(|v| v.as_str())
+            .or_else(|| json.get("description").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let capabilities = parse_frontmatter_capabilities(frontmatter).unwrap_or_default();
+        RevisionShape {
+            execution_mode,
+            script_entry,
+            description,
+            capabilities,
+        }
+    }
+}
+
+/// Structured signal describing how a candidate differs categorically from the
+/// outgoing revision it would replace.
+#[derive(Debug, Clone, Default)]
+struct ReassignmentSignal {
+    execution_mode_changed: bool,
+    /// Script entrypoint changed while remaining in script mode — the
+    /// entrypoint *is* the agent, so this is a wholesale replacement.
+    script_entry_changed: bool,
+    /// Descriptions share almost no vocabulary — a strong proxy for a
+    /// different agent role occupying the same slot.
+    description_unrelated: bool,
+    /// Full capability delta (including removed / narrowed), computed via the
+    /// public `compute_capability_delta`. The promotion gate's private wrapper
+    /// discards non-broadening deltas; this one retains them so capability
+    /// shrinkage can be surfaced and gated.
+    capability_delta: autonoetic_types::capability::CapabilityDelta,
+}
+
+impl ReassignmentSignal {
+    /// A categorical change to what kind of agent occupies the slot.
+    fn is_slot_reassignment(&self) -> bool {
+        self.execution_mode_changed || self.script_entry_changed || self.description_unrelated
+    }
+
+    /// The capability surface shrank (capabilities removed or scopes narrowed).
+    fn capabilities_removed_or_narrowed(&self) -> bool {
+        !self.capability_delta.removed.is_empty() || !self.capability_delta.narrowed.is_empty()
+    }
+
+    /// Whether this signal warrants a distinct operator approval.
+    fn requires_approval(&self) -> bool {
+        self.is_slot_reassignment() || self.capabilities_removed_or_narrowed()
+    }
+}
+
+fn compute_reassignment_signal(
+    outgoing: &RevisionShape,
+    incoming: &RevisionShape,
+) -> ReassignmentSignal {
+    let execution_mode_changed = outgoing.execution_mode != incoming.execution_mode;
+    let script_entry_changed = outgoing.execution_mode == ExecutionMode::Script
+        && incoming.execution_mode == ExecutionMode::Script
+        && outgoing.script_entry.as_deref() != incoming.script_entry.as_deref();
+    let description_unrelated =
+        description_token_overlap(&outgoing.description, &incoming.description) < 0.2;
+    let capability_delta = autonoetic_types::capability::compute_capability_delta(
+        &outgoing.capabilities,
+        &incoming.capabilities,
+    );
+    ReassignmentSignal {
+        execution_mode_changed,
+        script_entry_changed,
+        description_unrelated,
+        capability_delta,
+    }
+}
+
+/// Jaccard similarity over lowercased alphanumeric word tokens. Returns 1.0
+/// when both descriptions are empty (treat as unchanged). A low score means the
+/// two descriptions share almost no vocabulary.
+fn description_token_overlap(a: &str, b: &str) -> f64 {
+    let tokenize = |s: &str| -> BTreeSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 1)
+            .map(|t| t.to_string())
+            .collect()
+    };
+    let sa = tokenize(a);
+    let sb = tokenize(b);
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    let inter = sa.intersection(&sb).count() as f64;
+    let union = sa.union(&sb).count() as f64;
+    if union == 0.0 {
+        1.0
+    } else {
+        inter / union
+    }
+}
+
+/// Render the human-facing reassignment annotation appended to an approval
+/// message so the operator can see the severity of a slot replacement (#658).
+fn reassignment_message_suffix(
+    signal: &ReassignmentSignal,
+    outgoing: Option<&RevisionShape>,
+    incoming: Option<&RevisionShape>,
+) -> String {
+    if !signal.is_slot_reassignment() && !signal.capabilities_removed_or_narrowed() {
+        return String::new();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if signal.is_slot_reassignment() {
+        if signal.execution_mode_changed {
+            parts.push(format!(
+                "execution_mode {:?}→{:?}",
+                outgoing.map(|o| o.execution_mode).unwrap_or_default(),
+                incoming.map(|i| i.execution_mode).unwrap_or_default(),
+            ));
+        }
+        if signal.script_entry_changed {
+            parts.push("script entrypoint changed".to_string());
+        }
+        if signal.description_unrelated {
+            parts.push(format!(
+                "role/description changed ({:?}→{:?})",
+                outgoing
+                    .map(|o| truncate_desc(&o.description, 40))
+                    .unwrap_or_default(),
+                incoming
+                    .map(|i| truncate_desc(&i.description, 40))
+                    .unwrap_or_default(),
+            ));
+        }
+        format!(
+            " ⚠️ Slot reassignment — agent slot would be replaced by a categorically \
+             different agent ({}).",
+            parts.join("; ")
+        )
+    } else {
+        format!(
+            " ⚠️ Capability surface narrowed — removed {:?}, narrowed {:?}.",
+            signal.capability_delta.removed, signal.capability_delta.narrowed
+        )
+    }
+}
+
+fn truncate_desc(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 #[derive(Debug, Deserialize)]
 struct RevisionCreateArgs {
     agent_id: String,
@@ -2528,6 +2737,36 @@ do not re-issue."
         })?;
 
         let current_capabilities = parse_frontmatter_capabilities(&skill_frontmatter)?;
+
+        // --- Revision shape + slot-reassignment signal (issues #657 / #658) ---
+        // Computed once here so the approval gate, the reassignment gate, and
+        // the smoke-test gate all share one classification. `None` for a
+        // brand-new agent (nothing to compare against) or when the outgoing
+        // SKILL is unavailable.
+        let incoming_shape = RevisionShape::from_frontmatter(&skill_frontmatter);
+        let outgoing_shape: Option<RevisionShape> = match gateway_store
+            .resolve_alias(&args.agent_id)?
+        {
+            Some(alias) if alias.revision_id != args.revision_id => {
+                let outgoing_skill_path = gateway_dir
+                    .join("revisions/agents")
+                    .join(&args.agent_id)
+                    .join(&alias.revision_id)
+                    .join("SKILL.md");
+                std::fs::read_to_string(&outgoing_skill_path)
+                    .ok()
+                    .and_then(|text| {
+                        crate::runtime::install_contract::extract_frontmatter_raw(&text)
+                            .ok()
+                            .map(|fm| RevisionShape::from_frontmatter(&fm))
+                    })
+            }
+            _ => None,
+        };
+        let reassignment_signal: Option<ReassignmentSignal> = outgoing_shape
+            .as_ref()
+            .map(|o| compute_reassignment_signal(o, &incoming_shape));
+
         let delta_mode = config
             .map(|c| c.capability_delta_gate_mode)
             .unwrap_or(CapabilityDeltaGateMode::Strict);
@@ -2625,17 +2864,96 @@ do not re-issue."
                     }
                 }
             }
-            if let Some(delta) = capability_delta {
+
+            // Reassignment gate (#658). A categorical change to the agent
+            // occupying an EXISTING slot — execution_mode / script entrypoint /
+            // unrelated description — or a pure capability SHRINKAGE requires a
+            // distinct operator approval, even when no capability broadened.
+            // The broadening gate above returns None for non-broadening deltas,
+            // so without this a planner could replace a ground agent under a
+            // routine-looking approval (or none at all on pure shrinkage).
+            let needs_reassignment_approval = reassignment_signal
+                .as_ref()
+                .map(|r| r.requires_approval())
+                .unwrap_or(false);
+
+            if capability_delta.is_some() || needs_reassignment_approval {
                 let outgoing_revision_id = gateway_store
                     .resolve_alias(&args.agent_id)?
                     .map(|alias| alias.revision_id)
                     .unwrap_or_default();
-                let added_capabilities: Vec<String> = delta.added.clone();
-                let broadened_capabilities: Vec<String> = delta
-                    .broadened
-                    .iter()
-                    .map(|b| b.capability_type.clone())
-                    .collect();
+                let added_capabilities: Vec<String> = capability_delta
+                    .as_ref()
+                    .map(|d| d.added.clone())
+                    .unwrap_or_default();
+                let broadened_capabilities: Vec<String> = capability_delta
+                    .as_ref()
+                    .map(|d| {
+                        d.broadened
+                            .iter()
+                            .map(|b| b.capability_type.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Reassignment detail surfaced in the approval payload so the
+                // operator can give informed consent for a slot replacement
+                // (#658). Empty object when this is a pure in-place upgrade.
+                let reassignment_payload = reassignment_signal
+                    .as_ref()
+                    .map(|r| {
+                        serde_json::json!({
+                            "slot_reassignment": r.is_slot_reassignment(),
+                            "execution_mode_changed": r.execution_mode_changed,
+                            "script_entry_changed": r.script_entry_changed,
+                            "description_unrelated": r.description_unrelated,
+                            "removed_capabilities": r.capability_delta.removed,
+                            "narrowed_capabilities": r.capability_delta.narrowed,
+                        })
+                    })
+                    .unwrap_or_else(|| serde_json::json!({}));
+
+                let broadened_structured = capability_delta
+                    .as_ref()
+                    .map(|d| serde_json::to_value(&d.broadened).unwrap_or_default())
+                    .unwrap_or_default();
+                let payload = serde_json::json!({
+                    "added": added_capabilities,
+                    "broadened": broadened_structured,
+                    "reassignment": reassignment_payload,
+                });
+
+                let reass_suffix = reassignment_signal
+                    .as_ref()
+                    .map(|r| {
+                        reassignment_message_suffix(
+                            r,
+                            outgoing_shape.as_ref(),
+                            Some(&incoming_shape),
+                        )
+                    })
+                    .unwrap_or_default();
+
+                let approval_message = if outgoing_revision_id.is_empty() {
+                    format!(
+                        "Promoting new agent '{}' for the first time: all declared capabilities \
+                         require operator acknowledgement (R++2 / promotion-completeness). \
+                         Operator approval is required.{}",
+                        args.agent_id, reass_suffix
+                    )
+                } else if capability_delta.is_some() {
+                    format!(
+                        "Capability set broadened relative to outgoing revision '{}'. Operator \
+                         approval is required (R++2).{}",
+                        outgoing_revision_id, reass_suffix
+                    )
+                } else {
+                    format!(
+                        "Revision '{}' replaces outgoing revision '{}' for agent '{}'. Operator \
+                         approval is required.{}",
+                        args.revision_id, outgoing_revision_id, args.agent_id, reass_suffix
+                    )
+                };
 
                 // Cross-workflow dedupe: if an identical RevisionPromote approval
                 // already exists (pending or approved) for this agent/revision/delta,
@@ -2656,32 +2974,19 @@ do not re-issue."
                             &args.revision_id,
                             &added_capabilities,
                             &broadened_capabilities,
+                            &outgoing_revision_id,
                         )?
                     {
                         if let Some(guard) = single_flight_guard.as_mut() {
                             guard.disarm();
                         }
                         let request_id = existing.request_id.clone();
-                        let payload = serde_json::json!({
-                            "added": delta.added,
-                            "broadened": delta.broadened,
-                        });
                         return Ok(serde_json::json!({
                             "ok": existing.status
                                 == Some(autonoetic_types::background::ApprovalStatus::Approved),
                             "error_type": "permission",
                             "error": "capability_delta_requires_approval",
-                            "message": if outgoing_revision_id.is_empty() {
-                                format!(
-                                    "Promoting new agent '{}' for the first time: all declared capabilities require operator acknowledgement (R++2 / promotion-completeness). Operator approval is required.",
-                                    args.agent_id
-                                )
-                            } else {
-                                format!(
-                                    "Capability set broadened relative to outgoing revision '{}'. Operator approval is required (R++2).",
-                                    outgoing_revision_id
-                                )
-                            },
+                            "message": approval_message,
                             "approval_required": existing.status
                                 != Some(autonoetic_types::background::ApprovalStatus::Approved),
                             "request_id": request_id,
@@ -2694,11 +2999,6 @@ do not re-issue."
                         .to_string());
                     }
                 }
-
-                let payload = serde_json::json!({
-                    "added": delta.added,
-                    "broadened": delta.broadened,
-                });
 
                 let request_id = format!(
                     "apr-{}",
@@ -2729,19 +3029,7 @@ do not re-issue."
                     status: None,
                     decided_at: None,
                     decided_by: None,
-                    reason: args.reason.clone().or_else(|| {
-                        Some(if outgoing_revision_id.is_empty() {
-                            format!(
-                                "First promotion of new agent '{}' (revision '{}') — operator must acknowledge all declared capabilities",
-                                args.agent_id, args.revision_id
-                            )
-                        } else {
-                            format!(
-                                "Promote revision '{}' would broaden capabilities relative to '{}'",
-                                args.revision_id, outgoing_revision_id
-                            )
-                        })
-                    }),
+                    reason: args.reason.clone().or_else(|| Some(approval_message.clone())),
                     evidence_ref: None,
                     decision_reason: None,
                     approval_level: approval_level.clone(),
@@ -2768,17 +3056,7 @@ do not re-issue."
                     "ok": false,
                     "error_type": "permission",
                     "error": "capability_delta_requires_approval",
-                    "message": if outgoing_revision_id.is_empty() {
-                        format!(
-                            "Promoting new agent '{}' for the first time: all declared capabilities require operator acknowledgement (R++2 / promotion-completeness). Operator approval is required.",
-                            args.agent_id
-                        )
-                    } else {
-                        format!(
-                            "Capability set broadened relative to outgoing revision '{}'. Operator approval is required (R++2).",
-                            outgoing_revision_id
-                        )
-                    },
+                    "message": approval_message,
                     "approval_required": true,
                     "request_id": request_id,
                     "approval_ref": request_id,
@@ -3404,8 +3682,19 @@ do not re-issue."
             }
         }
 
-        // Smoke-test gate for new agent installation (P-2.28 / #578).
-        // Unconditional for capability-bearing agents; pure-reasoning agents exempt.
+        // Smoke-test gate (P-2.28 / #578, hardened #657).
+        //
+        // Two independent rules:
+        //  (A) Caller-supplied smoke-test evidence is ALWAYS verified, regardless
+        //      of whether the agent is new. Volunteering a smoke_test_task_id is
+        //      a request to enforce it — a failed task blocks promotion. This
+        //      closes the gap that let a failed smoke test be silently ignored
+        //      when promoting into an existing slot.
+        //  (B) New agents AND shape-changing replacements (#658) must supply a
+        //      successful smoke test when the candidate carries executable
+        //      capabilities. A categorical slot replacement is treated like a
+        //      brand-new agent because the candidate is effectively untrusted
+        //      code taking over the slot.
         let is_new_agent = gateway_store.resolve_alias(&args.agent_id)?.is_none();
         let runtime_lock_rel = crate::runtime::parser::SkillParser::parse(&skill_text)
             .map(|(m, _)| m.runtime.runtime_lock)
@@ -3419,9 +3708,69 @@ do not re-issue."
             &credential_services,
         );
 
-        if is_new_agent
-            && smoke_involvement != crate::runtime::smoke_test_gate::SmokeTestInvolvement::NotRequired
-        {
+        // A categorical slot replacement (existing agent whose candidate changes
+        // execution_mode / script entrypoint / unrelated description) is treated
+        // as smoke-test-required, like a new agent.
+        let shape_changed = reassignment_signal
+            .as_ref()
+            .map(|r| r.is_slot_reassignment())
+            .unwrap_or(false);
+        let smoke_required = (is_new_agent || shape_changed)
+            && smoke_involvement != crate::runtime::smoke_test_gate::SmokeTestInvolvement::NotRequired;
+
+        // (A) Verify any caller-supplied evidence. If either id is present, both
+        // must be, and the referenced task must have succeeded against this
+        // candidate revision. This runs even for an unchanged existing agent.
+        if args.smoke_test_task_id.is_some() || args.smoke_test_workflow_id.is_some() {
+            let Some(workflow_id) = args.smoke_test_workflow_id.as_deref() else {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_required",
+                    "message": "smoke_test_task_id was provided without smoke_test_workflow_id. \
+                                Supply both from the same successful smoke-test run.",
+                    "repair_hint": "Pass both smoke_test_workflow_id and smoke_test_task_id (or omit both).",
+                })
+                .to_string());
+            };
+            let Some(task_id) = args.smoke_test_task_id.as_deref() else {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_required",
+                    "message": "smoke_test_workflow_id was provided without smoke_test_task_id. \
+                                Supply both from the same successful smoke-test run.",
+                    "repair_hint": "Pass both smoke_test_workflow_id and smoke_test_task_id (or omit both).",
+                })
+                .to_string());
+            };
+            if let Err(e) = verify_smoke_test_task(
+                config.ok_or_else(|| anyhow::anyhow!("GatewayConfig required for smoke-test verification"))?,
+                &gateway_store,
+                workflow_id,
+                task_id,
+                &args.agent_id,
+                &args.revision_id,
+                args.smoke_test_input.as_deref(),
+            ) {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_failed_or_mismatched",
+                    "message": format!(
+                        "Smoke-test evidence for agent '{}' is missing or invalid: {}",
+                        args.agent_id,
+                        e
+                    ),
+                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...) and confirm the task succeeds, then retry promotion with the correct workflow_id and task_id.",
+                })
+                .to_string());
+            }
+        }
+
+        // (B) Require evidence for new agents and shape-changing replacements.
+        //     (If evidence was supplied it was already verified by rule A above.)
+        if smoke_required {
             if smoke_involvement
                 == crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected
             {
@@ -3442,15 +3791,29 @@ do not re-issue."
                 }
             }
 
-            let Some(workflow_id) = args.smoke_test_workflow_id.as_deref() else {
+            let has_evidence =
+                args.smoke_test_workflow_id.is_some() && args.smoke_test_task_id.is_some();
+            if !has_evidence {
+                let reason = if is_new_agent {
+                    format!(
+                        "Agent '{}' is new and declares executable capabilities.",
+                        args.agent_id
+                    )
+                } else {
+                    format!(
+                        "Agent '{}' candidate is a categorical slot replacement \
+                         (execution_mode / entrypoint / role changed) and declares executable \
+                         capabilities — it must be smoke-tested before replacing the live revision.",
+                        args.agent_id
+                    )
+                };
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "validation",
                     "error": "smoke_test_required",
                     "message": format!(
-                        "Agent '{}' is new and declares executable capabilities. \
-                         Provide smoke_test_workflow_id and smoke_test_task_id from a successful smoke-test run.",
-                        args.agent_id
+                        "{} Provide smoke_test_workflow_id and smoke_test_task_id from a successful smoke-test run.",
+                        reason
                     ),
                     "smoke_test_involvement": match smoke_involvement {
                         crate::runtime::smoke_test_gate::SmokeTestInvolvement::AutoRun => "auto_run",
@@ -3458,47 +3821,6 @@ do not re-issue."
                         _ => "required",
                     },
                     "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...), wait for success, then retry promotion with smoke_test_workflow_id and smoke_test_task_id.",
-                })
-                .to_string());
-            };
-            let Some(task_id) = args.smoke_test_task_id.as_deref() else {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "validation",
-                    "error": "smoke_test_required",
-                    "message": format!(
-                        "Agent '{}' is new and declares executable capabilities. \
-                         Provide smoke_test_task_id from a successful smoke-test run.",
-                        args.agent_id
-                    ),
-                    "smoke_test_involvement": match smoke_involvement {
-                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::AutoRun => "auto_run",
-                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected => "operator_directed",
-                        _ => "required",
-                    },
-                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...), wait for success, then retry promotion with smoke_test_workflow_id and smoke_test_task_id.",
-                })
-                .to_string());
-            };
-            if let Err(e) = verify_smoke_test_task(
-                config.ok_or_else(|| anyhow::anyhow!("GatewayConfig required for smoke-test verification"))?,
-                &gateway_store,
-                workflow_id,
-                task_id,
-                &args.agent_id,
-                &args.revision_id,
-                args.smoke_test_input.as_deref(),
-            ) {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "validation",
-                    "error": "smoke_test_failed_or_mismatched",
-                    "message": format!(
-                        "Smoke-test evidence for new agent '{}' is missing or invalid: {}",
-                        args.agent_id,
-                        e
-                    ),
-                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...) and confirm the task succeeds, then retry promotion with the correct workflow_id and task_id.",
                 })
                 .to_string());
             }

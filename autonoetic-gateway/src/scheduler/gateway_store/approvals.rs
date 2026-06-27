@@ -430,6 +430,7 @@ impl GatewayStore {
         revision_id: &str,
         added_capabilities: &[String],
         broadened_capabilities: &[String],
+        outgoing_revision_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -458,13 +459,22 @@ impl GatewayStore {
             if let autonoetic_types::background::ScheduledAction::RevisionPromote {
                 agent_id: a_id,
                 revision_id: r_id,
+                outgoing_revision_id: a_outgoing,
                 added_capabilities: a_caps,
                 broadened_capabilities: b_caps,
                 ..
             } = action
             {
+                // The outgoing baseline is part of the match key (#658 /
+                // review on #660): a stale approval acknowledged a delta against
+                // a *specific* outgoing revision. If the alias has since moved,
+                // reusing it would misrepresent what the operator approved (and
+                // could bypass the reassignment informed-consent gate after a
+                // slot shape change). An empty `outgoing_revision_id` (brand-new
+                // agent) matches only approvals that were also first-admission.
                 if a_id == agent_id
                     && r_id == revision_id
+                    && a_outgoing == outgoing_revision_id
                     && a_caps.iter().cloned().collect::<std::collections::HashSet<String>>()
                         == added
                     && b_caps.iter().cloned().collect::<std::collections::HashSet<String>>()
@@ -1328,6 +1338,7 @@ mod decided_by_kind_tests {
                 "rev-abc",
                 &["NetworkAccess".to_string()],
                 &[],
+                "",
             )
             .unwrap();
         assert!(matched.is_some());
@@ -1343,6 +1354,7 @@ mod decided_by_kind_tests {
                 "rev-abc",
                 &["FileWrite".to_string()],
                 &[],
+                "",
             )
             .unwrap();
         assert!(not_matched.is_none());
@@ -1396,6 +1408,7 @@ mod decided_by_kind_tests {
                 "rev-def",
                 &["NetworkAccess".to_string()],
                 &[],
+                "",
             )
             .unwrap();
         assert_eq!(
