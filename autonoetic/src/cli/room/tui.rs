@@ -2106,6 +2106,7 @@ pub fn run(
     // Idle-frame optimization: only rebuild and redraw when something changed.
     let mut needs_redraw = true;
     let mut cached_open_turns: HashSet<String> = HashSet::new();
+    let mut cached_open_turns_valid = false;
     let mut cached_floor = floor;
     let mut cached_squash = squash;
     let mut cached_show_reasoning = show_reasoning;
@@ -3947,7 +3948,7 @@ pub fn run(
 
         // Recompute open turns only when the timeline changed; otherwise reuse
         // the cached set to avoid scanning all entries every frame.
-        if entries_changed || cached_open_turns.is_empty() {
+        if entries_changed || !cached_open_turns_valid {
             cached_open_turns.clear();
             for e in &entries {
                 match e.event_type.as_str() {
@@ -3964,6 +3965,7 @@ pub fn run(
                     _ => {}
                 }
             }
+            cached_open_turns_valid = true;
         }
 
         // View configuration (floor/squash/reasoning) only changes through input,
@@ -6437,7 +6439,6 @@ fn draw(
                 LiveContentNode::Plan {
                     plan_id,
                     is_latest,
-                    version,
                     ..
                 } => {
                     last_plan_id = Some(plan_id.clone());
