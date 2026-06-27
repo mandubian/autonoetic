@@ -23,7 +23,7 @@ const TOOL_RESULT_PREVIEW_MAX_CHARS: usize = 256;
 /// Max characters for `agent.message` / `agent.reasoning` on the canonical
 /// timeline (after redaction). Aligns with the room list body ceiling; the TUI
 /// still repairs JSON truncated at the tail. Full text remains in the evidence store.
-const TIMELINE_AGENT_NARRATIVE_MAX_CHARS: usize = 8_000;
+pub(crate) const TIMELINE_AGENT_NARRATIVE_MAX_CHARS: usize = 8_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvidenceMode {

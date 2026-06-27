@@ -379,12 +379,6 @@ pub(crate) fn script_causal_event(
     });
 }
 
-/// Cap on script stdout mirrored into the `agent.message` timeline row. The
-/// timeline is a preview surface; the full, unredacted stdout already lives in
-/// `execution_traces` (queryable via `execution_search`), so we mirror a
-/// readable slice — matching the agent-narrative cap (`TIMELINE_AGENT_NARRATIVE_MAX_CHARS`).
-const TIMELINE_SCRIPT_STDOUT_MAX_CHARS: usize = 8_000;
-
 /// Emit an `agent.message` live-digest timeline row carrying a script agent's
 /// stdout, so the room TUI shows script output inline at the default (`Normal`)
 /// altitude — the same way a reasoning agent's narrative reaches the operator.
@@ -398,8 +392,11 @@ const TIMELINE_SCRIPT_STDOUT_MAX_CHARS: usize = 8_000;
 /// mirrors onto the timeline as `agent.message` (`session_tracer.rs:698`). We
 /// reuse that event so a `print("toto")` reads as a conversational line.
 ///
-/// The stdout is redacted (`redact_embedded_secrets`, matching `agent.message`)
-/// and capped. Empty output is skipped, mirroring the reasoning path.
+/// The row is built with the shared [`build_timeline_event`] so its shape
+/// (attribution, node id, payload serialization, refs) stays identical to every
+/// other timeline producer. The stdout is redacted (`redact_embedded_secrets`,
+/// matching `agent.message`) and capped at the shared narrative cap. Empty
+/// output is skipped, mirroring the reasoning path.
 pub(crate) fn emit_script_message_timeline(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     agent_id: &str,
@@ -414,29 +411,22 @@ pub(crate) fn emit_script_message_timeline(
         return;
     }
     let role = crate::runtime::session_timeline::derive_role(agent_id);
-    let altitude = crate::runtime::session_timeline::altitude_for("agent.message", &role);
+    let principal = autonoetic_types::principal::Principal::agent(agent_id.to_string());
     let capped = cap_chars(
         &autonoetic_types::redaction::redact_embedded_secrets(message),
-        TIMELINE_SCRIPT_STDOUT_MAX_CHARS,
+        crate::runtime::session_tracer::TIMELINE_AGENT_NARRATIVE_MAX_CHARS,
     );
-    let payload = serde_json::json!({ "message": capped });
-    let principal = autonoetic_types::principal::Principal::agent(agent_id.to_string());
-    let row = crate::scheduler::gateway_store::LiveDigestEventRecord {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        root_session_id: crate::runtime::live_digest::base_session_id(session_id).to_string(),
-        source_session_id: session_id.to_string(),
-        turn_id: None,
-        source_agent_id: Some(agent_id.to_string()),
-        source_node_id: crate::execution::gateway_actor_id(),
-        event_type: "agent.message".to_string(),
-        payload: serde_json::to_string(&payload).ok(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        principal_kind: Some(principal.kind_to_storage()),
-        principal_id: Some(principal.id.clone()),
-        role: Some(role.to_storage()),
-        altitude: Some(altitude.as_str().to_string()),
-        refs_json: None,
-    };
+    let row = crate::runtime::session_timeline::build_timeline_event(
+        crate::runtime::live_digest::base_session_id(session_id).to_string(),
+        session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        "agent.message",
+        None, // altitude derived from (event_type, role) -> Normal for agent.message
+        Some(serde_json::json!({ "message": capped })),
+        autonoetic_types::session_timeline::TimelineRefs::default(),
+    );
     if let Err(e) = store.create_live_digest_event(&row) {
         tracing::debug!(
             target: "live_digest",
@@ -831,13 +821,14 @@ mod tests {
     }
 
     #[test]
-    fn script_stdout_timeline_row_is_capped_and_redacted() {
+    fn script_stdout_timeline_row_is_capped() {
+        use crate::runtime::session_tracer::TIMELINE_AGENT_NARRATIVE_MAX_CHARS;
         use crate::scheduler::gateway_store::GatewayStore;
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
         let store = GatewayStore::open(dir.path()).unwrap();
-        let big = "x".repeat(TIMELINE_SCRIPT_STDOUT_MAX_CHARS + 5_000);
+        let big = "x".repeat(TIMELINE_AGENT_NARRATIVE_MAX_CHARS + 5_000);
         emit_script_message_timeline(Some(&store), "a.default", "root-3/a", &big);
 
         let page = store
@@ -849,9 +840,38 @@ mod tests {
         let msg = payload["message"].as_str().unwrap();
         assert_eq!(
             msg.chars().count(),
-            TIMELINE_SCRIPT_STDOUT_MAX_CHARS,
+            TIMELINE_AGENT_NARRATIVE_MAX_CHARS,
             "timeline mirrors a capped preview; full stdout lives in execution_traces"
         );
         assert!(msg.ends_with('…'));
+    }
+
+    #[test]
+    fn script_stdout_timeline_row_redacts_embedded_secrets() {
+        use crate::scheduler::gateway_store::GatewayStore;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        // A Bearer token in the script output must be masked before it reaches
+        // the timeline surface (`redact_embedded_secrets`, same as agent.message).
+        let stdout = "downloaded using Authorization: Bearer sk-live-abc123secret then exited";
+        emit_script_message_timeline(Some(&store), "a.default", "root-4/a", stdout);
+
+        let page = store
+            .list_session_timeline("root-4", None, 10, None, None)
+            .unwrap();
+        let row = &page.entries[0];
+        let payload: serde_json::Value =
+            serde_json::from_str(row.payload.as_deref().unwrap()).unwrap();
+        let msg = payload["message"].as_str().unwrap();
+        assert!(
+            !msg.contains("sk-live-abc123secret"),
+            "raw secret must not reach the timeline; got: {msg}"
+        );
+        assert!(
+            msg.contains("***REDACTED***"),
+            "bearer token must be masked; got: {msg}"
+        );
     }
 }
