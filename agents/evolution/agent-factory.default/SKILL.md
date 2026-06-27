@@ -379,11 +379,13 @@ against — a differently-formatted ref for the same digest is fine. If the
 new artifact first — never install one whose verdicts are stale (see "Gate and
 install the SAME artifact identity" above).
 
+**Check for an existing candidate first.** Before spawning `specialized_builder.default`, call `workflow_state` and inspect `reuse_guards.has_builder_candidate`. If it is true and the candidate's `artifact_ref` matches the artifact you intend to install, **skip this step entirely** and proceed to Step 6 (smoke test) or Step 7 (`install_mode: "promote"` with the existing `revision_id`). Creating a second candidate with a different intent will change the content digest and invalidate the existing promotion records.
+
 **Why we delegate** (not optional): you do **not** have the `AgentRevision` capability — see your manifest above. The gateway's policy engine will reject `agent_revision_create_from_intent` and `agent_revision_promote` calls from this agent. `specialized_builder.default` is the **only** agent licensed to call those tools.
 
 This separation exists by design (see `docs/protected-agents.md`, recursive trust problem): the orchestrator that *decides* what to install must not be the same agent that *executes* the install — otherwise a regressed orchestrator could silently promote broken revisions, including a broken version of itself.
 
-Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent **plus `install_mode: "create_candidate"`**. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
+Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent **plus `install_mode: "create_candidate"`** only when no candidate exists. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
 - `artifact_ref` (for code agents) or omit (for reasoning agents)
 - `instructions`, `description`, `capabilities`, `execution_mode`
 - `llm_preset` (for reasoning mode — gateway `llm_presets` key)
@@ -427,11 +429,13 @@ The gateway **always** rejects `agent_revision_promote` for new capability-beari
 Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing:
 - `install_mode: "promote"`
 - `agent_id`: the target agent id
-- `revision_id`: the candidate revision id from Step 5
+- `revision_id`: the candidate revision id from Step 5 (re-use the candidate from `workflow_state.reuse_guards.builder_candidate` if one exists)
 - `smoke_test_task_id` and `smoke_test_workflow_id` when Step 6 ran (required for script-mode and capability-bearing agents)
 - `smoke_test_input` when the candidate was operator-directed
 
 Then end your turn. On resume, if `specialized_builder` reports `status: "promoted"` / `installed: true`, the agent is now active. Report success to the planner.
+
+**Do not create a new candidate if one already exists.** If `workflow_state.reuse_guards.has_builder_candidate` is true, use that `revision_id` for promotion rather than returning to Step 5.
 
 ## Error Handling
 
@@ -467,6 +471,7 @@ On wake-up after interruption: call `workflow_state` first. Check `reuse_guards`
 
 | If `reuse_guards` shows... | Do NOT... | Do... |
 |---|---|---|
+| `has_builder_candidate: true` | Re-create a candidate revision | Proceed to Step 6/7 with the existing `revision_id` |
 | `has_coder_artifact: true` | Re-spawn architect or coder | Proceed to packager/gates/install |
 | `has_static_evaluator_result: true` + `has_unit_test_runner_result: true` + `has_auditor_result: true` | Re-run federation roles | `promotion_query` then Step 5 or escalate to planner |
 | `has_builder_revision_id: true` | Re-spawn specialized_builder create step | Proceed to smoke-test step (Step 6) |

@@ -949,13 +949,45 @@ fn create_revision_from_files(
         detected_network_hosts: common.detected_network_hosts.clone(),
     };
 
-    let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
-
+    // Fail-fast: creating a new revision with a different content digest would
+    // invalidate existing promotion evidence for the same artifact identity.
     if let Some(artifact_id) = &common.artifact_id {
         let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+        if let Some(record) = promo_store.get_promotion(artifact_id) {
+            let has_passing_evidence = record.auditor_pass
+                || record.static_evaluator_pass
+                || record.evaluator_pass
+                || record.sealed_evaluator_pass
+                || record.unit_test_runner_pass;
+            if has_passing_evidence {
+                if let Some(record_digest) = record.content_digest.as_deref() {
+                    if record_digest != rev.content_digest.as_str() {
+                        let error_json = ToolError::permission(format!(
+                            "Promotion gate: creating this revision would change the content digest for artifact '{}' \
+                             from '{}' to '{}' and invalidate existing promotion evidence. \
+                             Promote the existing candidate revision or re-run gate roles before creating a new revision.",
+                            artifact_id, record_digest, rev.content_digest
+                        ))
+                        .with_code("promotion_gate_content_digest_would_change")
+                        .with_repair_hint("Use agent_revision_promote with the existing candidate revision, or re-run auditor/evaluator and obtain new promotion records before creating a new revision.")
+                        .to_error_response();
+                        let response_value = serde_json::from_str(&error_json)
+                            .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error_json}));
+                        return Ok(PersistedRevisionResult {
+                            response: response_value,
+                            normalized_lock,
+                        });
+                    }
+                }
+                // If content_digest is not yet bound, let reconcile_content_digest_for_revision
+                // bind it below instead of failing.
+            }
+        }
         let _ =
             promo_store.reconcile_content_digest_for_revision(artifact_id, &rev.content_digest)?;
     }
+
+    let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
 
     let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
 
@@ -2106,7 +2138,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             metadata: args.metadata.clone(),
             manifest_meta: Some(manifest_meta),
             source_kind,
-            source_ref,
+            source_ref: source_ref.clone(),
             detected_network_hosts,
         };
         let persisted = create_revision_from_files(
@@ -2155,6 +2187,54 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 ]),
             );
         }
+
+        // Emit a workflow event so orchestrators can discover and reuse the candidate.
+        if response.get("ok") == Some(&serde_json::Value::Bool(true))
+            && response.get("status").and_then(|v| v.as_str()) == Some("created")
+        {
+            if let (Some(config), Some(session_id)) = (_config, session_id) {
+                let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+                let workflow_lookup = crate::scheduler::resolve_workflow_id_for_root_session(
+                    config,
+                    &root_session_id,
+                )
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+                        config,
+                        Some(gateway_store.as_ref()),
+                        &root_session_id,
+                        Some(manifest.agent.id.as_str()),
+                    )
+                    .ok()
+                    .map(|w| w.workflow_id)
+                });
+                if let Some(workflow) = workflow_lookup {
+                    let payload = serde_json::json!({
+                        "agent_id": args.agent_id,
+                        "revision_id": response.get("revision_id").cloned().unwrap_or(serde_json::Value::Null),
+                        "artifact_id": common.artifact_id,
+                        "artifact_ref": source_ref,
+                        "content_digest": response.get("content_digest").cloned().unwrap_or(serde_json::Value::Null),
+                    });
+                    let _ = crate::scheduler::workflow_store::append_workflow_event(
+                        config,
+                        Some(gateway_store.as_ref()),
+                        &autonoetic_types::workflow::WorkflowEventRecord {
+                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            workflow_id: workflow,
+                            task_id: None,
+                            event_type: "workflow.revision.created".to_string(),
+                            agent_id: Some(args.agent_id.clone()),
+                            payload,
+                            occurred_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
+                }
+            }
+        }
+
         Ok(response.to_string())
     }
 }

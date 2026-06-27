@@ -342,6 +342,18 @@ Set it from artifact inspection — the gateway cross-checks against static anal
 
 When a tool returns `approval_required: true`, the gateway will suspend your session. After resumption, retry the **same call** with `approval_ref` set to the approved `request_id`. Do not retry with a guessed id.
 
+### Candidate Revision Already Exists
+
+When `workflow_state.reuse_guards.has_builder_candidate` is true for the target `agent_id`:
+
+1. **STOP** — do not call `agent_revision_create_from_intent` again.
+2. Use the `revision_id` from `reuse_guards.builder_candidate`.
+3. If the candidate has not been smoke-tested and the agent is script-mode or declares `NetworkAccess`/`CodeExecution`, run the smoke test first.
+4. Call `agent_revision_promote` with the existing `revision_id`.
+5. Only create a new revision if the orchestrator explicitly asks you to replace the candidate.
+
+This guard exists because `agent_revision_create_from_intent` changes the artifact's content digest, which invalidates existing auditor/evaluator promotion records and leaves the install blocked.
+
 ### Promotion Gate Failure
 
 When `agent_revision_promote` returns `"Promotion gate: no promotion_record found"`:

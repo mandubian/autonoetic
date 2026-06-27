@@ -863,6 +863,15 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
             &workflow_id,
         )?;
 
+        // Load workflow events so orchestrators can discover durable artifacts
+        // produced outside of task results (e.g. candidate revisions).
+        let workflow_events = crate::scheduler::workflow_store::load_workflow_events(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+        )
+        .unwrap_or_default();
+
         // Load pending approvals for this workflow to enrich pending_approvals entries
         let pending_approvals_map: HashMap<String, String> = {
             let root = workflow
@@ -1003,6 +1012,20 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 })
             });
 
+        let builder_candidate = workflow_events
+            .iter()
+            .filter(|e| e.event_type == "workflow.revision.created")
+            .filter_map(|e| {
+                let payload = e.payload.as_object()?;
+                Some(serde_json::json!({
+                    "agent_id": payload.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "revision_id": payload.get("revision_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "artifact_ref": payload.get("artifact_ref").cloned().unwrap_or(serde_json::Value::Null),
+                    "content_digest": payload.get("content_digest").cloned().unwrap_or(serde_json::Value::Null),
+                }))
+            })
+            .last();
+
         let reuse_guards = serde_json::json!({
             "has_coder_artifact": latest_artifact_by_role.contains_key("coder"),
             "has_evaluator_result": latest_artifact_by_role.contains_key("evaluator"),
@@ -1010,6 +1033,8 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
             "has_static_evaluator_result": latest_artifact_by_role.contains_key("static_evaluator"),
             "has_unit_test_runner_result": latest_artifact_by_role.contains_key("unit_test_runner"),
             "has_sealed_evaluator_result": latest_artifact_by_role.contains_key("sealed_evaluator"),
+            "has_builder_candidate": builder_candidate.is_some(),
+            "builder_candidate": builder_candidate,
             "pending_approvals": !pending_approvals.is_empty(),
             "active_tasks_running": !active_tasks.is_empty(),
         });
@@ -1028,6 +1053,8 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 "approval_pending — do not spawn new tasks, wait for approval"
             } else if !active_tasks.is_empty() {
                 "tasks_running — wait for completion or proceed with partial results"
+            } else if builder_candidate.is_some() {
+                "builder_candidate_exists — use install_mode:\"promote\" with the existing revision_id; do not create a new revision"
             } else if (latest_artifact_by_role.contains_key("evaluator") || latest_artifact_by_role.contains_key("sealed_evaluator"))
                 && latest_artifact_by_role.contains_key("auditor")
             {
