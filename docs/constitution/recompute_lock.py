@@ -193,7 +193,15 @@ def main() -> None:
 
     lock_path.write_text(json.dumps(lock, indent=2, ensure_ascii=False) + "\n")
 
+    # Keep the human-facing `CURRENT` pointer in lockstep with the signed
+    # version. `ACTIVE_CONSTITUTION_VERSION` in autonoetic-types/src/config.rs
+    # is the other half of this contract; the
+    # `current_file_matches_active_constitution_version` test enforces they match.
+    current_path = repo_root / "docs" / "constitution" / "CURRENT"
+    current_path.write_text(f"{args.version}\n")
+
     print(f"Updated: {lock_path}")
+    print(f"Updated: {current_path}")
     print(f"constitution_digest: {constitution_digest}")
     print(f"rule_enforcement_count: {len(rules)}")
     print(f"right_enforcement_count: {len(rights)}")
