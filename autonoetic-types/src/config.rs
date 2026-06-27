@@ -800,12 +800,27 @@ impl Default for ConstitutionConfig {
     }
 }
 
-fn default_constitution_source_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.06.26/constitution.md")
+/// The single source of truth for the active ratified constitution version.
+///
+/// On a version bump, create `docs/constitution/versions/{VERSION}/`
+/// (`constitution.md` + `RATIFY.md`), update this constant, and re-run
+/// `docs/constitution/recompute_lock.py --version {VERSION}` — that one script
+/// re-signs the lock **and** rewrites `docs/constitution/CURRENT`, so the
+/// default paths, the `CURRENT` pointer, and the lock-inventory tests all stay
+/// in sync from this one edit. The guard test
+/// `current_file_matches_active_constitution_version` fails CI if the two drift.
+pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.06.26";
+
+pub fn default_constitution_source_path() -> PathBuf {
+    PathBuf::from(format!(
+        "docs/constitution/versions/{ACTIVE_CONSTITUTION_VERSION}/constitution.md"
+    ))
 }
 
-fn default_constitution_lock_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.06.26/gateway-constitution.lock.json")
+pub fn default_constitution_lock_path() -> PathBuf {
+    PathBuf::from(format!(
+        "docs/constitution/versions/{ACTIVE_CONSTITUTION_VERSION}/gateway-constitution.lock.json"
+    ))
 }
 
 fn default_require_constitution_signature() -> bool {

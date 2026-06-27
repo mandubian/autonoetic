@@ -21,22 +21,25 @@ node_name: "gateway"
 
 # ── Constitution ──────────────────────────────────────────────────────
 # Active constitution artifacts enforced by this gateway instance.
-# To switch constitutional release, point both paths to the same version dir.
-# Gateway startup and `agent bootstrap` also materialize a local snapshot under:
+# The active version is centralized in code as `ACTIVE_CONSTITUTION_VERSION`
+# (autonoetic-types/src/config.rs); `source_path`/`lock_path` are intentionally
+# omitted here so a version bump needs no template edit — they default to the
+# active version. Override only to pin a different version, e.g.:
+#   source_path: "docs/constitution/versions/<VERSION>/constitution.md"
+#   lock_path:   "docs/constitution/versions/<VERSION>/gateway-constitution.lock.json"
+# Gateway startup and `agent bootstrap` also materialize a local snapshot under
 #   <agents_dir>/.gateway/constitution/
-# You can point source_path/lock_path there for fully runtime-local enforcement.
-constitution:
-  source_path: "docs/constitution/versions/2026.06.26/constitution.md"
-  lock_path: "docs/constitution/versions/2026.06.26/gateway-constitution.lock.json"
-  require_signature: true
-  trusted_signers:
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
+# which you can point at for fully runtime-local enforcement:
 # constitution:
-#   source_path: ".gateway/constitution/versions/2026.06.26/constitution.md"
-#   lock_path: ".gateway/constitution/versions/2026.06.26/gateway-constitution.lock.json"
+#   source_path: ".gateway/constitution/versions/<VERSION>/constitution.md"
+#   lock_path:   ".gateway/constitution/versions/<VERSION>/gateway-constitution.lock.json"
 #   require_signature: true
 #   trusted_signers:
 #     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
+constitution:
+  require_signature: true
+  trusted_signers:
+    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 
 # ── Sandbox ───────────────────────────────────────────────────────────
 # Bubblewrap isolation overrides.
