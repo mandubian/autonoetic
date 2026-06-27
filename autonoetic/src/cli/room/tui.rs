@@ -992,6 +992,8 @@ enum LiveContentNode {
         plan_id: String,
         title: String,
         status: String,
+        version: u32,
+        is_latest: bool,
     },
     PlanStep {
         title: String,
@@ -1019,8 +1021,9 @@ impl LiveContentNode {
     /// Human-readable label for the node.
     fn label(&self) -> String {
         match self {
-            LiveContentNode::Plan { title, status, .. } => {
-                format!("📋 {} [{}]", title, status)
+            LiveContentNode::Plan { title, status, version, is_latest, .. } => {
+                let latest_tag = if *is_latest { " · latest" } else { "" };
+                format!("📋 {} v{}{} [{}]", title, version, latest_tag, status)
             }
             LiveContentNode::PlanStep { title } => {
                 format!("  📄 {}", title)
@@ -1055,6 +1058,39 @@ struct LiveContentPane {
     sections: Vec<(usize, &'static str)>,
     selected: usize,
     scroll: u16,
+/// Plan_id -> set of folded (hidden) older versions. The latest version per
+/// plan_id is always shown; older versions are hidden by default and can be
+/// toggled with `x` when a plan node is selected.
+folded: std::collections::HashMap<String, bool>,
+}
+
+impl LiveContentPane {
+    /// Toggle the older-version fold for the plan_id of the currently selected node.
+    fn toggle_fold(&mut self) {
+        let plan_id = match self.nodes.get(self.selected) {
+            Some(LiveContentNode::Plan { plan_id, .. }) => plan_id.clone(),
+            Some(LiveContentNode::PlanStep { .. }) => {
+                match self.nodes[..=self.selected]
+                    .iter()
+                    .rev()
+                    .find_map(|n| match n {
+                        LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
+                        _ => None,
+                    }) {
+                    Some(pid) => pid,
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        let entry = self.folded.entry(plan_id).or_insert(true);
+        *entry = !*entry;
+    }
+
+    /// Whether older revisions of `plan_id` are currently folded.
+    fn is_folded(&self, plan_id: &str) -> bool {
+        self.folded.get(plan_id).copied().unwrap_or(true)
+    }
 }
 
 /// Markdown-aware viewer for one content-store entry (mirror of
@@ -3152,6 +3188,10 @@ pub fn run(
                                 // --- Plans section ---
                                 let plan_start = all_nodes.len();
                                 // Fetch pending plans
+                                let mut plan_families: std::collections::BTreeMap<
+                                    String,
+                                    Vec<(u32, String, String, Vec<String>)>,
+                                > = std::collections::BTreeMap::new();
                                 if let Ok(v) = rpc(
                                     client,
                                     "planframes.list_pending",
@@ -3161,31 +3201,32 @@ pub fn run(
                                         for plan in arr {
                                             let plan_id = plan.get("plan_id").and_then(|p| p.as_str()).unwrap_or("").to_string();
                                             let title = plan.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                            // Add plan node
-                                            all_nodes.push(LiveContentNode::Plan {
-                                                plan_id,
-                                                title,
-                                                status: "pending".to_string(),
-                                            });
-                                            // Add each step as an indented child
-                                            if let Some(steps) = plan.get("steps").and_then(|s| s.as_array()) {
-                                                for step in steps {
-                                                    let step_title = step.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                                    all_nodes.push(LiveContentNode::PlanStep { title: step_title });
-                                                }
-                                            }
+                                            let version = plan.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                                            let status = plan
+                                                .get("status")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("awaiting_approval")
+                                                .to_string();
+                                            let step_titles: Vec<String> = plan
+                                                .get("steps")
+                                                .and_then(|s| s.as_array())
+                                                .map(|steps| {
+                                                    steps
+                                                        .iter()
+                                                        .filter_map(|step| step.get("title").and_then(|t| t.as_str()).map(String::from))
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            plan_families
+                                                .entry(plan_id)
+                                                .or_default()
+                                                .push((version, title, status, step_titles));
                                         }
                                     }
                                 }
                                 // Scan entries for plan.approved events with plan_ids
                                 // not already fetched as pending.
-                                let existing_plan_ids: std::collections::HashSet<String> = all_nodes
-                                    .iter()
-                                    .filter_map(|n| match n {
-                                        LiveContentNode::Plan { plan_id, .. } => Some(plan_id.clone()),
-                                        _ => None,
-                                    })
-                                    .collect();
+                                let existing_plan_ids: std::collections::HashSet<String> = plan_families.keys().cloned().collect();
                                 for entry in entries.iter().rev() {
                                     if entry.event_type == "plan.approved" {
                                         if let Some(ref pid) = entry.refs.plan_id {
@@ -3197,19 +3238,53 @@ pub fn run(
                                                 ) {
                                                     if let Some(plan) = v.get("plan") {
                                                         let title = plan.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                                        all_nodes.push(LiveContentNode::Plan {
-                                                            plan_id: pid.clone(),
-                                                            title,
-                                                            status: "approved".to_string(),
-                                                        });
-                                                        if let Some(steps) = plan.get("steps").and_then(|s| s.as_array()) {
-                                                            for step in steps {
-                                                                let step_title = step.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                                                all_nodes.push(LiveContentNode::PlanStep { title: step_title });
-                                                            }
-                                                        }
+                                                        let version = plan.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                                                        let status = plan
+                                                            .get("status")
+                                                            .and_then(|s| s.as_str())
+                                                            .unwrap_or("approved")
+                                                            .to_string();
+                                                        let step_titles: Vec<String> = plan
+                                                            .get("steps")
+                                                            .and_then(|s| s.as_array())
+                                                            .map(|steps| {
+                                                                steps
+                                                                    .iter()
+                                                                    .filter_map(|step| step.get("title").and_then(|t| t.as_str()).map(String::from))
+                                                                    .collect()
+                                                            })
+                                                            .unwrap_or_default();
+                                                        plan_families
+                                                            .entry(pid.clone())
+                                                            .or_default()
+                                                            .push((version, title, status, step_titles));
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                                for (_plan_id, mut versions) in plan_families {
+                                    versions.sort_by(|a, b| a.0.cmp(&b.0).reverse());
+                                    let max_version = versions.first().map(|v| v.0).unwrap_or(0);
+                                    for (idx, (version, title, status, steps)) in versions.iter().enumerate() {
+                                        let is_latest = *version == max_version;
+                                        all_nodes.push(LiveContentNode::Plan {
+                                            plan_id: _plan_id.clone(),
+                                            title: title.clone(),
+                                            status: status.clone(),
+                                            version: *version,
+                                            is_latest,
+                                        });
+                                        // Steps are only shown for the latest version to avoid
+                                        // visual clutter; older versions are folded by default
+                                        // and show only the plan header.
+                                        if is_latest || !versions.iter().skip(idx + 1).next().is_some() {
+                                            // keep latest expanded; older versions add no steps
+                                        }
+                                        if is_latest {
+                                            for step_title in steps {
+                                                all_nodes.push(LiveContentNode::PlanStep { title: step_title.clone() });
                                             }
                                         }
                                     }
@@ -3299,14 +3374,25 @@ pub fn run(
                                 if sections.is_empty() {
                                     status = Some("no content found for this session".to_string());
                                 } else {
+                                    // Preserve existing fold state across rebuilds (e.g. on 'c').
+                                    let folded = live_content_pane
+                                        .as_ref()
+                                        .map(|p| p.folded.clone())
+                                        .unwrap_or_default();
                                     live_content_pane = Some(LiveContentPane {
                                         nodes: all_nodes,
                                         sections,
                                         selected: 0,
                                         scroll: 0,
+                                        folded,
                                     });
-                                    status = Some("content: j/k navigate · Enter/o open · Esc close".to_string());
+                                    status = Some("content: j/k navigate · Enter/o open · x fold/unfold older versions · Esc close".to_string());
                                 }
+                            }
+                        }
+                        KeyCode::Char('x') => {
+                            if let Some(pane) = live_content_pane.as_mut() {
+                                pane.toggle_fold();
                             }
                         }
                         KeyCode::Char('o') => {
@@ -6242,63 +6328,114 @@ fn draw(
         let area = centered_rect(65, 70, f.area());
         f.render_widget(Clear, area);
 
+        // Determine which plan nodes are visible, honoring folding.
+        // The latest version is always shown; older versions are shown only
+        // when their plan_id is unfolded.
+        let mut visible_nodes: Vec<(usize, &LiveContentNode)> = Vec::new();
+        let mut last_plan_id: Option<String> = None;
+        for (idx, node) in pane.nodes.iter().enumerate() {
+            match node {
+                LiveContentNode::Plan {
+                    plan_id,
+                    is_latest,
+                    version,
+                    ..
+                } => {
+                    last_plan_id = Some(plan_id.clone());
+                    if *is_latest || !pane.is_folded(plan_id) {
+                        visible_nodes.push((idx, node));
+                    }
+                }
+                _ => {
+                    // Plan steps only appear under the latest plan version;
+                    // hide them if the parent latest plan is folded.
+                    if let Some(ref pid) = last_plan_id {
+                        if pane.is_folded(pid) {
+                            continue;
+                        }
+                    }
+                    visible_nodes.push((idx, node));
+                }
+            }
+        }
+
         let mut visual_lines: Vec<(usize, String)> = Vec::new();
-        for (sec_idx, &(start, label)) in pane.sections.iter().enumerate() {
+        let mut node_iter = visible_nodes.into_iter().peekable();
+        for (sec_idx, &(_start, label)) in pane.sections.iter().enumerate() {
             visual_lines.push((usize::MAX, format!("── {label} ──")));
             let end = pane
                 .sections
                 .get(sec_idx + 1)
                 .map(|&(s, _)| s)
                 .unwrap_or(pane.nodes.len());
-            for node_idx in start..end {
-                if let Some(node) = pane.nodes.get(node_idx) {
-                    let text = match node {
-                        LiveContentNode::Plan {
-                            plan_id,
-                            title,
-                            status,
-                        } => {
-                            let label = if title.is_empty() {
-                                &plan_id[..plan_id.len().min(12)]
-                            } else {
-                                title.as_str()
-                            };
-                            format!("  {label} ({status})")
-                        }
-                        LiveContentNode::PlanStep { title } => {
-                            format!("    ▶ {title}")
-                        }
-                        LiveContentNode::Artifact {
-                            artifact_id: _,
-                            artifact_ref: _,
-                            kind,
-                            name,
-                        } => {
-                            format!("  {name} [{kind}]")
-                        }
-                        LiveContentNode::ArtifactFile {
-                            name,
-                            alias: _,
-                            artifact_id: _,
-                            artifact_ref: _,
-                        } => {
-                            format!("    📄 {name}")
-                        }
-                        LiveContentNode::Draft {
-                            name,
-                            alias: _,
-                            visibility,
-                        } => {
-                            let lock = match visibility.as_str() {
-                                "private" => " 🔒",
-                                "global" => " 🌐",
-                                _ => "",
-                            };
-                            format!("  {name}{lock}")
-                        }
-                    };
-                    visual_lines.push((node_idx, text));
+            while let Some((node_idx, _node)) = node_iter.peek() {
+                if *node_idx >= end {
+                    break;
                 }
+                let (node_idx, node) = node_iter.next().unwrap();
+                let text = match node {
+                    LiveContentNode::Plan {
+                        plan_id,
+                        title,
+                        status,
+                        version,
+                        is_latest,
+                    } => {
+                        let label = if title.is_empty() {
+                            &plan_id[..plan_id.len().min(12)]
+                        } else {
+                            title.as_str()
+                        };
+                        let latest_tag = if *is_latest { " ✦" } else { "" };
+                        let count = pane
+                            .nodes
+                            .iter()
+                            .filter(|n| matches!(n, LiveContentNode::Plan { plan_id: pid, .. } if pid == plan_id))
+                            .count();
+                        let expand_hint = if count > 1 {
+                            if pane.is_folded(plan_id) {
+                                format!(" [{count} versions · x unfold]")
+                            } else {
+                                " [x fold older]".to_string()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        format!("  {label} v{version}{status}{latest_tag}{expand_hint}")
+                    }
+                    LiveContentNode::PlanStep { title } => {
+                        format!("    ▶ {title}")
+                    }
+                    LiveContentNode::Artifact {
+                        artifact_id: _,
+                        artifact_ref: _,
+                        kind,
+                        name,
+                    } => {
+                        format!("  {name} [{kind}]")
+                    }
+                    LiveContentNode::ArtifactFile {
+                        name,
+                        alias: _,
+                        artifact_id: _,
+                        artifact_ref: _,
+                    } => {
+                        format!("    📄 {name}")
+                    }
+                    LiveContentNode::Draft {
+                        name,
+                        alias: _,
+                        visibility,
+                    } => {
+                        let lock = match visibility.as_str() {
+                            "private" => " 🔒",
+                            "global" => " 🌐",
+                            _ => "",
+                        };
+                        format!("  {name}{lock}")
+                    }
+                };
+                visual_lines.push((node_idx, text));
             }
         }
 
@@ -6343,7 +6480,7 @@ fn draw(
             .min(max_scroll) as u16;
 
         let title = format!(
-            " 📋 Live Content — {} items (Plans · Artifacts · Drafts) [j/k nav · o open · Esc close] ",
+            " 📋 Live Content — {} items (Plans · Artifacts · Drafts) [j/k nav · o open · x fold/unfold · Esc close] ",
             pane.nodes.len()
         );
         f.render_widget(
