@@ -1742,17 +1742,37 @@ fn unresolved_plan_gate_key(
     resolved: &HashSet<String>,
     acted: &HashSet<String>,
 ) -> Option<String> {
+    let mut newest_approved_version: Option<u64> = None;
     for e in entries.iter().rev() {
+        if plan_id_for(e).as_deref() != Some(plan_id)
+            && render::extract_plan_proposal_id(e).as_deref() != Some(plan_id)
+        {
+            continue;
+        }
+        if e.event_type == "plan.approved" {
+            if let Some(v) = plan_version_for(e) {
+                newest_approved_version = Some(newest_approved_version.map_or(v, |m| m.max(v)));
+            } else {
+                // Legacy approval without version: treat as resolving all pending versions.
+                return None;
+            }
+        }
         if e.event_type != "plan.pending" {
             continue;
         }
-        if plan_id_for(e).as_deref() != Some(plan_id) {
+        let key = plan_gate_key(e)?;
+        if resolved.contains(&key) || acted.contains(&key) {
             continue;
         }
-        let key = plan_gate_key(e)?;
-        if !resolved.contains(&key) && !acted.contains(&key) {
-            return Some(key);
+        let pending_version = plan_version_for(e).unwrap_or(1);
+        if let Some(approved_version) = newest_approved_version {
+            if approved_version >= pending_version {
+                // A newer (or same) version has been approved; this pending
+                // revision is superseded.
+                continue;
+            }
         }
+        return Some(key);
     }
     None
 }
