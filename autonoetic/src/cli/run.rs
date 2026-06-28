@@ -266,6 +266,34 @@ fn ensure_bootstrap(config_path: &Path, overwrite: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateScope {
+    DefaultOnly,
+    AllPresets,
+}
+
+fn prompt_update_scope() -> anyhow::Result<UpdateScope> {
+    use std::io::{self as std_io, BufRead, Write};
+    let mut stderr = std_io::stderr();
+    writeln!(stderr, "\n  Which presets should be updated?")?;
+    writeln!(stderr, "    1) Default preset only")?;
+    writeln!(stderr, "    2) All llm_presets")?;
+    write!(stderr, "  Select [1/2]: ")?;
+    stderr.flush()?;
+
+    let stdin = std_io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    match line.trim() {
+        "1" | "" => Ok(UpdateScope::DefaultOnly),
+        "2" => Ok(UpdateScope::AllPresets),
+        _ => {
+            eprintln!("  Invalid choice; updating default preset only.");
+            Ok(UpdateScope::DefaultOnly)
+        }
+    }
+}
+
 pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let agents_dir = &config.agents_dir;
@@ -290,32 +318,63 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
 
     let current = std::fs::read_to_string(config_path).unwrap_or_default();
 
+    let update_scope = prompt_update_scope()?;
+
     let re_provider = regex::Regex::new(r#"(provider:\s*)"[^"]*""#).unwrap();
     let re_model = regex::Regex::new(r#"(model:\s*)"[^"]*""#).unwrap();
     let re_base_url = regex::Regex::new(r#"(base_url:\s*)"[^"]*""#).unwrap();
 
     let mut updated = current.clone();
-    if let Some(cap) = re_provider.captures(&updated) {
-        updated = updated.replacen(&cap[0], &format!("provider: \"{}\"", provider), 1);
-    }
-    if let Some(cap) = re_model.captures(&updated) {
-        updated = updated.replacen(&cap[0], &format!("model: \"{}\"", model), 1);
-    }
-    match (&base_url, re_base_url.captures(&updated)) {
-        (Some(url), Some(cap)) => {
-            updated = updated.replacen(&cap[0], &format!("base_url: \"{}\"", url), 1);
+    if update_scope == UpdateScope::DefaultOnly {
+        if let Some(cap) = re_provider.captures(&updated) {
+            updated = updated.replacen(&cap[0], &format!("provider: \"{}\"", provider), 1);
         }
-        (Some(url), None) => {
-            if let Some(re) = regex::Regex::new(r#"(model:\s*"[^"]*"\s*\n)"#).ok() {
-                updated = re.replace(&updated, format!("${{1}}    base_url: \"{}\"\n", url)).to_string();
+        if let Some(cap) = re_model.captures(&updated) {
+            updated = updated.replacen(&cap[0], &format!("model: \"{}\"", model), 1);
+        }
+        match (&base_url, re_base_url.captures(&updated)) {
+            (Some(url), Some(cap)) => {
+                updated = updated.replacen(&cap[0], &format!("base_url: \"{}\"", url), 1);
+            }
+            (Some(url), None) => {
+                if let Some(re) = regex::Regex::new(r#"(model:\s*"[^"]*"\s*\n)"#).ok() {
+                    updated = re.replace(&updated, format!("${{1}}    base_url: \"{}\"\n", url)).to_string();
+                }
+            }
+            (None, Some(_)) => {
+                if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\n"#).ok() {
+                    updated = re.replace(&updated, "").to_string();
+                }
+            }
+            (None, None) => {}
+        }
+    } else {
+        updated = re_provider
+            .replace_all(&updated, format!("${{1}}\"{}\"", provider))
+            .to_string();
+        updated = re_model
+            .replace_all(&updated, format!("${{1}}\"{}\"", model))
+            .to_string();
+        match &base_url {
+            Some(url) => {
+                if re_base_url.is_match(&updated) {
+                    updated = re_base_url
+                        .replace_all(&updated, format!("${{1}}\"{}\"", url))
+                        .to_string();
+                } else {
+                    if let Some(re) = regex::Regex::new(r#"(model:\s*"[^"]*"\s*\n)"#).ok() {
+                        updated = re
+                            .replace_all(&updated, format!("${{1}}    base_url: \"{}\"\n", url))
+                            .to_string();
+                    }
+                }
+            }
+            None => {
+                if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\n"#).ok() {
+                    updated = re.replace_all(&updated, "").to_string();
+                }
             }
         }
-        (None, Some(_)) => {
-            if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\n"#).ok() {
-                updated = re.replace(&updated, "").to_string();
-            }
-        }
-        (None, None) => {}
     }
 
     if let Some(url) = base_url.as_deref().or_else(|| {
