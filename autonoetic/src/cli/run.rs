@@ -276,7 +276,7 @@ fn prompt_update_scope() -> anyhow::Result<UpdateScope> {
     use std::io::{self as std_io, BufRead, Write};
     let mut stderr = std_io::stderr();
     writeln!(stderr, "\n  Which presets should be updated?")?;
-    writeln!(stderr, "    1) Default preset only")?;
+    writeln!(stderr, "    1) Default preset only (from llm_preset_mapping.default)")?;
     writeln!(stderr, "    2) All llm_presets")?;
     write!(stderr, "  Select [1/2]: ")?;
     stderr.flush()?;
@@ -320,35 +320,87 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
 
     let update_scope = prompt_update_scope()?;
 
-    let re_provider = regex::Regex::new(r#"(provider:\s*)"[^"]*""#).unwrap();
-    let re_model = regex::Regex::new(r#"(model:\s*)"[^"]*""#).unwrap();
-    let re_base_url = regex::Regex::new(r#"(base_url:\s*)"[^"]*""#).unwrap();
+    // Anchor to start-of-line (4-space indent) to avoid matching commented YAML lines.
+    let re_provider = regex::Regex::new(r#"(?m)^(\s{4}provider:\s*)"[^"]*""#).unwrap();
+    let re_model = regex::Regex::new(r#"(?m)^(\s{4}model:\s*)"[^"]*""#).unwrap();
+    let re_base_url = regex::Regex::new(r#"(?m)^(\s{4}base_url:\s*)"[^"]*""#).unwrap();
+    // Also support unquoted scalars (e.g. base_url: http://...).
+    let re_base_url_unquoted =
+        regex::Regex::new(r#"(?m)^(\s{4}base_url:\s*)([^\s#"][^\s#]*)"#).unwrap();
 
     let mut updated = current.clone();
     if update_scope == UpdateScope::DefaultOnly {
-        if let Some(cap) = re_provider.captures(&updated) {
-            updated = updated.replacen(&cap[0], &format!("provider: \"{}\"", provider), 1);
-        }
-        if let Some(cap) = re_model.captures(&updated) {
-            updated = updated.replacen(&cap[0], &format!("model: \"{}\"", model), 1);
-        }
-        match (&base_url, re_base_url.captures(&updated)) {
-            (Some(url), Some(cap)) => {
-                updated = updated.replacen(&cap[0], &format!("base_url: \"{}\"", url), 1);
+        // Resolve the actual default preset name from llm_preset_mapping.
+        let default_preset_name = config
+            .llm_preset_mapping
+            .get("default")
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+
+        // Line-by-line parser: update only the default preset block.
+        let lines: Vec<String> = current.lines().map(String::from).collect();
+        let had_trailing_newline = current.ends_with('\n');
+        let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+        let mut in_default_preset = false;
+        let mut preset_indent: usize = 0;
+        let mut found_base_url = false;
+        let mut model_line_idx: Option<usize> = None;
+
+        for line in &lines {
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+
+            // Detect start of a preset block: "  preset_name:" at 2-space indent.
+            if indent == 2
+                && !trimmed.starts_with('#')
+                && trimmed.ends_with(':')
+                && !trimmed.contains(' ')
+            {
+                let name = trimmed.trim_end_matches(':');
+                if name == default_preset_name {
+                    in_default_preset = true;
+                    preset_indent = indent;
+                } else if in_default_preset {
+                    in_default_preset = false;
+                }
+            } else if in_default_preset && indent <= preset_indent && !trimmed.is_empty() {
+                in_default_preset = false;
             }
-            (Some(url), None) => {
-                if let Some(re) = regex::Regex::new(r#"(model:\s*"[^"]*"\s*\n)"#).ok() {
-                    updated = re.replace(&updated, format!("${{1}}    base_url: \"{}\"\n", url)).to_string();
+
+            if in_default_preset && indent > preset_indent && !trimmed.starts_with('#') {
+                if trimmed.starts_with("provider:") {
+                    out.push(format!("    provider: \"{}\"", provider));
+                    continue;
+                } else if trimmed.starts_with("model:") {
+                    out.push(format!("    model: \"{}\"", model));
+                    model_line_idx = Some(out.len() - 1);
+                    continue;
+                } else if trimmed.starts_with("base_url:") {
+                    if let Some(ref url) = base_url {
+                        out.push(format!("    base_url: \"{}\"", url));
+                    }
+                    found_base_url = true;
+                    continue;
                 }
             }
-            (None, Some(_)) => {
-                if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\n"#).ok() {
-                    updated = re.replace(&updated, "").to_string();
-                }
-            }
-            (None, None) => {}
+            out.push(line.clone());
         }
+
+        // Insert base_url after model line if it wasn't already present.
+        if model_line_idx.is_some() && !found_base_url {
+            if let Some(ref url) = base_url {
+                let insert_at = model_line_idx.unwrap() + 1;
+                out.insert(insert_at, format!("    base_url: \"{}\"", url));
+            }
+        }
+
+        let mut result = out.join("\n");
+        if had_trailing_newline {
+            result.push('\n');
+        }
+        updated = result;
     } else {
+        // AllPresets: replace all occurrences (line-anchored to skip comments).
         updated = re_provider
             .replace_all(&updated, format!("${{1}}\"{}\"", provider))
             .to_string();
@@ -357,20 +409,37 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
             .to_string();
         match &base_url {
             Some(url) => {
-                if re_base_url.is_match(&updated) {
+                if re_base_url.is_match(&updated) || re_base_url_unquoted.is_match(&updated) {
                     updated = re_base_url
                         .replace_all(&updated, format!("${{1}}\"{}\"", url))
                         .to_string();
+                    updated = re_base_url_unquoted
+                        .replace_all(&updated, format!("${{1}}\"{}\"", url))
+                        .to_string();
                 } else {
-                    if let Some(re) = regex::Regex::new(r#"(model:\s*"[^"]*"\s*\n)"#).ok() {
+                    // Insert base_url after each model line.
+                    if let Some(re) =
+                        regex::Regex::new(r#"(?m)^(\s{4}model:\s*"[^"]*"\s*)$"#).ok()
+                    {
                         updated = re
-                            .replace_all(&updated, format!("${{1}}    base_url: \"{}\"\n", url))
+                            .replace_all(
+                                &updated,
+                                format!("${{1}}\n    base_url: \"{}\"", url),
+                            )
                             .to_string();
                     }
                 }
             }
             None => {
-                if let Some(re) = regex::Regex::new(r#"(?m)^\s*base_url:\s*"[^"]*"\n"#).ok() {
+                // Remove all base_url lines in preset blocks.
+                if let Some(re) =
+                    regex::Regex::new(r#"(?m)^\s{4}base_url:\s*"[^"]*"\s*\n?"#).ok()
+                {
+                    updated = re.replace_all(&updated, "").to_string();
+                }
+                if let Some(re) =
+                    regex::Regex::new(r#"(?m)^\s{4}base_url:\s*[^\s#"][^\s#]*\s*\n?"#).ok()
+                {
                     updated = re.replace_all(&updated, "").to_string();
                 }
             }
@@ -378,7 +447,8 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
     }
 
     if let Some(url) = base_url.as_deref().or_else(|| {
-        regex::Regex::new(r#"base_url:\s*"([^"]+)""#)
+        // Anchor to start-of-line with 4-space indent to skip comments.
+        regex::Regex::new(r#"(?m)^\s{4}base_url:\s*"([^"]+)""#)
             .ok()
             .and_then(|re| re.captures(&updated))
             .and_then(|cap| cap.get(1))
