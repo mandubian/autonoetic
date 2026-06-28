@@ -760,7 +760,7 @@ WHAT TO DO:\n\
 For each violation above:\n\
 • Understand why it failed (the \"Why\" explanation)\n\
 • Apply the fix (the \"Fix\" hint)\n\
-• Use your normal tools: artifact.build(), content.write(), etc.\n\
+• Use your normal tools: artifact.build() for bundles, content.write() to create a new file, content.patch() to edit an existing file, etc.\n\
 • Re-run your workflow to regenerate the output\n\n\
 EXAMPLES OF CORRECT OUTPUT:\n\
 ───────────────────────────────────────────────────────────────────────\n\
@@ -790,8 +790,8 @@ fn build_repair_examples(violations: &[ValidationViolation]) -> String {
             "required_artifacts" => {
                 examples.push(
                     "Required Artifact:\n  \
-                     Use artifact.build({\"name\": \"filename.ext\", ...}) or \n  \
-                     content.write(\"path/to/file\", contents) to create the file."
+                     If the file already exists in the session, edit it with content.patch({\"name\": \"filename.ext\", \"old_string\": \"...\", \"new_string\": \"...\"}).\n  \
+                     If it does not exist yet, create it with content.write(\"path/to/file\", contents) or artifact.build({\"inputs\": [...]})."
                         .to_string(),
                 );
             }

@@ -122,7 +122,7 @@ Before you report `dependency_files` in your result JSON, you MUST inspect every
 - Write clean, documented code
 - **Scripts that need API keys or secrets must read them from environment variables** (`os.environ.get("API_KEY")`), never from command-line arguments or hardcoded values. The gateway injects credentials at runtime via the `credential_env` parameter — the secret never reaches LLM context. The env var name is derived mechanically from the service name: e.g. service `"my-service"` → `"MY_SERVICE_SECRET"`. If the planner delegates with `service: "my-service"`, your script must use `os.environ["MY_SERVICE_SECRET"]`.
 - Test code with `sandbox_exec` before returning — but see "Persistent Test Failure" below
-- Use `content_write` to persist artifacts
+- Use `content_write` to author NEW files; use `content_patch` to edit existing files in place
 - Follow the principle of minimal changes
 - Focus on durable outputs that should be handed off, reviewed, or installed
 - **DO NOT use `dependencies` field in `sandbox_exec`** — you don't have `NetworkAccess`. If your code needs external packages, signal to the planner that `packager.default` is needed to resolve dependencies into layers.
@@ -221,6 +221,17 @@ When the planner asks you to create an agent (e.g. "create a data processing age
 When planner returns evaluator/auditor findings for your script:
 
 1. **DO** update the script to fix the reported issues — prefer `content_patch` to edit the existing files in place rather than re-writing whole files with `content_write`.
+
+   Worked example: the evaluator reports that `agent.py` returns the wrong shape. First `resolve` the current file, then patch only the changed function:
+   ```json
+   resolve({"ref": "agent.py", "include": "content"})
+   content_patch({
+     "name": "agent.py",
+     "old_string": "def fetch(city: str) -> dict:\n    return {\"temp\": 22}\n",
+     "new_string": "def fetch(city: str) -> dict:\n    return {\"city\": city, \"temp\": 22}\n"
+   })
+   ```
+   Use `content_write` only when the file does not yet exist or when the changed region cannot be uniquely anchored after re-reading it with `resolve`.
 2. **DO** rebuild the artifact after editing, and return the new artifact_ref plus the key file names.
 3. **DO NOT** install the agent yourself.
 4. **DO NOT** claim success until findings are addressed.
@@ -234,7 +245,7 @@ Expected response pattern:
 
 When the gateway returns a validation error (repair prompt), your final output violated a declared constraint. Repair is not optional.
 
-1. **When required_artifacts constraint fails:** Write the missing file with `content_write`, rebuild the artifact with `artifact_build`, and return the new artifact_ref.
+1. **When required_artifacts constraint fails:** If the missing file already exists in the session, edit it with `content_patch`; otherwise write it with `content_write`, rebuild the artifact with `artifact_build`, and return the new artifact_ref.
 2. **When min_artifact_builds constraint fails:** Call `artifact_build` successfully.
 
 Repair attempts are bounded by `validation_max_loops` and `validation_max_duration_ms`.

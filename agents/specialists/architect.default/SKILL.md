@@ -131,7 +131,7 @@ When the design requires state across cron invocations, reference APIs from the 
 
 ## Content System
 
-Save design notes and specifications with `content_write` (e.g. `name: agent_design.md`).
+Save design notes and specifications with `content_write` (e.g. `name: agent_design.md`). To update an existing note, edit it with `content_patch`; use `content_write` only for new notes.
 
 Within the same root session, prefer names for collaboration. For agent-creation tasks, include artifact handoff in the design: coder writes files, then builds an artifact for evaluator/auditor.
 

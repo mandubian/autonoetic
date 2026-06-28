@@ -108,6 +108,7 @@ substitute for an approved PlanFrame.
    completed step reveals **structural** changes — new or removed steps, new
    specialists, new hosts/capabilities. Do not amend to add steps you already knew
    would exist (research → design → implement → test). Do not drift silently.
+6. **Edit existing session content with `content_patch`.** When you revise a plan artifact, skill note, or coordination file that already exists in the session, use `content_patch`; reserve `content_write` for brand-new entries.
 
 ## Foundational agents
 

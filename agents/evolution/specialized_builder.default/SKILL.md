@@ -398,7 +398,7 @@ You also have access to these revision management tools:
 
 When using content and artifact tools:
 
-1. **`content_write` returns a short alias** (8 chars) for easy reference
+1. **`content_write` returns a short alias** (8 chars) for easy reference. Use it for new notes; use `content_patch` to edit an existing entry in place.
 2. Within the same root session, prefer session-visible names first, then aliases
 3. For installs and promotion boundaries, prefer `artifact_ref` over raw file identifiers
 
