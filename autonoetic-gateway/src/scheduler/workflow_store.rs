@@ -943,6 +943,47 @@ pub fn update_task_run_status(
     }
     save_task_run(config, store, &task)?;
 
+    // Session-workflow sync (#673 GAP-2A): finalize the bound session's
+    // transcript BEFORE emitting any signals/events so that a woken parent
+    // querying child state sees the correct terminal status, not stale
+    // 'active'/'suspended'. In the normal spawn-completion path the
+    // executor's close_session has already done this (harmless overwrite).
+    // In external paths (stuck sweeper, approval timeout, cancel, force-
+    // complete) this is the ONLY place the session gets finalized.
+    {
+        let is_terminal = matches!(
+            status,
+            TaskRunStatus::Succeeded | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled | TaskRunStatus::Aborted
+        );
+        let was_non_terminal = !matches!(
+            previous_status,
+            TaskRunStatus::Succeeded | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled | TaskRunStatus::Aborted
+        );
+        if is_terminal && was_non_terminal && !task.session_id.is_empty() {
+            if let Some(store) = store {
+                let session_status = match status {
+                    TaskRunStatus::Succeeded => "completed",
+                    _ => "failed",
+                };
+                let ended_at = now_rfc3339();
+                if let Err(e) =
+                    store.finalize_session_transcript(&task.session_id, &ended_at, session_status)
+                {
+                    tracing::warn!(
+                        target: "workflow",
+                        workflow_id = %workflow_id,
+                        task_id = %task_id,
+                        session_id = %task.session_id,
+                        error = %e,
+                        "Failed to finalize session transcript on terminal task transition"
+                    );
+                }
+            }
+        }
+    }
+
     if status == TaskRunStatus::Cancelled && previous_status == TaskRunStatus::AwaitingApproval {
         let cancel_reason = result_summary
             .as_deref()
@@ -1275,6 +1316,7 @@ pub fn update_task_run_status(
             }
         }
     }
+
     Ok(())
 }
 
@@ -1604,6 +1646,91 @@ pub fn fail_running_tasks_for_session(
         }
     }
     Ok(failed)
+}
+
+/// Fail all non-terminal tasks in the workflow for a root session and mark
+/// the workflow as Failed (GAP-1B). Called when the root session closes
+/// with an error — ensures the workflow and its tasks reach a terminal state
+/// instead of staying Running/Resumable forever.
+///
+/// Writes task status directly (like `apply_emergency_stop_to_workflow`) rather
+/// than going through `update_task_run_status` to avoid emitting misleading
+/// join-satisfied signals and child-state notifications to an already-dead root.
+pub fn fail_workflow_for_root_session(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    root_session_id: &str,
+    reason: &str,
+) -> anyhow::Result<bool> {
+    let wf_id = match resolve_workflow_id_for_root_session(config, root_session_id)? {
+        Some(id) => id,
+        None => return Ok(false),
+    };
+    let tasks = list_task_runs_for_workflow(config, store, &wf_id)?;
+    let mut failed = 0usize;
+    let now = now_rfc3339();
+    for mut task in tasks {
+        let is_terminal = matches!(
+            task.status,
+            TaskRunStatus::Succeeded | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled | TaskRunStatus::Aborted
+        );
+        if is_terminal {
+            continue;
+        }
+        task.status = TaskRunStatus::Failed;
+        task.updated_at = now.clone();
+        task.result_summary = Some(format!("root session terminated: {}", reason));
+        if let Err(e) = save_task_run(config, store, &task) {
+            tracing::warn!(
+                target: "workflow",
+                workflow_id = %wf_id,
+                task_id = %task.task_id,
+                error = %e,
+                "Failed to write Failed status during workflow failure"
+            );
+            continue;
+        }
+        failed += 1;
+
+        // Finalize the bound session transcript (mirrors GAP-2A in update_task_run_status,
+        // but without the signal emission that would wake an already-dead root).
+        if !task.session_id.is_empty() {
+            if let Some(store) = store {
+                if let Err(e) = store.finalize_session_transcript(&task.session_id, &now, "failed") {
+                    tracing::warn!(
+                        target: "workflow",
+                        session_id = %task.session_id,
+                        error = %e,
+                        "Failed to finalize session transcript during workflow failure"
+                    );
+                }
+            }
+        }
+    }
+
+    // Mark the workflow itself as Failed.
+    if let Ok(Some(mut wf)) = load_workflow_run(config, store, &wf_id) {
+        wf.status = WorkflowRunStatus::Failed;
+        wf.updated_at = now_rfc3339();
+        if let Err(e) = save_workflow_run(config, store, &wf) {
+            tracing::warn!(
+                target: "workflow",
+                workflow_id = %wf_id,
+                error = %e,
+                "Failed to mark workflow as Failed after root session error"
+            );
+        }
+    }
+
+    tracing::info!(
+        target: "workflow",
+        workflow_id = %wf_id,
+        root_session_id = %root_session_id,
+        failed_count = failed,
+        "Workflow failed — root session terminated with error"
+    );
+    Ok(true)
 }
 
 /// Creates an implicit artifact reference for a completed task.
@@ -2211,6 +2338,27 @@ pub fn apply_emergency_stop_to_workflow(
         task.updated_at = now_rfc3339();
         task.result_summary = Some(format!("emergency_stop:{stop_id}"));
         save_task_run(config, store, &task)?;
+
+        // GAP-1C: finalize the bound session transcript so it doesn't
+        // leak as 'active' forever. The orphan reaper can't see it
+        // because the parent session is also emergency-stopped (active).
+        if !task.session_id.is_empty() {
+            if let Some(store) = store {
+                let now = now_rfc3339();
+                if let Err(e) =
+                    store.finalize_session_transcript(&task.session_id, &now, "failed")
+                {
+                    tracing::warn!(
+                        target: "workflow",
+                        workflow_id = %workflow_id,
+                        task_id = %task.task_id,
+                        session_id = %task.session_id,
+                        error = %e,
+                        "Failed to finalize session transcript during emergency stop"
+                    );
+                }
+            }
+        }
 
         append_workflow_event(
             config,
