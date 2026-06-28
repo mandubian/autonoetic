@@ -78,6 +78,33 @@ fn validate_answer_payload(
     Ok(())
 }
 
+/// Reject free-text answers for interactions that do not allow freeform.
+/// The store also enforces this, but checking before answer orchestration
+/// avoids a round-trip and gives callers a clear, immediate error.
+fn validate_answer_allows_freeform(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    interaction_id: &str,
+    answer_text: &Option<String>,
+) -> anyhow::Result<()> {
+    if answer_text
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Ok(());
+    }
+    let interaction = store
+        .get_user_interaction(interaction_id)?
+        .ok_or_else(|| anyhow::anyhow!("User interaction '{}' not found", interaction_id))?;
+    anyhow::ensure!(
+        interaction.allow_freeform,
+        "Interaction '{}' does not allow freeform answers",
+        interaction_id
+    );
+    Ok(())
+}
+
 fn validate_nonsecret_answer_payload(answer_text: &Option<String>) -> anyhow::Result<()> {
     if let Some(text) = answer_text.as_deref() {
         if looks_like_secret_value(text) {
@@ -157,11 +184,13 @@ pub async fn answer_and_orchestrate_resume(
         anyhow::bail!("interaction answer orchestration is disabled in gateway config");
     }
     validate_answer_payload(&params.answer_text, &params.answer_option_id)?;
-    validate_nonsecret_answer_payload(&params.answer_text)?;
 
     let store = execution
         .gateway_store()
         .ok_or_else(|| anyhow::anyhow!("GatewayStore required"))?;
+
+    validate_answer_allows_freeform(store.as_ref(), &params.interaction_id, &params.answer_text)?;
+    validate_nonsecret_answer_payload(&params.answer_text)?;
 
     let answered_by = params
         .answered_by

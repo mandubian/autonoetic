@@ -33,6 +33,17 @@ pub struct RoomClient {
     sync_conn: StdMutex<Option<SyncPersistedConn>>,
 }
 
+impl Clone for RoomClient {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr.clone(),
+            token: self.token.clone(),
+            conn: Mutex::new(None),
+            sync_conn: StdMutex::new(None),
+        }
+    }
+}
+
 impl RoomClient {
     pub fn from_config(config: &GatewayConfig) -> anyhow::Result<Self> {
         let token = std::env::var("AUTONOETIC_SHARED_SECRET").map_err(|_| {
