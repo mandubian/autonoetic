@@ -4,7 +4,8 @@ use crate::runtime::parser::SkillParser;
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentManifest, AgentMeta};
 use autonoetic_types::agent_revision::{
-    parse_agent_target, AgentRef, AgentRevisionRecord, ParsedAgentTarget, SessionAgentBinding,
+    parse_agent_target, AgentRef, AgentRevisionRecord, AgentRevisionStatus, ParsedAgentTarget,
+    SessionAgentBinding,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -332,10 +333,34 @@ impl AgentRepository {
                 // Plain agent_id — resolve via alias
                 let alias = match gateway_store.resolve_alias(&alias_id)? {
                     Some(a) => a,
-                    None => anyhow::bail!(
-                        "No alias '{}' found. Create a revision and promote it first.",
-                        alias_id
-                    ),
+                    None => {
+                        // Check if a Candidate revision exists — suggest revision_id for smoke testing.
+                        let candidate_hint = match gateway_store.list_agent_revisions(&alias_id) {
+                            Ok(revs) => revs
+                                .iter()
+                                .find(|r| r.status == AgentRevisionStatus::Candidate)
+                                .map(|r| r.revision_id.clone()),
+                            Err(e) => {
+                                tracing::warn!(
+                    target: "agent_repository",
+                    agent_id = %alias_id,
+                    error = %e,
+                    "Failed to list revisions for candidate hint while reporting missing alias"
+                                );
+                                None
+                            }
+                        };
+                        match candidate_hint {
+                            Some(rev_id) => anyhow::bail!(
+                                "No alias '{}' found — the agent has not been promoted yet. A candidate revision exists ({}). To smoke-test it before promotion, use agent_spawn(agent_id=\"{}\", revision_id=\"{}\"). To install it, call agent_revision_promote.",
+                                alias_id, rev_id, alias_id, rev_id
+                            ),
+                            None => anyhow::bail!(
+                                "No alias '{}' found. Create a revision and promote it first.",
+                                alias_id
+                            ),
+                        }
+                    }
                 };
 
                 // NOTE: suspension is intentionally NOT checked here. Resolving
