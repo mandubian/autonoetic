@@ -674,6 +674,26 @@ impl AgentExecutor {
             }
         }
 
+        // Transition workflow tasks to Failed when a child session dies
+        // abnormally. Without this, tasks stay Running forever (#670).
+        if outcome.is_error() {
+            if let Some(cfg) = self.config.as_deref() {
+                if let Err(e) = crate::scheduler::workflow_store::fail_running_tasks_for_session(
+                    cfg,
+                    self.gateway_store.as_deref(),
+                    &session_id,
+                    outcome.as_str(),
+                ) {
+                    tracing::warn!(
+                        target: "workflow",
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to transition workflow tasks after session termination"
+                    );
+                }
+            }
+        }
+
         if let Some(d) = self.live_digest.take() {
             if let Ok(mut g) = d.lock() {
                 let _ = g.write_session_summary(reason);

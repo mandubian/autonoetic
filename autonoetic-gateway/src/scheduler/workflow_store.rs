@@ -1544,6 +1544,68 @@ pub fn try_complete_workflow(
     Ok(true)
 }
 
+/// Transition any `Running` workflow tasks bound to `session_id` to `Failed`.
+///
+/// Called from `close_session` when a child session terminates abnormally.
+/// Without this, tasks stay `Running` forever because `close_session` only
+/// finalizes transcripts — it has no callback into the workflow task layer.
+/// The orphan reaper (R+12) only fires when the *parent* is terminal, so
+/// a child that dies while the parent is alive/suspended leaves tasks stuck.
+pub fn fail_running_tasks_for_session(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    session_id: &str,
+    reason: &str,
+) -> anyhow::Result<usize> {
+    let root = crate::runtime::content_store::root_session_id(session_id);
+    let wf_id = match resolve_workflow_id_for_root_session(config, &root)? {
+        Some(id) => id,
+        None => return Ok(0),
+    };
+    let tasks = list_task_runs_for_workflow(config, store, &wf_id)?;
+    let mut failed = 0usize;
+    for task in tasks {
+        if task.session_id == session_id
+            && task.status == TaskRunStatus::Running
+        {
+            let task_id = task.task_id.clone();
+            let summary = format!("child session terminated: {}", reason);
+            match update_task_run_status(
+                config,
+                store,
+                &wf_id,
+                &task_id,
+                TaskRunStatus::Failed,
+                Some(summary),
+                None,
+                None,
+            ) {
+                Ok(()) => {
+                    failed += 1;
+                    tracing::info!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        failed_count = failed,
+                        "Transitioned Running task to Failed after child session termination"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        task_id = %task_id,
+                        error = %e,
+                        "Failed to transition Running task to Failed after session termination"
+                    );
+                }
+            }
+        }
+    }
+    Ok(failed)
+}
+
 /// Creates an implicit artifact reference for a completed task.
 ///
 /// Per spec (spec-implicit-artifacts-agent-evolution.md §4.2), the implicit
@@ -5262,5 +5324,95 @@ mod tests {
             }
             other => panic!("expected WorkflowJoinSatisfied, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fail_running_tasks_for_session_transitions_matching_tasks() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "fail-tasks-root", None)
+            .unwrap();
+
+        // Two tasks: one bound to the dead session, one bound to a different session.
+        let dead_session = "fail-tasks-root/coder-dead".to_string();
+        let live_session = "fail-tasks-root/coder-live".to_string();
+
+        let dead_task = TaskRun {
+            task_id: "task-dead".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: dead_session.clone(),
+            parent_session_id: "fail-tasks-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        let live_task = TaskRun {
+            task_id: "task-live".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: live_session.clone(),
+            parent_session_id: "fail-tasks-root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &dead_task).unwrap();
+        save_task_run(&cfg, Some(&store), &live_task).unwrap();
+
+        // Fail tasks for the dead session.
+        let failed = fail_running_tasks_for_session(
+            &cfg,
+            Some(&store),
+            &dead_session,
+            "spawn_execute_error",
+        )
+        .unwrap();
+        assert_eq!(failed, 1, "exactly one task should have been transitioned");
+
+        // Verify the dead task is now Failed.
+        let updated_dead = load_task_run(&cfg, Some(&store), &wf.workflow_id, "task-dead")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_dead.status, TaskRunStatus::Failed);
+        assert!(
+            updated_dead
+                .result_summary
+                .as_deref()
+                .unwrap_or("")
+                .contains("child session terminated"),
+            "result_summary should mention session termination: {:?}",
+            updated_dead.result_summary
+        );
+
+        // The live task should still be Running.
+        let updated_live = load_task_run(&cfg, Some(&store), &wf.workflow_id, "task-live")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_live.status, TaskRunStatus::Running);
     }
 }
