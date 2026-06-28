@@ -1250,6 +1250,18 @@ pub async fn process_queued_workflow_tasks(
     Ok(())
 }
 
+/// Truncate `s` to at most `max_bytes` UTF-8 bytes without splitting a
+/// multi-byte character. Returns the prefix ending at the nearest char boundary
+/// ≤ `max_bytes`.
+fn truncate_to_byte_boundary(s: &str, max_bytes: usize) -> String {
+    let end = s.len().min(max_bytes);
+    let mut cut = end;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s[..cut].to_string()
+}
+
 /// Execute a task: spawn agent, update status, checkpoint, dequeue on completion.
 /// Shared by normal execution, crash recovery, and approval-resume paths.
 async fn spawn_task_execution(
@@ -1271,6 +1283,7 @@ async fn spawn_task_execution(
     let prev_checkpoint = workflow_store::load_task_checkpoint(&cfg, store, &wf_id, &t_id)
         .ok()
         .flatten();
+    let preview = truncate_to_byte_boundary(&message, 120);
     let checkpoint_context = if let Some(ref prev) = prev_checkpoint {
         tracing::info!(
             target: "workflow",
@@ -1282,14 +1295,14 @@ async fn spawn_task_execution(
         serde_json::json!({
             "agent_id": agent_id,
             "session_id": session_id,
-            "message_preview": &message[..message.len().min(120)],
+            "message_preview": preview,
             "resuming_from": { "step": prev.step, "version": prev.version, "state": prev.state },
         })
     } else {
         serde_json::json!({
             "agent_id": agent_id,
             "session_id": session_id,
-            "message_preview": &message[..message.len().min(120)],
+            "message_preview": preview,
         })
     };
     let _ = workflow_store::checkpoint_task(
