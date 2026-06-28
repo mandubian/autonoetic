@@ -57,6 +57,14 @@ fn all_providers() -> Vec<ProviderEntry> {
             },
         },
         ProviderEntry {
+            name: "opencode",
+            display: "OpenCode Go (opencode.ai)",
+            kind: ProviderKind::Remote {
+                api_key_env: "OPENCODE_API_KEY",
+                models_url: "https://opencode.ai/zen/go/v1/models",
+            },
+        },
+        ProviderEntry {
             name: "deepseek",
             display: "DeepSeek",
             kind: ProviderKind::Remote {
@@ -852,7 +860,7 @@ fn manual_entry() -> anyhow::Result<(String, String, String, Option<String>)> {
     let mut stderr = io::stderr();
     writeln!(
         stderr,
-        "\n  Known providers: anthropic, openai, openrouter, ollama, lmstudio, \
+        "\n  Known providers: anthropic, openai, opencode, openrouter, ollama, lmstudio, \
          deepseek, mistral, groq, together, gemini, cohere, xai, vllm, llamacpp\n"
     )?;
     let provider = read_line_with_prompt("  Provider: ")?;
