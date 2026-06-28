@@ -576,18 +576,7 @@ impl NativeTool for ArtifactInspectTool {
         }
 
         let has_tests = bundle.files.iter().any(|f| {
-            let name = f.name.as_str();
-            let lower = name.to_lowercase();
-            lower.contains("/tests/")
-                || lower.contains("/__tests__/")
-                || name.starts_with("test_")
-                || name.ends_with("_test.py")
-                || name.ends_with("_test.rs")
-                || name.ends_with("_test.go")
-                || name.ends_with(".test.ts")
-                || name.ends_with(".test.js")
-                || name.ends_with(".spec.ts")
-                || name.ends_with(".spec.js")
+            crate::runtime::is_test_file(&f.name)
         });
 
         serde_json::to_string(&serde_json::json!({
