@@ -77,3 +77,72 @@ pub mod trajectory_health;
 pub mod trajectory_monitor;
 pub mod v4a;
 pub mod workbench_return;
+
+/// Returns true if the given filename matches common test-file patterns.
+/// Used by `artifact_build` (metadata), `semantic_diff` (file role), and
+/// formerly by `promotion_record` (removed — see #668).
+///
+/// All checks are case-insensitive.
+pub fn is_test_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("/tests/")
+        || lower.starts_with("tests/")
+        || lower.contains("/__tests__/")
+        || lower.starts_with("__tests__/")
+        || lower.starts_with("test_")
+        || lower.ends_with("_test.py")
+        || lower.ends_with("_test.rs")
+        || lower.ends_with("_test.go")
+        || lower.ends_with(".test.ts")
+        || lower.ends_with(".test.js")
+        || lower.ends_with(".spec.ts")
+        || lower.ends_with(".spec.js")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_test_file;
+
+    #[test]
+    fn is_test_file_detects_tests_directory_prefix() {
+        assert!(is_test_file("tests/test_fib_agent.py"));
+        assert!(is_test_file("tests/test_main.py"));
+        assert!(is_test_file("tests/conftest.py")); // part of test infrastructure
+        assert!(!is_test_file("src/main.py"));
+    }
+
+    #[test]
+    fn is_test_file_detects_nested_tests_directory() {
+        assert!(is_test_file("src/tests/test_foo.py"));
+        assert!(is_test_file("packages/bar/tests/test_bar.py"));
+    }
+
+    #[test]
+    fn is_test_file_detects_test_prefixes() {
+        assert!(is_test_file("test_agent.py"));
+        assert!(is_test_file("test_fib.py"));
+    }
+
+    #[test]
+    fn is_test_file_detects_test_suffixes() {
+        assert!(is_test_file("agent_test.py"));
+        assert!(is_test_file("foo_test.rs"));
+        assert!(is_test_file("component.test.ts"));
+        assert!(is_test_file("widget.spec.js"));
+    }
+
+    #[test]
+    fn is_test_file_case_insensitive() {
+        assert!(is_test_file("Tests/test_fib.py"));
+        assert!(is_test_file("TESTS/test_main.py"));
+        assert!(is_test_file("Test_Agent.PY"));
+    }
+
+    #[test]
+    fn is_test_file_rejects_non_test_files() {
+        assert!(!is_test_file("fib_agent.py"));
+        assert!(!is_test_file("main.py"));
+        assert!(!is_test_file("requirements.txt"));
+        assert!(!is_test_file("README.md"));
+    }
+}

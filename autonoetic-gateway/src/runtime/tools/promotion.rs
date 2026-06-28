@@ -266,44 +266,6 @@ call this — e.g. no tests found; follow that role-specific guidance.)"
             ).to_error_response());
         }
 
-        // Mechanical no-test guard: if unit_test_runner records a verdict on an
-        // artifact with no test files, the agent diverged (wrote its own tests,
-        // misread the artifact). Reject and instruct unable_to_evaluate.
-        if matches!(args.role, autonoetic_types::promotion::PromotionRole::UnitTestRunner) {
-            if let Ok(store) = crate::artifact_store::ArtifactStore::new(gw_dir) {
-                if let Ok(bundle) = store.inspect(&artifact_id) {
-                    let has_tests = bundle.files.iter().any(|f| {
-                        let name = f.name.as_str();
-                        let lower = name.to_lowercase();
-                        lower.contains("/tests/")
-                            || lower.contains("/__tests__/")
-                            || name.starts_with("test_")
-                            || name.ends_with("_test.py")
-                            || name.ends_with("_test.rs")
-                            || name.ends_with("_test.go")
-                            || name.ends_with(".test.ts")
-                            || name.ends_with(".test.js")
-                            || name.ends_with(".spec.ts")
-                            || name.ends_with(".spec.js")
-                    });
-                    if !has_tests {
-                        return Ok(ToolError::validation(
-                            format!(
-                                "Artifact '{}' has no test files. unit_test_runner must return status: unable_to_evaluate — do not record a pass or fail verdict on a test-less artifact.",
-                                artifact_id
-                            ),
-                            None::<String>,
-                        )
-                        .with_code("no_tests_in_artifact")
-                        .with_repair_hint(
-                            "Return {\"status\": \"unable_to_evaluate\", \"evaluator_pass\": false, \"findings\": [], \"summary\": \"No test files found in artifact\"} as your final response.",
-                        )
-                        .to_error_response());
-                    }
-                }
-            }
-        }
-
         let (pass, execution_trace_id) =
             if crate::runtime::promotion_evidence::role_requires_execution_trace(&args.role) {
                 let Some(trace_id) = args

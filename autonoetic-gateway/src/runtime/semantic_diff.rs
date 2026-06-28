@@ -258,14 +258,7 @@ fn classify_role(
     }
 
     // Test.
-    if lower.contains("/tests/")
-        || name.starts_with("test_")
-        || name.ends_with("_test.rs")
-        || name.ends_with("_test.py")
-        || name.ends_with(".test.ts")
-        || name.ends_with(".spec.ts")
-        || lower.contains("/__tests__/")
-    {
+    if crate::runtime::is_test_file(&name) {
         return FileRole::Test;
     }
 
