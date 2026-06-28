@@ -8177,6 +8177,7 @@ mod tests {
                 depends_on: Vec::new(),
                 agent_id: Some("coder.default".into()),
                 notes: None,
+                status: Default::default(),
             }],
             validation_policy: ValidationPolicy::default(),
             capability_envelope: Vec::new(),
@@ -8215,6 +8216,7 @@ mod tests {
                     depends_on: Vec::new(),
                     agent_id: Some("researcher.default".into()),
                     notes: None,
+                    status: Default::default(),
                 },
                 PlanStep {
                     step_id: "s2".into(),
@@ -8223,6 +8225,7 @@ mod tests {
                     depends_on: Vec::new(),
                     agent_id: None,
                     notes: Some("Keep it small".into()),
+                    status: Default::default(),
                 },
             ],
             validation_policy: ValidationPolicy {

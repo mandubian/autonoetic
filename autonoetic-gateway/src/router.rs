@@ -7,6 +7,7 @@ use crate::runtime::workbench_return::prepare_return_to_agent_wakeup;
 use crate::scheduler::append_task_board_entry;
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::plan_frame::unsatisfied_dependencies;
 use autonoetic_types::task_board::{TaskBoardEntry, TaskStatus};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -452,6 +453,52 @@ impl JsonRpcRouter {
         entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
     }
 
+    /// Check whether a plan step's `depends_on` are all Completed.
+    /// Returns `Some(error_message)` if the spawn should be blocked, or `None` if it's allowed.
+    ///
+    /// Enforcement is opt-in: only activates when the spawn's `metadata` contains
+    /// a `step_id` field. Spawns without `step_id` are not checked (backwards-compatible).
+    fn check_plan_step_dependencies(
+        &self,
+        metadata: &Option<serde_json::Value>,
+        session_id: &str,
+    ) -> Option<String> {
+        let metadata = metadata.as_ref()?;
+        let step_id = metadata.get("step_id")?.as_str()?;
+        let root_session_id = session_id.split('/').next().unwrap_or(session_id);
+
+        let store = self.execution.gateway_store()?;
+
+        // Find the latest approved plan for this root session.
+        let plans = store.list_latest_plan_frames_for_root(root_session_id).ok()?;
+        let plan = plans.first()?;
+
+        // Verify the step exists in the plan (reject unknown step_ids).
+        let step_exists = plan.steps.iter().any(|s| s.step_id == step_id);
+        if !step_exists {
+            return Some(format!(
+                "Spawn metadata references step_id `{}` which does not exist in the approved plan `{}` (v{}). Remove step_id from metadata or use a valid step_id.",
+                step_id, plan.plan_id, plan.version,
+            ));
+        }
+
+        let unsatisfied = unsatisfied_dependencies(plan, step_id);
+        if unsatisfied.is_empty() {
+            return None;
+        }
+
+        let deps_desc: Vec<String> = unsatisfied
+            .iter()
+            .map(|(id, status)| format!("`{}` ({})", id, status.as_str()))
+            .collect();
+        Some(format!(
+            "Plan step `{}` depends on {} which {} not completed. Complete the dependency step(s) before spawning for this step.",
+            step_id,
+            deps_desc.join(", "),
+            if unsatisfied.len() == 1 { "is" } else { "are" },
+        ))
+    }
+
     pub async fn dispatch(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         tracing::debug!("Dispatching JSON-RPC method: {}", req.method);
 
@@ -571,8 +618,18 @@ impl JsonRpcRouter {
                 };
                 let session_id = params
                     .session_id
+                    .clone()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 let agent_id = params.agent_id.clone();
+
+                // Enforce plan step depends_on ordering (#664).
+                // When the spawn carries a step_id in metadata, verify that all
+                // declared dependencies are Completed before allowing the spawn.
+                if let Some(block_msg) =
+                    self.check_plan_step_dependencies(&params.metadata, &session_id)
+                {
+                    return JsonRpcResponse::error(req.id, -32000, block_msg);
+                }
 
                 let ingress = IngressType::Spawn {
                     agent_id: params.agent_id.clone(),

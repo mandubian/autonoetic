@@ -171,6 +171,36 @@ pub(crate) fn list_pending_plan_frames_for_root(
     Ok(plans)
 }
 
+/// List the latest **approved** revision of each plan for a root session.
+/// Used by the agent_spawn depends_on enforcement to find the active plan.
+/// If a plan was amended into `awaiting_approval`, the last approved version
+/// is returned so enforcement stays in effect during re-approval.
+pub(crate) fn list_latest_plan_frames_for_root(
+    conn: &Connection,
+    root_session_id: &str,
+) -> Result<Vec<PlanFrame>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM plan_frames p
+         WHERE p.root_session_id = ?1
+           AND p.status = 'approved'
+           AND p.version = (
+             SELECT MAX(p2.version) FROM plan_frames p2
+             WHERE p2.plan_id = p.plan_id AND p2.status = 'approved'
+           )
+         ORDER BY p.created_at DESC"
+    ))?;
+
+    let rows = stmt.query_map(params![root_session_id], |row| {
+        Ok(row_to_plan_frame(row))
+    })?;
+
+    let mut plans = Vec::new();
+    for row in rows {
+        plans.push(row??);
+    }
+    Ok(plans)
+}
+
 pub(crate) fn list_plan_revisions(
     conn: &Connection,
     plan_id: &str,
