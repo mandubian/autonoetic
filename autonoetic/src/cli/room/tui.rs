@@ -1029,7 +1029,12 @@ impl LiveContentNode {
         match self {
             LiveContentNode::Plan { title, status, version, is_latest, .. } => {
                 let latest_tag = if *is_latest { " · latest" } else { "" };
-                format!("📋 {} v{}{} [{}]", title, version, latest_tag, status)
+                let label = if title.is_empty() {
+                    format!("plan v{version}")
+                } else {
+                    title.clone()
+                };
+                format!("📋 {} v{}{} [{}]", label, version, latest_tag, status)
             }
             LiveContentNode::PlanStep { title } => {
                 format!("  📄 {}", title)
@@ -1075,6 +1080,7 @@ impl LiveContentPane {
     fn visible_indices(&self) -> Vec<usize> {
         let mut visible = Vec::new();
         let mut last_plan_id: Option<String> = None;
+        let mut last_plan_was_latest = false;
         for (idx, node) in self.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -1083,16 +1089,23 @@ impl LiveContentPane {
                     ..
                 } => {
                     last_plan_id = Some(plan_id.clone());
+                    last_plan_was_latest = *is_latest;
                     if *is_latest || !self.is_folded(plan_id) {
                         visible.push(idx);
                     }
                 }
-                _ => {
+                LiveContentNode::PlanStep { .. } => {
+                    // Only hide steps under a folded older (non-latest) plan.
                     if let Some(ref pid) = last_plan_id {
-                        if self.is_folded(pid) {
+                        if !last_plan_was_latest && self.is_folded(pid) {
                             continue;
                         }
                     }
+                    visible.push(idx);
+                }
+                _ => {
+                    last_plan_id = None;
+                    last_plan_was_latest = false;
                     visible.push(idx);
                 }
             }
@@ -6513,6 +6526,7 @@ fn draw(
         // when their plan_id is unfolded.
         let mut visible_nodes: Vec<(usize, &LiveContentNode)> = Vec::new();
         let mut last_plan_id: Option<String> = None;
+        let mut last_plan_was_latest = false;
         for (idx, node) in pane.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -6521,18 +6535,24 @@ fn draw(
                     ..
                 } => {
                     last_plan_id = Some(plan_id.clone());
+                    last_plan_was_latest = *is_latest;
                     if *is_latest || !pane.is_folded(plan_id) {
                         visible_nodes.push((idx, node));
                     }
                 }
-                _ => {
+                LiveContentNode::PlanStep { .. } => {
                     // Plan steps only appear under the latest plan version;
-                    // hide them if the parent latest plan is folded.
+                    // hide them if the parent plan is a folded older revision.
                     if let Some(ref pid) = last_plan_id {
-                        if pane.is_folded(pid) {
+                        if !last_plan_was_latest && pane.is_folded(pid) {
                             continue;
                         }
                     }
+                    visible_nodes.push((idx, node));
+                }
+                _ => {
+                    last_plan_id = None;
+                    last_plan_was_latest = false;
                     visible_nodes.push((idx, node));
                 }
             }
@@ -6561,9 +6581,9 @@ fn draw(
                         is_latest,
                     } => {
                         let label = if title.is_empty() {
-                            &plan_id[..plan_id.len().min(12)]
+                            format!("plan v{version}")
                         } else {
-                            title.as_str()
+                            title.clone()
                         };
                         let latest_tag = if *is_latest { " ✦" } else { "" };
                         let count = pane
@@ -7564,6 +7584,71 @@ mod tests {
         assert_eq!(g.id, "int-1");
         let active = active_gate(&entries, &entries, Some(&later_row), &empty, &empty).unwrap();
         assert_eq!(active.id, "int-1");
+    }
+
+    #[test]
+    fn live_content_drafts_remain_visible_when_plan_versions_folded() {
+        // Drafts are session-scoped, not plan-scoped. Folding an older plan
+        // version must not hide drafts or artifacts that appear later.
+        let nodes = vec![
+            LiveContentNode::Plan {
+                plan_id: "plan-1".into(),
+                title: "Roadmap".into(),
+                status: "approved".into(),
+                version: 2,
+                is_latest: true,
+            },
+            LiveContentNode::PlanStep { title: "step A".into() },
+            LiveContentNode::Plan {
+                plan_id: "plan-1".into(),
+                title: "Roadmap".into(),
+                status: "approved".into(),
+                version: 1,
+                is_latest: false,
+            },
+            LiveContentNode::PlanStep { title: "old step".into() },
+            LiveContentNode::Artifact {
+                artifact_id: "art-1".into(),
+                artifact_ref: "art-1".into(),
+                kind: "patch".into(),
+                name: "changes.patch".into(),
+            },
+            LiveContentNode::Draft {
+                name: "notes.md".into(),
+                alias: "".into(),
+                visibility: "session".into(),
+            },
+        ];
+        let mut pane = LiveContentPane {
+            nodes,
+            sections: vec![(0, "Plans"), (5, "Artifacts"), (6, "Drafts")],
+            selected: 0,
+            scroll: 0,
+            folded: std::collections::HashMap::from([("plan-1".into(), true)]),
+        };
+
+        let visible = pane.visible_indices();
+        assert!(visible.contains(&0), "latest plan must be visible");
+        assert!(visible.contains(&1), "latest plan steps must be visible");
+        assert!(!visible.contains(&2), "older plan version must be folded");
+        assert!(!visible.contains(&3), "older plan steps must be folded");
+        assert!(visible.contains(&4), "artifact must remain visible");
+        assert!(visible.contains(&5), "draft must remain visible");
+    }
+
+    #[test]
+    fn live_content_plan_label_includes_version_even_without_title() {
+        let node = LiveContentNode::Plan {
+            plan_id: "plan-1".into(),
+            title: "".into(),
+            status: "pending".into(),
+            version: 3,
+            is_latest: false,
+        };
+        let label = node.label();
+        assert!(label.contains("plan v3"), "{label}");
+        assert!(label.contains("v3"), "{label}");
+        assert!(label.contains("[pending]"), "{label}");
     }
 
     #[test]
