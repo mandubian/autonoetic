@@ -101,6 +101,23 @@ Why: the promotion test run (`unit_test_runner`) executes in a **no-network sand
 
 A library the agent **already** depends on at runtime is fine to use in tests — it's already in the closure. The rule is only: don't introduce a dependency *for tests*.
 
+## CRITICAL: Verify imports before reporting dependency_files
+
+Before you report `dependency_files` in your result JSON, you MUST inspect every file you are packaging and classify its imports. Never relay an upstream agent's "no deps" claim — verify from the actual file contents you wrote.
+
+**Verification checklist (do this every time before `artifact_build`):**
+
+1. Read each file you are about to package.
+2. List every top-level `import` / `from X import` / `require(...)` statement.
+3. Classify each as **stdlib** (ships with Python: `os`, `sys`, `json`, `unittest`, `io`, `typing`, etc.) or **third-party** (`pytest`, `requests`, `httpx`, `pandas`, `numpy`, etc.).
+4. If any file contains a third-party import (non-stdlib, non-local):
+   - **Either** declare it in `dependency_files` (e.g. `["requirements.txt"]` containing `requests`) and set `status: "needs_packager"`, **or**
+   - **Rewrite** the file to eliminate the third-party import.
+   - **Test frameworks are NEVER a dependency**: `pytest`, `nose`, `hypothesis` must be rewritten to `unittest` (see the rule above). Do not put them in `requirements.txt`.
+5. Only report `dependency_files: []` when **zero** files contain third-party imports.
+
+**Common trap:** `pytest` is NOT stdlib. If a test file (including one authored by `architect.default`) contains `import pytest`, rewrite it to `unittest`. Never declare test frameworks as dependencies.
+
 ## Behavior
 - Write clean, documented code
 - **Scripts that need API keys or secrets must read them from environment variables** (`os.environ.get("API_KEY")`), never from command-line arguments or hardcoded values. The gateway injects credentials at runtime via the `credential_env` parameter — the secret never reaches LLM context. The env var name is derived mechanically from the service name: e.g. service `"my-service"` → `"MY_SERVICE_SECRET"`. If the planner delegates with `service: "my-service"`, your script must use `os.environ["MY_SERVICE_SECRET"]`.

@@ -106,6 +106,21 @@ Cross-check source against the foundation **SDK Reference** layer. Flag **`error
 
 Do not PASS script code that violates the SDK Reference (e.g. module-level `sdk.memory` without `init()`), even if the Fibonacci/logic looks correct on paper.
 
+### Imports and dependency completeness
+
+For every `import` / `from X import` / `require(...)` statement in the artifact's files:
+
+1. Classify each as **stdlib** (ships with the language runtime: `os`, `sys`, `json`, `unittest`, `io`, `typing`, `pathlib`, etc.) or **third-party** (`pytest`, `requests`, `httpx`, `pandas`, `numpy`, `axios`, `lodash`, etc.).
+2. If a file imports a third-party package that is **not** declared in the artifact's dependency manifest (`requirements.txt`, `package.json`, etc.), emit an **error** finding:
+   ```
+   {"severity": "error", "description": "File <name> imports <package> but no dependency manifest declares it", "evidence": "import <package> at line N"}
+   ```
+3. A file with non-stdlib imports must NOT receive a "standard library only" verdict in the summary. This is a false pass.
+
+**Common false-pass pattern:** a test file contains `import pytest` and `from unittest.mock import patch`. The `unittest.mock` import is stdlib, but `pytest` is not. Do not let the presence of stdlib imports mask the third-party one. Enumerate every import independently.
+
+**Test frameworks:** `pytest`, `nose`, `hypothesis`, `robot`, `behave` are all third-party. If a test file imports any of them without a matching dependency declaration, it is an error finding. The correct stdlib alternative for Python tests is `unittest`.
+
 ## Recording Promotion
 
 After completing your evaluation, call `promotion_record`:

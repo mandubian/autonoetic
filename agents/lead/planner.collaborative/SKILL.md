@@ -495,8 +495,14 @@ After `workflow_wait` on federation (s4):
 |---|---|
 | `unable_to_evaluate` (no tests in artifact) | OK to escalate if auditor + static_evaluator pass |
 | `pass` / `fail` with `promotion_record` | Use `promotion_query`; P-2.26 blocks install on `pass: false` |
+| `ModuleNotFoundError` / `ImportError` in findings | **Inspect the missing module name.** If it's a third-party package (e.g. `pytest`, `requests`), spawn `packager.default` with the artifact_ref to layer it. If it's a local artifact file (wrong import path, missing file), route to `coder.default`. Re-run gates after fixing. |
 | `Failed` / `spawn_execute_error` / LoopGuard | **Stop.** Retry runner with template above, or spawn `coder` to add `tests/` — do **not** escalate or install |
 | `validation_waive` for `unit_tests` | Only with canonical `art_*` from `resolve`/`artifact_inspect` — never `ar.*` |
+
+**Dependency gate failures vs code bugs:** When `unit_test_runner` or any gate reports `ModuleNotFoundError` or `ImportError`, inspect the missing module name before deciding the route:
+- **Third-party package** (e.g. `pytest`, `requests`, `httpx`): spawn `packager.default` — the code is correct, it just needs layered deps.
+- **Local artifact module** (wrong import path, missing file, typo): route to `coder.default` — this is a code bug.
+Respawning coder for a third-party packaging failure wastes a cycle because coder cannot install packages (no `NetworkAccess`).
 
 Do not set `federation_complete: true` or tell the operator "unit_tests waived" unless:
 
@@ -555,6 +561,15 @@ On resume (after `workflow_wait`, child completion, plan approval, or workbench 
    revision, so advance the plan (spawn or use it), don't rebuild or re-promote.
    A pending approval resumes automatically — relay the `request_id`, end your
    turn, and do not re-issue the step.
+
+### Recovery after LLM or infrastructure errors
+
+When your session resumes after an LLM error (`error decoding response body`, `spawn_execute_error`), connection timeout, or other infrastructure failure:
+
+1. **Call `planframe_get` first** — re-establish which step you are on before spawning any child.
+2. **Call `workflow_state`** — check which child tasks already completed and reuse their outputs.
+3. **Do not replay stale progress.** If a step was already completed before the error, do not re-spawn the agent for that step. Check task status in `workflow_state` first.
+4. **Diagnose the actual failure before respawning.** If a federation gate failed, read its findings and route to the correct specialist (packager for dep errors, coder for code bugs). Respawning the same agent that already succeeded wastes a cycle.
 
 ## Tools
 
