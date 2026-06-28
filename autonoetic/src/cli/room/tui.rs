@@ -3989,6 +3989,13 @@ pub fn run(
                                     resolved.insert(key);
                                 }
                             }
+                            // Emergency stop terminates the session tree; stop
+                            // treating it as async-processing so idle
+                            // optimization kicks in immediately.
+                            if e.event_type == "session.emergency_stop" && session_async_processing {
+                                session_async_processing = false;
+                                needs_redraw = true;
+                            }
                         }
                         if !page.entries.is_empty() {
                             entries_changed = true;
@@ -4040,6 +4047,9 @@ pub fn run(
 
         // Recompute open turns only when the timeline changed; otherwise reuse
         // the cached set to avoid scanning all entries every frame.
+        // An emergency stop terminates every open turn, even if no matching
+        // turn.end events arrive, so idle-frame optimization still kicks in.
+        let mut terminal_stop_seen = false;
         if entries_changed || !cached_open_turns_valid {
             cached_open_turns.clear();
             for e in &entries {
@@ -4054,8 +4064,14 @@ pub fn run(
                             cached_open_turns.remove(t);
                         }
                     }
+                    "session.emergency_stop" => {
+                        terminal_stop_seen = true;
+                    }
                     _ => {}
                 }
+            }
+            if terminal_stop_seen {
+                cached_open_turns.clear();
             }
             cached_open_turns_valid = true;
         }
