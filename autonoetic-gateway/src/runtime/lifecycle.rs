@@ -715,19 +715,39 @@ impl AgentExecutor {
 
         // Attempt workflow completion when root session closes normally.
         let is_root = crate::runtime::content_store::root_session_id(&session_id) == session_id;
-        if outcome.is_completed() && is_root {
+        if is_root {
             if let Some(cfg) = self.config.as_deref() {
-                if let Err(e) = crate::scheduler::workflow_store::try_complete_workflow(
-                    cfg,
-                    self.gateway_store.as_deref(),
-                    &session_id,
-                ) {
-                    tracing::warn!(
-                        target: "workflow",
-                        error = %e,
-                        session_id = %session_id,
-                        "Failed to attempt workflow completion on session close"
-                    );
+                if outcome.is_completed() {
+                    if let Err(e) = crate::scheduler::workflow_store::try_complete_workflow(
+                        cfg,
+                        self.gateway_store.as_deref(),
+                        &session_id,
+                    ) {
+                        tracing::warn!(
+                            target: "workflow",
+                            error = %e,
+                            session_id = %session_id,
+                            "Failed to attempt workflow completion on session close"
+                        );
+                    }
+                } else if outcome.is_error() {
+                    // GAP-1B: root session closed with error — fail the workflow
+                    // so tasks don't stay Running forever against a dead root.
+                    if let Err(e) =
+                        crate::scheduler::workflow_store::fail_workflow_for_root_session(
+                            cfg,
+                            self.gateway_store.as_deref(),
+                            &session_id,
+                            reason,
+                        )
+                    {
+                        tracing::warn!(
+                            target: "workflow",
+                            error = %e,
+                            session_id = %session_id,
+                            "Failed to fail workflow on root session error"
+                        );
+                    }
                 }
             }
         }

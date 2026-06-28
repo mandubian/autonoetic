@@ -1550,6 +1550,20 @@ impl GatewayExecutionService {
             Some(&details.to_string()),
         )?;
 
+        // GAP-1C: finalize the root session transcript so it doesn't stay
+        // 'active' forever. The orphan reaper checks parent transcript status
+        // and can't reap children if the parent looks alive.
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Err(e) = store.finalize_session_transcript(root_session_id, &now, "failed") {
+            tracing::warn!(
+                target: "execution",
+                root_session_id = %root_session_id,
+                stop_id = %stop_id,
+                error = %e,
+                "Failed to finalize root session transcript during emergency stop"
+            );
+        }
+
         Ok(serde_json::json!({
             "ok": true,
             "stop_id": stop_id,

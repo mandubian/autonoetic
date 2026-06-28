@@ -1165,18 +1165,20 @@ impl GatewayStore {
         Ok(results)
     }
 
-    /// Find active sessions whose parent session has ended (orphan detection for R+12).
+    /// Find active or suspended sessions whose parent session has ended (orphan detection for R+12).
     ///
     /// Returns (child_session_id, parent_session_id, root_session_id, agent_id) tuples
-    /// for each orphaned child. A child is "active" if its transcript status is 'active'
-    /// and its parent (derived from session_id path) has a terminal transcript
-    /// (`completed` or `failed`). `suspended` parents are NOT terminal (resumable).
+    /// for each orphaned child. A child is orphaned if its transcript status is
+    /// 'active' or 'suspended' and its parent (derived from session_id path) has
+    /// a terminal transcript (`completed` or `failed`). `suspended` parents are
+    /// NOT terminal (resumable). GAP-3C: include suspended children so approval-
+    /// rejected or timed-out sessions get reaped when their parent dies.
     pub fn find_orphaned_sessions(&self) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT session_id, root_session_id, agent_id
              FROM session_transcripts
-             WHERE status = 'active'
+             WHERE status IN ('active', 'suspended')
                AND session_id LIKE '%/%'",
         )?;
         let active_children: Vec<(String, String, String, String)> = stmt
