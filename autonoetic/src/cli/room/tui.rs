@@ -29,6 +29,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 /// Spinner frames — a gentle breathing indicator on the in-flight row. The
@@ -1391,6 +1392,10 @@ struct GateInput {
     options: Vec<GateOption>,
     /// Whether free-text is accepted alongside any options (interactions).
     allow_freeform: bool,
+    /// True after the operator selected the synthetic "Give more details" option.
+    /// This lets them type a free-text follow-up even when the original payload
+    /// was choice-only, without claiming the underlying interaction allows freeform.
+    details_mode: bool,
     /// Rejections always require motivation (§O). Approvals may require it for
     /// elevated/external actions — the gateway enforces that on submit.
     motivation_required: bool,
@@ -1399,6 +1404,16 @@ struct GateInput {
     required_confirm_phrase: Option<String>,
     /// R++2: `revision_promote` approvals — auto-filled from the timeline payload.
     acknowledged_capabilities: Vec<String>,
+}
+
+/// A gate RPC that is running in the background so the TUI event loop stays
+/// responsive while waiting for the gateway.
+struct PendingGateResolve {
+    /// The gate the operator committed; restored on error so they can retry.
+    /// Wrapped in `Option` so `poll_pending_gate` can take ownership on error.
+    gi: Option<GateInput>,
+    /// Shared result cell populated by the async task; checked each frame.
+    result: Arc<StdMutex<Option<Result<String, String>>>>,
 }
 
 /// Blocking popup for operator gates — auto-opens when a new approval, question,
@@ -1631,6 +1646,7 @@ fn approval_gate_input(
         buffer: String::new(),
         options: Vec::new(),
         allow_freeform: true,
+        details_mode: false,
         motivation_required,
         required_confirm_phrase,
         acknowledged_capabilities,
@@ -2053,6 +2069,10 @@ fn format_tokens(n: u64) -> String {
 
 /// `user.ask.pending` timeline entry (the gateway embeds them, #393). Returns
 /// `(options, allow_freeform)`; missing `allow_freeform` defaults to permissive.
+/// Adds a synthetic "Give more details" option when there are pre-defined
+/// choices so the operator can always elaborate without guessing. The returned
+/// `allow_freeform` is the original payload value, not overridden by the
+/// presence of options; the synthetic details option is handled locally.
 fn interaction_choices(entries: &[SessionTimelineEntry], interaction_id: &str) -> (Vec<GateOption>, bool) {
     let entry = entries.iter().find(|e| {
         e.event_type == "user.ask.pending"
@@ -2064,7 +2084,7 @@ fn interaction_choices(entries: &[SessionTimelineEntry], interaction_id: &str) -
     else {
         return (Vec::new(), true);
     };
-    let options = payload
+    let mut options: Vec<GateOption> = payload
         .get("options")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -2082,6 +2102,15 @@ fn interaction_choices(entries: &[SessionTimelineEntry], interaction_id: &str) -
         .get("allow_freeform")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    // Always offer an explicit "give details" option when there are pre-defined
+    // choices. Selecting it lets the operator type a free-text follow-up without
+    // the TUI guessing whether freeform is allowed.
+    if !options.is_empty() {
+        options.push(GateOption {
+            id: "__details__".to_string(),
+            label: "Give more details / explain".to_string(),
+        });
+    }
     (options, allow_freeform)
 }
 
@@ -2142,6 +2171,7 @@ pub fn run(
     let mut detail_scroll: u16 = 0; // vertical scroll offset for detail pane
     let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
     let mut input: Option<GateInput> = None; // in-flight gate decision
+    let mut pending_gate: Option<PendingGateResolve> = None; // background gate RPC
     let mut compose: Option<ComposeInput> = None; // in-flight free-form message to the session
     // When Some, the active compose targets a file comment (name, version handle)
     // and submits via `content.comment` instead of a freeform session message.
@@ -2208,7 +2238,7 @@ pub fn run(
                         c.insert_str(&text);
                         repaint_after_input = true;
                     } else if let Some(gi) = input.as_mut() {
-                        if gi.allow_freeform {
+                        if gi.allow_freeform || gi.details_mode {
                             gi.buffer.push_str(&text.replace('\r', ""));
                             repaint_after_input = true;
                         }
@@ -2600,6 +2630,7 @@ pub fn run(
                         let chosen = if gi.action == GateAction::Answer
                             && gi.buffer.is_empty()
                             && !gi.allow_freeform
+                            && !gi.details_mode
                             && gi.options.len() <= 9
                         {
                             if let KeyCode::Char(c @ '1'..='9') = key.code {
@@ -2613,6 +2644,18 @@ pub fn run(
                         // Number selection and Enter both commit; share the resolve path.
                         let commit = chosen.is_some() || key.code == KeyCode::Enter;
                         if commit {
+                            // The synthetic "Give more details" option switches the input
+                            // into free-text follow-up mode without submitting.
+                            if let Some(ref opt) = chosen {
+                                if opt.id == "__details__" {
+                                    gi.buffer.clear();
+                                    gi.details_mode = true;
+                                    status = Some(
+                                        "✓ type your details, then press Enter".to_string(),
+                                    );
+                                    continue;
+                                }
+                            }
                             let gi = input.take().unwrap();
                             if let Some(err) = gate_commit_validation_error(&gi) {
                                 status = Some(err.to_string());
@@ -2646,20 +2689,14 @@ pub fn run(
                                     gi.id
                                 ));
                             } else {
-                                match resolve_gate(client, &gi, chosen.as_ref()) {
-                                    Ok(msg) => {
-                                        acted.insert(gi.id.clone());
-                                        if gate_modal
-                                            .as_ref()
-                                            .is_some_and(|m| m.gate.id == gi.id)
-                                        {
-                                            gate_modal = None;
-                                        }
-                                        status = Some(msg);
-                                        follow = true;
-                                        force_timeline_refresh = true;
+                                match resolve_gate(client, gi, chosen.clone()) {
+                                    Ok(pending) => {
+                                        pending_gate = Some(pending);
+                                        status = Some(
+                                            "⏳ submitting answer…".to_string()
+                                        );
                                     }
-                                    Err(msg) => {
+                                    Err((msg, gi)) => {
                                         status = Some(msg);
                                         input = Some(gi);
                                     }
@@ -2668,6 +2705,11 @@ pub fn run(
                             continue;
                         }
                         match key.code {
+                            KeyCode::Esc if gi.details_mode => {
+                                gi.details_mode = false;
+                                gi.buffer.clear();
+                                status = None;
+                            }
                             KeyCode::Esc => input = None,
                             KeyCode::Backspace => {
                                 gi.buffer.pop();
@@ -2718,7 +2760,7 @@ pub fn run(
                                 }
                                 _ => {}
                             }
-                        } else if input.is_none() {
+                        } else if input.is_none() && pending_gate.is_none() {
                             match key.code {
                                 KeyCode::Esc => {
                                     if let Some(m) = gate_modal.as_mut() {
@@ -2764,6 +2806,7 @@ pub fn run(
                                         buffer: String::new(),
                                         options,
                                         allow_freeform,
+                                        details_mode: false,
                                         motivation_required: false,
                                         required_confirm_phrase: None,
                                         acknowledged_capabilities: Vec::new(),
@@ -3083,6 +3126,7 @@ pub fn run(
                                     buffer: String::new(),
                                     options,
                                     allow_freeform,
+                                    details_mode: false,
                                     motivation_required: false,
                                     required_confirm_phrase: None,
                                     acknowledged_capabilities: Vec::new(),
@@ -3140,7 +3184,7 @@ pub fn run(
                         KeyCode::Char('A') => {
                             if content_view.is_some() || artifact_file_view.is_some()
                                 || artifact_viewer.is_some() || detail.is_some()
-                                || input.is_some() || compose.is_some()
+                                || input.is_some() || pending_gate.is_some() || compose.is_some()
                                 || gate_modal.is_some()
                             {
                             } else if approvals_popup.is_some() {
@@ -3256,6 +3300,7 @@ pub fn run(
                                     buffer: String::new(),
                                     options,
                                     allow_freeform,
+                                    details_mode: false,
                                     motivation_required: false,
                                     required_confirm_phrase: None,
                                     acknowledged_capabilities: Vec::new(),
@@ -3295,7 +3340,7 @@ pub fn run(
                         KeyCode::Char('c') => {
                             if content_view.is_some() || artifact_file_view.is_some()
                                 || artifact_viewer.is_some() || detail.is_some()
-                                || input.is_some() || compose.is_some()
+                                || input.is_some() || pending_gate.is_some() || compose.is_some()
                             {
                                 // don't grab 'c' while another overlay/text input is active
                             } else if live_content_pane.is_some() {
@@ -3805,6 +3850,35 @@ pub fn run(
             needs_redraw = true;
         }
 
+        // Check whether a background gate RPC has finished. This keeps the TUI
+        // responsive during slow gateway answers and gives the operator an
+        // immediate success/error status without blocking the event loop.
+        if let Some(mut pending) = pending_gate.take() {
+            if let Some(result) = poll_pending_gate(&mut pending) {
+                match result {
+                    Ok(msg) => {
+                        acted.insert(pending.gi.as_ref().map(|g| g.id.clone()).unwrap_or_default());
+                        if gate_modal
+                            .as_ref()
+                            .is_some_and(|m| m.gate.id == pending.gi.as_ref().map(|g| g.id.clone()).unwrap_or_default())
+                        {
+                            gate_modal = None;
+                        }
+                        status = Some(msg);
+                        follow = true;
+                        force_timeline_refresh = true;
+                    }
+                    Err((msg, gi)) => {
+                        status = Some(msg);
+                        input = Some(gi);
+                    }
+                }
+                needs_redraw = true;
+            } else {
+                pending_gate = Some(pending);
+            }
+        }
+
         // Paint immediately after input so detail panes and scroll don't wait on
         // a blocking timeline RPC or a full row-height pass over the list.
         // Use cached turn_boundaries and spinner to avoid visual jumps vs the
@@ -3933,7 +4007,10 @@ pub fn run(
         }
 
         let mut entries_changed = false;
-        let timeline_poll_ms = if cached_open_turns.is_empty() && !session_async_processing {
+        let timeline_poll_ms = if cached_open_turns.is_empty()
+            && !session_async_processing
+            && pending_gate.is_none()
+        {
             IDLE_TIMELINE_POLL_MS
         } else {
             TIMELINE_POLL_MS
@@ -4091,7 +4168,9 @@ pub fn run(
 
         // Only animate the spinner when something is actually in flight. Idle
         // sessions therefore freeze the spinner and skip redraws entirely.
-        let has_in_flight_visual = !cached_open_turns.is_empty() || session_async_processing;
+        let has_in_flight_visual = !cached_open_turns.is_empty()
+            || session_async_processing
+            || pending_gate.is_some();
         if has_in_flight_visual {
             spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
             needs_redraw = true;
@@ -4179,7 +4258,7 @@ pub fn run(
 
         // Keep an open plan-review pane aligned with the latest pending revision
         // (e.g. v2 amend while v1 review was still on screen).
-        if input.is_none() && compose.is_none() {
+        if input.is_none() && pending_gate.is_none() && compose.is_none() {
             if let Some(plan_id) = detail
                 .as_ref()
                 .and_then(|d| d.plan_id.clone())
@@ -4195,7 +4274,7 @@ pub fn run(
             }
         }
 
-        let new_plan = if input.is_none() && compose.is_none() {
+        let new_plan = if input.is_none() && pending_gate.is_none() && compose.is_none() {
             newest_pending_plan_event(&visible, &indexed, &resolved, &acted)
         } else {
             None
@@ -4225,7 +4304,7 @@ pub fn run(
             selected = selected.min(rows.len().saturating_sub(1));
         }
 
-        if input.is_none() && compose.is_none() && slash.is_none() {
+        if input.is_none() && pending_gate.is_none() && compose.is_none() && slash.is_none() {
             if let Some((gate_ref, event_id)) =
                 newest_blocking_gate_event(&entries, &resolved, &acted)
             {
@@ -4386,7 +4465,10 @@ pub fn run(
     }
 
     let _ = event::poll(Duration::from_millis(
-        if cached_open_turns.is_empty() && !session_async_processing {
+        if cached_open_turns.is_empty()
+            && !session_async_processing
+            && pending_gate.is_none()
+        {
             IDLE_FRAME_MS
         } else {
             FRAME_MS
@@ -4640,6 +4722,11 @@ fn answer_params(gi: &GateInput, chosen: Option<&GateOption>) -> Result<serde_js
         .filter(|n| (1..=gi.options.len()).contains(n))
         .map(|n| &gi.options[n - 1]);
     if let Some(opt) = chosen.or(by_number) {
+        if opt.id == "__details__" {
+            // "Give more details" requires a free-text follow-up. Keep the input
+            // open in details mode and do not submit yet.
+            return Err("__details__".to_string());
+        }
         return Ok(serde_json::json!({
             "interaction_id": gi.id, "answer_option_id": opt.id, "answered_by": "operator"
         }));
@@ -4651,7 +4738,7 @@ fn answer_params(gi: &GateInput, chosen: Option<&GateOption>) -> Result<serde_js
             "✗ type a number to choose, or type a reply".to_string()
         });
     }
-    if !gi.allow_freeform {
+    if !gi.allow_freeform && !gi.details_mode {
         return Err("✗ this question requires choosing a numbered option".to_string());
     }
     Ok(serde_json::json!({
@@ -4691,31 +4778,73 @@ fn approval_approve_params(gi: &GateInput) -> serde_json::Value {
     params
 }
 
-fn resolve_gate(client: &RoomClient, gi: &GateInput, chosen: Option<&GateOption>) -> Result<String, String> {
-    let text = gi.buffer.trim();
-    let reason = (!text.is_empty()).then(|| text.to_string());
-    let (result, verb) = match gi.action {
-        GateAction::Approve => (
-            rpc(client, "approvals.approve", approval_approve_params(gi)),
-            "approved",
-        ),
+/// Start resolving a gate asynchronously so the TUI event loop stays
+/// responsive. Returns immediately with a `PendingGateResolve` that the caller
+/// must poll each frame; on completion the operator sees the same success/error
+/// path as before.
+fn resolve_gate(
+    client: &RoomClient,
+    gi: GateInput,
+    chosen: Option<GateOption>,
+) -> Result<PendingGateResolve, (String, GateInput)> {
+    let text = gi.buffer.trim().to_string();
+    let reason = (!text.is_empty()).then(|| text.clone());
+    let id = gi.id.clone();
+    let (params, verb) = match gi.action {
+        GateAction::Approve => (approval_approve_params(&gi), "approved"),
         GateAction::Reject => (
-            rpc(
-                client,
-                "approvals.reject",
-                serde_json::json!({ "request_id": gi.id, "decided_by": "operator", "reason": reason }),
-            ),
+            serde_json::json!({ "request_id": id, "decided_by": "operator", "reason": reason }),
             "rejected",
         ),
-        GateAction::Answer => (
-            rpc(client, "interaction.resolve_and_answer", answer_params(gi, chosen)?),
-            "answered",
-        ),
+        GateAction::Answer => match answer_params(&gi, chosen.as_ref()) {
+            Ok(p) => (p, "answered"),
+            Err(msg) => return Err((msg, gi)),
+        },
     };
-    match result {
-        Ok(_) => Ok(format!("✓ {verb} {}", gi.id)),
-        Err(e) => Err(format!("✗ {e}")),
-    }
+    let method = match gi.action {
+        GateAction::Approve => "approvals.approve",
+        GateAction::Reject => "approvals.reject",
+        GateAction::Answer => "interaction.resolve_and_answer",
+    };
+    let client = client.clone();
+    let gate_id = gi.id.clone();
+    let result: Arc<StdMutex<Option<Result<String, String>>>> = Arc::new(StdMutex::new(None));
+    let result2 = Arc::clone(&result);
+    tokio::spawn(async move {
+        let outcome = match client
+            .call_with_timeout(method, params, Duration::from_secs(30))
+            .await
+        {
+            Ok(_) => Ok(format!("✓ {verb} {gate_id}")),
+            Err(e) => Err(format!("✗ {e}")),
+        };
+        *result2.lock().expect("pending gate result mutex poisoned") = Some(outcome);
+    });
+    Ok(PendingGateResolve {
+        gi: Some(gi),
+        result,
+    })
+}
+
+/// Non-blocking check of a pending gate RPC. On completion returns `Some` with
+/// the restored `GateInput` on error (so the operator can retry) and a status
+/// message for both outcomes.
+fn poll_pending_gate(
+    pending: &mut PendingGateResolve,
+) -> Option<Result<String, (String, GateInput)>> {
+    let mut guard = pending
+        .result
+        .lock()
+        .expect("pending gate result mutex poisoned");
+    guard.take().map(|outcome| {
+        outcome.map_err(|msg| {
+            let gi = pending
+                .gi
+                .take()
+                .expect("pending gate input already consumed");
+            (msg, gi)
+        })
+    })
 }
 
 /// Send a free-form operator message into the session over the gateway API
@@ -6855,7 +6984,9 @@ fn gate_modal_input_panel_lines(
         )));
     }
 
-    let input_label = if gi.required_confirm_phrase.is_some() {
+    let input_label = if gi.details_mode {
+        "DETAILS".to_string()
+    } else if gi.required_confirm_phrase.is_some() {
         "Your input".to_string()
     } else {
         gate_input_label(gi).trim_end_matches(':').to_string()
@@ -6870,6 +7001,11 @@ fn gate_modal_input_panel_lines(
             err.to_string(),
             Style::default().fg(Color::Red),
         )));
+    } else if gi.details_mode {
+        lines.push(Line::from(Span::styled(
+            "✓ type your details, then press Enter".to_string(),
+            Style::default().fg(Color::Green),
+        )));
     }
 
     let choices = gi
@@ -6879,7 +7015,9 @@ fn gate_modal_input_panel_lines(
         .map(|(i, o)| format!("[{}] {}", i + 1, render::one_line(&o.label, 28)))
         .collect::<Vec<_>>()
         .join(" · ");
-    let hint = if gi.options.is_empty() {
+    let hint = if gi.details_mode {
+        "Enter submit details · Esc cancel details".to_string()
+    } else if gi.options.is_empty() {
         "Enter submit · Esc back · Esc×2 peek timeline".to_string()
     } else if gi.allow_freeform {
         format!("{choices}   Enter submit · Esc back")
@@ -7694,6 +7832,7 @@ mod tests {
             buffer: "promote weather-lookup rev_sha256:abc".into(),
             options: Vec::new(),
             allow_freeform: true,
+            details_mode: false,
             motivation_required: false,
             required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
             acknowledged_capabilities: vec!["NetworkAccess".into()],
@@ -7723,6 +7862,7 @@ mod tests {
             buffer: "agreed".into(),
             options: Vec::new(),
             allow_freeform: true,
+            details_mode: false,
             motivation_required: false,
             required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
             acknowledged_capabilities: vec!["NetworkAccess".into()],
@@ -7741,6 +7881,7 @@ mod tests {
             buffer: String::new(),
             options: Vec::new(),
             allow_freeform: true,
+            details_mode: false,
             motivation_required: true,
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
@@ -7755,18 +7896,18 @@ mod tests {
     fn empty_interaction_answer_is_rejected_before_any_rpc() {
         // An empty answer is rejected locally (the gateway requires non-empty),
         // so the caller never marks the gate acted on a doomed submission.
-        let client = RoomClient::for_test();
         let gi = GateInput {
             action: GateAction::Answer,
             id: "int-1".into(),
             buffer: "   ".into(), // whitespace-only ⇒ empty after trim
             options: Vec::new(),
             allow_freeform: true,
+            details_mode: false,
             motivation_required: false,
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
         };
-        let err = resolve_gate(&client, &gi, None).unwrap_err();
+        let err = answer_params(&gi, None).unwrap_err();
         assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
     }
 
@@ -7782,6 +7923,7 @@ mod tests {
             buffer: buffer.into(),
             options,
             allow_freeform,
+            details_mode: false,
             motivation_required: false,
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
@@ -7806,6 +7948,13 @@ mod tests {
         assert!(answer_params(&mk("maybe later", opts(), false), None)
             .unwrap_err()
             .contains("numbered option"));
+
+        // Details mode allows free-text even when the original payload was
+        // choice-only, because the operator explicitly asked to elaborate.
+        let mut details = mk("need context", opts(), false);
+        details.details_mode = true;
+        let p = answer_params(&details, None).unwrap();
+        assert_eq!(p["answer_text"], "need context");
 
         // Empty with options ⇒ guidance to type a number; empty without ⇒ "empty".
         assert!(answer_params(&mk("", opts(), true), None).unwrap_err().contains("number"));
@@ -7913,10 +8062,11 @@ mod tests {
             .to_string(),
         );
         let (opts, freeform) = interaction_choices(std::slice::from_ref(&e), "int-1");
-        assert_eq!(opts.len(), 2);
+        assert_eq!(opts.len(), 3);
         assert_eq!(opts[0].id, "o1");
         assert_eq!(opts[1].label, "No");
-        assert!(!freeform);
+        assert_eq!(opts[2].id, "__details__");
+        assert!(!freeform, "original payload allow_freeform=false must be preserved");
         // Unknown interaction ⇒ permissive default, no options.
         let (none, ff) = interaction_choices(std::slice::from_ref(&e), "other");
         assert!(none.is_empty() && ff);
