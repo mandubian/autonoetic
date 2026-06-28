@@ -177,6 +177,12 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
         }),
+        "opencode" => Some(ProviderDefaults {
+            base_url: "https://opencode.ai/zen/go/v1/chat/completions",
+            api_key_env: "OPENCODE_API_KEY",
+            kind: DriverKind::OpenAi,
+            capabilities: ProviderCapabilities::openai_compatible,
+        }),
         "openrouter" => Some(ProviderDefaults {
             base_url: "https://openrouter.ai/api/v1/chat/completions",
             api_key_env: "OPENROUTER_API_KEY",

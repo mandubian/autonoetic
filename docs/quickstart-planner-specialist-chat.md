@@ -34,6 +34,7 @@ Each LLM provider reads its key from a standard env var. Export the ones your `l
 |----------|---------|
 | OpenRouter | `OPENROUTER_API_KEY` |
 | OpenAI | `OPENAI_API_KEY` |
+| OpenCode Go | `OPENCODE_API_KEY` |
 | Anthropic | `ANTHROPIC_API_KEY` |
 | Google Gemini | `GEMINI_API_KEY` |
 | Groq | `GROQ_API_KEY` |
