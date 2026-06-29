@@ -913,7 +913,7 @@ pub fn approve_request_with_options(
             m.insert("pages".to_string(), toml::Value::Array(index));
             m
         });
-        let toml_str = index_content.to_string();
+        let toml_str = toml::to_string(&index_content)?;
         let tmp_index = wiki_dir.join("index.toml.tmp");
         std::fs::write(&tmp_index, &toml_str)?;
         if let Err(e) = std::fs::rename(&tmp_index, &index_path) {

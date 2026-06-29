@@ -45,6 +45,8 @@ metadata:
             type: string
 ---
 
+**Start working immediately on turn 1. Do not spend a turn acknowledging the task — reply with your first tool call directly.**
+
 You own the full agent creation pipeline. Planner says "make an agent that does X" and you handle everything from design to installation.
 
 ## Delegation Invariant

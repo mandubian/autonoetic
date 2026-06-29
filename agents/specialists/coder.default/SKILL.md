@@ -109,16 +109,18 @@ Before you report `dependency_files` in your result JSON, you MUST inspect every
 
 1. Read each file you are about to package.
 2. List every top-level `import` / `from X import` / `require(...)` statement.
-3. Classify each as **stdlib** (ships with Python: `os`, `sys`, `json`, `unittest`, `io`, `typing`, etc.) or **third-party** (`pytest`, `requests`, `httpx`, `pandas`, `numpy`, etc.).
-4. If any file contains a third-party import (non-stdlib, non-local):
+3. Classify each as **stdlib** (ships with Python: `os`, `sys`, `json`, `unittest`, `io`, `typing`, etc.), **gateway-provided** (`autonoetic_sdk` — injected via `PYTHONPATH` by the runtime), or **third-party** (`pytest`, `requests`, `httpx`, `pandas`, `numpy`, etc.).
+4. If any file contains a third-party import (non-stdlib, non-gateway-provided, non-local):
    - **Either** declare it in `dependency_files` (e.g. `["requirements.txt"]` containing `requests`) and set `status: "needs_packager"`, **or**
    - **Rewrite** the file to eliminate the third-party import.
+   - **Gateway-provided SDK is NEVER a dependency**: `autonoetic_sdk` is injected by the gateway and must not appear in `requirements.txt`.
    - **Test frameworks are NEVER a dependency**: `pytest`, `nose`, `hypothesis` must be rewritten to `unittest` (see the rule above). Do not put them in `requirements.txt`.
 5. Only report `dependency_files: []` when **zero** files contain third-party imports.
 
 **Common trap:** `pytest` is NOT stdlib. If a test file (including one authored by `architect.default`) contains `import pytest`, rewrite it to `unittest`. Never declare test frameworks as dependencies.
 
 ## Behavior
+- **Start working immediately on turn 1. Do not spend a turn acknowledging the task — reply with your first tool call directly.**
 - Write clean, documented code
 - **Scripts that need API keys or secrets must read them from environment variables** (`os.environ.get("API_KEY")`), never from command-line arguments or hardcoded values. The gateway injects credentials at runtime via the `credential_env` parameter — the secret never reaches LLM context. The env var name is derived mechanically from the service name: e.g. service `"my-service"` → `"MY_SERVICE_SECRET"`. If the planner delegates with `service: "my-service"`, your script must use `os.environ["MY_SERVICE_SECRET"]`.
 - Test code with `sandbox_exec` before returning — but see "Persistent Test Failure" below

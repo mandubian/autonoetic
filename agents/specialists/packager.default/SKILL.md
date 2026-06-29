@@ -111,6 +111,8 @@ When installing dependencies, you MUST pass `capture_paths` to `sandbox_exec` to
 
 The response will contain `captured_layers` with `layer_id` and `digest`. **Copy these values exactly.**
 
+**Gateway-injected packages are NEVER installed by pip:** `autonoetic_sdk` is provided by the runtime via `PYTHONPATH`. Before installing, read `requirements.txt` and remove any line containing `autonoetic_sdk`. Do not install it, do not capture it, and do not include it as a layer.
+
 | Language | Command | capture_paths |
 |----------|---------|---------------|
 | Python | `pip install ... --target /tmp/venv` | `{ "path": "/tmp/venv", "mount_as": "/tmp/venv" }` |
