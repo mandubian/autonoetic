@@ -425,13 +425,17 @@ pub fn validate_spawn_response(
                 });
             }
             Some(reply) => {
-                // First try: raw reply as-is (may be valid JSON that happens to
-                // contain ``` inside a string value — stripping would destroy it).
-                let json = serde_json::from_str::<serde_json::Value>(reply.trim())
+                // Strip <think> reasoning blocks first (minimax-m3, DeepSeek),
+                // then try parsing as-is.
+                let reply_clean = strip_think_blocks(reply);
+                // First try: reply after stripping <think> blocks (may be valid
+                // JSON that happens to contain ``` inside a string value —
+                // stripping markdown fences would destroy it, so we try raw first).
+                let json = serde_json::from_str::<serde_json::Value>(reply_clean.trim())
                     .ok()
                     .or_else(|| {
                         // Fallback: strip markdown code fences and retry.
-                        let stripped = strip_markdown_code_fences(reply);
+                        let stripped = strip_markdown_code_fences(&reply_clean);
                         serde_json::from_str(&stripped).ok()
                     });
                 match json {
@@ -494,7 +498,11 @@ fn compute_total_output_size_bytes(
 /// task listing only happens for actual delegation claims.
 fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
     assistant_reply
-        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+        .and_then(|r| {
+            let clean = strip_think_blocks(r);
+            let stripped = strip_markdown_code_fences(&clean);
+            serde_json::from_str::<serde_json::Value>(stripped.trim()).ok()
+        })
         .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "delegated"))
         .unwrap_or(false)
 }
@@ -503,10 +511,11 @@ fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
 /// one is present. Used to catch a fabricated reference, NOT to require plans —
 /// agents that never mention a `plan_id` (e.g. `planner.default`) are unaffected.
 fn reply_claimed_plan_id(assistant_reply: Option<&str>) -> Option<String> {
-    // Strip markdown code fences first — models often wrap their JSON reply in
-    // ```json … ``` (handled elsewhere in this module the same way), and a fenced
-    // reply must not slip the fabricated-plan_id guard.
-    let stripped = strip_markdown_code_fences(assistant_reply?);
+    // Strip <think> blocks and markdown code fences first — models often wrap
+    // their reasoning or JSON reply in these, and a fenced reply must not slip
+    // the fabricated-plan_id guard.
+    let cleaned = strip_think_blocks(assistant_reply?);
+    let stripped = strip_markdown_code_fences(&cleaned);
     let v: serde_json::Value = serde_json::from_str(stripped.trim()).ok()?;
     v.get("plan_id")
         .or_else(|| v.get("result").and_then(|r| r.get("plan_id")))
@@ -890,6 +899,35 @@ pub fn violations_to_final_error(
     } else {
         anyhow::anyhow!("response validation failed: {}", summary)
     }
+}
+
+/// Strip `<think>…</think>` reasoning blocks that some models (minimax-m3,
+/// DeepSeek, Qwen) emit inline in the assistant reply text. Unlike Anthropic's
+/// native thinking channel, these are part of the reply payload and leak into
+/// validation, history, and display. Stripping them early ensures downstream
+/// JSON parsing, schema validation, and chat rendering see clean content.
+///
+/// Handles both closed (`<think>…</think>`) and unclosed (`<think>…` to end)
+/// blocks. Returns the text with all think blocks removed and leading/trailing
+/// whitespace trimmed.
+pub fn strip_think_blocks(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains("<think>") {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 7..];
+        if let Some(end) = after_open.find("</think>") {
+            rest = &after_open[end + 8..];
+        } else {
+            // Unclosed think block — discard everything after `<think>`.
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out.trim().to_string())
 }
 
 /// Strip markdown code fences wrapping a JSON payload.
@@ -2519,5 +2557,45 @@ mod tests {
             None,
         );
         assert!(violations.is_empty(), "advisory path must not flag delegated claims; got: {violations:?}");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // strip_think_blocks
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_think_blocks_removes_closed_block() {
+        let input = "<think>reasoning here</think>{\"status\":\"ok\"}";
+        assert_eq!(strip_think_blocks(input).as_ref(), "{\"status\":\"ok\"}");
+    }
+
+    #[test]
+    fn strip_think_blocks_removes_unclosed_block() {
+        let input = "hello<think>still thinking...";
+        assert_eq!(strip_think_blocks(input).as_ref(), "hello");
+    }
+
+    #[test]
+    fn strip_think_blocks_preserves_text_without_think_tags() {
+        let input = "{\"status\":\"ok\",\"summary\":\"hello\"}";
+        assert_eq!(strip_think_blocks(input).as_ref(), input);
+    }
+
+    #[test]
+    fn strip_think_blocks_handles_multiple_blocks() {
+        let input = "<think>part 1</think>hello<think>part 2</think> world";
+        assert_eq!(strip_think_blocks(input).as_ref(), "hello world");
+    }
+
+    #[test]
+    fn strip_think_blocks_reply_is_delegated_works_with_think_prefix() {
+        let reply = "<think>let me delegate</think>{\"status\":\"delegated\"}";
+        assert!(reply_is_delegated(Some(reply)));
+    }
+
+    #[test]
+    fn strip_think_blocks_reply_claimed_plan_id_works_with_think_prefix() {
+        let reply = "<think>planning</think>{\"status\":\"ok\",\"plan_id\":\"plan-abc\"}";
+        assert_eq!(reply_claimed_plan_id(Some(reply)).as_deref(), Some("plan-abc"));
     }
 }

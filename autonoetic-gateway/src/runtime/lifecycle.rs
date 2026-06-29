@@ -2359,13 +2359,25 @@ impl AgentExecutor {
                 );
             }
 
-            if !response.text.trim().is_empty() {
-                latest_assistant_text = Some(response.text.clone());
+            // Strip inline <think> reasoning blocks (minimax-m3, DeepSeek, Qwen)
+            // before the text enters history, reply capture, or tool-call context.
+            // Native thinking (Anthropic) arrives via reasoning_content, not inline.
+            // Only allocate when the model actually emitted a <think> tag; this is
+            // the common-case fast path.
+            let clean_text: String = if response.text.contains("<think>") {
+                crate::runtime::response_validation::strip_think_blocks(&response.text)
+                    .into_owned()
+            } else {
+                response.text.clone()
+            };
+
+            if !clean_text.trim().is_empty() {
+                latest_assistant_text = Some(clean_text.clone());
             }
 
             match response.stop_reason {
                 StopReason::ToolUse => {
-                    let mut assistant_msg = Message::assistant(response.text.clone());
+                    let mut assistant_msg = Message::assistant(clean_text.clone());
                     assistant_msg.reasoning_content = response.reasoning_content.clone();
                     assistant_msg.reasoning_details = response.reasoning_details.clone();
                     assistant_msg.tool_calls = response.tool_calls.clone();
@@ -2389,8 +2401,8 @@ impl AgentExecutor {
                     }
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
-                    if !response.text.trim().is_empty() {
-                        let mut assistant_msg = Message::assistant(response.text.clone());
+                    if !clean_text.trim().is_empty() {
+                        let mut assistant_msg = Message::assistant(clean_text.clone());
                         assistant_msg.reasoning_content = response.reasoning_content.clone();
                         assistant_msg.reasoning_details = response.reasoning_details.clone();
 
