@@ -1258,6 +1258,43 @@ impl NativeTool for AgentMessageTool {
             .any(|cap| matches!(cap, Capability::AgentMessage { .. }))
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        vec![
+            GuidanceBlock {
+                id: "agent_message.send",
+                when: GuidanceCondition::Capability("agent_message"),
+                priority: 7,
+                prose: "**Inter-agent messaging (`agent_message`):** Use `agent_message` for \
+asynchronous fire-and-forget communication — progress updates, findings, divergence reports, or \
+notifications that don't need a synchronous reply. Unlike `agent_spawn`, this does NOT create a \
+child session or expect a completed-task wake-up; the receiver finds the message as a \
+`[Direct Message from Agent '<sender>' (Session: <sender_session>)]` user-text block at the \
+start of their next turn.\n\n\
+Choose `target_agent_id` to broadcast to all active sessions of that role, or \
+`target_session_id` to reach a specific session. After sending, validate the result: success only \
+when `ok == true`, `status == \"delivered\"`, and `recipients_count > 0`. A status of \
+`no_live_recipients` means the target agent has no active sessions — the message was NOT sent; a \
+status of `target_agent_not_found` means no agent with that id is installed."
+                    .to_string(),
+            },
+            GuidanceBlock {
+                id: "agent_message.receive",
+                when: GuidanceCondition::Capability("agent_message"),
+                priority: 6,
+                prose: "**Receiving agent messages:** Messages from other agents arrive at the \
+start of your turn as a user-text block: \
+`[Direct Message from Agent '<sender>' (Session: <sender_session>)]` followed by the message \
+content on a new line.\n\n\
+Treat these as asynchronous input from a peer agent. Process the content and correlate it with \
+your active goals or workflow state. If a response is needed, use `agent_message` back to the \
+sender's `agent_id` or `session_id`. Do not ignore or discard incoming messages — they carry \
+important signals (progress reports, divergence findings, status updates from spawned agents)."
+                    .to_string(),
+            },
+        ]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
