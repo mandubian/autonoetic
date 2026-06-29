@@ -45,20 +45,24 @@ impl GatewayStore {
         Ok(existing.filter(|id: &String| id != task_id))
     }
 
-    /// Mark a singleton slot as running.
+    /// Mark a singleton slot as running. Only updates the row matching
+    /// `(workflow_id, agent_id, revision_id, task_id)` that is currently
+    /// `pending`, preventing activation of a stale or replaced slot.
     pub fn activate_singleton_task(
         &self,
         workflow_id: &str,
         agent_id: &str,
         revision_id: Option<&str>,
+        task_id: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let revision = revision_id.unwrap_or("");
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE workflow_singleton_index SET status = 'running', updated_at = ?4
-             WHERE workflow_id = ?1 AND agent_id = ?2 AND revision_id = ?3",
-            params![workflow_id, agent_id, revision, now],
+             WHERE workflow_id = ?1 AND agent_id = ?2 AND revision_id = ?3
+               AND task_id = ?5 AND status = 'pending'",
+            params![workflow_id, agent_id, revision, now, task_id],
         )?;
         Ok(())
     }

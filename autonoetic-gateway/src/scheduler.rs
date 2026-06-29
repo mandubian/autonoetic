@@ -1277,6 +1277,7 @@ pub async fn process_queued_workflow_tasks(
                     m.get("_autonoetic_spawn_revision_id")
                         .and_then(|v| v.as_str())
                 }),
+                &queued_task.task_id,
             ) {
                 tracing::warn!(
                     target: "singleton_dedup",

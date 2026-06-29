@@ -1807,7 +1807,7 @@ pub fn handle_agent_import_skill(
             id: agent_id.to_string(),
             name: parsed_manifest.agent.name.clone(),
             description: parsed_manifest.agent.description.clone(),
-            singleton: false,
+            singleton: parsed_manifest.agent.singleton,
         },
         capabilities,
         llm_preset: parsed_manifest.llm_preset.clone(),
