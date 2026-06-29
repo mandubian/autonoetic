@@ -3304,6 +3304,17 @@ fn finalize_assistant_display(
 }
 
 fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
+    // Safety net: strip <think> blocks for display, in case the reply was
+    // stored before the lifecycle-level stripping was added.
+    let reply_owned: String;
+    let reply: &str = if reply.contains("<think>") {
+        reply_owned = autonoetic_gateway::runtime::response_validation::strip_think_blocks(reply)
+            .into_owned();
+        &reply_owned
+    } else {
+        reply
+    };
+
     let (source, is_fenced) = parse_assistant_reply_json(reply);
 
     let summary = loose_field_from_reply(reply, "summary", &source);
