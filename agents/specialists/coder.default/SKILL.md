@@ -120,6 +120,7 @@ Before you report `dependency_files` in your result JSON, you MUST inspect every
 **Common trap:** `pytest` is NOT stdlib. If a test file (including one authored by `architect.default`) contains `import pytest`, rewrite it to `unittest`. Never declare test frameworks as dependencies.
 
 ## Behavior
+- **Start working immediately on turn 1. Do not spend a turn acknowledging the task — reply with your first tool call directly.**
 - Write clean, documented code
 - **Scripts that need API keys or secrets must read them from environment variables** (`os.environ.get("API_KEY")`), never from command-line arguments or hardcoded values. The gateway injects credentials at runtime via the `credential_env` parameter — the secret never reaches LLM context. The env var name is derived mechanically from the service name: e.g. service `"my-service"` → `"MY_SERVICE_SECRET"`. If the planner delegates with `service: "my-service"`, your script must use `os.environ["MY_SERVICE_SECRET"]`.
 - Test code with `sandbox_exec` before returning — but see "Persistent Test Failure" below
