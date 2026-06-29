@@ -1,6 +1,6 @@
 # RFC: Singleton Agents and Deterministic `agent_spawn` Semantics
 
-**Status:** Draft — 2026-06-29
+**Status:** Draft — 2026-06-29 (rev. 2)
 **Authors:** OpenCode session, from observed session `session-79b128af`
 **Related:** `docs/AGENTS.md`, `docs/rfc/gateway-agent-divergence-robustness.md`, `autonoetic-gateway/src/execution.rs`, `autonoetic-gateway/src/scheduler/workflow_store.rs`
 
@@ -8,14 +8,13 @@
 
 ## 1. Summary
 
-This RFC proposes a small set of gateway-side primitives that make agent coordination deterministic and cheap, without asking every SKILL.md to become a concurrency expert.
+This RFC proposes gateway-side primitives that make agent coordination deterministic and cheap, without asking every SKILL.md to become a concurrency expert.
 
-The core ideas are:
+Three layers, in priority order:
 
-1. **Declare certain agent roles as singletons** in their manifest. A singleton can have at most one pending or running task per workflow.
-2. **Make `agent_spawn` idempotent by default for singletons.** A second call returns the existing task/session instead of starting a duplicate.
-3. **Route duplicate spawns as messages** when the singleton is already running and the caller wants to hand it a follow-up task.
-4. **Block new spawns and suppress stale notifications once a workflow is `Completed`.**
+1. **Workflow completion guard** — once a workflow is terminal, reject new spawns and suppress stale notifications. This is a standalone bug fix; ship first.
+2. **Singleton agents** — declare coordinator/reviewer/installer roles as singletons in their manifest. The gateway allows at most one pending or running task per singleton per workflow. Duplicate `agent_spawn` calls return the existing task instead of creating a parallel session.
+3. **Stateful singleton sessions** (phase 2) — a singleton's session persists across tasks. Subsequent spawns become messages, reusing loaded context. This saves system-prompt and context-assembly tokens but adds lifecycle complexity; defer until the simpler layers are proven.
 
 The goal is to stop the retry/backpressure/notification loops that burned ~80 turns and several hundred thousand tokens in the `fibonacci.calculator` install session.
 
@@ -50,6 +49,18 @@ LLM agents are stateless reasoners. When they wake up, they do not reliably reme
 
 SKILL.md files already contain many ad-hoc rules to prevent this: "do not respawn a completed step", "call `workflow_state` first", "trust a child step's terminal result". Those rules help, but they are hard for an LLM to follow reliably. The right place to enforce "only one architect at a time" is the gateway, not the prompt.
 
+### 2.3 The token cost
+
+Each redundant `agent_spawn` of a singleton pays the full system-prompt cost (~15–18k tokens for most specialists) plus context assembly, even if the duplicate is immediately backpressured or force-completed. In the observed session:
+
+| Redundant spawns | System-prompt tokens wasted |
+|---|---|
+| 2 extra `agent-factory.default` instances | ~36k |
+| Repeated auditor / static_evaluator / unit_test_runner batches | ~90k |
+| Post-install `fibonacci.calculator` verification spawns | ~15k |
+
+Singleton dedup (phase 1) eliminates the duplicate sessions entirely. Stateful singleton sessions (phase 2) additionally eliminates re-loading the system prompt for the same agent across sequential tasks.
+
 ---
 
 ## 3. Goals and Non-Goals
@@ -67,12 +78,37 @@ SKILL.md files already contain many ad-hoc rules to prevent this: "do not respaw
 - We are not removing parallelism globally. We are making it opt-in where it matters.
 - We are not replacing `workflow_wait` or `workflow_state`. We are reducing the need for agents to poll them defensively.
 - We are not adding a general message-equivalence detector. We dedup on identity, not on task content.
+- Phase 2 (stateful singleton sessions) is explicitly deferred; it is not a blocker for shipping phases 0 and 1.
 
 ---
 
-## 4. Proposed Changes
+## 4. Phase 0: Workflow Completion Guard
 
-### 4.1 Agent manifest: `singleton` flag
+> **Ship this first.** It is a standalone bug fix, independent of singletons.
+
+### 4.1 The problem
+
+Once a workflow reaches `Completed`, in-flight `workflow.child.resolved` and `WorkflowJoinSatisfied` notifications continue to wake the root session. The planner resumes, sees nothing to do, emits a summary, and hibernates — only to be woken again by the next stale notification. In the observed session this loop ran for 10+ extra minutes.
+
+### 4.2 The fix
+
+Once a workflow reaches a terminal status (`Completed`, `Failed`, `Aborted`):
+
+1. **Reject new `agent_spawn` calls** that target that workflow. Return `workflow_already_completed` with the terminal status and a pointer to the existing task results.
+2. **Suppress in-flight notifications** for that workflow — mark pending `workflow.child.resolved` and `WorkflowJoinSatisfied` notifications as `suppressed` instead of delivering them.
+3. **Reject workflow mutations** — `workflow.force_complete`, `workflow.amend`, `workflow_wait` return `workflow_already_completed`.
+
+The completion check must happen **inside `agent_spawn`**, not only in the workflow state machine. In the observed session, new tasks were enqueued during a turn whose processing also marked the workflow completed — the spawn succeeded because the completion check ran after, not before.
+
+### 4.3 Atomicity
+
+The completion check and the task creation must be in the same locked section of the workflow store. Without this, a race window allows a spawn to sneak in between "workflow completing" and "workflow completed".
+
+---
+
+## 5. Phase 1: Singleton Agents
+
+### 5.1 Agent manifest: `singleton` flag
 
 Add a boolean field to the `metadata.autonoetic.agent` block in SKILL.md:
 
@@ -84,21 +120,23 @@ metadata:
       singleton: true   # default false
 ```
 
-A singleton agent can have **at most one pending or running task per `(root_session_id, workflow_id, agent_id)`**. If a spawn request arrives while one is already in flight, the gateway returns the existing task/session instead of creating a new one.
+A singleton agent can have **at most one pending or running task per `(workflow_id, agent_id, revision_id)`** within a workflow. If a spawn request arrives while one is already in flight, the gateway returns the existing task/session instead of creating a duplicate.
 
 The flag is a property of the **agent role**, not of an individual spawn. The agent author decides once whether this role is parallelizable.
 
-### 4.2 `agent_spawn` behavior for singletons
+### 5.2 Dedup key: `(workflow_id, agent_id, revision_id)`
 
-For a singleton agent:
+The dedup key includes `revision_id` when the caller provides one. Two spawns of the same singleton with **different** revision_ids are genuinely different work (e.g., smoke-testing revision A vs. revision B). Spawns with the same revision_id, or both without one, are treated as duplicates.
 
-| Existing state | `agent_spawn(...)` result |
-|---|---|
-| No task exists | Create task/session normally. |
-| Task pending or running | Return existing task/session metadata; do not create a duplicate. |
-| Task terminal (completed/failed) | Create a new task/session. Singletons serialize across time but are not one-shot. |
+### 5.3 `agent_spawn` behavior for singletons
 
-The response shape remains the same, but includes a marker so the caller can tell what happened:
+| Existing state | `agent_spawn(async=true)` result | `agent_spawn(async=false)` result |
+|---|---|---|
+| No task exists | Create task/session normally. | Create and block as today. |
+| Task pending or running | Return existing task/session with `deduplicated: true`. | **Block** on the existing task; return its result when done. |
+| Task terminal | Create a new task/session. | Create a new task and block. |
+
+The response includes a marker so the caller can tell what happened:
 
 ```json
 {
@@ -111,65 +149,62 @@ The response shape remains the same, but includes a marker so the caller can tel
 }
 ```
 
-When deduplicated, `deduplicated: true` and `existing_task_id` / `existing_session_id` point to the in-flight work.
+When deduplicated, `deduplicated: true` and the `task_id` / `session_id` point to the in-flight work. The caller can `workflow_wait` on the returned `task_id`.
 
-### 4.3 Opt-out: `allow_duplicate: true`
+For **sync spawns** (`async: false`): the gateway blocks on the existing task and returns its result. This is what the caller expects from a sync call — a result, not a "go look elsewhere" marker.
 
-Callers that genuinely need a second concurrent instance of a singleton can pass `allow_duplicate: true`:
+### 5.4 No `allow_duplicate` in v1
 
-```json
-{
-  "agent_id": "architect.default",
-  "message": "...",
-  "async": true,
-  "allow_duplicate": true
-}
-```
+The original draft proposed an `allow_duplicate: true` escape hatch. We are **dropping it from v1**. If an agent is declared singleton, the point is "don't run two in parallel." If someone genuinely needs two concurrent architects, they should either wait for the first to finish, use a separate root session, or change the manifest flag. Adding an escape hatch that LLMs might over-use ("I'll set allow_duplicate=true to be safe") undermines the guarantee.
 
-This is an explicit, auditable override. It should be rare and is intended for advanced cases (e.g., two independent design explorations in the same workflow).
+We can add it later if a concrete use case emerges.
 
-### 4.4 Message routing for duplicate spawns
+### 5.5 No `queue_if_running` — use `agent_message` explicitly
 
-Sometimes a caller wants to give a running singleton a **new task** rather than wait for the current one. We support two modes:
+The original draft proposed automatic conversion of duplicate spawns into messages. We are **dropping this from v1**. Silently converting a spawn to a message changes the contract: the caller expected a fresh session; it gets a message routed into a session with different context. The result shape is unpredictable.
 
-**A. `queue_if_running: true`**
+Instead: if the singleton is running and the caller wants to send a follow-up task, the caller uses `agent_message` explicitly. This keeps the two operations distinct and the LLM can understand each one.
 
-```json
-{
-  "agent_id": "unit_test_runner.default",
-  "message": "Also run the integration artifact tests.",
-  "async": true,
-  "queue_if_running": true
-}
-```
+### 5.6 Atomic check-and-create
 
-If the singleton is already running, the spawn is converted to an `agent_message` to the existing session and the caller receives the existing task id. The running agent handles the follow-up in its normal turn loop.
+Two parents (planner + factory) can both call `agent_spawn` for the same singleton in the same millisecond. The workflow store must perform an **atomic check-and-create**: look up the singleton index and create the task if absent, in a single locked transaction. Without this, the race window allows duplicates.
 
-**B. Return `agent_already_running`**
+### 5.7 Singleton task timeout
 
-If neither `allow_duplicate` nor `queue_if_running` is set, and a singleton is running, the gateway returns the existing task id. The caller is expected to `workflow_wait` on it.
+If a singleton task is stuck in `Running` forever (the agent hung, the LLM provider is down, etc.), the singleton constraint blocks all future spawns of that agent for the workflow. There must be a **timeout**: after N minutes with no checkpoint progress (default: 10), the gateway marks the singleton task as `Failed` with reason `singleton_timeout`, releasing the singleton slot so a new spawn can replace it.
 
-### 4.5 Workflow completion guard
+This is especially important for `agent-factory.default` — if the factory hangs, nothing else can install the agent.
 
-Once a workflow reaches status `Completed`, the gateway must:
+### 5.8 Emergency stop cleanup
 
-1. Reject new `agent_spawn` calls that target that workflow with `workflow_already_completed`.
-2. Drop in-flight `workflow.child.resolved` and `WorkflowJoinSatisfied` notifications instead of delivering them to the root session.
-3. Reject `workflow.force_complete` and `workflow.amend` calls on completed workflows.
+Emergency stop cancels all tasks in a root session. The singleton index must be cleaned up atomically with the emergency stop. Otherwise the index retains stale "running" entries that block future workflows from spawning the same singleton.
 
-This stops the post-install wake loop where stale notifications keep resuming a planner that has already emitted its final response.
+### 5.9 Admission semaphore scoping
 
-### 4.6 Gate admission semaphore per workflow
-
-The `max_pending_spawns_per_agent` semaphore currently keys on `agent_id` globally. We propose scoping the singleton admission check to `(workflow_id, agent_id)` so that concurrent workflows are not coupled. This matches the semantics of "one architect per project", not "one architect across the whole gateway".
+The `max_pending_spawns_per_agent` semaphore currently keys on `agent_id` globally. For singleton agents, the dedup mechanism already prevents queue saturation within a workflow, so the semaphore change is less critical. We keep the global semaphore as-is for v1; it serves as a cross-workflow safety net.
 
 ---
 
-## 5. Singleton Classification
+## 6. How the Observed Failures Are Fixed
 
-We classify the built-in agents as follows. This list should live in `docs/AGENTS.md` and be enforced by manifests.
+| Observed failure | Fix | Phase |
+|---|---|---|
+| Planner spawned 3 `agent-factory.default` instances | `agent-factory.default` is a singleton; spawns 2 and 3 return the first factory's task_id. | 1 |
+| Each factory spawned `fibonacci.calculator` for smoke test, hitting backpressure | Only one factory runs → only one smoke-test spawn chain. `fibonacci.calculator` is NOT a singleton, but the cascading spawns were caused by the duplicate factories. With one factory, there is one smoke-test task. | 1 (indirect) |
+| Planner directly spawned `fibonacci.calculator` in parallel with the factory | Planner's spawn of `fibonacci.calculator` is not deduped (it's not a singleton), but the planner gets the factory's singleton task_id back and `workflow_wait`s on it instead of spawning the target directly. | 1 (indirect) |
+| Force-completed tasks emitted child-state notifications | Completion guard suppresses notifications after workflow is terminal. | 0 |
+| Post-install `fibonacci.calculator` verification loop | Completion guard rejects new spawns once workflow is `Completed`. | 0 |
+| Planner resumed 10+ times after final response | Completion guard suppresses stale `WorkflowJoinSatisfied` signals. | 0 |
 
-### Singletons (coordinators, reviewers, installers)
+**Key insight:** `fibonacci.calculator` itself does not need to be a singleton. The cascade was caused by duplicate singletons upstream (factories, planner coordination). Fixing the singletons eliminates the cascade.
+
+---
+
+## 7. Singleton Classification
+
+We classify the built-in agents as follows.
+
+### Singletons
 
 | Agent | Why singleton |
 |---|---|
@@ -190,7 +225,7 @@ We classify the built-in agents as follows. This list should live in `docs/AGENT
 | `memory-curator.default` | One curator pass at a time. |
 | `evolution-steward.default` | One steward decision at a time. |
 
-### Non-singletons (worker agents)
+### Non-singletons (parallelizable workers)
 
 | Agent | Why parallelizable |
 |---|---|
@@ -202,86 +237,133 @@ We classify the built-in agents as follows. This list should live in `docs/AGENT
 
 ### Special case: user-facing worker agents
 
-Agents installed via `agent-factory.default` should generally **not** be singletons unless the install intent explicitly sets `singleton: true`. A calculator, weather agent, or API client is expected to handle many concurrent invocations.
+Agents installed via `agent-factory.default` should **not** be singletons unless the install intent explicitly sets `singleton: true`. A calculator, weather agent, or API client is expected to handle many concurrent invocations.
 
 ---
 
-## 6. Backwards Compatibility
+## 8. Phase 2: Stateful Singleton Sessions (Deferred)
+
+> This section analyzes a future optimization. It is **not** part of the v1 implementation.
+
+### 8.1 The idea
+
+A singleton agent gets **one long-lived session per workflow**. The first `agent_spawn` creates the session. Subsequent spawns for the same singleton are converted to `agent_message` calls to that session, reusing the loaded system prompt and accumulated context.
+
+This is distinct from the existing `type: "stateful"` manifest field, which means the agent can persist data to durable storage across sessions. A stateful singleton session persists the **LLM conversation** itself.
+
+### 8.2 Token savings
+
+In the observed session, the federation gates (auditor, static_evaluator, unit_test_runner) were each spawned twice — once per quality-gate batch. Each spawn paid the full system-prompt cost (~15–18k tokens). With a persistent session, the second invocation would be a ~500-token message into the existing session. Across three gates and three factory instances, this saves an estimated **90–130k tokens** per install session.
+
+For comparison, phase-1 singleton dedup (preventing duplicate sessions entirely) saves the ~36k tokens from the two extra factory instances. Phase 2 saves the additional context-reload cost for legitimate sequential tasks within the same singleton.
+
+### 8.3 Why it is more complicated
+
+| Concern | Detail |
+|---|---|
+| **Context contamination** | An auditor that reviewed artifact v1 and found issues might be biased when re-reviewing the fixed v2 in the same session. Fresh sessions are more objective. The contamination risk is highest for evaluators and auditors; lowest for architects and planners. |
+| **Session lifecycle** | When does the persistent session end? If it lives for the whole workflow, context accumulates. For long workflows (50+ turns), the context window fills up. The gateway would need to compact or summarize mid-session, which is lossy and hard to get right. |
+| **"Task done" vs "session done"** | Currently, agents return a final JSON and the session ends. A persistent singleton needs a way to say "this task is done, ready for the next one" without terminating the session. This is a new concept in the agent contract — a "yield for next task" yield reason distinct from "end turn." |
+| **Error propagation** | If the persistent session develops a wrong assumption (misread a file, hallucinated an API), all subsequent tasks in that session inherit the error. Fresh sessions are more resilient because each starts from a clean state. |
+| **Observability** | A persistent session that handles multiple tasks produces a longer, harder-to-read transcript. Debugging "which task caused the wrong assumption" requires correlation across task boundaries within the same session log. |
+
+### 8.4 When it would be worth it
+
+Stateful singleton sessions make sense when:
+
+- The agent's tasks are **closely related** (same codebase, same install pipeline, same audit target with minor revisions). Shared context genuinely helps.
+- The agent is **not an evaluator** (contamination risk is low). Architects, planners, and factories benefit; auditors and evaluators do not.
+- The workflow is **short enough** that context accumulation is manageable (< 20 tasks per singleton).
+
+### 8.5 Recommendation
+
+Defer phase 2 until phase 0 + phase 1 are shipped and measured. If phase 1 eliminates the duplicate-session tokens (the majority of the waste), the remaining context-reload savings may not justify the complexity. If measurement shows that sequential singleton invocations still consume significant tokens on system-prompt reloads, revisit with a focused proposal.
+
+If pursued, start with `architect.default` and `agent-factory.default` (low contamination risk, high context-reuse benefit). Do NOT start with evaluators/auditors.
+
+---
+
+## 9. Backwards Compatibility
 
 - Existing agents without `singleton: true` behave exactly as before.
-- `allow_duplicate: true` lets callers opt out of singleton behavior.
 - The new `deduplicated` / `singleton` fields in the spawn response are additive.
-- The workflow completion guard only affects workflows that have already reached `Completed`; it does not change behavior of active workflows.
+- The workflow completion guard only affects workflows that have already reached a terminal status; it does not change behavior of active workflows.
 
-There is one behavioral change for existing callers: if they currently rely on spawning e.g. `architect.default` twice in the same workflow to get two parallel design explorations, they must now pass `allow_duplicate: true`. We believe this is extremely rare and undesirable.
+One behavioral change for existing callers: if a caller currently spawns a singleton-declared agent twice in the same workflow, the second spawn returns the first task instead of creating a parallel session. This is the intended behavior; callers that need the result should `workflow_wait` on the returned task.
 
 ---
 
-## 7. Implementation Notes
+## 10. Implementation Notes
 
-### 7.1 Data model
+### 10.1 Phase 0: Workflow completion guard
+
+In the workflow store and JSON-RPC router:
+
+1. Add a `is_workflow_terminal(workflow_id) -> bool` check.
+2. In `agent_spawn` handler: check terminal status **before** task creation, inside the same lock as task creation.
+3. In notification pump (`scheduler.rs:deliver_pending_signals`): skip notifications whose workflow is terminal; mark them `suppressed`.
+4. In `workflow.force_complete`, `workflow.amend`, `workflow_wait`: return `workflow_already_completed` error.
+
+### 10.2 Phase 1: Singleton data model
 
 Add `singleton: bool` to `AgentManifest` in `autonoetic-types`.
 
-In the workflow store, maintain a per-workflow index of in-flight singleton tasks. On `agent_spawn`:
+In the workflow store, maintain a per-workflow index: `HashMap<(workflow_id, agent_id, Option<revision_id>), task_id>`. On `agent_spawn`:
 
 1. Resolve agent manifest.
-2. If `singleton: true` and no `allow_duplicate: true`:
-   - Look up `(workflow_id, agent_id)` in the in-flight index.
-   - If found and task is pending/running, return existing task.
-   - If `queue_if_running: true`, additionally send `agent_message` to the existing session.
-3. Otherwise, create new task as today.
+2. If `singleton: true`:
+   - Acquire workflow-store lock.
+   - Look up `(workflow_id, agent_id, revision_id)` in the index.
+   - If found and task is pending/running → return existing task with `deduplicated: true`.
+   - Otherwise → create new task, insert into index, release lock.
+3. On task terminal transition → remove from index.
+4. On emergency stop → clear all index entries for the root session.
 
-### 7.2 Workflow completion guard
+### 10.3 Phase 1: Singleton timeout
 
-In `update_task_run_status` / workflow state transitions:
+Background sweeper (already exists for orphan reaping): every tick, scan singleton tasks that have been `Running` with no checkpoint update for > `singleton_timeout_secs` (default 600). Mark as `Failed` with `singleton_timeout`.
 
-- When the workflow transitions to `Completed`, clear pending notifications for that workflow and mark them `suppressed`.
-- In the JSON-RPC router, reject `agent_spawn` calls whose `workflow_id` (explicit or inferred from session) is completed.
-- Reject `workflow.force_complete`, `workflow.amend`, `workflow_wait` on completed workflows.
+### 10.4 SKILL.md updates — what becomes unnecessary
 
-### 7.3 Admission semaphore
+After the gateway enforces singleton behavior, these specific SKILL rules become mechanically enforced and can be simplified:
 
-Scope the existing `agent_admission_semaphore` in `execution.rs:execute_with_reliability_controls` to `(workflow_id, agent_id)` for singleton agents. Non-singleton agents keep the global agent-id semaphore.
+| Current SKILL rule | Where | After singleton enforcement |
+|---|---|---|
+| "Trust a child step's terminal result; don't re-spawn to confirm it" | `planner.collaborative` §Resumption | Mechanically enforced for singleton children (dedup returns existing/terminal task). |
+| "Do not spawn parallel factories" | `planner.collaborative` (implicit) | Enforced: `agent-factory.default` is a singleton. |
+| "Check `reuse_guards.has_builder_candidate` before creating" | `agent-factory.default` Step 5 | Partially replaced: singleton dedup prevents duplicate builder spawns. Still useful for cross-resume state. |
+| "After 2 retries on the same stage: report failure" | `agent-factory.default` §Error Handling | Still needed — retry after failure is legitimate; singleton prevents parallel, not sequential retries. |
 
-### 7.4 SKILL.md updates
-
-- Add `singleton: true` to each singleton manifest.
-- Remove or simplify the ad-hoc "do not respawn" / "call workflow_state first" rules in planner/factory/builder SKILLs once the gateway enforces the behavior.
-
----
-
-## 8. Relation to Observed Failures
-
-| Observed failure | How this RFC fixes it |
-|---|---|
-| Planner spawned 3 `agent-factory.default` instances | `agent-factory.default` is a singleton; spawns 2 and 3 return the first factory's task id. |
-| Factories spawned `fibonacci.calculator` repeatedly for smoke test | For a non-singleton, this is allowed, but the workflow completion guard prevents post-install retries. Better: factory's own retry logic becomes a single `workflow_wait` on one smoke-test task. |
-| Backpressure on `fibonacci.calculator` admission queue | Singleton admission per workflow + fewer duplicate spawns reduces queue pressure. |
-| Force-completed tasks and stale child-state notifications kept waking planner | Workflow completion guard suppresses notifications after `Completed`. |
-| Post-install verification spawns | Rejected once workflow is `Completed`. |
+Rules that remain necessary (singleton does NOT address these):
+- "Do not call `agent_list` repeatedly" (roster polling, not spawn dedup).
+- "Call `workflow_state` on resume" (checkpoint recovery, not spawn dedup).
+- "Process all child results in one turn after `workflow_wait`" (turn batching, not spawn dedup).
 
 ---
 
-## 9. Open Questions
+## 11. Open Questions
 
-1. Should `singleton` be a **capability** instead of a manifest flag? A capability would let it be gated by policy; a manifest flag is simpler.
-2. Should `agent_spawn` dedup consider `revision_id`? Two spawns of the same singleton with **different** `revision_id`s are arguably different work. We suggest deduping on `agent_id` only, unless `revision_id` differs and the caller passes `allow_duplicate: true`.
-3. Should we expose a "current task id" query tool (`workflow.singleton_status`) so agents can discover in-flight singletons without attempting a spawn?
-4. How does this interact with `agent_message`? If a singleton is running and a caller sends `agent_message`, it is naturally routed to the existing session. We may not need `queue_if_running` at all if `agent_message` is the idiomatic follow-up.
+1. **Capability vs manifest flag.** Should `singleton` be a capability (gated by policy) or a manifest field (purely declarative)? Current recommendation: manifest field. Capabilities gate what an agent *can do*; singleton declares what the agent *is*.
+
+2. **Scope: per-workflow vs per-root-session.** Should the singleton constraint be `(workflow_id, agent_id)` or `(root_session_id, agent_id)`? For most agents per-workflow is fine. For `agent-factory.default`, per-root-session might be better (two factories installing different agents in the same session still compete for the single installer). Open: measure whether this matters in practice.
+
+3. **Singleton status query.** Should we expose a `workflow.singleton_status` tool so agents can discover in-flight singletons without attempting a spawn? Probably yes — it helps the planner decide whether to wait or proceed.
+
+4. **Phase 2 trigger.** What metric determines whether phase 2 (stateful sessions) is worth building? Candidate: "system-prompt tokens reloaded for sequential singleton invocations per workflow." If this exceeds 50k on average, revisit.
 
 ---
 
-## 10. Recommended Next Steps
+## 12. Recommended Implementation Order
 
-1. Add `singleton: bool` to `AgentManifest` and parser.
-2. Implement per-workflow singleton task index in the workflow store.
-3. Update `agent_spawn` to respect singleton semantics and return `deduplicated` marker.
-4. Implement workflow completion guard.
-5. Mark built-in singleton agents in their SKILL.md manifests.
-6. Add integration tests:
-   - Second spawn of singleton returns existing task.
-   - `allow_duplicate: true` bypasses singleton dedup.
-   - Completed workflow rejects new spawns.
-   - Stale notifications are suppressed.
-7. Simplify planner/factory SKILLs after the gateway enforces the behavior.
+| Step | What | Why first |
+|---|---|---|
+| 1 | Workflow completion guard (phase 0) | Standalone bug fix; highest impact; no manifest changes needed. |
+| 2 | Integration tests for completion guard | Verify no regressions in active-workflow spawns. |
+| 3 | `singleton: bool` in `AgentManifest` + parser | Foundation for phase 1. |
+| 4 | Per-workflow singleton index + atomic check-and-create | Core dedup mechanism. |
+| 5 | Update `agent_spawn` to respect singleton semantics | Return `deduplicated` marker; sync spawn blocks. |
+| 6 | Singleton timeout sweeper | Prevent stuck singletons from blocking workflows. |
+| 7 | Emergency stop cleanup of singleton index | Safety. |
+| 8 | Mark built-in singleton agents in SKILL.md manifests | Enable the behavior for coordinators/reviewers/installers. |
+| 9 | Simplify planner/factory SKILLs | Remove rules now mechanically enforced. |
+| 10 | Measure token/turn impact; decide on phase 2 | Data-driven decision. |
