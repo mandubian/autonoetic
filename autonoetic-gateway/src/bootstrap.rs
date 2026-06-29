@@ -863,7 +863,7 @@ fn merge_index_toml(src: &Path, dst: &Path) -> Result<()> {
             .into_iter()
             .collect(),
     );
-    std::fs::write(dst, merged.to_string())?;
+    std::fs::write(dst, toml::to_string(&merged)?)?;
     Ok(())
 }
 
