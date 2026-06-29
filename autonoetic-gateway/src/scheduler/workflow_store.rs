@@ -1717,10 +1717,11 @@ pub fn fail_running_tasks_for_session(
     Ok(failed)
 }
 
-/// Fail all non-terminal tasks in the workflow for a root session and mark
-/// the workflow as Failed (GAP-1B). Called when the root session closes
-/// with an error — ensures the workflow and its tasks reach a terminal state
-/// instead of staying Running/Resumable forever.
+/// Fail all non-terminal tasks in the workflow for a root session. Called when
+/// the root session closes with an error. If `mark_workflow_failed` is true,
+/// the workflow is also marked Failed (GAP-1B). When false, only the tasks are
+/// failed so the workflow itself stays recoverable while ensuring tasks don't
+/// stay Running forever against a dead root.
 ///
 /// Writes task status directly (like `apply_emergency_stop_to_workflow`) rather
 /// than going through `update_task_run_status` to avoid emitting misleading
@@ -1730,6 +1731,7 @@ pub fn fail_workflow_for_root_session(
     store: Option<&GatewayStore>,
     root_session_id: &str,
     reason: &str,
+    mark_workflow_failed: bool,
 ) -> anyhow::Result<bool> {
     let wf_id = match resolve_workflow_id_for_root_session(config, root_session_id)? {
         Some(id) => id,
@@ -1778,17 +1780,19 @@ pub fn fail_workflow_for_root_session(
         }
     }
 
-    // Mark the workflow itself as Failed.
-    if let Ok(Some(mut wf)) = load_workflow_run(config, store, &wf_id) {
-        wf.status = WorkflowRunStatus::Failed;
-        wf.updated_at = now_rfc3339();
-        if let Err(e) = save_workflow_run(config, store, &wf) {
-            tracing::warn!(
-                target: "workflow",
-                workflow_id = %wf_id,
-                error = %e,
-                "Failed to mark workflow as Failed after root session error"
-            );
+    // Mark the workflow itself as Failed only when requested.
+    if mark_workflow_failed {
+        if let Ok(Some(mut wf)) = load_workflow_run(config, store, &wf_id) {
+            wf.status = WorkflowRunStatus::Failed;
+            wf.updated_at = now_rfc3339();
+            if let Err(e) = save_workflow_run(config, store, &wf) {
+                tracing::warn!(
+                    target: "workflow",
+                    workflow_id = %wf_id,
+                    error = %e,
+                    "Failed to mark workflow as Failed after root session error"
+                );
+            }
         }
     }
 
@@ -1804,12 +1808,19 @@ pub fn fail_workflow_for_root_session(
         }
     }
 
+    let status_msg = if mark_workflow_failed {
+        "Workflow failed"
+    } else {
+        "Workflow tasks failed (workflow left recoverable)"
+    };
     tracing::info!(
         target: "workflow",
         workflow_id = %wf_id,
         root_session_id = %root_session_id,
         failed_count = failed,
-        "Workflow failed — root session terminated with error"
+        mark_workflow_failed,
+        "{} — root session terminated with error",
+        status_msg
     );
     Ok(true)
 }

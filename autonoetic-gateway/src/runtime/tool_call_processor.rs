@@ -280,19 +280,18 @@ impl<'a> ToolCallProcessor<'a> {
                     let tool_error = decorate_tool_error(e.into());
                     let error_json = tool_error.to_json_string();
                     let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
+                    // Safety net: never let a single tool error kill the agent
+                    // session or the bound workflow. Surface the error as a
+                    // normal tool result so the agent can see it and decide how
+                    // to proceed. The LoopGuard will still trip if the agent
+                    // spirals on the same failure.
                     if !tool_error.is_recoverable() {
-                        let _ = self.record_execution_trace(
-                            tc,
-                            &error_json,
-                            started_at.elapsed(),
-                            Some(&tool_error),
-                            Some(failure_event_id),
-                        )?;
-                        return Err(anyhow::anyhow!(
-                            "Fatal tool error in {}: {}",
-                            tc.name,
-                            tool_error.message
-                        ));
+                        tracing::warn!(
+                            target: "tool_call_processor",
+                            tool = %tc.name,
+                            session_id = %self.session_id.as_deref().unwrap_or("unknown"),
+                            "Non-recoverable tool error surfaced as tool result instead of terminating session"
+                        );
                     }
                     let event_id = tracer.log_tool_completed_with_approval(
                         canonical_tool,
@@ -1949,6 +1948,88 @@ mod tests {
         // inspect #3 must re-execute (cache invalidated) → 2 executions.
         processor.process_tool_calls(&[call("a3", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         assert_eq!(exists_calls.load(Ordering::SeqCst), 2, "agent_inspect after promote must re-execute");
+    }
+
+    /// A fake tool that returns a non-recoverable fatal error. Used to verify
+    /// the tool dispatch safety net: fatal tool errors must be surfaced as
+    /// structured tool results, not propagated as session-killing Errs.
+    struct FakeFatalTool;
+    impl NativeTool for FakeFatalTool {
+        fn name(&self) -> &'static str {
+            "fake_fatal"
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "fake".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+        fn is_available(&self, _m: &AgentManifest) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            _m: &AgentManifest,
+            _p: &PolicyEngine,
+            _ad: &Path,
+            _gd: Option<&Path>,
+            _args: &str,
+            _sid: Option<&str>,
+            _tid: Option<&str>,
+            _cfg: Option<&autonoetic_types::config::GatewayConfig>,
+            _gs: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _rc: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+        ) -> anyhow::Result<String> {
+            // The message contains "corrupted" so the gateway classifies this
+            // as ToolErrorType::Fatal (non-recoverable).
+            anyhow::bail!("artifact id 'art_deadbeef' already exists but its manifest does not match the requested inputs (identity mismatch). Refusing reuse; remove or repair the on-disk artifact if it is corrupted.")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_recoverable_tool_error_is_surfaced_as_tool_result() {
+        let temp = tempdir().unwrap();
+        let gw_dir = temp.path().join("gateway");
+        std::fs::create_dir_all(&gw_dir).unwrap();
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gw_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(FakeFatalTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(Some("fatal-sess".to_string()), Some("t1".to_string()));
+
+        let (had_success, results) = processor
+            .process_tool_calls(&[call("f1", "fake_fatal", "{}")], temp.path(), None, &mut SessionTracer::test_tracer())
+            .await
+            .expect("process_tool_calls must return Ok even for non-recoverable tool errors");
+
+        assert!(!had_success, "a fatal tool call is not a success");
+        assert_eq!(results.len(), 1, "one result per tool call");
+
+        let parsed: serde_json::Value = serde_json::from_str(&results[0].2)
+            .expect("result must be valid JSON");
+        assert_eq!(parsed["ok"], false, "result must report ok:false");
+        assert_eq!(parsed["error_type"], "fatal", "result must be typed fatal");
+        assert!(
+            parsed["message"].as_str().unwrap().contains("corrupted"),
+            "message must preserve the original error"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

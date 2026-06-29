@@ -504,6 +504,31 @@ impl AgentExecutor {
         crate::runtime::checkpoint::turn_id_for(self.turn_counter)
     }
 
+    /// Detect a terminal-workflow error returned by `agent_spawn` and extract
+    /// the workflow id. These errors are deterministic: retrying the same call
+    /// can never succeed while the workflow stays terminal.
+    fn detect_terminal_workflow_error(tool_name: &str, result_json: &str) -> Option<String> {
+        if tool_name != "agent_spawn" && tool_name != "agent.spawn" {
+            return None;
+        }
+        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+        if parsed.get("ok").and_then(|v| v.as_bool()) != Some(false) {
+            return None;
+        }
+        let message = parsed.get("message")?.as_str()?;
+        let lower = message.to_ascii_lowercase();
+        if !lower.contains("already terminal") || !lower.contains("workflow") {
+            return None;
+        }
+        // Message format: "Cannot delegate (agent.spawn): workflow <id> is already terminal ..."
+        message
+            .split("workflow ")
+            .nth(1)?
+            .split_whitespace()
+            .next()
+            .map(|s| s.to_string())
+    }
+
     fn approved_session_continue_count(&self, session_id: &str) -> anyhow::Result<u64> {
         let Some(store) = self.gateway_store.as_ref() else {
             return Ok(0);
@@ -731,21 +756,30 @@ impl AgentExecutor {
                         );
                     }
                 } else if outcome.is_error() {
-                    // GAP-1B: root session closed with error — fail the workflow
-                    // so tasks don't stay Running forever against a dead root.
+                    // GAP-1B: root session closed with error — fail pending tasks so
+                    // they don't stay Running forever against a dead root. We only
+                    // mark the workflow itself terminal for unrecoverable spawn-time
+                    // or script-mode errors; ExecuteLoopError is recoverable (e.g.
+                    // LLM failure, context overflow) and leaves the workflow intact
+                    // so the scheduler or operator can resume.
+                    let mark_workflow_terminal = !matches!(
+                        outcome,
+                        SessionCloseOutcome::ExecuteLoopError
+                    );
                     if let Err(e) =
                         crate::scheduler::workflow_store::fail_workflow_for_root_session(
                             cfg,
                             self.gateway_store.as_deref(),
                             &session_id,
                             reason,
+                            mark_workflow_terminal,
                         )
                     {
                         tracing::warn!(
                             target: "workflow",
                             error = %e,
                             session_id = %session_id,
-                            "Failed to fail workflow on root session error"
+                            "Failed to fail workflow tasks on root session error"
                         );
                     }
                 }
@@ -2834,6 +2868,28 @@ impl AgentExecutor {
                 )
                 .await?;
 
+            // Hard-trip the LoopGuard if any tool call returned a deterministic
+            // terminal-workflow error. Retrying agent_spawn against a terminal
+            // workflow can never succeed, so stop the turn immediately rather
+            // than letting the agent burn its tool-failure budget.
+            for (_id, tool_name, result_json) in &results {
+                if let Some(workflow_id) = Self::detect_terminal_workflow_error(tool_name, result_json) {
+                    self.guard.trip(
+                        crate::runtime::guard::LoopGuardTripReason::WorkflowTerminal {
+                            workflow_id: workflow_id.clone(),
+                        },
+                    );
+                    tracing::info!(
+                        target: "loop_guard",
+                        session_id = %session_id,
+                        workflow_id = %workflow_id,
+                        tool = %tool_name,
+                        "LoopGuard hard-trip: tool returned terminal-workflow error"
+                    );
+                    break;
+                }
+            }
+
             // Progressive tool disclosure: if the agent used any Specialized-tier
             // tool, escalate the session so subsequent turns see all tiers.
             if !self.tool_tier_escalated {
@@ -3553,6 +3609,27 @@ mod tests {
     use autonoetic_types::agent::SessionState;
 
     // -- overflow_presend_block ------------------------------------------------
+
+    #[test]
+    fn detect_terminal_workflow_error_detects_agent_spawn_rejection() {
+        let result = r#"{"ok":false,"error_type":"execution","message":"Cannot delegate (agent.spawn): workflow wf-123 is already terminal (failed). No new tasks can be spawned."}"#;
+        assert_eq!(
+            AgentExecutor::detect_terminal_workflow_error("agent_spawn", result),
+            Some("wf-123".to_string())
+        );
+        assert_eq!(
+            AgentExecutor::detect_terminal_workflow_error("agent.spawn", result),
+            Some("wf-123".to_string())
+        );
+        assert_eq!(
+            AgentExecutor::detect_terminal_workflow_error("agent_spawn", r#"{"ok":true}"#),
+            None
+        );
+        assert_eq!(
+            AgentExecutor::detect_terminal_workflow_error("content_read", result),
+            None
+        );
+    }
 
     #[test]
     fn overflow_presend_block_errors_with_context_overflow_tag_when_over_window() {

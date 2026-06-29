@@ -63,6 +63,11 @@ pub enum LoopGuardTripReason {
     },
     /// Trip condition #6 — consecutive LLM endpoint failures.
     LlmFailureBudget { failures: u32 },
+    /// Trip condition #7 — a tool returned a deterministic permanent failure
+    /// (e.g. agent_spawn rejected because the bound workflow is already
+    /// terminal). Retrying the same call can never succeed, so end the turn
+    /// immediately instead of letting the agent burn its tool-failure budget.
+    WorkflowTerminal { workflow_id: String },
 }
 
 impl LoopGuardTripReason {
@@ -75,6 +80,7 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::ChildFailureBudget { .. } => "child_failure_budget",
             LoopGuardTripReason::RedundantRosterPolling { .. } => "redundant_roster_polling",
             LoopGuardTripReason::LlmFailureBudget { .. } => "llm_failure_budget",
+            LoopGuardTripReason::WorkflowTerminal { .. } => "workflow_terminal",
         }
     }
 
@@ -88,6 +94,8 @@ impl LoopGuardTripReason {
     /// - `RotatingPollingPattern`→ P-7.19 (no semantic progress across successes)
     /// - `ChildFailureBudget`    → P-7.20 (child-failure delegation-loop budget)
     /// - `RedundantRosterPolling`→ P-7.19 (no semantic progress across successes)
+    /// - `LlmFailureBudget`       → P-7.5 (consecutive failures)
+    /// - `WorkflowTerminal`       → P-7.5 (deterministic tool failure)
     pub fn rule_id(&self) -> &'static str {
         match self {
             LoopGuardTripReason::ToolFailureBudget { .. } => "P-7.5",
@@ -96,6 +104,7 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::ChildFailureBudget { .. } => "P-7.20",
             LoopGuardTripReason::RedundantRosterPolling { .. } => "P-7.19",
             LoopGuardTripReason::LlmFailureBudget { .. } => "P-7.5",
+            LoopGuardTripReason::WorkflowTerminal { .. } => "P-7.5",
         }
     }
 }
@@ -279,10 +288,17 @@ impl LoopGuard {
     }
 
     /// Returns the trip reason if the guard has already tripped, so the
-    /// caller can emit a structured causal event before propagating the
-    /// error. Returns `None` when the guard is still healthy.
+    /// caller can emit a structured causal event before propagating the trip
+    /// as an error. Returns `None` when the guard is still healthy.
     pub fn last_trip_reason(&self) -> Option<&LoopGuardTripReason> {
         self.trip_reason.as_ref()
+    }
+
+    /// Hard-trip the guard immediately with the given reason. Used when a
+    /// tool returns a deterministic permanent failure (e.g. spawning into a
+    /// terminal workflow) so the agent stops instead of retrying forever.
+    pub fn trip(&mut self, reason: LoopGuardTripReason) {
+        self.trip_reason = Some(reason);
     }
 
     /// Returns `true` when the guard is approaching a trip condition but has
@@ -582,6 +598,11 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
              The model API is unavailable — suspending to prevent retry spirals.",
             failures
         ),
+        LoopGuardTripReason::WorkflowTerminal { workflow_id } => anyhow::anyhow!(
+            "LoopGuard tripped: workflow {} is already terminal. \
+             Cannot spawn new tasks against it — resume or start a new workflow.",
+            workflow_id
+        ),
     }
 }
 
@@ -639,6 +660,22 @@ fn compute_fingerprint(tool_name: &str, arguments: &str) -> (String, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_workflow_terminal_trip_reason_formats_and_rules() {
+        let reason = LoopGuardTripReason::WorkflowTerminal {
+            workflow_id: "wf-test".to_string(),
+        };
+        assert_eq!(reason.code(), "workflow_terminal");
+        assert_eq!(reason.rule_id(), "P-7.5");
+
+        let mut guard = LoopGuard::new(10);
+        guard.trip(reason.clone());
+        let err = guard.check_loop().expect_err("guard must trip");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("wf-test"), "message must mention workflow id: {msg}");
+        assert!(msg.contains("already terminal"), "message must mention terminal state: {msg}");
+    }
 
     #[test]
     fn test_loop_guard_trips_on_max_loops() {
