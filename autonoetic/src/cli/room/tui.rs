@@ -3390,19 +3390,30 @@ pub fn run(
                                 }
                                 // Scan entries for plan.approved events with plan_ids
                                 // not already fetched as pending.
-                                let existing_plan_ids: std::collections::HashSet<String> = plan_families.keys().cloned().collect();
+                                let mut seen_plan_versions: std::collections::HashSet<(String, u32)> = plan_families
+                                    .iter()
+                                    .flat_map(|(pid, versions)| {
+                                        versions.iter().map(move |(v, _, _, _)| (pid.clone(), *v))
+                                    })
+                                    .collect();
                                 for entry in entries.iter().rev() {
                                     if entry.event_type == "plan.approved" {
                                         if let Some(ref pid) = entry.refs.plan_id {
-                                            if !existing_plan_ids.contains(pid) {
-                                                if let Ok(v) = rpc(
-                                                    client,
-                                                    "planframes.get",
-                                                    serde_json::json!({ "plan_id": pid }),
-                                                ) {
+                                            let event_version = plan_version_for(entry)
+                                                .and_then(|v| u32::try_from(v).ok());
+                                            let already_seen = match event_version {
+                                                Some(v) => seen_plan_versions.contains(&(pid.clone(), v)),
+                                                None => seen_plan_versions.iter().any(|(p, _)| p == pid),
+                                            };
+                                            if !already_seen {
+                                                let mut req_params = serde_json::json!({ "plan_id": pid });
+                                                if let Some(v) = event_version {
+                                                    req_params["version"] = serde_json::json!(v);
+                                                }
+                                                if let Ok(v) = rpc(client, "planframes.get", req_params) {
                                                     if let Some(plan) = v.get("plan") {
                                                         let title = plan.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                                        let version = plan.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                                                        let version = plan.get("version").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(1);
                                                         let status = plan
                                                             .get("status")
                                                             .and_then(|s| s.as_str())
@@ -3418,6 +3429,7 @@ pub fn run(
                                                                     .collect()
                                                             })
                                                             .unwrap_or_default();
+                                                        seen_plan_versions.insert((pid.clone(), version));
                                                         plan_families
                                                             .entry(pid.clone())
                                                             .or_default()

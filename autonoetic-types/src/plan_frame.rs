@@ -493,6 +493,10 @@ pub struct PlanFramesApproveResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanFramesGetParams {
     pub plan_id: String,
+    /// If provided, return the specific revision. Otherwise return the latest
+    /// version (default behavior preserved for existing callers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
