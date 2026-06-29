@@ -27,6 +27,7 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
             id: "improvement-orchestrator".to_string(),
             name: "improvement-orchestrator".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,

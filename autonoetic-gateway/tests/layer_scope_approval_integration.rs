@@ -38,6 +38,7 @@ fn test_manifest_no_network() -> AgentManifest {
             id: "test.agent".to_string(),
             name: "Test Agent".to_string(),
             description: "Test agent".to_string(),
+            singleton: false,
         },
         llm_overrides: None,
         llm_preset: None,

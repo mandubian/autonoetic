@@ -62,6 +62,7 @@ fn test_manifest() -> AgentManifest {
             id: "report.tester".to_string(),
             name: "report.tester".to_string(),
             description: "session report integration".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 57;
+const SCHEMA_VERSION_LATEST: i64 = 58;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -542,7 +542,46 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_drop_approval_similarity_v55(conn)?;
     apply_agent_revision_detected_network_hosts_v56(conn)?;
     apply_session_spawn_lineage_v57(conn)?;
+    apply_workflow_singleton_index_v58(conn)?;
 
+    Ok(())
+}
+
+fn apply_workflow_singleton_index_v58(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 58 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_singleton_index (
+            workflow_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, agent_id, revision_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_singleton_index_task
+            ON workflow_singleton_index(workflow_id, task_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_singleton_index_workflow
+            ON workflow_singleton_index(workflow_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            58_i64,
+            "workflow_singleton_index",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

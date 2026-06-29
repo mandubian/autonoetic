@@ -173,6 +173,7 @@ fn proposer_manifest() -> AgentManifest {
             id: "specialized_builder.default".to_string(),
             name: "specialized_builder.default".to_string(),
             description: "Proposer".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -213,6 +214,7 @@ fn auditor_manifest(id: &str) -> AgentManifest {
             id: id.to_string(),
             name: id.to_string(),
             description: "Auditor".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],

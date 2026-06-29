@@ -29,6 +29,7 @@ fn planner_manifest() -> AgentManifest {
             id: "planner.default".to_string(),
             name: "planner.default".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentSpawn {
             max_children: 4,

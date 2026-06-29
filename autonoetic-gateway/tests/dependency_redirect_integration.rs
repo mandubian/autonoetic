@@ -33,6 +33,7 @@ fn make_manifest(has_network: bool) -> AgentManifest {
             id: "test-coder".to_string(),
             name: "Test Coder".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         llm_overrides: None,
         llm_preset: None,

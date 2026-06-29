@@ -27,6 +27,7 @@ fn test_manifest() -> AgentManifest {
             id: "coder.default".to_string(),
             name: "Coder".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],

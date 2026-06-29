@@ -52,6 +52,7 @@ fn manifest_with_capabilities(capabilities: Vec<Capability>) -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,

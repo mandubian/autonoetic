@@ -115,6 +115,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         id: standard.name.clone(),
         name: standard.name.clone(),
         description: standard.description.clone(),
+        singleton: false,
     });
     if agent.id.trim().is_empty() {
         agent.id = standard.name.clone();

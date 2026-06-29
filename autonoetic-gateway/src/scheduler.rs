@@ -1268,6 +1268,27 @@ pub async fn process_queued_workflow_tasks(
             );
         }
 
+        // Mark the singleton slot as running so duplicate spawns see it as active.
+        if let Some(gs) = store {
+            if let Err(e) = gs.activate_singleton_task(
+                &queued_task.workflow_id,
+                &queued_task.agent_id,
+                queued_task.metadata.as_ref().and_then(|m| {
+                    m.get("_autonoetic_spawn_revision_id")
+                        .and_then(|v| v.as_str())
+                }),
+            ) {
+                tracing::warn!(
+                    target: "singleton_dedup",
+                    workflow_id = %queued_task.workflow_id,
+                    task_id = %queued_task.task_id,
+                    agent_id = %queued_task.agent_id,
+                    error = %e,
+                    "Failed to activate singleton slot"
+                );
+            }
+        }
+
         // Spawn background execution
         let exec = execution.clone();
         let reg = execution.active_executions();

@@ -73,6 +73,7 @@ fn test_manifest() -> AgentManifest {
             id: "escalation-test-agent".to_string(),
             name: "Escalation Test Agent".to_string(),
             description: "Test agent for escalation flow".to_string(),
+            singleton: false,
         },
         llm_overrides: None,
         llm_preset: None,

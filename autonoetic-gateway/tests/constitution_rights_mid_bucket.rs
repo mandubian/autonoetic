@@ -35,6 +35,7 @@ fn minimal_manifest() -> AgentManifest {
             id: "test.agent".to_string(),
             name: "Test Agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,

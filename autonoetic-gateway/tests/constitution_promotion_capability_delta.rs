@@ -53,6 +53,7 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
             id: AGENT_ID.to_string(),
             name: AGENT_ID.to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,

@@ -569,6 +569,7 @@ fn admin_revision_manifest() -> AgentManifest {
             id: "cli.admin".to_string(),
             name: "CLI Admin".to_string(),
             description: "CLI administrative operator".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -1806,6 +1807,7 @@ pub fn handle_agent_import_skill(
             id: agent_id.to_string(),
             name: parsed_manifest.agent.name.clone(),
             description: parsed_manifest.agent.description.clone(),
+            singleton: false,
         },
         capabilities,
         llm_preset: parsed_manifest.llm_preset.clone(),

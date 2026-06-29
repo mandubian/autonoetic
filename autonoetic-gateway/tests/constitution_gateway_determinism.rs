@@ -99,6 +99,7 @@ fn base_manifest(capabilities: Vec<Capability>) -> AgentManifest {
             id: "determinism.gateway.default".to_string(),
             name: "Determinism Gateway".to_string(),
             description: "Property test manifest".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,

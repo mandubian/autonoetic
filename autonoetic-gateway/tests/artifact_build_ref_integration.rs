@@ -27,6 +27,7 @@ fn writer_manifest() -> AgentManifest {
             id: "coder.default".to_string(),
             name: "coder".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::WriteAccess {
             scopes: vec!["*".to_string()],
@@ -321,6 +322,7 @@ fn reader_manifest() -> AgentManifest {
             id: "sealed_evaluator.default".to_string(),
             name: "sealed_evaluator".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],

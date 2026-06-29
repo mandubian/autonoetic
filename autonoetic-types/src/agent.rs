@@ -36,6 +36,8 @@ pub struct AgentIdentity {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub singleton: bool,
 }
 
 /// LLM configuration for the agent.

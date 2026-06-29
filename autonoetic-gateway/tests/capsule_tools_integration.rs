@@ -21,6 +21,7 @@ fn manifest_with(caps: Vec<Capability>) -> AgentManifest {
             id: "test".to_string(),
             name: "test".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,
