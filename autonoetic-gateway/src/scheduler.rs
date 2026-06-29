@@ -748,6 +748,59 @@ pub async fn reap_orphaned_sessions(
         }
     }
 
+    // Collect child session ids that are bound to non-terminal workflow tasks,
+    // paired with their parent session id. The orphan reaper treats parent
+    // transcript status `completed` as "terminated", but `completed` is also the
+    // normal between-turns state (reopened to `active` at the start of the next
+    // turn). A child that is an in-flight workflow task (Running, Pending,
+    // AwaitingApproval) must survive the parent's between-turn window — the
+    // workflow system will wake the parent when the task completes. Without this
+    // exemption, every async agent_spawn → parent hibernate → background tick
+    // kills the child.
+    //
+    // Only applies when the parent is `completed` (between turns). A `failed`
+    // parent is truly terminated and its children must be reaped even if a
+    // stale workflow task lingers.
+    let mut workflow_active_children: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for wf_dir in &workflow_dirs {
+        let tasks_dir = wf_dir.join("tasks");
+        if !tasks_dir.is_dir() {
+            continue;
+        }
+        let wf_id = match wf_dir.file_name().and_then(|n| n.to_str()) {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+        let tasks = match crate::scheduler::workflow_store::list_task_runs_for_workflow(
+            &config,
+            Some(store.as_ref()),
+            &wf_id,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    workflow_id = %wf_id,
+                    error = %e,
+                    "Orphan-child reaper (R+12): could not load workflow tasks — skipping this reap cycle (conservative)"
+                );
+                return Ok(());
+            }
+        };
+        for task in tasks {
+            let is_terminal = matches!(
+                task.status,
+                autonoetic_types::workflow::TaskRunStatus::Succeeded
+                    | autonoetic_types::workflow::TaskRunStatus::Failed
+                    | autonoetic_types::workflow::TaskRunStatus::Cancelled
+                    | autonoetic_types::workflow::TaskRunStatus::Aborted
+            );
+            if !is_terminal && !task.session_id.is_empty() && !task.parent_session_id.is_empty() {
+                workflow_active_children.insert((task.session_id, task.parent_session_id));
+            }
+        }
+    }
+
     for (idx, (child_session_id, parent_session_id, root_session_id, agent_id)) in
         orphans.into_iter().enumerate()
     {
@@ -760,6 +813,25 @@ pub async fn reap_orphaned_sessions(
                 "Orphan-child reaper (R+12): skipping child parked at an approval gate"
             );
             continue;
+        }
+
+        // Skip children that are active workflow tasks when the parent is merely
+        // `completed` (between turns). A `failed` parent is truly gone — its
+        // children must be reaped even if a workflow task lingers.
+        if workflow_active_children.contains(&(child_session_id.clone(), parent_session_id.clone())) {
+            let parent_status = store
+                .find_transcript_by_session_id(&parent_session_id)
+                .ok()
+                .flatten()
+                .map(|t| t.status);
+            if parent_status.as_deref() == Some("completed") {
+                tracing::info!(
+                    child_session_id = %child_session_id,
+                    parent_session_id = %parent_session_id,
+                    "Orphan-child reaper (R+12): skipping child with active workflow task (parent between turns)"
+                );
+                continue;
+            }
         }
 
         tracing::info!(
