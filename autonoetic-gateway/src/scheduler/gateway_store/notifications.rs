@@ -203,10 +203,11 @@ impl GatewayStore {
         let cutoff =
             (chrono::Utc::now() - chrono::Duration::hours(max_age_hours as i64)).to_rfc3339();
         let rows = conn.execute(
-            "DELETE FROM notifications WHERE consumed_at < ?1 OR (status = ?2 AND created_at < ?3)",
+            "DELETE FROM notifications WHERE consumed_at < ?1 OR (status IN (?2, ?3) AND created_at < ?4)",
             params![
                 cutoff,
                 serde_json::to_string(&NotificationStatus::Failed)?,
+                serde_json::to_string(&NotificationStatus::Suppressed)?,
                 cutoff
             ],
         )?;

@@ -398,6 +398,19 @@ the single join already does that."
         )?;
         let workflow_id = workflow.workflow_id.clone();
 
+        // Phase 0 completion guard: do not enqueue new work once the workflow is terminal.
+        if crate::scheduler::workflow_store::is_workflow_terminal(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+        )? {
+            return Err(anyhow::anyhow!(
+                "Cannot delegate (agent.spawn): workflow {} is already terminal ({}). No new tasks can be spawned.",
+                workflow_id,
+                workflow.status.as_str()
+            ));
+        }
+
         if let Some(gate) = crate::scheduler::workflow_approval_gate_active(
             gw_config,
             gateway_store.as_deref(),

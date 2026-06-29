@@ -2105,6 +2105,40 @@ async fn process_pending_notifications(
         std::collections::HashSet::new();
 
     for n in pending {
+        // Suppress notifications whose workflow has already reached a terminal
+        // state. Stale child-state / join-satisfied signals must not wake a
+        // root session that has already emitted its final response.
+        if let Some(ref workflow_id) = n.workflow_id {
+            match crate::scheduler::workflow_store::is_workflow_terminal(
+                execution.config().as_ref(),
+                Some(store),
+                workflow_id,
+            ) {
+                Ok(true) => {
+                    tracing::info!(
+                        notification_id = %n.notification_id,
+                        workflow_id = %workflow_id,
+                        notification_type = ?n.notification_type,
+                        "Suppressing notification for terminal workflow"
+                    );
+                    store.update_notification_status(
+                        &n.notification_id,
+                        autonoetic_types::notification::NotificationStatus::Suppressed,
+                    )?;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        notification_id = %n.notification_id,
+                        workflow_id = %workflow_id,
+                        error = %e,
+                        "Failed to check workflow terminal status; delivering notification anyway"
+                    );
+                }
+            }
+        }
+
         // Coalesce redundant child-state notifications.
         if n.notification_type
             == autonoetic_types::notification::NotificationType::ChildStateNotification

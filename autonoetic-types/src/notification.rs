@@ -29,6 +29,7 @@ pub enum NotificationStatus {
     Delivered,      // notification visible to consumers
     Consumed,       // consumer acknowledged
     Failed,         // action execution permanently failed
+    Suppressed,     // intentionally dropped (e.g., workflow became terminal)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
