@@ -391,3 +391,94 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
         "no reap event should be emitted for an approval-parked child"
     );
 }
+
+/// A child bound to a non-terminal workflow task must NOT be reaped when the
+/// parent is merely `completed` (between turns). The workflow system will wake
+/// the parent when the task finishes. Without this exemption, every async
+/// agent_spawn → parent hibernate → background tick kills the child.
+#[tokio::test]
+async fn orphan_reaper_skips_workflow_task_when_parent_between_turns() {
+    use autonoetic_gateway::scheduler::workflow_store::{
+        ensure_workflow_for_root_session, save_task_run, save_workflow_run,
+    };
+    use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
+
+    let ws = TestWorkspace::new().unwrap();
+    let gateway_dir = ws.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+    let root_id = "root-wf-exempt";
+    // Parent IS the root (planner hibernated between turns).
+    let parent_id = root_id;
+    let child_id = "root-wf-exempt/coder.default-aaaa1111";
+
+    store
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.collaborative",
+            "completed",
+        ))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(
+            child_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
+        .unwrap();
+
+    let config = ws.gateway_config();
+
+    // Workflow with a Running task bound to the child session.
+    let mut wf =
+        ensure_workflow_for_root_session(&config, Some(store.as_ref()), root_id, Some("planner.collaborative"))
+            .unwrap();
+    wf.status = WorkflowRunStatus::WaitingChildren;
+    save_workflow_run(&config, Some(store.as_ref()), &wf).unwrap();
+    let task = TaskRun {
+        task_id: "task-wf-running".to_string(),
+        workflow_id: wf.workflow_id.clone(),
+        agent_id: "coder.default".to_string(),
+        session_id: child_id.to_string(),
+        parent_session_id: parent_id.to_string(),
+        status: TaskRunStatus::Running,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        source_agent_id: Some("planner.collaborative".to_string()),
+        result_summary: None,
+        join_group: None,
+        message: None,
+        metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
+    };
+    save_task_run(&config, Some(store.as_ref()), &task).unwrap();
+
+    let execution = std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
+
+    reap_orphaned_sessions(execution)
+        .await
+        .expect("reaper should succeed");
+
+    let child = store
+        .find_transcript_by_session_id(child_id)
+        .unwrap()
+        .expect("child transcript");
+    assert_eq!(
+        child.status, "active",
+        "child with active workflow task must NOT be reaped when parent is between turns (completed)"
+    );
+
+    let events = store.search_causal_events(Some(child_id), None, 100).unwrap();
+    assert!(
+        !events.iter().any(|e| e.action == "parent_terminated"),
+        "no reap event should be emitted for a workflow-active child with parent between turns"
+    );
+}
