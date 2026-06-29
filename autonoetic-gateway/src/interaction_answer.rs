@@ -313,6 +313,17 @@ pub async fn answer_and_orchestrate_resume(
         interaction.workflow_id.as_deref(),
         interaction.task_id.as_deref(),
     ) {
+        // If the workflow is already terminal, resuming the task is meaningless
+        // and can hang the caller (the agent may block on a workflow that will
+        // never make progress). Reject the answer with a clear error.
+        if workflow_store::is_workflow_terminal(cfg.as_ref(), Some(store.as_ref()), wf_id)? {
+            anyhow::bail!(
+                "Cannot answer interaction {}: workflow {} is already terminal",
+                params.interaction_id,
+                wf_id
+            );
+        }
+
         let mut unblocked = false;
         if let Some(mut task) =
             workflow_store::load_task_run(cfg.as_ref(), Some(store.as_ref()), wf_id, t_id)?

@@ -3186,6 +3186,23 @@ impl GatewayExecutionService {
             );
         }
 
+        // If the interaction is bound to a terminal workflow, do not attempt to
+        // resume — the session cannot make progress and the agent execution may
+        // hang indefinitely.
+        if let Some(ref wf_id) = interaction.workflow_id {
+            if crate::scheduler::workflow_store::is_workflow_terminal(
+                self.config.as_ref(),
+                self.gateway_store.as_deref(),
+                wf_id,
+            )? {
+                anyhow::bail!(
+                    "Cannot resume from interaction {}: workflow {} is already terminal",
+                    interaction_id,
+                    wf_id
+                );
+            }
+        }
+
         // Acquire the resume claim before any spawn attempt. This is the single
         // gate for all resume paths (UserInputRequired, EmergencyStop, etc.) and
         // prevents the scheduler from spawning multiple concurrent executions for
