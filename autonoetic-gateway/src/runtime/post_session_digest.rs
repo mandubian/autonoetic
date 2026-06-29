@@ -54,15 +54,58 @@ pub fn load_digest_skill_body(agents_dir: &Path) -> anyhow::Result<String> {
 /// Parse digest JSON with a lenient fallback for common LLM output issues
 /// (unescaped newlines/control characters in string values).
 fn parse_digest_json(json_slice: &str) -> anyhow::Result<DigestLlmOutput> {
-    serde_json::from_str::<DigestLlmOutput>(json_slice).or_else(|_| {
-        // Attempt repair: strip control characters (except tab/newline) from
-        // string bodies — these are the most common LLM-generated JSON defect.
-        let repaired: String = json_slice
-            .chars()
-            .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
-            .collect();
-        serde_json::from_str(&repaired).map_err(|e| anyhow::anyhow!("{}", e))
-    })
+    serde_json::from_str::<DigestLlmOutput>(json_slice)
+        .or_else(|_| serde_json::from_str(&repair_json_string_control_chars(json_slice)))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Escape raw control characters that appear inside JSON string values.
+///
+/// LLMs frequently emit literal newlines/tabs/control characters inside
+/// quoted strings instead of the JSON-required `\n`, `\t`, etc. This walks
+/// the text, tracks whether it is inside a string, and escapes only the
+/// control characters that are bare inside string values, leaving already
+/// escaped sequences and structural whitespace untouched.
+fn repair_json_string_control_chars(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for c in json.chars() {
+        if !in_string {
+            out.push(c);
+            if c == '"' {
+                in_string = true;
+            }
+            continue;
+        }
+
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+
+        match c {
+            '\\' => {
+                escaped = true;
+                out.push(c);
+            }
+            '"' => {
+                in_string = false;
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            _ => out.push(c),
+        }
+    }
+
+    out
 }
 
 fn strip_markdown_frontmatter(raw: &str) -> String {
@@ -512,5 +555,55 @@ mod tests {
             body.contains("post-session digest"),
             "expected embedded digest prompt, got: {body}"
         );
+    }
+
+    #[test]
+    fn parse_digest_json_accepts_clean_json() {
+        let json = r#"{"narrative": "hello", "memories": []}"#;
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "hello");
+        assert!(out.memories.is_empty());
+    }
+
+    #[test]
+    fn parse_digest_json_repairs_unescaped_newline_in_string() {
+        let json = "{\"narrative\": \"line1\nline2\", \"memories\": []}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "line1\nline2");
+    }
+
+    #[test]
+    fn parse_digest_json_repairs_unescaped_tab_and_return_in_string() {
+        let json = "{\"narrative\": \"a\tb\rc\", \"memories\": []}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "a\tb\rc");
+    }
+
+    #[test]
+    fn parse_digest_json_preserves_already_escaped_sequences() {
+        let json = r#"{"narrative": "escaped \\n and \"quoted\"", "memories": []}"#;
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "escaped \\n and \"quoted\"");
+    }
+
+    #[test]
+    fn parse_digest_json_preserves_structural_whitespace_outside_strings() {
+        let json = "{\n  \"narrative\": \"ok\",\n  \"memories\": []\n}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "ok");
+    }
+
+    #[test]
+    fn parse_digest_json_repairs_other_control_chars_in_string() {
+        // ASCII 0x07 (BELL) inside a string value.
+        let json = "{\"narrative\": \"beep\u{0007}done\", \"memories\": []}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "beep\u{0007}done");
+    }
+
+    #[test]
+    fn parse_digest_json_returns_error_for_truly_broken_input() {
+        let json = "{\"narrative\": \"unclosed string, \"memories\": []}";
+        assert!(parse_digest_json(json).is_err());
     }
 }
