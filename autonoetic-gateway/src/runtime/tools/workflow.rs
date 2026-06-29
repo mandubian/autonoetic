@@ -1273,6 +1273,23 @@ impl NativeTool for WorkflowForceCompleteTool {
         let task_id = args["task_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("task_id is required"))?;
+
+        if crate::scheduler::workflow_store::is_workflow_terminal(
+            config,
+            gateway_store.as_deref(),
+            workflow_id,
+        )? {
+            return Ok(ToolError::conflict(
+                format!(
+                    "Workflow '{}' is already terminal. Force-complete is not allowed after completion.",
+                    workflow_id
+                ),
+                Some("The workflow has already reached a terminal state; no further mutations are permitted."),
+            )
+            .with_code("workflow_already_completed")
+            .to_error_response());
+        }
+
         let target_status_str = args["status"].as_str().unwrap_or("succeeded");
         let summary = args["summary"].as_str().map(str::to_string);
 

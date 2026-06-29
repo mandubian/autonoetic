@@ -11,7 +11,7 @@ pub struct NotificationRecord {
     pub target_agent_id: Option<String>,     // explicit target
     pub workflow_id: Option<String>,
     pub task_id: Option<String>,
-    pub status: NotificationStatus, // Pending | ActionExecuted | Delivered | Consumed
+    pub status: NotificationStatus, // Pending | ActionExecuted | Delivered | Consumed | Failed | Suppressed
     pub created_at: String,
     pub action_completed_at: Option<String>,
     pub delivered_at: Option<String>,
@@ -29,6 +29,7 @@ pub enum NotificationStatus {
     Delivered,      // notification visible to consumers
     Consumed,       // consumer acknowledged
     Failed,         // action execution permanently failed
+    Suppressed,     // intentionally dropped (e.g., workflow became terminal)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

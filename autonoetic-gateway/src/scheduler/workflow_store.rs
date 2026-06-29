@@ -217,6 +217,36 @@ pub fn load_workflow_run(
     Ok(Some(read_json_file(&p)?))
 }
 
+pub fn is_workflow_terminal(
+    config: &GatewayConfig,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    workflow_id: &str,
+) -> anyhow::Result<bool> {
+    let run = match load_workflow_run(config, store, workflow_id)? {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+    Ok(matches!(
+        run.status,
+        WorkflowRunStatus::Completed
+            | WorkflowRunStatus::Failed
+            | WorkflowRunStatus::Cancelled
+            | WorkflowRunStatus::EmergencyStopped
+    ))
+}
+
+/// Mark pending notifications for a workflow as Suppressed so they do not wake
+/// the root session after the workflow has reached a terminal state.
+pub fn suppress_pending_notifications_for_workflow(
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    workflow_id: &str,
+) -> anyhow::Result<usize> {
+    let Some(store) = store else {
+        return Ok(0);
+    };
+    store.suppress_pending_notifications_for_workflow(workflow_id)
+}
+
 /// Resolve `wf-*` id from a root session id (`agent.spawn` root), if an index exists.
 pub fn resolve_workflow_id_for_root_session(
     config: &GatewayConfig,
@@ -1559,6 +1589,29 @@ pub fn try_complete_workflow(
     wf.updated_at = now_rfc3339();
     save_workflow_run(config, store, &wf)?;
 
+    // Suppress any pending notifications so stale child-state / join-satisfied
+    // signals do not wake the root session after the workflow is complete.
+    if let Some(gs) = store {
+        match suppress_pending_notifications_for_workflow(Some(gs), &wf_id) {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        workflow_id = %wf_id,
+                        suppressed_count = count,
+                        "Suppressed pending notifications for completed workflow"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workflow_id = %wf_id,
+                    error = %e,
+                    "Failed to suppress pending notifications for completed workflow"
+                );
+            }
+        }
+    }
+
     append_workflow_event(
         config,
         store,
@@ -1719,6 +1772,18 @@ pub fn fail_workflow_for_root_session(
                 workflow_id = %wf_id,
                 error = %e,
                 "Failed to mark workflow as Failed after root session error"
+            );
+        }
+    }
+
+    // Suppress pending notifications so an already-dead root is not woken.
+    if let Some(gs) = store {
+        if let Err(e) = suppress_pending_notifications_for_workflow(Some(gs), &wf_id) {
+            tracing::warn!(
+                target: "workflow",
+                workflow_id = %wf_id,
+                error = %e,
+                "Failed to suppress pending notifications after workflow failure"
             );
         }
     }
