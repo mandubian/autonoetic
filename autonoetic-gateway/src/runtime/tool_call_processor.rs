@@ -63,6 +63,13 @@ pub struct ToolCallProcessor<'a> {
     session_state: autonoetic_types::agent::SessionState,
 }
 
+/// Result of executing a single tool call, including whether the payload was
+/// served from the session read cache.
+struct ToolCallOutput {
+    result: String,
+    cache_hit: bool,
+}
+
 pub fn is_degraded_mode_tool_blocked(
     session_state: autonoetic_types::agent::SessionState,
     tool_name: &str,
@@ -247,22 +254,23 @@ impl<'a> ToolCallProcessor<'a> {
 
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
-                Ok(res) => {
-                    let res = normalize_tool_result_json(&res);
+                Ok(output) => {
+                    let res = normalize_tool_result_json(&output.result);
                     let event_id = tracer.log_tool_completed_with_approval(
                         canonical_tool,
                         &res,
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
                     )?;
-                    let trace_id = self.record_execution_trace(
-                        tc,
-                        &res,
-                        started_at.elapsed(),
-                        None,
-                        Some(event_id.clone()),
-                    )?;
-                    let res = inject_execution_trace_id(&res, trace_id.as_deref());
+                    if !output.cache_hit {
+                        self.record_execution_trace(
+                            tc,
+                            &res,
+                            started_at.elapsed(),
+                            None,
+                            Some(event_id.clone()),
+                        )?;
+                    }
                     self.record_operator_activity(tc, &res, Some(event_id));
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
@@ -366,8 +374,18 @@ impl<'a> ToolCallProcessor<'a> {
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
+        // If the tool result already carries a trace id (e.g. injected by
+        // `execute_tool_call` before caching), reuse it so the durable trace
+        // matches the id returned to the agent.
+        let trace_id = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("execution_trace_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         let trace = ExecutionTraceRecord {
-            trace_id: uuid::Uuid::new_v4().to_string(),
+            trace_id,
             event_id,
             agent_id: self.manifest.agent.id.clone(),
             session_id: session_id.clone(),
@@ -466,7 +484,7 @@ impl<'a> ToolCallProcessor<'a> {
         tc: &ToolCall,
         agent_dir: &Path,
         gateway_dir: Option<&Path>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<ToolCallOutput> {
         let tool_name = Self::canonical_tool_name(&tc.name);
         let policy = &self.policy;
 
@@ -479,7 +497,7 @@ impl<'a> ToolCallProcessor<'a> {
         // separate handling. Centralizing safely needs a dedicated change.
         let sanitized_args = strip_gemma_token_artifacts(&tc.arguments);
 
-        let mut result = if self.mcp_runtime.has_tool(tool_name) {
+        let (mut result, cache_hit) = if self.mcp_runtime.has_tool(tool_name) {
             let tool_policy = policy.can_invoke_tool(tool_name);
             if !tool_policy.is_allowed() {
                 return Err(anyhow::Error::from(
@@ -492,9 +510,11 @@ impl<'a> ToolCallProcessor<'a> {
                     ),
                 ));
             }
-            self.mcp_runtime
+            let r = self.mcp_runtime
                 .call_tool(tool_name, &sanitized_args)
-                .await?
+                .await?;
+            let r = inject_execution_trace_id(&r, Some(&uuid::Uuid::new_v4().to_string()));
+            (r, false)
         } else if self.registry.has_tool(tool_name) {
             // #289 session-scoped read cache: for pure read tools, return a
             // memoized result instead of re-executing (and re-injecting the
@@ -503,6 +523,10 @@ impl<'a> ToolCallProcessor<'a> {
             // still run on every hit, so this is transparent to those
             // invariants. The cache is consulted only when we have both a
             // session id and a gateway store to hold the per-session cache.
+            //
+            // We inject `execution_trace_id` before caching so the memoized
+            // payload already carries the durable trace handle; cache hits
+            // reuse that id and skip creating a duplicate execution trace.
             let cache_ctx = match (self.session_id.as_deref(), self.gateway_store.as_ref()) {
                 (Some(sid), Some(store)) => Some((sid.to_string(), store.clone())),
                 _ => None,
@@ -514,7 +538,7 @@ impl<'a> ToolCallProcessor<'a> {
                     .get(sid, tool_name, &sanitized_args)
                 {
                     self.emit_cache_hit_event(store, tool_name);
-                    hit
+                    (hit, true)
                 } else {
                     let r = self.registry.execute(
                         tool_name,
@@ -529,11 +553,12 @@ impl<'a> ToolCallProcessor<'a> {
                         self.gateway_store.clone(),
                         self.run_context.as_ref(),
                     )?;
+                    let r = inject_execution_trace_id(&r, Some(&uuid::Uuid::new_v4().to_string()));
                     self.maybe_cache_or_invalidate(store, sid, tool_name, &sanitized_args, &r);
-                    r
+                    (r, false)
                 }
             } else {
-                self.registry.execute(
+                let r = self.registry.execute(
                     tool_name,
                     self.manifest,
                     &policy,
@@ -545,7 +570,9 @@ impl<'a> ToolCallProcessor<'a> {
                     self.config,
                     self.gateway_store.clone(),
                     self.run_context.as_ref(),
-                )?
+                )?;
+                let r = inject_execution_trace_id(&r, Some(&uuid::Uuid::new_v4().to_string()));
+                (r, false)
             }
         } else {
             let agent_like_hint = if tc.name.contains('.') {
@@ -575,7 +602,7 @@ impl<'a> ToolCallProcessor<'a> {
             }
         }
 
-        Ok(result)
+        Ok(ToolCallOutput { result, cache_hit })
     }
 
     /// After a successful `registry.execute` for a tool with cache
@@ -1557,6 +1584,68 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("echo hi"));
+    }
+
+    #[tokio::test]
+    async fn test_process_tool_calls_injects_execution_trace_id() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(TraceSuccessTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(
+            Some("trace-id-session".to_string()),
+            Some("turn-000001".to_string()),
+        );
+
+        let tool_calls = vec![ToolCall {
+            id: "tc1".to_string(),
+            name: "test.trace.success".to_string(),
+            arguments: r#"{"command":"echo hi"}"#.to_string(),
+        }];
+
+        let (_had_success, results) = processor
+            .process_tool_calls(
+                &tool_calls,
+                temp.path(),
+                Some(gateway_dir.as_path()),
+                &mut SessionTracer::test_tracer(),
+            )
+            .await
+            .unwrap();
+
+        let result_json = &results[0].2;
+        let parsed: serde_json::Value = serde_json::from_str(result_json).unwrap();
+        let trace_id = parsed
+            .get("execution_trace_id")
+            .and_then(|v| v.as_str())
+            .expect("execution_trace_id should be injected into tool result");
+
+        let trace = store
+            .get_execution_trace(trace_id)
+            .unwrap()
+            .expect("trace should exist for the returned execution_trace_id");
+        assert_eq!(trace.tool_name, "test.trace.success");
+        assert_eq!(trace.session_id, "trace-id-session");
+        assert_eq!(trace.trace_id, trace_id);
     }
 
     #[test]
