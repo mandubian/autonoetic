@@ -92,11 +92,11 @@ Once a workflow reaches `Completed`, in-flight `workflow.child.resolved` and `Wo
 
 ### 4.2 The fix
 
-Once a workflow reaches a terminal status (`Completed`, `Failed`, `Aborted`):
+Once a workflow reaches a terminal status (`Completed`, `Failed`, `Cancelled`, `EmergencyStopped`):
 
 1. **Reject new `agent_spawn` calls** that target that workflow. Return `workflow_already_completed` with the terminal status and a pointer to the existing task results.
 2. **Suppress in-flight notifications** for that workflow — mark pending `workflow.child.resolved` and `WorkflowJoinSatisfied` notifications as `suppressed` instead of delivering them.
-3. **Reject workflow mutations** — `workflow.force_complete`, `workflow.amend`, `workflow_wait` return `workflow_already_completed`.
+3. **Reject workflow mutations** — `workflow.force_complete` returns `workflow_already_completed`. Plan amendment (`planframe_amend`) already rejects non-mutable plan statuses independently. `workflow_wait` remains allowed on terminal workflows so agents can read final task results.
 
 The completion check must happen **inside `agent_spawn`**, not only in the workflow state machine. In the observed session, new tasks were enqueued during a turn whose processing also marked the workflow completed — the spawn succeeded because the completion check ran after, not before.
 

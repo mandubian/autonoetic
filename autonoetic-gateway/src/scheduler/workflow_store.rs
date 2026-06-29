@@ -244,15 +244,7 @@ pub fn suppress_pending_notifications_for_workflow(
     let Some(store) = store else {
         return Ok(0);
     };
-    let pending = store.list_pending_notifications()?;
-    let mut suppressed = 0usize;
-    for n in pending {
-        if n.workflow_id.as_deref() == Some(workflow_id) {
-            store.update_notification_status(&n.notification_id, autonoetic_types::notification::NotificationStatus::Suppressed)?;
-            suppressed += 1;
-        }
-    }
-    Ok(suppressed)
+    store.suppress_pending_notifications_for_workflow(workflow_id)
 }
 
 /// Resolve `wf-*` id from a root session id (`agent.spawn` root), if an index exists.

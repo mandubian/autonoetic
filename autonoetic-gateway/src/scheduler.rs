@@ -2104,38 +2104,52 @@ async fn process_pending_notifications(
     let mut child_notified_sessions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
+    // Cache terminal-workflow checks for this pump cycle to avoid re-reading
+    // workflow.json from disk for every notification sharing the same workflow_id.
+    let mut terminal_workflows: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for n in pending {
         // Suppress notifications whose workflow has already reached a terminal
         // state. Stale child-state / join-satisfied signals must not wake a
         // root session that has already emitted its final response.
         if let Some(ref workflow_id) = n.workflow_id {
-            match crate::scheduler::workflow_store::is_workflow_terminal(
-                execution.config().as_ref(),
-                Some(store),
-                workflow_id,
-            ) {
-                Ok(true) => {
-                    tracing::info!(
-                        notification_id = %n.notification_id,
-                        workflow_id = %workflow_id,
-                        notification_type = ?n.notification_type,
-                        "Suppressing notification for terminal workflow"
-                    );
-                    store.update_notification_status(
-                        &n.notification_id,
-                        autonoetic_types::notification::NotificationStatus::Suppressed,
-                    )?;
-                    continue;
+            let is_terminal = if terminal_workflows.contains(workflow_id) {
+                true
+            } else {
+                match crate::scheduler::workflow_store::is_workflow_terminal(
+                    execution.config().as_ref(),
+                    Some(store),
+                    workflow_id,
+                ) {
+                    Ok(true) => {
+                        terminal_workflows.insert(workflow_id.clone());
+                        true
+                    }
+                    Ok(false) => false,
+                    Err(e) => {
+                        tracing::warn!(
+                            notification_id = %n.notification_id,
+                            workflow_id = %workflow_id,
+                            error = %e,
+                            "Failed to check workflow terminal status; delivering notification anyway"
+                        );
+                        false
+                    }
                 }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        notification_id = %n.notification_id,
-                        workflow_id = %workflow_id,
-                        error = %e,
-                        "Failed to check workflow terminal status; delivering notification anyway"
-                    );
-                }
+            };
+            if is_terminal {
+                tracing::info!(
+                    notification_id = %n.notification_id,
+                    workflow_id = %workflow_id,
+                    notification_type = ?n.notification_type,
+                    "Suppressing notification for terminal workflow"
+                );
+                store.update_notification_status(
+                    &n.notification_id,
+                    autonoetic_types::notification::NotificationStatus::Suppressed,
+                )?;
+                continue;
             }
         }
 

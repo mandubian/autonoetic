@@ -213,4 +213,17 @@ impl GatewayStore {
         )?;
         Ok(rows as u64)
     }
+
+    /// Suppress all pending notifications for a workflow in a single SQL statement.
+    /// Returns the number of rows updated.
+    pub fn suppress_pending_notifications_for_workflow(&self, workflow_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let pending_str = serde_json::to_string(&NotificationStatus::Pending)?;
+        let suppressed_str = serde_json::to_string(&NotificationStatus::Suppressed)?;
+        let rows = conn.execute(
+            "UPDATE notifications SET status = ?1 WHERE status = ?2 AND workflow_id = ?3",
+            params![suppressed_str, pending_str, workflow_id],
+        )?;
+        Ok(rows)
+    }
 }

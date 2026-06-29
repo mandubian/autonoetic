@@ -399,6 +399,13 @@ the single join already does that."
         let workflow_id = workflow.workflow_id.clone();
 
         // Phase 0 completion guard: do not enqueue new work once the workflow is terminal.
+        // NOTE: This check is not atomic with the subsequent save_task_run/enqueue_task.
+        // A narrow TOCTOU window exists if the workflow transitions to terminal between
+        // this check and task enqueue. The impact is bounded: the enqueued task will be
+        // orphaned but the notification pump suppresses its completion signal for the
+        // terminal workflow, so it cannot wake the root session. A fully atomic
+        // check-and-enqueue inside a workflow-store transaction is tracked as a
+        // follow-up (see RFC §4.3).
         if crate::scheduler::workflow_store::is_workflow_terminal(
             gw_config,
             gateway_store.as_deref(),
