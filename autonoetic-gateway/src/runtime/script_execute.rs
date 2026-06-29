@@ -97,14 +97,14 @@ fn prepare_runtime_lock_layer_mounts(
     agent_dir: &Path,
     runtime_lock_rel_path: &str,
     gateway_dir: Option<&Path>,
-) -> anyhow::Result<(Vec<crate::sandbox::SandboxMount>, Vec<String>)> {
+) -> anyhow::Result<(Vec<crate::sandbox::SandboxMount>, Vec<String>, Vec<String>)> {
     let Some(gw_dir) = gateway_dir else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
 
     let lock_path = agent_dir.join(runtime_lock_rel_path);
     if !lock_path.exists() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
 
     let parsed_lock = match crate::runtime_lock::resolve_runtime_lock(&lock_path) {
@@ -116,12 +116,12 @@ fn prepare_runtime_lock_layer_mounts(
                 error = %error,
                 "Failed to parse runtime.lock; skipping layer mounting for script execution"
             );
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
     };
 
     if parsed_lock.layers.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
 
     let lock_layers: Vec<crate::runtime::tools::sandbox::LayerMount> = parsed_lock
@@ -134,15 +134,17 @@ fn prepare_runtime_lock_layer_mounts(
         .collect();
     let mut mounts = Vec::new();
     let mut python_paths = Vec::new();
+    let mut node_paths = Vec::new();
     crate::runtime::tools::sandbox::extract_and_mount_layers(
         &lock_layers,
         gw_dir,
         "runtime.lock",
         &mut mounts,
         &mut python_paths,
+        &mut node_paths,
     )?;
 
-    Ok((mounts, python_paths))
+    Ok((mounts, python_paths, node_paths))
 }
 
 /// Execute a script agent directly in sandbox, bypassing the LLM.
@@ -229,10 +231,13 @@ pub(crate) async fn execute_script_in_sandbox(
         autonoetic_env.push((k.clone(), v.clone()));
     }
 
-    let (runtime_lock_mounts, layer_python_paths) =
+    let (runtime_lock_mounts, layer_python_paths, layer_node_paths) =
         prepare_runtime_lock_layer_mounts(agent_dir, runtime_lock_rel_path, gateway_dir)?;
     if !layer_python_paths.is_empty() {
         autonoetic_env.push(("PYTHONPATH".to_string(), layer_python_paths.join(":")));
+    }
+    if !layer_node_paths.is_empty() {
+        autonoetic_env.push(("NODE_PATH".to_string(), layer_node_paths.join(":")));
     }
 
     // WASM tier runs in-process, not via the POSIX spawn path: route it through
@@ -698,13 +703,14 @@ mod tests {
             std::fs::write(agent_dir.join("runtime.lock"), runtime_lock_yaml)
                 .expect("runtime lock should write");
 
-            let (mounts, python_paths) =
+            let (mounts, python_paths, node_paths) =
                 prepare_runtime_lock_layer_mounts(&agent_dir, "runtime.lock", Some(&gateway_dir))
                     .expect("runtime lock layers should resolve");
 
             assert_eq!(mounts.len(), 1);
             assert_eq!(mounts[0].dest, "/tmp/venv");
             assert!(python_paths.contains(&"/tmp/venv".to_string()));
+            assert!(node_paths.is_empty());
         }
 
         #[test]
@@ -745,13 +751,14 @@ mod tests {
             std::fs::write(agent_dir.join("runtime.lock"), runtime_lock_yaml)
                 .expect("runtime lock should write");
 
-            let (mounts, python_paths) =
+            let (mounts, python_paths, node_paths) =
                 prepare_runtime_lock_layer_mounts(&agent_dir, "runtime.lock", Some(&gateway_dir))
                     .expect("runtime lock layers should resolve");
 
             assert_eq!(mounts.len(), 1);
             assert!(python_paths.contains(&"/tmp/venv/lib/python3.13/site-packages".to_string()));
             assert!(python_paths.contains(&"/tmp/venv".to_string()));
+            assert!(node_paths.is_empty());
         }
     }
 

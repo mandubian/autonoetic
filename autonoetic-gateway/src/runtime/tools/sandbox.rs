@@ -51,6 +51,7 @@ pub fn extract_and_mount_layers(
     source_label: &str,
     mounts: &mut Vec<SandboxMount>,
     python_paths: &mut Vec<String>,
+    node_paths: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     let layer_store = crate::layer_store::LayerStore::new(gw_dir, Default::default())?;
     for layer in layers {
@@ -84,6 +85,7 @@ pub fn extract_and_mount_layers(
             readonly: true,
         });
 
+        // Discover Python site-packages inside the layer.
         let mut found_site_packages = false;
         if let Ok(lib_entries) = std::fs::read_dir(layer_temp_base.join("lib")) {
             for entry in lib_entries.flatten() {
@@ -102,6 +104,15 @@ pub fn extract_and_mount_layers(
             }
         }
         python_paths.push(layer.mount_path.clone());
+
+        // Discover Node.js node_modules directories inside the layer.
+        let node_modules_temp = layer_temp_base.join("node_modules");
+        if node_modules_temp.is_dir() {
+            let node_mount = std::path::Path::new(&layer.mount_path).join("node_modules");
+            if node_mount.has_root() {
+                node_paths.push(node_mount.to_string_lossy().to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -1897,6 +1908,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             .or_else(|| run_context.as_ref().and_then(|c| c.artifact_id.as_ref()));
 
         let mut layer_python_paths: Vec<String> = Vec::new();
+        let mut layer_node_paths: Vec<String> = Vec::new();
         let mut artifact_fixture_root: Option<std::path::PathBuf> = None;
         let session_content_mounts = if let Some(artifact_id) = effective_artifact_id {
             let Some(gw_dir) = gateway_dir else {
@@ -1945,6 +1957,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     "artifact",
                     &mut mounts,
                     &mut layer_python_paths,
+                    &mut layer_node_paths,
                 )?;
             }
 
@@ -1979,6 +1992,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     "runtime.lock",
                     &mut runtime_lock_mounts,
                     &mut layer_python_paths,
+                    &mut layer_node_paths,
                 )?;
 
                 tracing::info!(
@@ -2013,11 +2027,14 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         }
 
         let layer_python_path_str = layer_python_paths.join(":");
-        let mut extra_env: Vec<(String, String)> = if !layer_python_path_str.is_empty() {
-            vec![("PYTHONPATH".to_string(), layer_python_path_str)]
-        } else {
-            vec![]
-        };
+        let layer_node_path_str = layer_node_paths.join(":");
+        let mut extra_env: Vec<(String, String)> = Vec::new();
+        if !layer_python_path_str.is_empty() {
+            extra_env.push(("PYTHONPATH".to_string(), layer_python_path_str));
+        }
+        if !layer_node_path_str.is_empty() {
+            extra_env.push(("NODE_PATH".to_string(), layer_node_path_str));
+        }
 
         if let Some(credential_mappings) = &args.credential_env {
             if let (Some(gw_dir), Some(store)) = (gateway_dir, &gateway_store) {

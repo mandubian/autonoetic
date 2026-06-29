@@ -792,6 +792,7 @@ impl NativeTool for ArtifactExecTool {
 
         let mut mounts = Vec::new();
         let mut layer_python_paths: Vec<String> = Vec::new();
+        let mut layer_node_paths: Vec<String> = Vec::new();
         let temp_base = std::env::temp_dir()
             .join("autonoetic_artifact")
             .join(artifact_id.replace('/', "_"));
@@ -826,6 +827,7 @@ impl NativeTool for ArtifactExecTool {
                 "artifact",
                 &mut mounts,
                 &mut layer_python_paths,
+                &mut layer_node_paths,
             )?;
         }
 
@@ -893,6 +895,18 @@ impl NativeTool for ArtifactExecTool {
                 }
                 None => {
                     extra_env.push(("PYTHONPATH".to_string(), layer_pp));
+                }
+            }
+        }
+        if !layer_node_paths.is_empty() {
+            let layer_np = layer_node_paths.join(":");
+            match extra_env.iter().position(|(k, _)| k == "NODE_PATH") {
+                Some(idx) => {
+                    let existing = std::mem::take(&mut extra_env[idx].1);
+                    extra_env[idx].1 = format!("{}:{}", layer_np, existing);
+                }
+                None => {
+                    extra_env.push(("NODE_PATH".to_string(), layer_np));
                 }
             }
         }
@@ -1159,6 +1173,7 @@ fn execute_with_ticket(
 
     let mut mounts = Vec::new();
     let mut layer_python_paths: Vec<String> = Vec::new();
+    let mut layer_node_paths: Vec<String> = Vec::new();
     let temp_base = std::env::temp_dir()
         .join("autonoetic_artifact")
         .join(args.artifact_ref.replace('/', "_"));
@@ -1193,6 +1208,7 @@ fn execute_with_ticket(
             "artifact",
             &mut mounts,
             &mut layer_python_paths,
+            &mut layer_node_paths,
         )?;
     }
 
@@ -1255,6 +1271,19 @@ fn execute_with_ticket(
             }
             None => {
                 extra_env.push(("PYTHONPATH".to_string(), layer_pp));
+            }
+        }
+    }
+
+    if !layer_node_paths.is_empty() {
+        let layer_np = layer_node_paths.join(":");
+        match extra_env.iter().position(|(k, _)| k == "NODE_PATH") {
+            Some(idx) => {
+                let existing = std::mem::take(&mut extra_env[idx].1);
+                extra_env[idx].1 = format!("{}:{}", layer_np, existing);
+            }
+            None => {
+                extra_env.push(("NODE_PATH".to_string(), layer_np));
             }
         }
     }
