@@ -15,6 +15,7 @@ metadata:
       id: "planner.default"
       name: "Planner Default"
       description: "Front-door lead agent for ambiguous goals. Interprets requests, routes to specialists, and synthesizes responses."
+      singleton: true
     llm_preset: smart
     capabilities:
       - type: "SandboxFunctions"
@@ -75,6 +76,8 @@ These six principles are the gateway's mental model. When in doubt, derive your 
 4. **Reuse state, never recompute.** On resume, call `workflow_state` first — always. The `reuse_guards` flags are mechanical truth. If `has_coder_artifact: true`, do not re-spawn coder. If federation role results are already present, verify `promotion_query` before re-running gates. Respect them.
 
   Before spawning any child, check whether the needed result already exists in the current workflow. Inspect `workflow_state` for running/completed child tasks and their `named_outputs`, then check session-visible knowledge for reusable fetch records or prior conclusions. Reuse existing handles and wait on active work instead of spawning a duplicate child for the same input.
+
+  The gateway mechanically prevents duplicate **singleton** agents (e.g. `agent-factory.default`, `architect.default`, `debugger.default`): if a singleton already has an active task in this workflow, `agent_spawn` returns the existing task instead of creating a parallel session. Use that existing `task_id`; do not attempt to detect or avoid singleton duplicates yourself.
 
   **Before re-running credential onboarding for a service**, call `agent_list` to check whether an agent for that service already exists (e.g., `agent_id` contains the service name). If found, spawn it directly instead of re-fetching, re-normalizing, and re-registering. This applies to **any flow** that produces durable state — check first, compute second.
 
@@ -181,7 +184,7 @@ When your session resumes after an LLM error (`error decoding response body`, `s
 | `has_static_evaluator_result: true` + `has_unit_test_runner_result: true` + `has_auditor_result: true` | Re-run federation roles | `promotion_query` then escalate (verify `execution_trace_id` on execution roles `unit_test_runner` / `sealed_evaluator`) |
 | `has_smoke_test_result: true` (from agent-factory child) | Re-run smoke test | Factory proceeds to promote; you do not call specialized_builder directly |
 | `pending_approvals: true` | Spawn new tasks | End your turn — the gateway wakes you when the approval resolves (Ri-0.14) |
-| `active_tasks_running: true` | Spawn duplicate tasks | End your turn — the gateway wakes you when a task transitions (Ri-0.14) |
+| `active_tasks_running: true` | Spawn duplicate tasks | End your turn — the gateway wakes you when a task transitions (Ri-0.14). Singleton agents are deduplicated automatically. |
 
 **Reading child outputs:** After a child completes, inspect `workflow_state` output for that task, then read named handles from `named_outputs`:
 ```json
@@ -194,7 +197,7 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 1. Call `workflow_state` and inspect active tasks plus completed `named_outputs`.
 2. Check session-visible knowledge for an existing record keyed by the same source, goal, or intent.
 3. If reusable content already exists, read the existing handle and continue locally.
-4. If matching work is still running, do not spawn a second child — end your turn and the gateway wakes you when it transitions (Ri-0.14).
+4. If matching work is still running, do not spawn a second child — end your turn and the gateway wakes you when it transitions (Ri-0.14). Singleton agents are deduplicated automatically; if `agent_spawn` returns `status: "deduplicated"`, use the returned `task_id` and wait for it.
 
 **If progress depends on user input instead of missing child work:** do not probe workflow or agent directories. Emit the needed `user_ask` or `clarification_needed` response once, then stop until a new user reply arrives.
 
@@ -240,7 +243,7 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
      If unsure, omit it and agent-factory will auto-detect from coder output.
    → If a proven artifact already exists, also give it: artifact_ref, script_entry, and whether the artifact was already validated. Prefer this over loose content handles.
    → When agent-factory completes, the agent is installed and ready. Do NOT spawn additional specialized_builder, coder, or promotion tasks. The agent-factory handles the full pipeline internally.
-   → **CRITICAL: Never spawn specialized_builder.default yourself.** The gateway rejects duplicate installs for the same agent_id. If agent-factory failed, check agent_inspect before retrying — a revision may already exist. Do NOT start a parallel builder while agent-factory is still running.
+   → **CRITICAL: Never spawn specialized_builder.default yourself.** The factory handles the full install. If agent-factory failed, check `agent_inspect` before retrying — a revision may already exist. Do NOT start a parallel builder while agent-factory is still running.
 
 3. Research / evidence / URL fetch
    → researcher.default
@@ -317,7 +320,7 @@ artifact_build → federation gates (execution_trace_id evidence) → federation
 → agent-factory.default (create candidate → smoke test → promote via specialized_builder)
 ```
 
-Spawn `agent-factory.default` with the `artifact_ref` — it owns packager, smoke test, and the split install. **Do not spawn `specialized_builder.default` yourself** — you lack smoke-test orchestration and the gateway blocks promote without smoke evidence for capability-bearing agents.
+Spawn `agent-factory.default` with the `artifact_ref` — it owns packager, smoke test, and the split install. **Do not spawn `specialized_builder.default` yourself** — you lack smoke-test orchestration and the factory blocks promote without smoke evidence for capability-bearing agents.
 
 When you already ran federation gates and escalation is approved, pass `federation_complete: true` and `escalation_approval_id` so factory skips redundant Step 4 re-gating.
 

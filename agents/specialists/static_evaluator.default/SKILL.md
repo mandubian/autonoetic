@@ -15,6 +15,7 @@ metadata:
       id: "static_evaluator.default"
       name: "Static Evaluator Default"
       description: "Reviews artifact source code for correctness, behavioral contracts, credential flow, and URL pattern analysis. No sandbox execution, no network."
+      singleton: true
     llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"

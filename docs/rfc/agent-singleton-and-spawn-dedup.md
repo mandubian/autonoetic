@@ -339,6 +339,31 @@ Rules that remain necessary (singleton does NOT address these):
 - "Call `workflow_state` on resume" (checkpoint recovery, not spawn dedup).
 - "Process all child results in one turn after `workflow_wait`" (turn batching, not spawn dedup).
 
+### 10.5 Measurement
+
+Measure impact in three ways:
+
+1. **Duplicate spawns prevented.** Count `workflow.singleton.deduplicated` events emitted by the gateway (`autonoetic-gateway/src/runtime/tools/agent.rs`). Each event represents one duplicate `agent_spawn` that did not create a new session.
+
+2. **Turns saved.** Each prevented duplicate avoids at least one wasted planner turn: the turn that would have issued the redundant spawn and the turn(s) that would have tried to reconcile the duplicate child. In the observed `session-79b128af`, duplicate factory spawns alone added ~6–8 planner turns.
+
+3. **Tokens saved.** Estimate from system-prompt sizes:
+   - Specialist agent system prompts (instructions + schema + capabilities): ~12–18k tokens.
+   - Coordinator/planner system prompts: ~8–12k tokens.
+   - Each duplicate singleton spawn prevented saves the full system-prompt load for that agent in that workflow.
+
+In `session-79b128af` the three duplicate `agent-factory.default` spawns would have paid ~45k tokens in system prompts alone. Phase 1 prevents those duplicates. Phase 2 would additionally avoid reloading the system prompt for legitimate sequential singleton invocations.
+
+### 10.6 Decision on Phase 2
+
+Phase 2 (stateful singleton sessions) is **deferred**. Decision criteria:
+
+- Revisit if production measurement shows sequential singleton invocations reloading > 50k system-prompt tokens per workflow on average.
+- Do not start with evaluators/auditors (context-contamination risk).
+- If pursued, prototype with `architect.default` and `agent-factory.default` first.
+
+Current recommendation: ship phase 0 + phase 1, measure for several representative workflows, then decide.
+
 ---
 
 ## 11. Open Questions
@@ -367,3 +392,11 @@ Rules that remain necessary (singleton does NOT address these):
 | 8 | Mark built-in singleton agents in SKILL.md manifests | Enable the behavior for coordinators/reviewers/installers. |
 | 9 | Simplify planner/factory SKILLs | Remove rules now mechanically enforced. |
 | 10 | Measure token/turn impact; decide on phase 2 | Data-driven decision. |
+
+## Status
+
+- Phase 0 (#684): merged via PR #688.
+- Phase 1 (#685): merged via PR #690.
+- Phase 2 (#686): deferred; see §10.6.
+
+Built-in singleton manifests were updated in PR #690 follow-up.

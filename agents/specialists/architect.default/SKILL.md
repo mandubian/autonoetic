@@ -15,6 +15,7 @@ metadata:
       id: "architect.default"
       name: "Architect Default"
       description: "Defines structure, interfaces, trade-offs, and decomposes tasks into implementable sub-tasks."
+      singleton: true
     llm_preset: coding
     llm_overrides:
       temperature: 0.2

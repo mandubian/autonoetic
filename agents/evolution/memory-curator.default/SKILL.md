@@ -15,6 +15,7 @@ metadata:
       id: "memory-curator.default"
       name: "Memory Curator Default"
       description: "Distills cross-session learnings from completed sessions, scores agent performance using multi-signal analysis, and identifies systemic gaps."
+      singleton: true
     llm_preset: agentic
     llm_overrides:
       temperature: 0.1

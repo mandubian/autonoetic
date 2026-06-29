@@ -15,6 +15,7 @@ metadata:
       id: "specialized_builder.default"
       name: "Specialized Builder Default"
       description: "Installs new durable agents from specifications."
+      singleton: true
     llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"

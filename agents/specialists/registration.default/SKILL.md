@@ -15,6 +15,7 @@ metadata:
       id: "registration.default"
       name: "Registration Default"
       description: "Focused agent for suspended credential flows; does not cold-start onboarding from remote skill URLs."
+      singleton: true
     llm_preset: agentic
     llm_overrides:
       temperature: 0.0

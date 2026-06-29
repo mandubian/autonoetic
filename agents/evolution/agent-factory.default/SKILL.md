@@ -15,6 +15,7 @@ metadata:
       id: "agent-factory.default"
       name: "Agent Factory Default"
       description: "Owns the full agent creation pipeline: architect (if design needed) → coder or reasoning intent → packager (if deps) → evaluator + auditor (if gates required) → specialized_builder installs."
+      singleton: true
     llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"

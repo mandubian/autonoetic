@@ -15,6 +15,7 @@ metadata:
       id: "unit_test_runner.default"
       name: "Unit Test Runner Default"
       description: "Discovers and runs deterministic, hermetic unit tests in a no-network promotion sandbox (P-3.10). Network/integration tests → unable_to_evaluate. If no tests exist, skips without recording a verdict."
+      singleton: true
     llm_preset: coding
     sandbox_network: normal
     loop_guard:

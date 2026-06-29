@@ -15,6 +15,7 @@ metadata:
       id: "debugger.default"
       name: "Debugger Default"
       description: "Isolates root causes and proposes targeted fixes."
+      singleton: true
     llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"

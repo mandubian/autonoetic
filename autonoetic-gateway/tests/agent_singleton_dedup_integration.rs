@@ -199,6 +199,51 @@ fn singleton_spawn_deduplicates_active_task() -> anyhow::Result<()> {
 }
 
 #[test]
+fn singleton_spawn_prevents_parallel_factory_cascade() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let parent_dir = config.agents_dir.join("planner.default");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
+    let _guard = runtime.enter();
+
+    let args = serde_json::json!({
+        "agent_id": "singleton.test",
+        "message": "do the thing",
+        "async": true
+    });
+
+    // Simulate a planner that spawns the same singleton three times in rapid
+    // succession because it appeared stuck. With singleton dedup, only the
+    // first call creates a task; the next two return the same task_id.
+    let mut task_ids = Vec::new();
+    for i in 0..3 {
+        let resp = registry.execute(
+            "agent_spawn",
+            &manifest,
+            &policy,
+            &parent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&args)?,
+            Some("root-factory-cascade"),
+            Some(&format!("turn-factory-cascade-{}", i)),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )?;
+        let parsed: serde_json::Value = serde_json::from_str(&resp)?;
+        task_ids.push(parsed["task_id"].as_str().unwrap().to_string());
+    }
+
+    assert_eq!(task_ids.len(), 3);
+    assert!(task_ids.iter().all(|id| id == &task_ids[0]));
+    Ok(())
+}
+
+#[test]
 fn singleton_spawn_different_revision_is_separate_task() -> anyhow::Result<()> {
     let (_temp, config, store) = setup()?;
     let manifest = planner_manifest();

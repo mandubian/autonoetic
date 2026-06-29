@@ -15,6 +15,7 @@ metadata:
       id: "improvement-orchestrator.default"
       name: "Improvement Orchestrator Default"
       description: "Wraps the improvement.ab_replay native tool to run A/B comparisons between two agent revisions. Accepts task specs, queues eval runs for both revisions, and returns a multi-axis comparison report with holdout analysis."
+      singleton: true
     llm_preset: agentic
     llm_overrides:
       temperature: 0.1

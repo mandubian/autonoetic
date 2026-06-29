@@ -15,6 +15,7 @@ metadata:
       id: "watchdog.default"
       name: "Watchdog"
       description: "Observer that reviews agent sessions for trajectory divergence. Read-only — no execution capabilities."
+      singleton: true
     llm_preset: budget
     llm_overrides:
       temperature: 0.0

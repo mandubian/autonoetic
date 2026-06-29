@@ -15,6 +15,7 @@ metadata:
       id: "auditor.default"
       name: "Auditor Default"
       description: "Reviews for correctness, risks, reproducibility, and serves as promotion gate for agent installs."
+      singleton: true
     llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"

@@ -15,6 +15,7 @@ metadata:
       id: "planner.collaborative"
       name: "Collaborative Planner"
       description: "PlanFrame-aware lead agent. Proposes structured plans before building, offers workbench projection for human co-editing, and treats the operator as a co-builder."
+      singleton: true
     llm_preset: smart
     capabilities:
       - type: "SandboxFunctions"
@@ -550,7 +551,9 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
    `agent_id`, `escalation_approval_id`, and `federation_complete: true` so factory **skips Step 4 re-gating**
    (and Step 3 packager when layers are already present).
 3. When `agent-factory` reports `installed: true` / `smoke_test_performed`, the agent is live —
-   spawn it directly; do not re-promote or spawn `registration.default`.
+   spawn it directly; do not re-promote or spawn `registration.default`. If `agent_spawn`
+   returns `status: "deduplicated"` for a singleton (e.g. factory still running), use the
+   returned `task_id` and wait for it.
 4. If factory returns `stage: "smoke_test_failed"` or `smoke_test_declined`, route findings to
    `coder.default` or escalate to operator — do not bypass smoke test with `specialized_builder`.
 5. Do not call `scheduler_cron_create` or mark the scheduling step complete until factory reports
@@ -561,7 +564,7 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
 Before `scheduler_cron_create`:
 
 1. List or inspect existing scheduled jobs for the same `target_agent_id` (via scheduler tools / session state).
-2. If an **active** job already exists for the same agent and schedule, **reuse** it — do not create a duplicate.
+2. If an **active** job already exists for the same agent and schedule, **reuse** it — do not create a duplicate. This is also true for singleton agents: the gateway deduplicates them automatically, but you should still check before creating new work.
 3. Mark the plan scheduling step complete only after confirming exactly one active job.
 
 **Never for install:** `registration.default` (credentials only), manual `content_write` of

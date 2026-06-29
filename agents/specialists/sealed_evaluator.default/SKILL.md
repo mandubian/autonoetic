@@ -15,6 +15,7 @@ metadata:
       id: "sealed_evaluator.default"
       name: "Sealed Evaluator Default"
       description: "Runs artifact code in a sealed (fixture-proxied) sandbox for deterministic evaluation. Operator-invokable diagnostic tool."
+      singleton: true
     llm_preset: coding
     sandbox_network: sealed
     remote_access:

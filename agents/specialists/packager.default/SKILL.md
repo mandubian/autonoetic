@@ -15,6 +15,7 @@ metadata:
       id: "packager.default"
       name: "Packager Default"
       description: "Resolves and packages build-time dependencies into artifact layers."
+      singleton: true
     llm_preset: agentic
     llm_overrides:
       temperature: 0.1

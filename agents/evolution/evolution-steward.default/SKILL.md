@@ -15,6 +15,7 @@ metadata:
       id: "evolution-steward.default"
       name: "Evolution Steward Default"
       description: "Decides whether to evolve a flagged agent, classifies the root cause, and delegates to agent-factory for revision creation."
+      singleton: true
     llm_preset: agentic
     llm_overrides:
       temperature: 0.1
