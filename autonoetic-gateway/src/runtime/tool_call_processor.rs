@@ -213,13 +213,14 @@ impl<'a> ToolCallProcessor<'a> {
                 ));
                 let error_json = tool_error.to_json_string();
                 let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
-                self.record_execution_trace(
+                let trace_id = self.record_execution_trace(
                     tc,
                     &error_json,
                     started_at.elapsed(),
                     Some(&tool_error),
                     Some(failure_event_id),
                 )?;
+                let error_json = inject_execution_trace_id(&error_json, trace_id.as_deref());
                 results.push((tc.id.clone(), tc.name.clone(), error_json));
                 continue;
             }
@@ -229,13 +230,14 @@ impl<'a> ToolCallProcessor<'a> {
                 Err(tool_error) => {
                     let error_json = tool_error.to_json_string();
                     let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
-                    self.record_execution_trace(
+                    let trace_id = self.record_execution_trace(
                         tc,
                         &error_json,
                         started_at.elapsed(),
                         Some(&tool_error),
                         Some(failure_event_id),
                     )?;
+                    let error_json = inject_execution_trace_id(&error_json, trace_id.as_deref());
                     results.push((tc.id.clone(), tc.name.clone(), error_json));
                     continue;
                 }
@@ -253,13 +255,14 @@ impl<'a> ToolCallProcessor<'a> {
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
                     )?;
-                    self.record_execution_trace(
+                    let trace_id = self.record_execution_trace(
                         tc,
                         &res,
                         started_at.elapsed(),
                         None,
                         Some(event_id.clone()),
                     )?;
+                    let res = inject_execution_trace_id(&res, trace_id.as_deref());
                     self.record_operator_activity(tc, &res, Some(event_id));
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
@@ -270,7 +273,7 @@ impl<'a> ToolCallProcessor<'a> {
                     let error_json = tool_error.to_json_string();
                     let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
                     if !tool_error.is_recoverable() {
-                        self.record_execution_trace(
+                        let _ = self.record_execution_trace(
                             tc,
                             &error_json,
                             started_at.elapsed(),
@@ -289,13 +292,14 @@ impl<'a> ToolCallProcessor<'a> {
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
                     )?;
-                    self.record_execution_trace(
+                    let trace_id = self.record_execution_trace(
                         tc,
                         &error_json,
                         started_at.elapsed(),
                         Some(&tool_error),
                         Some(event_id.clone()),
                     )?;
+                    let error_json = inject_execution_trace_id(&error_json, trace_id.as_deref());
                     self.record_operator_activity(tc, &error_json, Some(event_id));
                     error_json
                 }
@@ -321,9 +325,9 @@ impl<'a> ToolCallProcessor<'a> {
         duration: Duration,
         tool_error: Option<&ToolError>,
         event_id: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         let Some(store) = &self.gateway_store else {
-            return Ok(());
+            return Ok(None);
         };
         let session_id = self
             .session_id
@@ -383,7 +387,8 @@ impl<'a> ToolCallProcessor<'a> {
             arguments: Some(tc.arguments.clone()),
             result: Some(result_json.to_string()),
         };
-        store.create_execution_trace(&trace)
+        store.create_execution_trace(&trace)?;
+        Ok(Some(trace.trace_id))
     }
 
     fn record_operator_activity(
@@ -762,6 +767,25 @@ fn tool_result_requires_escalation(result: &str) -> bool {
         .ok()
         .and_then(|parsed| parsed.get("escalation_required").and_then(|v| v.as_bool()))
         .unwrap_or(false)
+}
+
+fn inject_execution_trace_id(result_json: &str, trace_id: Option<&str>) -> String {
+    let Some(id) = trace_id else {
+        return result_json.to_string();
+    };
+    match serde_json::from_str::<serde_json::Value>(result_json) {
+        Ok(Value::Object(mut obj)) => {
+            // If the result already carries an execution_trace_id (e.g. served
+            // from the session read cache), keep it so repeated cache hits stay
+            // byte-identical and agents always reference the original run trace.
+            if obj.contains_key("execution_trace_id") {
+                return result_json.to_string();
+            }
+            obj.insert("execution_trace_id".to_string(), Value::String(id.to_string()));
+            serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| result_json.to_string())
+        }
+        _ => result_json.to_string(),
+    }
 }
 
 fn infer_trace_success(

@@ -1350,7 +1350,11 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match store.load_plan_frame(&params.plan_id) {
+                let result = match params.version {
+                    Some(v) => store.load_plan_frame_revision(&params.plan_id, v),
+                    None => store.load_plan_frame(&params.plan_id),
+                };
+                match result {
                     Ok(Some(plan)) => JsonRpcResponse::success(
                         req.id,
                         serde_json::to_value(
@@ -1361,7 +1365,10 @@ impl JsonRpcRouter {
                     Ok(None) => JsonRpcResponse::error(
                         req.id,
                         -32000,
-                        format!("Plan '{}' not found", params.plan_id),
+                        match params.version {
+                            Some(v) => format!("Plan '{}' version {} not found", params.plan_id, v),
+                            None => format!("Plan '{}' not found", params.plan_id),
+                        },
                     ),
                     Err(e) => JsonRpcResponse::error(
                         req.id,
