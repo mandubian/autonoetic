@@ -109,10 +109,11 @@ Before you report `dependency_files` in your result JSON, you MUST inspect every
 
 1. Read each file you are about to package.
 2. List every top-level `import` / `from X import` / `require(...)` statement.
-3. Classify each as **stdlib** (ships with Python: `os`, `sys`, `json`, `unittest`, `io`, `typing`, etc.) or **third-party** (`pytest`, `requests`, `httpx`, `pandas`, `numpy`, etc.).
-4. If any file contains a third-party import (non-stdlib, non-local):
+3. Classify each as **stdlib** (ships with Python: `os`, `sys`, `json`, `unittest`, `io`, `typing`, etc.), **gateway-provided** (`autonoetic_sdk` — injected via `PYTHONPATH` by the runtime), or **third-party** (`pytest`, `requests`, `httpx`, `pandas`, `numpy`, etc.).
+4. If any file contains a third-party import (non-stdlib, non-gateway-provided, non-local):
    - **Either** declare it in `dependency_files` (e.g. `["requirements.txt"]` containing `requests`) and set `status: "needs_packager"`, **or**
    - **Rewrite** the file to eliminate the third-party import.
+   - **Gateway-provided SDK is NEVER a dependency**: `autonoetic_sdk` is injected by the gateway and must not appear in `requirements.txt`.
    - **Test frameworks are NEVER a dependency**: `pytest`, `nose`, `hypothesis` must be rewritten to `unittest` (see the rule above). Do not put them in `requirements.txt`.
 5. Only report `dependency_files: []` when **zero** files contain third-party imports.
 

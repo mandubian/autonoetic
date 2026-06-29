@@ -742,6 +742,8 @@ const PYTHON_STDLIB: &[&str] = &[
     // Other common stdlib
     "time",
     "copy",
+    // Gateway-provided SDK (injected via PYTHONPATH; not available on PyPI)
+    "autonoetic_sdk",
 ];
 
 #[derive(Debug, Default)]
@@ -1304,6 +1306,17 @@ artifacts: "not_a_sequence"
         file_map.insert("utils.py".to_string(), b"# local module\n".to_vec());
         let external = detect_external_python_imports(&file_map, None);
         assert!(external.is_empty());
+    }
+
+    #[test]
+    fn test_detect_external_python_imports_ignores_autonoetic_sdk() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "agent.py".to_string(),
+            b"import os\nfrom autonoetic_sdk import load_invocation\n".to_vec(),
+        );
+        let external = detect_external_python_imports(&file_map, None);
+        assert!(!external.contains(&"autonoetic_sdk".to_string()));
     }
 
     #[test]
