@@ -51,6 +51,20 @@ pub fn load_digest_skill_body(agents_dir: &Path) -> anyhow::Result<String> {
     Ok(strip_markdown_frontmatter(&raw))
 }
 
+/// Parse digest JSON with a lenient fallback for common LLM output issues
+/// (unescaped newlines/control characters in string values).
+fn parse_digest_json(json_slice: &str) -> anyhow::Result<DigestLlmOutput> {
+    serde_json::from_str::<DigestLlmOutput>(json_slice).or_else(|_| {
+        // Attempt repair: strip control characters (except tab/newline) from
+        // string bodies — these are the most common LLM-generated JSON defect.
+        let repaired: String = json_slice
+            .chars()
+            .map(|c| if c.is_control() && c != '\n' && c != '\r' && c != '\t' { ' ' } else { c })
+            .collect();
+        serde_json::from_str(&repaired).map_err(|e| anyhow::anyhow!("{}", e))
+    })
+}
+
 fn strip_markdown_frontmatter(raw: &str) -> String {
     let t = raw.trim_start();
     if !t.starts_with("---") {
@@ -359,7 +373,15 @@ async fn run_post_session_digest_inner(
         anyhow::bail!("digest LLM must return JSON text only, not tool calls");
     }
     let json_slice = extract_json_object_slice(&resp.text)?;
-    let output: DigestLlmOutput = serde_json::from_str(json_slice)?;
+    let output: DigestLlmOutput = parse_digest_json(json_slice)
+        .map_err(|e| {
+            let preview: String = json_slice.chars().take(500).collect();
+            anyhow::anyhow!(
+                "digest LLM JSON parse error: {} (preview: {}...)",
+                e,
+                preview
+            )
+        })?;
     let sqlite_store = crate::runtime::memory::SqliteMemoryStore::new(store.clone());
     apply_digest_output(
         gateway_dir,

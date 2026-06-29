@@ -802,12 +802,6 @@ fn inject_execution_trace_id(result_json: &str, trace_id: Option<&str>) -> Strin
     };
     match serde_json::from_str::<serde_json::Value>(result_json) {
         Ok(Value::Object(mut obj)) => {
-            // If the result already carries an execution_trace_id (e.g. served
-            // from the session read cache), keep it so repeated cache hits stay
-            // byte-identical and agents always reference the original run trace.
-            if obj.contains_key("execution_trace_id") {
-                return result_json.to_string();
-            }
             obj.insert("execution_trace_id".to_string(), Value::String(id.to_string()));
             serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| result_json.to_string())
         }
