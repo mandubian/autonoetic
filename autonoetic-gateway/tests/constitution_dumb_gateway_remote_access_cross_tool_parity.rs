@@ -28,6 +28,7 @@ fn manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "cross-tool parity test agent".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,

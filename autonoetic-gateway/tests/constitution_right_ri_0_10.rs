@@ -31,6 +31,7 @@ fn no_capability_manifest() -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         // The whole point of Ri-0.10: NO capabilities required to read the law.
         capabilities: vec![],

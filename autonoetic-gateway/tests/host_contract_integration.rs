@@ -19,6 +19,7 @@ fn builder_manifest() -> AgentManifest {
             id: "specialized-builder.test".to_string(),
             name: "specialized-builder.test".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],

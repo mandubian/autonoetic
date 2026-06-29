@@ -31,6 +31,7 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "digest query test reader".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess { scopes: vec![] }],
         llm_overrides: None,

@@ -32,6 +32,7 @@ fn plan_frame_manifest() -> AgentManifest {
             id: "planner.collaborative".to_string(),
             name: "Collaborative Planner".to_string(),
             description: "Test planner".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::AgentSpawn {

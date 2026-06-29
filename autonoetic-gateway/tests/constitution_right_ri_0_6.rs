@@ -79,6 +79,7 @@ fn manifest(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,

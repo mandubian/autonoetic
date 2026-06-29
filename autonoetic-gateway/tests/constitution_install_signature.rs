@@ -36,6 +36,7 @@ fn test_manifest() -> AgentManifest {
             id: "revision.tester".to_string(),
             name: "revision.tester".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],

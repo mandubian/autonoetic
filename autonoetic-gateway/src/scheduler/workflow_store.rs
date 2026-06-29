@@ -1012,6 +1012,22 @@ pub fn update_task_run_status(
                 }
             }
         }
+
+        // Release any singleton slot held by this task so the same singleton
+        // can be reacquired in the workflow.
+        if is_terminal && was_non_terminal {
+            if let Some(store) = store {
+                if let Err(e) = store.release_singleton_slot_by_task_id(workflow_id, task_id) {
+                    tracing::warn!(
+                        target: "singleton_dedup",
+                        workflow_id = %workflow_id,
+                        task_id = %task_id,
+                        error = %e,
+                        "Failed to release singleton slot on terminal task transition"
+                    );
+                }
+            }
+        }
     }
 
     if status == TaskRunStatus::Cancelled && previous_status == TaskRunStatus::AwaitingApproval {
@@ -2461,6 +2477,19 @@ pub fn apply_emergency_stop_to_workflow(
     run.status = WorkflowRunStatus::EmergencyStopped;
     run.updated_at = now_rfc3339();
     save_workflow_run(config, store, &run)?;
+
+    // Clear singleton index so future workflows are not blocked.
+    if let Some(store) = store {
+        if let Err(e) = store.delete_singleton_slots_for_workflow(workflow_id) {
+            tracing::warn!(
+                target: "singleton_dedup",
+                workflow_id = %workflow_id,
+                stop_id = %stop_id,
+                error = %e,
+                "Failed to delete singleton slots during emergency stop"
+            );
+        }
+    }
 
     append_workflow_event(
         config,

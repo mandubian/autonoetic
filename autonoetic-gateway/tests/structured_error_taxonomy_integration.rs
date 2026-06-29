@@ -30,6 +30,7 @@ fn test_manifest(caps: Vec<Capability>) -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,

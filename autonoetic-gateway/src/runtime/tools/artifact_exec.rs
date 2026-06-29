@@ -1516,7 +1516,8 @@ mod tests {
                 id: "unit_test_runner.default".to_string(),
                 name: "Unit Test Runner".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![
                 Capability::SandboxFunctions {
                     allowed: vec![
@@ -1570,7 +1571,8 @@ mod tests {
                 id: "static_evaluator.default".to_string(),
                 name: "Static Evaluator".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![
                 Capability::SandboxFunctions {
                     allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],

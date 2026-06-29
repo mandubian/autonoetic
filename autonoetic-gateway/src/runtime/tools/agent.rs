@@ -18,6 +18,19 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+fn target_agent_is_singleton(agents_dir: &Path, agent_id: &str) -> bool {
+    let path = agents_dir.join(agent_id).join("SKILL.md");
+    if !path.exists() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    crate::runtime::parser::SkillParser::parse(&raw)
+        .map(|(m, _)| m.agent.singleton)
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
     agent_id: String,
@@ -533,6 +546,71 @@ the single join already does that."
             }
         }
 
+        let is_singleton = target_agent_is_singleton(agents_dir, &target_agent_id);
+        let mut acquired_singleton_slot = false;
+        let mut existing_singleton_task_id: Option<String> = None;
+        if is_singleton {
+            if let Some(gs) = gateway_store.as_ref() {
+                match gs.acquire_singleton_slot(
+                    &workflow_id,
+                    &target_agent_id,
+                    args.revision_id.as_deref(),
+                    &task_id,
+                ) {
+                    Ok(Some(existing)) => {
+                        existing_singleton_task_id = Some(existing);
+                    }
+                    Ok(None) => {
+                        acquired_singleton_slot = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "singleton_dedup",
+                            workflow_id = %workflow_id,
+                            agent_id = %target_agent_id,
+                            error = %e,
+                            "failed to acquire singleton slot; proceeding without dedup"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(existing_task_id) = existing_singleton_task_id {
+            crate::scheduler::append_workflow_event(
+                gw_config,
+                gateway_store.as_deref(),
+                &WorkflowEventRecord {
+                    event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    workflow_id: workflow_id.clone(),
+                    task_id: Some(existing_task_id.clone()),
+                    event_type: "workflow.singleton.deduplicated".to_string(),
+                    agent_id: Some(target_agent_id.clone()),
+                    payload: serde_json::json!({
+                        "status": "deduplicated",
+                        "requested_task_id": task_id,
+                        "existing_task_id": existing_task_id,
+                        "agent_id": target_agent_id,
+                        "revision_id": args.revision_id,
+                    }),
+                    occurred_at: Utc::now().to_rfc3339(),
+                },
+            )?;
+
+            return serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "accepted": true,
+                "status": "deduplicated",
+                "singleton": true,
+                "deduplicated": true,
+                "workflow_id": workflow_id,
+                "task_id": existing_task_id,
+                "agent_id": target_agent_id,
+                "message": "Singleton agent already has an active task in this workflow. Returning the existing task."
+            }))
+            .map_err(Into::into);
+        }
+
         let execution_config = GatewayConfig {
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
@@ -752,6 +830,11 @@ the single join already does that."
                     &workflow_id,
                     &spec.dedupe_key,
                 );
+            }
+            if acquired_singleton_slot {
+                if let Some(gs) = gateway_store.as_ref() {
+                    let _ = gs.release_singleton_slot_by_task_id(&workflow_id, &task_id);
+                }
             }
         }
         return persist_result;

@@ -191,7 +191,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test-agent".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: if network {
                 vec![Capability::NetworkAccess {
                     hosts: vec!["*".to_string()],

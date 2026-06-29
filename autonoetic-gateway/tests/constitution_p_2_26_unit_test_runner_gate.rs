@@ -60,6 +60,7 @@ fn manifest_for(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "Test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],

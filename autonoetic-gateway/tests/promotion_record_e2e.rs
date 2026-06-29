@@ -106,6 +106,7 @@ fn builder_manifest() -> AgentManifest {
             id: "specialized_builder.default".to_string(),
             name: "specialized_builder.default".to_string(),
             description: "Builder".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::AgentSpawn {
@@ -153,6 +154,7 @@ fn evaluator_manifest() -> AgentManifest {
             id: "sealed_evaluator.default".to_string(),
             name: "sealed_evaluator.default".to_string(),
             description: "Evaluator".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
@@ -194,6 +196,7 @@ fn auditor_manifest() -> AgentManifest {
             id: "auditor.default".to_string(),
             name: "auditor.default".to_string(),
             description: "Auditor".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
@@ -542,6 +545,7 @@ async fn test_promotion_record_with_artifact_ref() {
             id: "reader.default".to_string(),
             name: "reader".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],

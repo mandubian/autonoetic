@@ -21,6 +21,7 @@ fn evaluator_manifest() -> AgentManifest {
             id: "sealed_evaluator.default".to_string(),
             name: "sealed_evaluator.default".to_string(),
             description: "Evaluator".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,

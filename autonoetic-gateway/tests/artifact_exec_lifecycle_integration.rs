@@ -35,6 +35,7 @@ fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "Test agent".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::CodeExecution {
@@ -81,6 +82,7 @@ fn manifest_without_network() -> AgentManifest {
             id: "executor.default".to_string(),
             name: "Executor".to_string(),
             description: "Test executor".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::CodeExecution {
             patterns: vec!["*".to_string()],
@@ -308,6 +310,7 @@ fn test_artifact_exec_tool_registered_and_gated() {
             id: "researcher.default".to_string(),
             name: "Researcher".to_string(),
             description: "No code execution".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::NetworkAccess {
             hosts: vec!["*".to_string()],
@@ -354,6 +357,7 @@ fn unit_test_runner_gate_manifest() -> AgentManifest {
             id: "acme.custom_unit_test_runner".to_string(),
             name: "Custom Unit Test Runner".to_string(),
             description: "Federation unit-test gate".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::SandboxFunctions {
@@ -425,6 +429,7 @@ fn test_artifact_exec_not_available_for_static_evaluator() {
             id: "static_evaluator.default".to_string(),
             name: "Static Evaluator".to_string(),
             description: "Static federation gate".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::SandboxFunctions {

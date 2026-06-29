@@ -61,6 +61,7 @@ fn test_manifest() -> AgentManifest {
             id: "digest.tester".to_string(),
             name: "digest.tester".to_string(),
             description: "live digest integration".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,

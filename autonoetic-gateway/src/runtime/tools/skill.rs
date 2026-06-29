@@ -199,6 +199,7 @@ impl NativeTool for SkillInstallTool {
                 id: args.agent_id.clone(),
                 name: parsed_manifest.agent.name.clone(),
                 description: parsed_manifest.agent.description.clone(),
+                singleton: parsed_manifest.agent.singleton,
             },
             capabilities,
             llm_overrides: parsed_manifest.llm_overrides.clone(),

@@ -946,7 +946,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test-agent".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![
                 Capability::ReadAccess {
                     scopes: vec!["*".to_string()],

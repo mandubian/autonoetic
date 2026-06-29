@@ -30,6 +30,7 @@ fn manifest_with_sandbox(allowed: Vec<&str>) -> AgentManifest {
             id: "test.agent".to_string(),
             name: "Test Agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: allowed.iter().map(|s| s.to_string()).collect(),
@@ -70,6 +71,7 @@ fn manifest_no_capabilities() -> AgentManifest {
             id: "no.cap".to_string(),
             name: "No Cap".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,

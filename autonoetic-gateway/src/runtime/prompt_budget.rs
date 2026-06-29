@@ -812,7 +812,8 @@ mod tests {
                 id: "planner.default".to_string(),
                 name: "Planner".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![
                 Capability::SandboxFunctions {
                     allowed: vec![

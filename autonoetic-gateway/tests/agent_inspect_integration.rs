@@ -50,6 +50,7 @@ fn manifest_with_read_access(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "Test".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::ReadAccess {
@@ -360,6 +361,7 @@ fn tool_requires_read_access_capability() {
             id: "no-read-agent".to_string(),
             name: "no-read-agent".to_string(),
             description: "Test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,

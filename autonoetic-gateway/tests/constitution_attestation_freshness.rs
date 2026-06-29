@@ -36,6 +36,7 @@ fn manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
             id: "freshness-agent".to_string(),
             name: "freshness-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,

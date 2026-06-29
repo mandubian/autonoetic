@@ -32,6 +32,7 @@ pub mod sentinel_disagreements;
 pub mod session_envelopes;
 pub mod session_inference;
 mod session_outcomes;
+pub mod singleton_index;
 mod user_interactions;
 mod user_profiles;
 mod util;
