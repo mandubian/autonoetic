@@ -1537,6 +1537,22 @@ pub fn try_complete_workflow(
         return Ok(false);
     }
 
+    // Don't complete the workflow if the planner has pending (unresolved)
+    // escalations for this root session. The operator hasn't responded yet,
+    // and the plan may have more steps to run after they do. Completing now
+    // would make the workflow terminal and block all future agent.spawn calls.
+    if let Some(gw_store) = store {
+        if gw_store.has_pending_escalations_for_session(root_session_id)? {
+            tracing::debug!(
+                target: "workflow",
+                workflow_id = %wf_id,
+                root_session_id = %root_session_id,
+                "Workflow not completing: pending escalation(s) for root session"
+            );
+            return Ok(false);
+        }
+    }
+
     // Issue #330: warn if the workflow has active workbenches with
     // local edits that haven't been reconciled yet. The workflow still
     // completes, but the warning event surfaces the unreconciled edits

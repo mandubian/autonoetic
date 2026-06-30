@@ -15,6 +15,7 @@ use autonoetic_gateway::scheduler::workflow_store::{
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::escalation::{EscalationMessage, EscalationStatus};
 use autonoetic_types::notification::{NotificationRecord, NotificationStatus, NotificationType};
 use autonoetic_types::workflow::{
     ChildStateNotification, TaskRun, TaskRunStatus, WorkflowRunStatus,
@@ -284,5 +285,72 @@ fn try_complete_workflow_suppresses_pending_notifications() -> anyhow::Result<()
         NotificationStatus::Suppressed,
     )?;
     assert_eq!(suppressed.len(), 1, "notification should be marked Suppressed");
+    Ok(())
+}
+
+#[test]
+fn try_complete_workflow_blocked_by_pending_escalation() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let root_session_id = "root-escalation-block";
+
+    // Seed a workflow in Resumable with a completed task and join satisfied.
+    seed_terminal_workflow(
+        &config,
+        &store,
+        root_session_id,
+        WorkflowRunStatus::Resumable,
+    )?;
+
+    // Create a pending escalation for this root session.
+    let escalation = EscalationMessage::new(
+        "esc_test_0001".to_string(),
+        "ar.test".to_string(),
+        "coder.default".to_string(),
+        "rev-001".to_string(),
+        vec![],
+        "Federation verdicts ready for review".to_string(),
+        root_session_id.to_string(),
+    );
+    store.create_escalation(&escalation)?;
+
+    // Workflow should NOT complete while escalation is pending.
+    let completed =
+        try_complete_workflow(&config, Some(store.as_ref()), root_session_id)?;
+    assert!(
+        !completed,
+        "workflow should not complete while escalation is pending"
+    );
+
+    // Verify workflow is still Resumable.
+    let wf_id =
+        autonoetic_gateway::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+            &config,
+            root_session_id,
+        )?
+        .expect("workflow should exist");
+    let wf = load_workflow_run(&config, Some(store.as_ref()), &wf_id)?
+        .expect("workflow run should exist");
+    assert_eq!(
+        wf.status,
+        WorkflowRunStatus::Resumable,
+        "workflow should still be Resumable"
+    );
+
+    // Now resolve the escalation.
+    store.resolve_escalation(
+        "esc_test_0001",
+        EscalationStatus::Approved,
+        "operator",
+        Some("approved"),
+    )?;
+
+    // Workflow should now complete.
+    let completed =
+        try_complete_workflow(&config, Some(store.as_ref()), root_session_id)?;
+    assert!(
+        completed,
+        "workflow should complete after escalation is resolved"
+    );
+
     Ok(())
 }

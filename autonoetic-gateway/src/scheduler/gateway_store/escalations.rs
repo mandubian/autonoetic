@@ -199,6 +199,21 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// Check whether any pending (unresolved) escalations exist for the given
+    /// root session. Used by `try_complete_workflow` to prevent the workflow
+    /// from completing while the planner is waiting for operator input — the
+    /// plan may have more steps to run after the operator responds.
+    pub fn has_pending_escalations_for_session(&self, root_session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM escalations \
+             WHERE root_session_id = ?1 AND status = 'pending'",
+            params![root_session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Find the latest escalation for an artifact+revision with a matching
     /// status (used by the FullJury gate to check for operator approval).
     pub fn find_escalation(
