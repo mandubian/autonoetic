@@ -3,10 +3,95 @@
 //! Provides observability into what consumes the context window budget
 //! before each LLM call, and tool tiering for dynamic tool filtering.
 
-use crate::llm::{Message, ToolCall, ToolDefinition};
+use crate::llm::{Message, Role, ToolCall, ToolDefinition};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Options controlling how `sanitize_history_for_request` transforms the
+/// stored conversation history before it is sent to the LLM.
+///
+/// Storage (checkpoints, exports, timeline) keeps the original messages;
+/// sanitization only affects the wire-format copy used for the
+/// `CompletionRequest`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HistorySanitizeOptions {
+    /// When true, strip `reasoning_content` and `reasoning_details` from
+    /// assistant messages. The model does not need to re-read its own
+    /// chain-of-thought on subsequent turns.
+    pub strip_reasoning: bool,
+    /// Maximum characters to allow in a tool-result message content. Values
+    /// <= 0 disable truncation. When truncation is enabled, large results are
+    /// kept as `head + "[... N chars truncated ...]" + tail`, with each of
+    /// head/tail sized to roughly half the budget.
+    pub max_tool_result_chars: usize,
+}
+
+impl Default for HistorySanitizeOptions {
+    fn default() -> Self {
+        Self {
+            // Default to false: reasoning_content / reasoning_details must be
+            // replayed for many thinking/reasoning models (DeepSeek, OpenRouter
+            // reasoning models, etc.). Operators whose model does not require
+            // replay can opt in to stripping.
+            strip_reasoning: false,
+            // Conservative default: most tool results need only a summary,
+            // and 2000 chars is enough for that plus short stdout/stderr.
+            max_tool_result_chars: 2000,
+        }
+    }
+}
+
+/// Create a wire-format copy of `history` with tokens reduced but information
+/// preserved in storage.
+///
+/// - Assistant `reasoning_content` / `reasoning_details` are stripped.
+/// - Tool-result `content` over `max_tool_result_chars` is truncated with a
+///   head+tail ellipsis so status/summary is still visible.
+/// - System, user, and assistant messages are otherwise untouched.
+pub fn sanitize_history_for_request(
+    history: &[Message],
+    opts: &HistorySanitizeOptions,
+) -> Vec<Message> {
+    if !opts.strip_reasoning && opts.max_tool_result_chars == 0 {
+        return history.to_vec();
+    }
+
+    history
+        .iter()
+        .map(|msg| {
+            let mut m = msg.clone();
+
+            if opts.strip_reasoning {
+                m.reasoning_content = None;
+                m.reasoning_details = None;
+            }
+
+            if opts.max_tool_result_chars > 0 && m.role == Role::Tool && !m.content.is_empty() {
+                m.content = truncate_middle(&m.content, opts.max_tool_result_chars);
+            }
+
+            m
+        })
+        .collect()
+}
+
+fn truncate_middle(s: &str, max_chars: usize) -> String {
+    let len = s.chars().count();
+    if len <= max_chars {
+        return s.to_string();
+    }
+
+    // Keep head and tail; each gets roughly half the budget.
+    let keep_each = max_chars.saturating_sub(30) / 2;
+    if keep_each == 0 {
+        return s.chars().take(max_chars).collect();
+    }
+
+    let head: String = s.chars().take(keep_each).collect();
+    let tail: String = s.chars().skip(len.saturating_sub(keep_each)).collect();
+    format!("{}\n[... {} chars truncated ...]\n{}", head, len - (keep_each * 2), tail)
+}
 
 /// Default chars-per-token ratio used when no override is configured.
 ///
@@ -898,5 +983,148 @@ mod tests {
             "escalated planner surface should remain modestly above max_tool_definitions cap (got {})",
             all_tiers.len()
         );
+    }
+
+    #[test]
+    fn sanitize_history_strips_reasoning_from_assistant_messages() {
+        let history = vec![
+            Message {
+                role: Role::System,
+                content: "system".to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: "hello".to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: Some("deep thought".to_string()),
+                reasoning_details: Some(serde_json::json!([{"text": "step 1"}])),
+            },
+        ];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: true,
+                max_tool_result_chars: 2000,
+            },
+        );
+
+        assert_eq!(sanitized[0].role, Role::System);
+        assert!(sanitized[0].reasoning_content.is_none());
+        assert_eq!(sanitized[1].role, Role::Assistant);
+        assert_eq!(sanitized[1].content, "hello");
+        assert!(sanitized[1].reasoning_content.is_none());
+        assert!(sanitized[1].reasoning_details.is_none());
+
+        // Original history is untouched.
+        assert_eq!(history[1].reasoning_content.as_deref(), Some("deep thought"));
+    }
+
+    #[test]
+    fn sanitize_history_default_preserves_reasoning() {
+        // Default options must keep reasoning content because many thinking/
+        // reasoning models require it to be replayed across tool-call turns.
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: "hello".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: Some("deep thought".to_string()),
+            reasoning_details: Some(serde_json::json!([{"text": "step 1"}])),
+        }];
+
+        let sanitized = sanitize_history_for_request(&history, &HistorySanitizeOptions::default());
+
+        assert_eq!(sanitized[0].reasoning_content.as_deref(), Some("deep thought"));
+        assert!(sanitized[0].reasoning_details.is_some());
+    }
+
+    #[test]
+    fn sanitize_history_keeps_reasoning_when_disabled() {
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: "hello".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: Some("deep thought".to_string()),
+            reasoning_details: None,
+        }];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+            },
+        );
+
+        assert_eq!(sanitized[0].reasoning_content.as_deref(), Some("deep thought"));
+    }
+
+    #[test]
+    fn sanitize_history_truncates_long_tool_results() {
+        let long_content = "x".repeat(5000);
+        let history = vec![Message {
+            role: Role::Tool,
+            content: long_content.clone(),
+            tool_calls: vec![],
+            tool_call_id: Some("tc_1".to_string()),
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 100,
+            },
+        );
+
+        assert!(sanitized[0].content.len() < long_content.len());
+        assert!(sanitized[0].content.contains("[..."));
+        assert!(sanitized[0].content.contains("chars truncated ...]"));
+        assert!(sanitized[0].content.starts_with('x'));
+        assert!(sanitized[0].content.ends_with('x'));
+    }
+
+    #[test]
+    fn sanitize_history_does_not_shorten_small_tool_results() {
+        let history = vec![Message {
+            role: Role::Tool,
+            content: "small result".to_string(),
+            tool_calls: vec![],
+            tool_call_id: Some("tc_1".to_string()),
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 100,
+            },
+        );
+
+        assert_eq!(sanitized[0].content, "small result");
+    }
+
+    #[test]
+    fn truncate_middle_boundary_cases() {
+        assert_eq!(truncate_middle("hello", 10), "hello");
+        assert_eq!(truncate_middle("hello world", 11), "hello world");
+        assert!(
+            truncate_middle("a".repeat(500).as_str(), 100).contains("[..."),
+            "expected middle-truncation marker for large content"
+        );
+        // When max_chars is too small for head + ellipsis + tail, fall back
+        // to a simple head truncation.
+        assert_eq!(truncate_middle("hello world", 5).len(), 5);
     }
 }

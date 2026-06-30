@@ -38,6 +38,9 @@ use crate::runtime::budget_tracker::{
     is_retryable_empty_other_response, max_other_empty_retries,
 };
 use crate::runtime::context_governor::resolver::resolve_context_window_for_run;
+use crate::runtime::prompt_budget::{
+    sanitize_history_for_request, HistorySanitizeOptions,
+};
 use crate::runtime::trajectory_monitor::{ToolObservation, TrajectoryMonitor};
 use autonoetic_types::tool_error::ToolErrorType;
 use autonoetic_types::trajectory::FeedbackEvent;
@@ -2034,7 +2037,24 @@ impl AgentExecutor {
 
             let req = CompletionRequest {
                 model: routed_model.clone(),
-                messages: history.clone(),
+                // Sanitize the wire-format history: strip reasoning content
+                // and truncate large tool results, while leaving the stored
+                // `history` untouched for checkpoints and exports.
+                messages: sanitize_history_for_request(
+                    history,
+                    &HistorySanitizeOptions {
+                        strip_reasoning: self
+                            .config
+                            .as_ref()
+                            .map(|c| c.prompt_budget.strip_reasoning_from_request)
+                            .unwrap_or(false),
+                        max_tool_result_chars: self
+                            .config
+                            .as_ref()
+                            .map(|c| c.prompt_budget.max_tool_result_chars)
+                            .unwrap_or(2000),
+                    },
+                ),
                 tools,
                 max_tokens: None,
                 temperature,

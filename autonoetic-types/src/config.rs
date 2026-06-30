@@ -2426,6 +2426,40 @@ pub struct PromptBudgetConfig {
     #[serde(default)]
     pub progressive_tool_disclosure: bool,
 
+    /// Soft token budget that triggers the context governor *before* the hard
+    /// context-window limit is reached. When set, the governor proactively
+    /// summarizes/capsules old turns once `total_tokens` exceeds this value,
+    /// even if the session is still far from `context_window_tokens - margin_tokens`.
+    ///
+    /// This is useful for large context-window models (e.g. 200K tokens) where
+    /// waiting for the hard limit wastes tokens on every round. Recommended
+    /// value for such models: 30000–50000.
+    ///
+    /// `None` (the default) disables the soft budget; only the hard limit fires.
+    #[serde(default)]
+    pub soft_budget_tokens: Option<u32>,
+
+    /// Strip `reasoning_content` / `reasoning_details` from assistant messages
+    /// before sending them to the LLM. The model does not need to re-read its
+    /// own chain-of-thought; stripping it saves tokens without losing the
+    /// reasoning in storage (checkpoints, exports, timeline events keep it).
+    ///
+    /// **Disabled by default.** Many thinking/reasoning models (DeepSeek,
+    /// OpenRouter reasoning models, and other OpenAI-compatible thinking
+    /// models) require the reasoning blocks to be replayed on subsequent
+    /// turns; stripping them breaks chain-of-thought continuity. Operators
+    /// whose model does not require replay can enable this to save tokens.
+    #[serde(default = "default_strip_reasoning")]
+    pub strip_reasoning_from_request: bool,
+
+    /// Maximum characters to allow in a tool-result message content before it
+    /// is truncated to `head + "[... N chars truncated ...]" + tail` for the
+    /// LLM request. Large stdout/stderr/tool outputs are common and do not need
+    /// to be replayed in full on every turn. The full result is still stored.
+    /// Set to 0 to disable truncation. Default is 2000.
+    #[serde(default = "default_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+
     /// Override the chars-per-token ratio used by the prompt budget
     /// estimator. `None` (the default) means "use the built-in default of
     /// 3.0 chars/token". Operators running a tokenizer that is known to
@@ -2447,6 +2481,14 @@ fn default_prompt_budget_margin() -> usize {
     4096
 }
 
+fn default_strip_reasoning() -> bool {
+    false
+}
+
+fn default_max_tool_result_chars() -> usize {
+    2000
+}
+
 impl Default for PromptBudgetConfig {
     fn default() -> Self {
         Self {
@@ -2457,6 +2499,9 @@ impl Default for PromptBudgetConfig {
             compress_tool_schemas_after_turn_0: false,
             max_tool_definitions: 0,
             progressive_tool_disclosure: false,
+            soft_budget_tokens: None,
+            strip_reasoning_from_request: default_strip_reasoning(),
+            max_tool_result_chars: default_max_tool_result_chars(),
             chars_per_token: None,
         }
     }

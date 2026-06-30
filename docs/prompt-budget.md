@@ -61,9 +61,51 @@ diverge from the expected tool-call contract.
 - **System prompt over cap**: Fails for all actions except `warn` (no action can reduce system prompt size at runtime)
 - **Tool definitions over cap**: Fails for all actions except `warn` and `demote_tools` (which can reduce tool count)
 
-## Tool Tiers
+## Wire-Format History Sanitization
 
-Tools are classified into three tiers for progressive disclosure and budget enforcement:
+Before a `CompletionRequest` is sent to the LLM, the gateway can cheaply reduce
+tokens in the wire-format copy of the conversation history while keeping the
+full messages in storage (checkpoints, exports, timeline events):
+
+- **Strip reasoning content**: Remove `reasoning_content` / `reasoning_details`
+  from assistant messages. The model does not need to re-read its own
+  chain-of-thought on subsequent turns.
+- **Truncate tool results**: Cap tool-result message content to a configured
+  character budget, keeping `head + "[... N chars truncated ...]" + tail` so
+  status/summary remains visible.
+
+Both are controlled under `prompt_budget`:
+
+```yaml
+prompt_budget:
+  strip_reasoning_from_request: false  # default; enable only if your model
+                                       # does not require reasoning replay
+  max_tool_result_chars: 2000          # default; set 0 to disable
+```
+
+These reductions apply only to the request sent to the provider; stored history
+remains complete for audit, replay, and compression strategies.
+
+## Soft Budget (Proactive Governor)
+
+By default, the context governor only runs when the prompt exceeds
+`context_window - margin_tokens`. For large context-window models (e.g. 200K
+tokens), this means the context can grow to ~196K before any summarization
+happens, wasting tokens on every round.
+
+Set `prompt_budget.soft_budget_tokens` to trigger the governor earlier:
+
+```yaml
+prompt_budget:
+  soft_budget_tokens: 40000
+```
+
+When `total_tokens` exceeds `soft_budget_tokens`, the governor runs the same
+reduction pipeline but targets the soft budget instead of the hard window
+limit. This caps context growth before it becomes expensive. The hard limit
+remains the safety backstop.
+
+## Tool Tiers
 
 | Tier | Tools | When included |
 |------|-------|---------------|
