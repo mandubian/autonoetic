@@ -1652,6 +1652,11 @@ impl AgentExecutor {
             self.last_context_utilization = budget_breakdown.utilization_pct.map(|v| v as f32 / 100.0);
 
             // --- Budget Enforcement + Context Compression (Context Governor) ---
+            //
+            // The governor only needs to run when the prompt exceeds either the
+            // hard effective limit or the configured soft budget. On the common
+            // under-budget path we skip the GovernorContext allocation entirely
+            // to avoid cloning the full history + tools every round.
             {
                 use crate::runtime::context_governor::{
                     ContextGovernor, GovernorConfig,
@@ -1668,174 +1673,198 @@ impl AgentExecutor {
                             crate::runtime::prompt_budget::FALLBACK_CONTEXT_WINDOW;
                         default_window.saturating_sub(margin)
                     });
-                let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
-                let plan_anchor = self
-                    .gateway_store
-                    .as_ref()
-                    .and_then(|store| {
-                        // `session_id` may be a child/forked id ("root/x"); the
-                        // workflow index is keyed on the *root* id.
-                        let root_session_id =
-                            crate::runtime::content_store::root_session_id(&session_id)
-                                .to_string();
-                        let wf_id = self.workflow_id.clone().or_else(|| {
-                            crate::scheduler::resolve_workflow_id_for_root_session(
-                                self.config.as_ref()?,
-                                &root_session_id,
-                            )
-                            .ok()
-                            .flatten()
-                        })?;
-                        let plan = store.load_active_plan_for_workflow(&wf_id).ok().flatten()?;
-                        Some(plan.compact_summary())
-                    });
-                let mut ctx = crate::runtime::context_governor::strategies::GovernorContext::new(
-                    history.clone(),
-                    tools.clone(),
-                    budget_breakdown.clone(),
-                    effective_limit,
-                    self.turn_counter.saturating_sub(1),
-                    session_id.clone(),
-                    Some(self.compression_metadata.clone()),
-                    self.config.as_ref().map(|c| c.prompt_budget.clone())
-                        .unwrap_or_default(),
-                    compression_cfg.cloned(),
-                    self.manifest.compression.clone(),
-                    plan_anchor,
-                );
-                let governor = if self.overflow_recovery {
-                    tracing::info!(
-                        target: "autonoetic::context_governor",
-                        "Using aggressive governor pipeline (overflow recovery)"
+                let soft_budget = self.config.as_ref()
+                    .and_then(|c| c.prompt_budget.soft_budget_tokens)
+                    .map(|sb| sb as usize);
+                let total_tokens = budget_breakdown.total_tokens;
+                let hard_ok = total_tokens <= effective_limit;
+                let soft_ok = soft_budget.map(|sb| total_tokens <= sb).unwrap_or(true);
+
+                if !hard_ok || !soft_ok {
+                    let compression_cfg = self.config.as_ref().map(|c| &c.context_compression);
+                    let plan_anchor = self
+                        .gateway_store
+                        .as_ref()
+                        .and_then(|store| {
+                            // `session_id` may be a child/forked id ("root/x"); the
+                            // workflow index is keyed on the *root* id.
+                            let root_session_id =
+                                crate::runtime::content_store::root_session_id(&session_id)
+                                    .to_string();
+                            let wf_id = self.workflow_id.clone().or_else(|| {
+                                crate::scheduler::resolve_workflow_id_for_root_session(
+                                    self.config.as_ref()?,
+                                    &root_session_id,
+                                )
+                                .ok()
+                                .flatten()
+                            })?;
+                            let plan = store.load_active_plan_for_workflow(&wf_id).ok().flatten()?;
+                            Some(plan.compact_summary())
+                        });
+                    let mut ctx = crate::runtime::context_governor::strategies::GovernorContext::new(
+                        history.clone(),
+                        tools.clone(),
+                        budget_breakdown.clone(),
+                        effective_limit,
+                        self.turn_counter.saturating_sub(1),
+                        session_id.clone(),
+                        Some(self.compression_metadata.clone()),
+                        self.config.as_ref().map(|c| c.prompt_budget.clone())
+                            .unwrap_or_default(),
+                        compression_cfg.cloned(),
+                        self.manifest.compression.clone(),
+                        plan_anchor,
                     );
-                    ContextGovernor::new_aggressive(&GovernorConfig {
-                        http_client: self.http_client.clone(),
-                        presets: self.config.as_ref().map(|c| c.llm_presets.clone())
-                            .unwrap_or_default(),
-                        gateway_dir: self.gateway_dir.clone(),
-                    })
-                } else {
-                    ContextGovernor::new(&GovernorConfig {
-                        http_client: self.http_client.clone(),
-                        presets: self.config.as_ref().map(|c| c.llm_presets.clone())
-                            .unwrap_or_default(),
-                        gateway_dir: self.gateway_dir.clone(),
-                    })
-                };
-                match governor.govern(&mut ctx).await {
-                    Ok(GovernorResult::Recovered { actions_taken }) => {
+                    let governor = if self.overflow_recovery {
                         tracing::info!(
                             target: "autonoetic::context_governor",
-                            actions = ?actions_taken,
-                            "ContextGovernor recovered within budget"
+                            "Using aggressive governor pipeline (overflow recovery)"
                         );
-                        if ctx.compression_metadata.as_ref().map(|m| m.compression_count > self.compression_metadata.compression_count).unwrap_or(false) {
-                            if let Some(meta) = ctx.compression_metadata.clone() {
-                                self.compression_metadata = meta;
+                        ContextGovernor::new_aggressive(&GovernorConfig {
+                            http_client: self.http_client.clone(),
+                            presets: self.config.as_ref().map(|c| c.llm_presets.clone())
+                                .unwrap_or_default(),
+                            gateway_dir: self.gateway_dir.clone(),
+                        })
+                    } else {
+                        ContextGovernor::new(&GovernorConfig {
+                            http_client: self.http_client.clone(),
+                            presets: self.config.as_ref().map(|c| c.llm_presets.clone())
+                                .unwrap_or_default(),
+                            gateway_dir: self.gateway_dir.clone(),
+                        })
+                    };
+                    match governor.govern(&mut ctx).await {
+                        Ok(GovernorResult::Recovered { actions_taken }) => {
+                            tracing::info!(
+                                target: "autonoetic::context_governor",
+                                actions = ?actions_taken,
+                                "ContextGovernor recovered within budget"
+                            );
+                            if ctx.compression_metadata.as_ref().map(|m| m.compression_count > self.compression_metadata.compression_count).unwrap_or(false) {
+                                if let Some(meta) = ctx.compression_metadata.clone() {
+                                    self.compression_metadata = meta;
+                                }
+                            }
+                            // Once set, capsule_state is never cleared back to None —
+                            // the latest capsule represents current session compression state.
+                            if ctx.capsule_state.is_some() {
+                                self.capsule_state = ctx.capsule_state.clone();
                             }
                         }
-                        // Once set, capsule_state is never cleared back to None —
-                        // the latest capsule represents current session compression state.
-                        if ctx.capsule_state.is_some() {
-                            self.capsule_state = ctx.capsule_state.clone();
+                        Ok(GovernorResult::Overflow(diag)) => {
+                            tracing::warn!(
+                                target: "autonoetic::context_governor",
+                                diagnostic = ?diag,
+                                "ContextGovernor exhausted — all strategies failed"
+                            );
+                            // Don't knowingly send a prompt that exceeds the model's
+                            // context window. Use the POST-governor estimate
+                            // (`ctx.breakdown.total_tokens`, after every reduction
+                            // strategy ran) — not the pre-governor `budget_breakdown`.
+                            // If it still exceeds the assumed window
+                            // (`effective_limit + margin`), sending is a guaranteed
+                            // provider context-overflow, so surface a
+                            // `context_overflow:`-tagged error here to route into the
+                            // scheduler's recovery (retry once with the aggressive
+                            // pipeline; a second overflow is terminal) instead of
+                            // paying a round-trip for a 500 we can already predict.
+                            // Prompts only within the safety margin (still under the
+                            // window) fall through and are sent as before.
+                            let post_governor_tokens = ctx.breakdown.total_tokens;
+                            if let Some(err) =
+                                overflow_presend_block(post_governor_tokens, effective_limit, margin)
+                            {
+                                let _ = tracer.log_event(
+                                    "context_governor",
+                                    "overflow_blocked_send",
+                                    autonoetic_types::causal_chain::EntryStatus::Error,
+                                    Some(serde_json::json!({
+                                        "estimated_tokens": post_governor_tokens,
+                                        "assumed_window": effective_limit.saturating_add(margin),
+                                        "effective_limit": effective_limit,
+                                        "margin_tokens": margin,
+                                        "overflow_recovery": self.overflow_recovery,
+                                    })),
+                                );
+                                return Err(err);
+                            }
                         }
-                    }
-                    Ok(GovernorResult::Overflow(diag)) => {
-                        tracing::warn!(
-                            target: "autonoetic::context_governor",
-                            diagnostic = ?diag,
-                            "ContextGovernor exhausted — all strategies failed"
-                        );
-                        // Don't knowingly send a prompt that exceeds the model's
-                        // context window. Use the POST-governor estimate
-                        // (`ctx.breakdown.total_tokens`, after every reduction
-                        // strategy ran) — not the pre-governor `budget_breakdown`.
-                        // If it still exceeds the assumed window
-                        // (`effective_limit + margin`), sending is a guaranteed
-                        // provider context-overflow, so surface a
-                        // `context_overflow:`-tagged error here to route into the
-                        // scheduler's recovery (retry once with the aggressive
-                        // pipeline; a second overflow is terminal) instead of
-                        // paying a round-trip for a 500 we can already predict.
-                        // Prompts only within the safety margin (still under the
-                        // window) fall through and are sent as before.
-                        let post_governor_tokens = ctx.breakdown.total_tokens;
-                        if let Some(err) =
-                            overflow_presend_block(post_governor_tokens, effective_limit, margin)
-                        {
+                        Ok(GovernorResult::WithinBudget) => {
+                            // The ContextGovernor can return WithinBudget when a soft
+                            // budget is configured but the prompt is already within
+                            // both budgets after accounting for rounding. Treat the
+                            // same as the local under-budget fast path for pressure
+                            // warnings below.
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "autonoetic::context_governor",
+                                error = %e,
+                                "ContextGovernor error, falling through without reduction"
+                            );
                             let _ = tracer.log_event(
                                 "context_governor",
-                                "overflow_blocked_send",
+                                "error",
                                 autonoetic_types::causal_chain::EntryStatus::Error,
                                 Some(serde_json::json!({
-                                    "estimated_tokens": post_governor_tokens,
-                                    "assumed_window": effective_limit.saturating_add(margin),
-                                    "effective_limit": effective_limit,
-                                    "margin_tokens": margin,
-                                    "overflow_recovery": self.overflow_recovery,
+                                    "error": crate::log_redaction::redact_text_for_logs(&e.to_string()),
                                 })),
                             );
-                            return Err(err);
                         }
                     }
-                    Ok(GovernorResult::WithinBudget) => {
-                        // Emit a TUI-visible warning card when the estimated prompt
-                        // is still within the effective limit but close to overflowing.
-                        // Uses a dedup flag so it fires once per pressure buildup cycle.
-                        if effective_limit > 0 {
-                            let ratio = budget_breakdown.total_tokens as f64 / effective_limit as f64;
-                            if ratio >= 0.85 {
-                                if !self.pressure_high_warned {
-                                    self.pressure_high_warned = true;
-                                    if let (Some(config), Some(store), Some(wf_id)) =
-                                        (self.config.as_deref(), self.gateway_store.as_deref(), self.workflow_id.as_deref())
-                                    {
-                                        let pct = (ratio * 100.0) as u32;
-                                        let _ = crate::scheduler::append_workflow_event(
-                                            config,
-                                            Some(store),
-                                            &autonoetic_types::workflow::WorkflowEventRecord {
-                                                event_id: format!("ctxp-{}", &uuid::Uuid::new_v4().to_string()[..8]),
-                                                workflow_id: wf_id.to_string(),
-                                                task_id: self.task_id.clone(),
-                                                event_type: "context.pressure_high".to_string(),
-                                                agent_id: Some(self.manifest.agent.id.clone()),
-                                                payload: serde_json::json!({
-                                                    "status": "pressure_high",
-                                                    "estimated_tokens": budget_breakdown.total_tokens,
-                                                    "effective_limit": effective_limit,
-                                                    "utilization_pct": pct,
-                                                    "context_window": budget_breakdown.context_window,
-                                                    "margin_tokens": margin,
-                                                }),
-                                                occurred_at: chrono::Utc::now().to_rfc3339(),
-                                            },
-                                        );
-                                    }
-                                }
-                            } else if ratio < 0.70 {
-                                self.pressure_high_warned = false;
+                    *history = ctx.history;
+                    tools = ctx.tools;
+                } else {
+                    tracing::debug!(
+                        target: "autonoetic::context_governor",
+                        total_tokens,
+                        effective_limit,
+                        soft_budget,
+                        "Context is within budget; skipping governor"
+                    );
+                }
+
+                // Emit a TUI-visible warning card when the estimated prompt is
+                // close to overflowing. Uses a dedup flag so it fires once per
+                // pressure buildup cycle. This is independent of whether the
+                // governor ran.
+                if effective_limit > 0 {
+                    let ratio = total_tokens as f64 / effective_limit as f64;
+                    if ratio >= 0.85 {
+                        if !self.pressure_high_warned {
+                            self.pressure_high_warned = true;
+                            if let (Some(config), Some(store), Some(wf_id)) =
+                                (self.config.as_deref(), self.gateway_store.as_deref(), self.workflow_id.as_deref())
+                            {
+                                let pct = (ratio * 100.0) as u32;
+                                let _ = crate::scheduler::append_workflow_event(
+                                    config,
+                                    Some(store),
+                                    &autonoetic_types::workflow::WorkflowEventRecord {
+                                        event_id: format!("ctxp-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                                        workflow_id: wf_id.to_string(),
+                                        task_id: self.task_id.clone(),
+                                        event_type: "context.pressure_high".to_string(),
+                                        agent_id: Some(self.manifest.agent.id.clone()),
+                                        payload: serde_json::json!({
+                                            "status": "pressure_high",
+                                            "estimated_tokens": total_tokens,
+                                            "effective_limit": effective_limit,
+                                            "utilization_pct": pct,
+                                            "context_window": budget_breakdown.context_window,
+                                            "margin_tokens": margin,
+                                        }),
+                                        occurred_at: chrono::Utc::now().to_rfc3339(),
+                                    },
+                                );
                             }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "autonoetic::context_governor",
-                            error = %e,
-                            "ContextGovernor error, falling through without reduction"
-                        );
-                        let _ = tracer.log_event(
-                            "context_governor",
-                            "error",
-                            autonoetic_types::causal_chain::EntryStatus::Error,
-                            Some(serde_json::json!({
-                                "error": crate::log_redaction::redact_text_for_logs(&e.to_string()),
-                            })),
-                        );
+                    } else if ratio < 0.70 {
+                        self.pressure_high_warned = false;
                     }
                 }
-                *history = ctx.history;
-                tools = ctx.tools;
             }
 
             // --- Model Routing: select model based on budget/complexity signals ---
