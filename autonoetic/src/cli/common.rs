@@ -295,6 +295,34 @@ pub enum SessionCommands {
     Show {
         session_id: String,
     },
+    /// Export a full session into a single human-readable archive.
+    Export {
+        /// Session ID to export. May be a root session or any child/spawn
+        /// session; the export always covers the entire root session tree.
+        session_id: String,
+        /// Output path. Defaults to `<session-id>.room.md` in the current
+        /// directory.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+        /// Export format: `room` (default), `room-raw`, or `json`.
+        #[arg(short, long, default_value = "room")]
+        format: String,
+        /// Include checkpoint files (full message history) in the appendix.
+        /// Checkpoints can be large.
+        #[arg(long)]
+        with_checkpoints: bool,
+        /// Minimum timeline altitude to include. `detail` events are dropped
+        /// when set to `normal`, `attention`, or `error`.
+        #[arg(long)]
+        min_altitude: Option<String>,
+        /// Export into a structured archive directory instead of a single
+        /// file. The directory layout is:
+        ///   `<output-dir>/<constitution-version>-<lock-digest-short>/<session-id>/`
+        /// All formats are written there (room.md, json, checkpoints json,
+        /// manifest). Mutually exclusive with `--output`.
+        #[arg(long, conflicts_with = "output")]
+        output_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Arguments for the all-in-one `run` command.
