@@ -2079,6 +2079,26 @@ impl GatewayExecutionService {
                     // the tool calls and mark them with approval_ref.
                     if let Some(ref am) = checkpoint.assistant_message {
                         history.push(am.clone());
+                        // Inject tool result messages for completed tools AND
+                        // the approval-triggering tool call so every tool_call_id
+                        // in the assistant message has a matching tool message.
+                        // Without this the LLM API rejects the request:
+                        //   "assistant message with 'tool_calls' must be followed
+                        //    by tool messages responding to each 'tool_call_id'"
+                        if let Some(ref pts) = checkpoint.pending_tool_state {
+                            for (call_id, tool_name, result) in &pts.completed_tool_results {
+                                history.push(Message::tool_result(
+                                    call_id, tool_name, result,
+                                ));
+                            }
+                            if let Some(ref resp) = pts.pending_tool_call.approval_response {
+                                history.push(Message::tool_result(
+                                    &pts.pending_tool_call.call_id,
+                                    &pts.pending_tool_call.tool_name,
+                                    resp,
+                                ));
+                            }
+                        }
                     }
                     inject_approval_ref_into_history(&mut history, rid, target_call_id);
                     let initial_msg = checkpoint.initial_user_message();
