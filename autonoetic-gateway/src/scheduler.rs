@@ -2374,6 +2374,7 @@ async fn process_due_scheduled_jobs(
                         join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
                         join_task_ids: Vec::new(),
                         active_plan_ref: None,
+                        reactivated_for_root_spawn: false,
                     };
                     if let Err(e) =
                         workflow_store::save_workflow_run(&config, Some(store.as_ref()), &new_run)

@@ -3,7 +3,7 @@
 //! Verifies that a child-state signal delivered to the planner root session
 //! after the workflow has completed does NOT wake the planner and cause a
 //! token-burning auto-loop. The notification should still be consumed (marked
-//! Delivered) so it is not retried forever.
+//! Suppressed or Delivered) so it is not retried forever.
 
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::scheduler::run_scheduler_tick;

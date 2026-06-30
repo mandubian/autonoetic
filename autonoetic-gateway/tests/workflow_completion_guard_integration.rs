@@ -180,12 +180,18 @@ fn root_agent_spawn_reactivates_terminal_workflow() -> anyhow::Result<()> {
     let parsed: serde_json::Value = serde_json::from_str(&result)?;
     assert_eq!(parsed["ok"].as_bool(), Some(true), "root agent_spawn should succeed on terminal workflow: {}", result);
 
-    let workflow = load_workflow_run(&config, Some(&store), &parsed["workflow_id"].as_str().unwrap_or(""))?
+    let workflow_id = parsed["workflow_id"].as_str().expect("workflow_id should be a string");
+    assert!(!workflow_id.is_empty(), "workflow_id should be non-empty");
+    let workflow = load_workflow_run(&config, Some(&store), workflow_id)?
         .expect("workflow should exist");
     assert_eq!(
         workflow.status,
         WorkflowRunStatus::Resumable,
         "workflow should be reactivated to Resumable for root planner spawn"
+    );
+    assert!(
+        workflow.reactivated_for_root_spawn,
+        "workflow should be flagged as reactivated by root spawn"
     );
     Ok(())
 }
@@ -236,6 +242,79 @@ fn child_agent_spawn_rejected_when_workflow_completed() -> anyhow::Result<()> {
     assert!(
         err.contains("terminal"),
         "error should mention terminal workflow: {}",
+        err
+    );
+    Ok(())
+}
+
+#[test]
+fn child_agent_spawn_rejected_after_root_reactivation() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let root_session_id = "root-spawn-guard-reactivate";
+
+    seed_terminal_workflow(
+        &config,
+        &store,
+        root_session_id,
+        WorkflowRunStatus::Completed,
+    )?;
+
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let parent_dir = config.agents_dir.join("planner.default");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
+    let _guard = runtime.enter();
+
+    // Root reactivates the completed workflow.
+    let root_args = serde_json::json!({
+        "agent_id": "coder.default",
+        "message": "root follow-up spawn",
+        "async": true
+    });
+    let root_result = registry.execute(
+        "agent_spawn",
+        &manifest,
+        &policy,
+        &parent_dir,
+        Some(&gateway_dir),
+        &serde_json::to_string(&root_args)?,
+        Some(root_session_id),
+        Some("turn-spawn-guard-reactivate-root"),
+        Some(&config),
+        Some(store.clone()),
+        None,
+    )?;
+    let root_parsed: serde_json::Value = serde_json::from_str(&root_result)?;
+    assert_eq!(root_parsed["ok"].as_bool(), Some(true), "root agent_spawn should reactivate workflow");
+
+    // Child session spawn must still be rejected while the workflow is root-reactivated.
+    let child_args = serde_json::json!({
+        "agent_id": "coder.default",
+        "message": "this should fail after reactivation",
+        "async": true
+    });
+    let child_result = registry.execute(
+        "agent_spawn",
+        &manifest,
+        &policy,
+        &parent_dir,
+        Some(&gateway_dir),
+        &serde_json::to_string(&child_args)?,
+        Some(&format!("{}/coder-after-reactivate", root_session_id)),
+        Some("turn-spawn-guard-reactivate-child"),
+        Some(&config),
+        Some(store.clone()),
+        None,
+    );
+
+    assert!(child_result.is_err(), "agent_spawn should fail for child session after root reactivation");
+    let err = child_result.unwrap_err().to_string();
+    assert!(
+        err.contains("reactivated"),
+        "error should mention reactivated workflow: {}",
         err
     );
     Ok(())
