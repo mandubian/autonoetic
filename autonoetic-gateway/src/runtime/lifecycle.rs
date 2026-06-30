@@ -2047,7 +2047,7 @@ impl AgentExecutor {
                             .config
                             .as_ref()
                             .map(|c| c.prompt_budget.strip_reasoning_from_request)
-                            .unwrap_or(true),
+                            .unwrap_or(false),
                         max_tool_result_chars: self
                             .config
                             .as_ref()

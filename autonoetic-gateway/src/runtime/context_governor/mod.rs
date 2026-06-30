@@ -96,14 +96,31 @@ impl ContextGovernor {
     /// limit wastes tokens on every round.
     pub async fn govern(&self, ctx: &mut GovernorContext) -> anyhow::Result<GovernorResult> {
         let hard_ok = ctx.breakdown.total_tokens <= ctx.effective_limit;
-        let soft_ok = ctx
-            .budget_config
-            .soft_budget_tokens
-            .map(|sb| ctx.breakdown.total_tokens <= sb as usize)
+        let soft_limit = ctx.budget_config.soft_budget_tokens.map(|sb| sb as usize);
+        let soft_ok = soft_limit
+            .map(|sb| ctx.breakdown.total_tokens <= sb)
             .unwrap_or(true);
 
         if hard_ok && soft_ok {
             return Ok(GovernorResult::WithinBudget);
+        }
+
+        // If the soft budget is the binding constraint, temporarily lower the
+        // limit the strategies target so they actually reduce down to the soft
+        // budget instead of returning Resolved immediately because the total is
+        // still below the hard context-window limit.
+        let original_effective_limit = ctx.effective_limit;
+        if let Some(sb) = soft_limit {
+            if sb < ctx.effective_limit {
+                tracing::debug!(
+                    target: "autonoetic::context_governor",
+                    soft_budget_tokens = sb,
+                    original_effective_limit,
+                    total_tokens = ctx.breakdown.total_tokens,
+                    "Soft budget is binding; strategies will target soft limit"
+                );
+                ctx.effective_limit = sb;
+            }
         }
 
         let mut actions_taken: Vec<GovernorAction> = Vec::new();
@@ -116,6 +133,7 @@ impl ContextGovernor {
                         strategy: strategy.name().to_string(),
                         tokens_after,
                     });
+                    ctx.effective_limit = original_effective_limit;
                     return Ok(GovernorResult::Recovered { actions_taken });
                 }
                 ReductionOutcome::Insufficient { tokens_remaining } => {
@@ -127,6 +145,7 @@ impl ContextGovernor {
             }
         }
 
+        ctx.effective_limit = original_effective_limit;
         Ok(GovernorResult::Overflow(
             crate::runtime::context_governor::error::ContextOverflowDiagnostic {
                 budget_snapshot: BudgetSnapshot::from(ctx),

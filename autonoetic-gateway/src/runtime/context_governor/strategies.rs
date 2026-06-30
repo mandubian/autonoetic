@@ -177,6 +177,62 @@ mod tests {
         );
     }
 
+    /// Strategy that asserts the effective_limit it observes matches an
+    /// expected value, then resolves.
+    struct AssertLimitStrategy {
+        expected: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl ReductionStrategy for AssertLimitStrategy {
+        fn name(&self) -> &'static str {
+            "assert_limit"
+        }
+        async fn reduce(&self, ctx: &mut GovernorContext) -> anyhow::Result<ReductionOutcome> {
+            assert_eq!(
+                ctx.effective_limit, self.expected,
+                "strategy should target the binding limit"
+            );
+            Ok(ReductionOutcome::Resolved { tokens_after: 1 })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_soft_budget_lowers_effective_limit_for_strategies() {
+        let ctx = make_context_with_soft_budget(150, 1000, 100);
+        let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
+            Box::new(AssertLimitStrategy { expected: 100 }),
+        ];
+        let governor = crate::runtime::context_governor::ContextGovernor::with_strategies(strategies);
+        let mut ctx = ctx;
+        let _ = governor.govern(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_hard_limit_binding_when_soft_budget_is_higher() {
+        // Soft budget (500) is above the hard limit (100), so the hard limit
+        // is binding and strategies should still see the hard limit.
+        let mut ctx = make_context_with_soft_budget(150, 100, 500);
+        let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
+            Box::new(AssertLimitStrategy { expected: 100 }),
+        ];
+        let governor = crate::runtime::context_governor::ContextGovernor::with_strategies(strategies);
+        let mut ctx = ctx;
+        let _ = governor.govern(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_effective_limit_restored_after_govern() {
+        let ctx = make_context_with_soft_budget(150, 1000, 100);
+        let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
+            Box::new(AssertLimitStrategy { expected: 100 }),
+        ];
+        let governor = crate::runtime::context_governor::ContextGovernor::with_strategies(strategies);
+        let mut ctx = ctx;
+        let _ = governor.govern(&mut ctx).await.unwrap();
+        assert_eq!(ctx.effective_limit, 1000, "effective_limit must be restored after govern");
+    }
+
     #[tokio::test]
     async fn test_soft_budget_disabled_when_none() {
         // Same totals as the soft-budget test, but no soft budget configured.

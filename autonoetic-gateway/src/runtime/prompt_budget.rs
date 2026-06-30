@@ -30,7 +30,11 @@ pub struct HistorySanitizeOptions {
 impl Default for HistorySanitizeOptions {
     fn default() -> Self {
         Self {
-            strip_reasoning: true,
+            // Default to false: reasoning_content / reasoning_details must be
+            // replayed for many thinking/reasoning models (DeepSeek, OpenRouter
+            // reasoning models, etc.). Operators whose model does not require
+            // replay can opt in to stripping.
+            strip_reasoning: false,
             // Conservative default: most tool results need only a summary,
             // and 2000 chars is enough for that plus short stdout/stderr.
             max_tool_result_chars: 2000,
@@ -1002,7 +1006,13 @@ mod tests {
             },
         ];
 
-        let sanitized = sanitize_history_for_request(&history, &HistorySanitizeOptions::default());
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: true,
+                max_tool_result_chars: 2000,
+            },
+        );
 
         assert_eq!(sanitized[0].role, Role::System);
         assert!(sanitized[0].reasoning_content.is_none());
@@ -1013,6 +1023,25 @@ mod tests {
 
         // Original history is untouched.
         assert_eq!(history[1].reasoning_content.as_deref(), Some("deep thought"));
+    }
+
+    #[test]
+    fn sanitize_history_default_preserves_reasoning() {
+        // Default options must keep reasoning content because many thinking/
+        // reasoning models require it to be replayed across tool-call turns.
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: "hello".to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: Some("deep thought".to_string()),
+            reasoning_details: Some(serde_json::json!([{"text": "step 1"}])),
+        }];
+
+        let sanitized = sanitize_history_for_request(&history, &HistorySanitizeOptions::default());
+
+        assert_eq!(sanitized[0].reasoning_content.as_deref(), Some("deep thought"));
+        assert!(sanitized[0].reasoning_details.is_some());
     }
 
     #[test]

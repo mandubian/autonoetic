@@ -78,14 +78,34 @@ Both are controlled under `prompt_budget`:
 
 ```yaml
 prompt_budget:
-  strip_reasoning_from_request: true   # default
+  strip_reasoning_from_request: false  # default; enable only if your model
+                                       # does not require reasoning replay
   max_tool_result_chars: 2000          # default; set 0 to disable
 ```
 
 These reductions apply only to the request sent to the provider; stored history
 remains complete for audit, replay, and compression strategies.
 
-Tools are classified into three tiers for progressive disclosure and budget enforcement:
+## Soft Budget (Proactive Governor)
+
+By default, the context governor only runs when the prompt exceeds
+`context_window - margin_tokens`. For large context-window models (e.g. 200K
+tokens), this means the context can grow to ~196K before any summarization
+happens, wasting tokens on every round.
+
+Set `prompt_budget.soft_budget_tokens` to trigger the governor earlier:
+
+```yaml
+prompt_budget:
+  soft_budget_tokens: 40000
+```
+
+When `total_tokens` exceeds `soft_budget_tokens`, the governor runs the same
+reduction pipeline but targets the soft budget instead of the hard window
+limit. This caps context growth before it becomes expensive. The hard limit
+remains the safety backstop.
+
+## Tool Tiers
 
 | Tier | Tools | When included |
 |------|-------|---------------|

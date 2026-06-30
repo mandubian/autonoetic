@@ -467,8 +467,10 @@ prompt_budget:
   # Strip reasoning_content / reasoning_details from assistant messages before
   # sending them to the LLM. The model does not need to re-read its own
   # chain-of-thought, and checkpoints/exports/timeline keep the full reasoning
-  # for audit. Enabled by default.
-  # strip_reasoning_from_request: true
+  # for audit. Disabled by default because many thinking/reasoning models
+  # (DeepSeek, OpenRouter reasoning models, etc.) require reasoning replay.
+  # Enable only when you are sure your model does not need it.
+  # strip_reasoning_from_request: false
   # Maximum characters to allow in a tool-result message content before it is
   # truncated to head + tail for the LLM request. Large stdout/stderr blobs are
   # not replayed in full every turn, but the full result is still stored.

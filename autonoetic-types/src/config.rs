@@ -2443,7 +2443,12 @@ pub struct PromptBudgetConfig {
     /// before sending them to the LLM. The model does not need to re-read its
     /// own chain-of-thought; stripping it saves tokens without losing the
     /// reasoning in storage (checkpoints, exports, timeline events keep it).
-    /// Enabled by default.
+    ///
+    /// **Disabled by default.** Many thinking/reasoning models (DeepSeek,
+    /// OpenRouter reasoning models, and other OpenAI-compatible thinking
+    /// models) require the reasoning blocks to be replayed on subsequent
+    /// turns; stripping them breaks chain-of-thought continuity. Operators
+    /// whose model does not require replay can enable this to save tokens.
     #[serde(default = "default_strip_reasoning")]
     pub strip_reasoning_from_request: bool,
 
@@ -2477,7 +2482,7 @@ fn default_prompt_budget_margin() -> usize {
 }
 
 fn default_strip_reasoning() -> bool {
-    true
+    false
 }
 
 fn default_max_tool_result_chars() -> usize {
