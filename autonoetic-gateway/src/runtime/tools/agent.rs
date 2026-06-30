@@ -424,11 +424,44 @@ the single join already does that."
             gateway_store.as_deref(),
             &workflow_id,
         )? {
-            return Err(anyhow::anyhow!(
-                "Cannot delegate (agent.spawn): workflow {} is already terminal ({}). No new tasks can be spawned.",
-                workflow_id,
-                workflow.status.as_str()
-            ));
+            // The root planner session is allowed to spawn agents even after the
+            // workflow reached a terminal state. This supports follow-up work
+            // (e.g. installing and invoking a newly built agent) after the build
+            // workflow has completed. We transiently reactivate the workflow to
+            // Resumable so task creation and execution can proceed; the next
+            // close_session will re-close it via try_complete_workflow.
+            if resolved_session_id == root {
+                tracing::info!(
+                    target: "agent_spawn",
+                    workflow_id = %workflow_id,
+                    root_session_id = %root,
+                    agent_id = %args.agent_id,
+                    "Reactivating terminal workflow for root-planner spawn"
+                );
+                let mut run = crate::scheduler::workflow_store::load_workflow_run(
+                    gw_config,
+                    gateway_store.as_deref(),
+                    &workflow_id,
+                )?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Workflow '{}' vanished between terminal check and reload",
+                        workflow_id
+                    )
+                })?;
+                run.status = autonoetic_types::workflow::WorkflowRunStatus::Resumable;
+                run.updated_at = Utc::now().to_rfc3339();
+                crate::scheduler::workflow_store::save_workflow_run(
+                    gw_config,
+                    gateway_store.as_deref(),
+                    &run,
+                )?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Cannot delegate (agent.spawn): workflow {} is already terminal ({}). No new tasks can be spawned.",
+                    workflow_id,
+                    workflow.status.as_str()
+                ));
+            }
         }
 
         if let Some(gate) = crate::scheduler::workflow_approval_gate_active(

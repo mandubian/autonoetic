@@ -2304,6 +2304,22 @@ impl GatewayExecutionService {
                     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
                 }
             }
+        } else if is_signal_delivered_for_terminal_workflow(
+            &self.config,
+            self.gateway_store.as_deref(),
+            session_id,
+            metadata,
+        )? {
+            tracing::info!(
+                target: "checkpoint",
+                session_id = %session_id,
+                "Suppressing signal-triggered auto-resume: workflow is terminal"
+            );
+            Ok((
+                crate::runtime::lifecycle::TurnOutcome::Completed(None),
+                checkpoint.initial_user_message(),
+                Some(checkpoint.turn_id),
+            ))
         } else if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
             tracing::info!(
                 target: "checkpoint",
@@ -4075,6 +4091,28 @@ fn build_initial_history(
     history.extend(turn_start_messages.iter().cloned());
     history.push(Message::user(user_message.to_string()));
     history
+}
+
+fn is_signal_delivered_for_terminal_workflow(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
+    metadata: Option<&serde_json::Value>,
+) -> anyhow::Result<bool> {
+    let is_signal_delivery = metadata
+        .and_then(|value| value.get("signal_delivered"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !is_signal_delivery {
+        return Ok(false);
+    }
+    let root = crate::runtime::content_store::root_session_id(session_id);
+    let Some(workflow_id) =
+        crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(config, &root)?
+    else {
+        return Ok(false);
+    };
+    crate::scheduler::workflow_store::is_workflow_terminal(config, store, &workflow_id)
 }
 
 fn gateway_signal_turn_start_context(

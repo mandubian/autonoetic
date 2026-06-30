@@ -1,7 +1,10 @@
 //! Workflow completion guard integration tests (RFC phase 0).
 //!
 //! Verifies that once a workflow reaches a terminal state:
-//! - `agent_spawn` native tool rejects new tasks.
+//! - `agent_spawn` from the root planner session reactivates the workflow and
+//!   accepts the new task (allows follow-up work such as invoking a freshly
+//!   built agent after the build workflow completed).
+//! - `agent_spawn` from a child session still rejects new tasks.
 //! - `workflow.force_complete` rejects mutations.
 //! - Pending child-state / join-satisfied notifications are suppressed, not delivered.
 
@@ -134,9 +137,63 @@ fn seed_terminal_workflow(
 }
 
 #[test]
-fn agent_spawn_rejected_when_workflow_completed() -> anyhow::Result<()> {
+fn root_agent_spawn_reactivates_terminal_workflow() -> anyhow::Result<()> {
     let (_temp, config, store) = setup()?;
     let root_session_id = "root-spawn-guard";
+
+    seed_terminal_workflow(
+        &config,
+        &store,
+        root_session_id,
+        WorkflowRunStatus::Completed,
+    )?;
+
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let parent_dir = config.agents_dir.join("planner.default");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    let args = serde_json::json!({
+        "agent_id": "coder.default",
+        "message": "this should succeed for root planner",
+        "async": true
+    });
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
+    let _guard = runtime.enter();
+
+    let result = registry.execute(
+        "agent_spawn",
+        &manifest,
+        &policy,
+        &parent_dir,
+        Some(&gateway_dir),
+        &serde_json::to_string(&args)?,
+        Some(root_session_id),
+        Some("turn-spawn-guard"),
+        Some(&config),
+        Some(store.clone()),
+        None,
+    )?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&result)?;
+    assert_eq!(parsed["ok"].as_bool(), Some(true), "root agent_spawn should succeed on terminal workflow: {}", result);
+
+    let workflow = load_workflow_run(&config, Some(&store), &parsed["workflow_id"].as_str().unwrap_or(""))?
+        .expect("workflow should exist");
+    assert_eq!(
+        workflow.status,
+        WorkflowRunStatus::Resumable,
+        "workflow should be reactivated to Resumable for root planner spawn"
+    );
+    Ok(())
+}
+
+#[test]
+fn child_agent_spawn_rejected_when_workflow_completed() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let root_session_id = "root-spawn-guard-child";
 
     seed_terminal_workflow(
         &config,
@@ -167,14 +224,14 @@ fn agent_spawn_rejected_when_workflow_completed() -> anyhow::Result<()> {
         &parent_dir,
         Some(&gateway_dir),
         &serde_json::to_string(&args)?,
-        Some(root_session_id),
-        Some("turn-spawn-guard"),
+        Some(&format!("{}/coder-old", root_session_id)),
+        Some("turn-spawn-guard-child"),
         Some(&config),
         Some(store.clone()),
         None,
     );
 
-    assert!(result.is_err(), "agent_spawn should fail for terminal workflow");
+    assert!(result.is_err(), "agent_spawn should fail for terminal workflow from child session");
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("terminal"),
