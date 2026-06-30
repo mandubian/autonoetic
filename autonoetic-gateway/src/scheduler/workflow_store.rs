@@ -362,6 +362,7 @@ pub fn ensure_workflow_for_root_session(
                     join_policy: Default::default(),
                     join_task_ids: vec![],
                     active_plan_ref: None,
+                    reactivated_for_root_spawn: false,
                 }
             }
         };
@@ -389,6 +390,7 @@ pub fn ensure_workflow_for_root_session(
         join_policy: Default::default(),
         join_task_ids: vec![],
         active_plan_ref: None,
+        reactivated_for_root_spawn: false,
     };
 
     save_workflow_run(config, store, &run)?;
@@ -1618,6 +1620,7 @@ pub fn try_complete_workflow(
 
     let mut wf = run;
     wf.status = WorkflowRunStatus::Completed;
+    wf.reactivated_for_root_spawn = false;
     wf.updated_at = now_rfc3339();
     save_workflow_run(config, store, &wf)?;
 
@@ -3086,6 +3089,7 @@ mod tests {
             join_policy: JoinPolicy::AllOf,
             join_task_ids: vec![],
             active_plan_ref: None,
+            reactivated_for_root_spawn: false,
         };
         save_workflow_run(&cfg, Some(&store), &wf_run).unwrap();
 

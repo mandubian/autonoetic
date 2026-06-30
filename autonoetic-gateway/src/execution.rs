@@ -4107,9 +4107,13 @@ fn is_signal_delivered_for_terminal_workflow(
         return Ok(false);
     }
     let root = crate::runtime::content_store::root_session_id(session_id);
-    let Some(workflow_id) =
-        crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(config, &root)?
-    else {
+    let workflow_id = match store {
+        Some(s) => s.resolve_workflow_id(&root)?,
+        None => crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+            config, &root,
+        )?,
+    };
+    let Some(workflow_id) = workflow_id else {
         return Ok(false);
     };
     crate::scheduler::workflow_store::is_workflow_terminal(config, store, &workflow_id)

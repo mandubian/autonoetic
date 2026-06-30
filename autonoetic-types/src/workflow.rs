@@ -155,6 +155,12 @@ pub struct WorkflowRun {
     /// Reference to the active PlanFrame governing this workflow, if any.
     #[serde(default)]
     pub active_plan_ref: Option<PlanRef>,
+    /// True when a terminal workflow was transiently reactivated by the root
+    /// planner to allow follow-up work (e.g. spawning a freshly built agent).
+    /// While true, only the root session may spawn agents; child-session spawns
+    /// remain blocked.
+    #[serde(default)]
+    pub reactivated_for_root_spawn: bool,
 }
 
 /// One delegated task (typically one `agent.spawn` child path).

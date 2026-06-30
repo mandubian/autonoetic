@@ -412,6 +412,10 @@ the single join already does that."
         let workflow_id = workflow.workflow_id.clone();
 
         // Phase 0 completion guard: do not enqueue new work once the workflow is terminal.
+        // The root planner session is allowed to reactivate a *Completed* workflow so it
+        // can perform follow-up work (e.g. installing and invoking a newly built agent).
+        // Reactivation is persisted as Resumable with a flag so that child-session spawns
+        // remain blocked while the workflow is in this transient root-only state.
         // NOTE: This check is not atomic with the subsequent save_task_run/enqueue_task.
         // A narrow TOCTOU window exists if the workflow transitions to terminal between
         // this check and task enqueue. The impact is bounded: the enqueued task will be
@@ -419,49 +423,50 @@ the single join already does that."
         // terminal workflow, so it cannot wake the root session. A fully atomic
         // check-and-enqueue inside a workflow-store transaction is tracked as a
         // follow-up (see RFC §4.3).
-        if crate::scheduler::workflow_store::is_workflow_terminal(
+        let mut run = crate::scheduler::workflow_store::load_workflow_run(
             gw_config,
             gateway_store.as_deref(),
             &workflow_id,
-        )? {
-            // The root planner session is allowed to spawn agents even after the
-            // workflow reached a terminal state. This supports follow-up work
-            // (e.g. installing and invoking a newly built agent) after the build
-            // workflow has completed. We transiently reactivate the workflow to
-            // Resumable so task creation and execution can proceed; the next
-            // close_session will re-close it via try_complete_workflow.
-            if resolved_session_id == root {
+        )?.ok_or_else(|| {
+            anyhow::anyhow!("Workflow '{}' vanished after terminal check", workflow_id)
+        })?;
+        match run.status {
+            autonoetic_types::workflow::WorkflowRunStatus::Completed
+                if resolved_session_id == root =>
+            {
                 tracing::info!(
                     target: "agent_spawn",
                     workflow_id = %workflow_id,
                     root_session_id = %root,
                     agent_id = %args.agent_id,
-                    "Reactivating terminal workflow for root-planner spawn"
+                    "Reactivating completed workflow for root-planner spawn"
                 );
-                let mut run = crate::scheduler::workflow_store::load_workflow_run(
-                    gw_config,
-                    gateway_store.as_deref(),
-                    &workflow_id,
-                )?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Workflow '{}' vanished between terminal check and reload",
-                        workflow_id
-                    )
-                })?;
                 run.status = autonoetic_types::workflow::WorkflowRunStatus::Resumable;
+                run.reactivated_for_root_spawn = true;
                 run.updated_at = Utc::now().to_rfc3339();
                 crate::scheduler::workflow_store::save_workflow_run(
                     gw_config,
                     gateway_store.as_deref(),
                     &run,
                 )?;
-            } else {
+            }
+            autonoetic_types::workflow::WorkflowRunStatus::Completed
+            | autonoetic_types::workflow::WorkflowRunStatus::Failed
+            | autonoetic_types::workflow::WorkflowRunStatus::Cancelled
+            | autonoetic_types::workflow::WorkflowRunStatus::EmergencyStopped => {
                 return Err(anyhow::anyhow!(
                     "Cannot delegate (agent.spawn): workflow {} is already terminal ({}). No new tasks can be spawned.",
                     workflow_id,
-                    workflow.status.as_str()
+                    run.status.as_str()
                 ));
             }
+            _ => {}
+        }
+        if run.reactivated_for_root_spawn && resolved_session_id != root {
+            return Err(anyhow::anyhow!(
+                "Cannot delegate (agent.spawn): workflow {} was reactivated by the root planner and cannot accept child-session spawns.",
+                workflow_id
+            ));
         }
 
         if let Some(gate) = crate::scheduler::workflow_approval_gate_active(
