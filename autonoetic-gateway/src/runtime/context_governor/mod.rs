@@ -89,9 +89,20 @@ impl ContextGovernor {
     /// Returns `WithinBudget` if no action needed, `Recovered` if the pipeline
     /// resolved the issue, or `Overflow` with diagnostics if all strategies
     /// were exhausted.
+    ///
+    /// A configured `soft_budget_tokens` triggers the pipeline proactively,
+    /// even when the hard `effective_limit` has not been reached. This is
+    /// useful for large context-window models where waiting for the hard
+    /// limit wastes tokens on every round.
     pub async fn govern(&self, ctx: &mut GovernorContext) -> anyhow::Result<GovernorResult> {
-        let within_budget = ctx.breakdown.total_tokens <= ctx.effective_limit;
-        if within_budget {
+        let hard_ok = ctx.breakdown.total_tokens <= ctx.effective_limit;
+        let soft_ok = ctx
+            .budget_config
+            .soft_budget_tokens
+            .map(|sb| ctx.breakdown.total_tokens <= sb as usize)
+            .unwrap_or(true);
+
+        if hard_ok && soft_ok {
             return Ok(GovernorResult::WithinBudget);
         }
 

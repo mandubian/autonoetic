@@ -154,6 +154,60 @@ mod tests {
         }
     }
 
+    fn make_context_with_soft_budget(total: usize, limit: usize, soft: u32) -> GovernorContext {
+        let mut ctx = make_context(total, limit);
+        ctx.budget_config.soft_budget_tokens = Some(soft);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn test_soft_budget_triggers_pipeline_below_hard_limit() {
+        // Total tokens (150) are below the hard limit (1000) but above the
+        // soft budget (100). The governor should run the pipeline.
+        let ctx = make_context_with_soft_budget(150, 1000, 100);
+        let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
+            Box::new(AlwaysResolveStrategy),
+        ];
+        let governor = crate::runtime::context_governor::ContextGovernor::with_strategies(strategies);
+        let mut ctx = ctx;
+        let result = governor.govern(&mut ctx).await.unwrap();
+        assert!(
+            matches!(result, GovernorResult::Recovered { .. }),
+            "soft budget should trigger recovery even when hard limit is not breached"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_soft_budget_disabled_when_none() {
+        // Same totals as the soft-budget test, but no soft budget configured.
+        let ctx = make_context(150, 1000);
+        let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
+            Box::new(AlwaysResolveStrategy),
+        ];
+        let governor = crate::runtime::context_governor::ContextGovernor::with_strategies(strategies);
+        let mut ctx = ctx;
+        let result = governor.govern(&mut ctx).await.unwrap();
+        assert!(
+            matches!(result, GovernorResult::WithinBudget),
+            "without soft budget, totals below hard limit should be WithinBudget"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hard_limit_still_triggers_when_soft_budget_is_unset() {
+        let ctx = make_context(150, 100);
+        let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
+            Box::new(AlwaysResolveStrategy),
+        ];
+        let governor = crate::runtime::context_governor::ContextGovernor::with_strategies(strategies);
+        let mut ctx = ctx;
+        let result = governor.govern(&mut ctx).await.unwrap();
+        assert!(
+            matches!(result, GovernorResult::Recovered { .. }),
+            "hard limit must still trigger recovery when soft budget is unset"
+        );
+    }
+
     #[tokio::test]
     async fn test_within_budget_returns_immediately() {
         let ctx = make_context(50, 100);

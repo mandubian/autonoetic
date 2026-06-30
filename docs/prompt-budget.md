@@ -61,7 +61,29 @@ diverge from the expected tool-call contract.
 - **System prompt over cap**: Fails for all actions except `warn` (no action can reduce system prompt size at runtime)
 - **Tool definitions over cap**: Fails for all actions except `warn` and `demote_tools` (which can reduce tool count)
 
-## Tool Tiers
+## Wire-Format History Sanitization
+
+Before a `CompletionRequest` is sent to the LLM, the gateway can cheaply reduce
+tokens in the wire-format copy of the conversation history while keeping the
+full messages in storage (checkpoints, exports, timeline events):
+
+- **Strip reasoning content**: Remove `reasoning_content` / `reasoning_details`
+  from assistant messages. The model does not need to re-read its own
+  chain-of-thought on subsequent turns.
+- **Truncate tool results**: Cap tool-result message content to a configured
+  character budget, keeping `head + "[... N chars truncated ...]" + tail` so
+  status/summary remains visible.
+
+Both are controlled under `prompt_budget`:
+
+```yaml
+prompt_budget:
+  strip_reasoning_from_request: true   # default
+  max_tool_result_chars: 2000          # default; set 0 to disable
+```
+
+These reductions apply only to the request sent to the provider; stored history
+remains complete for audit, replay, and compression strategies.
 
 Tools are classified into three tiers for progressive disclosure and budget enforcement:
 
