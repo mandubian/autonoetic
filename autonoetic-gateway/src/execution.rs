@@ -2078,13 +2078,38 @@ impl GatewayExecutionService {
                     // separately; push it back so inject_approval_ref can find
                     // the tool calls and mark them with approval_ref.
                     if let Some(ref am) = checkpoint.assistant_message {
-                        history.push(am.clone());
-                        // Inject tool result messages for completed tools AND
-                        // the approval-triggering tool call so every tool_call_id
-                        // in the assistant message has a matching tool message.
-                        // Without this the LLM API rejects the request:
-                        //   "assistant message with 'tool_calls' must be followed
-                        //    by tool messages responding to each 'tool_call_id'"
+                        // Build the set of call_ids that have results, so we can
+                        // filter out remaining_tool_calls from the assistant
+                        // message.  Remaining calls were never executed — they
+                        // were blocked mid-batch by an approval gate — so they
+                        // have no matching tool result.  If we leave them in the
+                        // assistant message's tool_calls list, the next LLM
+                        // request will violate:
+                        //   "an assistant message with 'tool_calls' must be
+                        //    followed by tool messages responding to each
+                        //    'tool_call_id'"
+                        let mut call_ids_with_results: std::collections::HashSet<&str> =
+                            std::collections::HashSet::new();
+                        if let Some(ref pts) = checkpoint.pending_tool_state {
+                            for (call_id, _, _) in &pts.completed_tool_results {
+                                call_ids_with_results.insert(call_id.as_str());
+                            }
+                            // Only keep the pending tool call if we actually
+                            // have its approval_response to inject as a matching
+                            // tool result. Otherwise it would be orphaned.
+                            if pts.pending_tool_call.approval_response.is_some() {
+                                call_ids_with_results
+                                    .insert(&pts.pending_tool_call.call_id);
+                            }
+                        }
+
+                        let mut filtered_am = am.clone();
+                        filtered_am.tool_calls.retain(|tc| {
+                            call_ids_with_results.contains(tc.id.as_str())
+                                || call_ids_with_results.is_empty()
+                        });
+                        history.push(filtered_am);
+
                         if let Some(ref pts) = checkpoint.pending_tool_state {
                             for (call_id, tool_name, result) in &pts.completed_tool_results {
                                 history.push(Message::tool_result(
