@@ -73,14 +73,19 @@ full messages in storage (checkpoints, exports, timeline events):
 - **Truncate tool results**: Cap tool-result message content to a configured
   character budget, keeping `head + "[... N chars truncated ...]" + tail` so
   status/summary remains visible.
+- **Deduplicate tool results**: Collapse duplicate tool-result
+  messages to a short marker after the first occurrence. Re-reading artifacts,
+  polling status tools, or repeated workflow snapshots often produce identical
+  output across turns.
 
-Both are controlled under `prompt_budget`:
+All three are controlled under `prompt_budget`:
 
 ```yaml
 prompt_budget:
   strip_reasoning_from_request: false  # default; enable only if your model
                                        # does not require reasoning replay
   max_tool_result_chars: 2000          # default; set 0 to disable
+  dedup_tool_results: true             # default
 ```
 
 These reductions apply only to the request sent to the provider; stored history

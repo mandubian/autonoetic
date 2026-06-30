@@ -2053,6 +2053,11 @@ impl AgentExecutor {
                             .as_ref()
                             .map(|c| c.prompt_budget.max_tool_result_chars)
                             .unwrap_or(2000),
+                        dedup_tool_results: self
+                            .config
+                            .as_ref()
+                            .map(|c| c.prompt_budget.dedup_tool_results)
+                            .unwrap_or(true),
                     },
                 ),
                 tools,

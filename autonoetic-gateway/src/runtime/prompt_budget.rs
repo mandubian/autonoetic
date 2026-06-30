@@ -25,6 +25,11 @@ pub struct HistorySanitizeOptions {
     /// kept as `head + "[... N chars truncated ...]" + tail`, with each of
     /// head/tail sized to roughly half the budget.
     pub max_tool_result_chars: usize,
+    /// When true, duplicate `Role::Tool` messages are collapsed: the first
+    /// occurrence keeps its content, and later duplicates are replaced with a
+    /// short marker. The matching `tool_call_id` is preserved so the
+    /// assistant/tool pairing required by providers remains valid.
+    pub dedup_tool_results: bool,
 }
 
 impl Default for HistorySanitizeOptions {
@@ -38,6 +43,9 @@ impl Default for HistorySanitizeOptions {
             // Conservative default: most tool results need only a summary,
             // and 2000 chars is enough for that plus short stdout/stderr.
             max_tool_result_chars: 2000,
+            // Most repeated tool reads are uninformative after the first
+            // occurrence; collapsing them saves tokens without losing storage.
+            dedup_tool_results: true,
         }
     }
 }
@@ -48,16 +56,18 @@ impl Default for HistorySanitizeOptions {
 /// - Assistant `reasoning_content` / `reasoning_details` are stripped.
 /// - Tool-result `content` over `max_tool_result_chars` is truncated with a
 ///   head+tail ellipsis so status/summary is still visible.
+/// - Duplicate tool-result messages are collapsed to a short marker after the
+///   first occurrence.
 /// - System, user, and assistant messages are otherwise untouched.
 pub fn sanitize_history_for_request(
     history: &[Message],
     opts: &HistorySanitizeOptions,
 ) -> Vec<Message> {
-    if !opts.strip_reasoning && opts.max_tool_result_chars == 0 {
+    if !opts.strip_reasoning && opts.max_tool_result_chars == 0 && !opts.dedup_tool_results {
         return history.to_vec();
     }
 
-    history
+    let mut sanitized: Vec<Message> = history
         .iter()
         .map(|msg| {
             let mut m = msg.clone();
@@ -73,7 +83,30 @@ pub fn sanitize_history_for_request(
 
             m
         })
-        .collect()
+        .collect();
+
+    if opts.dedup_tool_results {
+        dedup_duplicate_tool_results(&mut sanitized);
+    }
+
+    sanitized
+}
+
+/// Replace duplicate `Role::Tool` message contents with a short marker. The
+/// first occurrence in the history (or after a different tool result) is
+/// preserved; later duplicates keep their `tool_call_id` so provider
+/// assistant/tool pairing remains valid.
+fn dedup_duplicate_tool_results(messages: &mut [Message]) {
+    let mut last_tool_content: Option<String> = None;
+    for msg in messages.iter_mut() {
+        if msg.role == Role::Tool && !msg.content.is_empty() {
+            if last_tool_content.as_deref() == Some(msg.content.as_str()) {
+                msg.content = "[duplicate result — see above]".to_string();
+            } else {
+                last_tool_content = Some(msg.content.clone());
+            }
+        }
+    }
 }
 
 fn truncate_middle(s: &str, max_chars: usize) -> String {
@@ -1011,6 +1044,7 @@ mod tests {
             &HistorySanitizeOptions {
                 strip_reasoning: true,
                 max_tool_result_chars: 2000,
+                dedup_tool_results: false,
             },
         );
 
@@ -1060,6 +1094,7 @@ mod tests {
             &HistorySanitizeOptions {
                 strip_reasoning: false,
                 max_tool_result_chars: 0,
+                dedup_tool_results: false,
             },
         );
 
@@ -1083,6 +1118,7 @@ mod tests {
             &HistorySanitizeOptions {
                 strip_reasoning: false,
                 max_tool_result_chars: 100,
+                dedup_tool_results: false,
             },
         );
 
@@ -1109,10 +1145,194 @@ mod tests {
             &HistorySanitizeOptions {
                 strip_reasoning: false,
                 max_tool_result_chars: 100,
+                dedup_tool_results: false,
             },
         );
 
         assert_eq!(sanitized[0].content, "small result");
+    }
+
+    #[test]
+    fn sanitize_history_dedups_consecutive_duplicate_tool_results() {
+        let history = vec![
+            Message {
+                role: Role::Assistant,
+                content: "call 1".to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "same result".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: "call 2".to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "same result".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "same result".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_3".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: true,
+            },
+        );
+
+        // First occurrence is preserved.
+        assert_eq!(sanitized[1].content, "same result");
+        assert_eq!(sanitized[1].tool_call_id.as_deref(), Some("tc_1"));
+
+        // Second and third consecutive duplicates are replaced by a marker.
+        assert_eq!(sanitized[3].content, "[duplicate result — see above]");
+        assert_eq!(sanitized[3].tool_call_id.as_deref(), Some("tc_2"));
+        assert_eq!(sanitized[4].content, "[duplicate result — see above]");
+        assert_eq!(sanitized[4].tool_call_id.as_deref(), Some("tc_3"));
+
+        // Original history is untouched.
+        assert_eq!(history[3].content, "same result");
+    }
+
+    #[test]
+    fn sanitize_history_dedup_resets_on_non_duplicate() {
+        let history = vec![
+            Message {
+                role: Role::Tool,
+                content: "result A".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "result B".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "result A".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_3".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: true,
+            },
+        );
+
+        // The third message is identical to the first but not consecutive, so
+        // it is not collapsed.
+        assert_eq!(sanitized[0].content, "result A");
+        assert_eq!(sanitized[1].content, "result B");
+        assert_eq!(sanitized[2].content, "result A");
+    }
+
+    #[test]
+    fn sanitize_history_dedup_disabled_keeps_duplicates() {
+        let history = vec![
+            Message {
+                role: Role::Tool,
+                content: "same result".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: "same result".to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: false,
+            },
+        );
+
+        assert_eq!(sanitized[0].content, "same result");
+        assert_eq!(sanitized[1].content, "same result");
+    }
+
+    #[test]
+    fn sanitize_history_dedup_composes_with_truncation() {
+        let long = "x".repeat(5000);
+        let history = vec![
+            Message {
+                role: Role::Tool,
+                content: long.clone(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: long.clone(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 100,
+                dedup_tool_results: true,
+            },
+        );
+
+        // Both are truncated identically, so the second collapses.
+        assert!(sanitized[0].content.contains("[..."));
+        assert_eq!(sanitized[1].content, "[duplicate result — see above]");
     }
 
     #[test]
