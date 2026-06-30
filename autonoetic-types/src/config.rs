@@ -2460,6 +2460,16 @@ pub struct PromptBudgetConfig {
     #[serde(default = "default_max_tool_result_chars")]
     pub max_tool_result_chars: usize,
 
+    /// Collapse consecutive duplicate tool-result messages into a short marker
+    /// for the LLM request. Re-reading artifacts, polling `approval.status`, or
+    /// repeated `workflow.state` snapshots often produce identical output across
+    /// turns; replaying the full content every round wastes tokens without
+    /// adding information. The first occurrence is kept; later consecutive
+    /// duplicates are replaced with a reference marker. The full results are
+    /// still stored. Enabled by default.
+    #[serde(default = "default_dedup_tool_results")]
+    pub dedup_tool_results: bool,
+
     /// Override the chars-per-token ratio used by the prompt budget
     /// estimator. `None` (the default) means "use the built-in default of
     /// 3.0 chars/token". Operators running a tokenizer that is known to
@@ -2489,6 +2499,10 @@ fn default_max_tool_result_chars() -> usize {
     2000
 }
 
+fn default_dedup_tool_results() -> bool {
+    true
+}
+
 impl Default for PromptBudgetConfig {
     fn default() -> Self {
         Self {
@@ -2502,6 +2516,7 @@ impl Default for PromptBudgetConfig {
             soft_budget_tokens: None,
             strip_reasoning_from_request: default_strip_reasoning(),
             max_tool_result_chars: default_max_tool_result_chars(),
+            dedup_tool_results: default_dedup_tool_results(),
             chars_per_token: None,
         }
     }

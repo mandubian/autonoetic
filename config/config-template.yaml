@@ -476,6 +476,11 @@ prompt_budget:
   # not replayed in full every turn, but the full result is still stored.
   # Set to 0 to disable truncation. Default is 2000.
   # max_tool_result_chars: 2000
+  # Collapse duplicate tool-result messages into a short marker
+  # ("duplicate result — see above"). Re-reading artifacts or polling status
+  # tools often produces identical output across turns; this saves tokens while
+  # keeping the full results in storage. Enabled by default.
+  # dedup_tool_results: true
   # Chars-per-token ratio used by the prompt-budget estimator. The default
   # (3.0) is conservative — it matches Qwen3 / Llama3 / GPT-4o on code/JSON
   # content, which is typically 2.2–3.5 chars/token. The previous default
