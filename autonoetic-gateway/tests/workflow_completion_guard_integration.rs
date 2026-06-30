@@ -4,7 +4,9 @@
 //! - `agent_spawn` from the root planner session reactivates the workflow and
 //!   accepts the new task (allows follow-up work such as invoking a freshly
 //!   built agent after the build workflow completed).
-//! - `agent_spawn` from a child session still rejects new tasks.
+//! - `agent_spawn` from a child session is allowed once the root planner has
+//!   reactivated the workflow (needed for install delegations such as
+//!   agent-factory / specialized_builder).
 //! - `workflow.force_complete` rejects mutations.
 //! - Pending child-state / join-satisfied notifications are suppressed, not delivered.
 
@@ -248,7 +250,7 @@ fn child_agent_spawn_rejected_when_workflow_completed() -> anyhow::Result<()> {
 }
 
 #[test]
-fn child_agent_spawn_rejected_after_root_reactivation() -> anyhow::Result<()> {
+fn child_agent_spawn_allowed_after_root_reactivation() -> anyhow::Result<()> {
     let (_temp, config, store) = setup()?;
     let root_session_id = "root-spawn-guard-reactivate";
 
@@ -288,12 +290,18 @@ fn child_agent_spawn_rejected_after_root_reactivation() -> anyhow::Result<()> {
         None,
     )?;
     let root_parsed: serde_json::Value = serde_json::from_str(&root_result)?;
-    assert_eq!(root_parsed["ok"].as_bool(), Some(true), "root agent_spawn should reactivate workflow");
+    assert_eq!(
+        root_parsed["ok"].as_bool(),
+        Some(true),
+        "root agent_spawn should reactivate workflow"
+    );
 
-    // Child session spawn must still be rejected while the workflow is root-reactivated.
+    // Child session spawn is allowed once the root planner has reactivated the
+    // workflow (needed for install flows where the root delegates to agents like
+    // agent-factory / specialized_builder).
     let child_args = serde_json::json!({
         "agent_id": "coder.default",
-        "message": "this should fail after reactivation",
+        "message": "child spawn after root reactivation",
         "async": true
     });
     let child_result = registry.execute(
@@ -308,14 +316,29 @@ fn child_agent_spawn_rejected_after_root_reactivation() -> anyhow::Result<()> {
         Some(&config),
         Some(store.clone()),
         None,
+    )?;
+    let child_parsed: serde_json::Value = serde_json::from_str(&child_result)?;
+    assert_eq!(
+        child_parsed["ok"].as_bool(),
+        Some(true),
+        "child agent_spawn should succeed after root reactivation: {}",
+        child_result
+    );
+    assert_eq!(
+        child_parsed["workflow_id"].as_str(),
+        root_parsed["workflow_id"].as_str(),
+        "child spawn should share the reactivated workflow"
     );
 
-    assert!(child_result.is_err(), "agent_spawn should fail for child session after root reactivation");
-    let err = child_result.unwrap_err().to_string();
-    assert!(
-        err.contains("reactivated"),
-        "error should mention reactivated workflow: {}",
-        err
+    let workflow_id = root_parsed["workflow_id"]
+        .as_str()
+        .expect("workflow_id present");
+    let workflow = load_workflow_run(&config, Some(&store), workflow_id)?
+        .expect("workflow should exist");
+    assert_eq!(
+        workflow.status,
+        WorkflowRunStatus::Resumable,
+        "workflow should stay Resumable after root reactivation"
     );
     Ok(())
 }

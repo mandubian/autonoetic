@@ -414,8 +414,8 @@ the single join already does that."
         // Phase 0 completion guard: do not enqueue new work once the workflow is terminal.
         // The root planner session is allowed to reactivate a *Completed* workflow so it
         // can perform follow-up work (e.g. installing and invoking a newly built agent).
-        // Reactivation is persisted as Resumable with a flag so that child-session spawns
-        // remain blocked while the workflow is in this transient root-only state.
+        // Reactivation persists the workflow as Resumable; normal workflow spawn rules
+        // then apply, and try_complete_workflow will re-close it when the root session ends.
         // NOTE: This check is not atomic with the subsequent save_task_run/enqueue_task.
         // A narrow TOCTOU window exists if the workflow transitions to terminal between
         // this check and task enqueue. The impact is bounded: the enqueued task will be
@@ -461,12 +461,6 @@ the single join already does that."
                 ));
             }
             _ => {}
-        }
-        if run.reactivated_for_root_spawn && resolved_session_id != root {
-            return Err(anyhow::anyhow!(
-                "Cannot delegate (agent.spawn): workflow {} was reactivated by the root planner and cannot accept child-session spawns.",
-                workflow_id
-            ));
         }
 
         if let Some(gate) = crate::scheduler::workflow_approval_gate_active(
