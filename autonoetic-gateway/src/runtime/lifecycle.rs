@@ -3297,7 +3297,13 @@ impl AgentExecutor {
                                 .get("side_effect_state")
                                 .and_then(|v| v.as_str())
                                 == Some("committed");
-                            if terminal {
+                            if crate::runtime::tool_dispatch::is_read_only_tool(&tc.name) {
+                                // Read-only probes advance no workflow — track
+                                // for rotating-polling detection but do not
+                                // reset the no-progress counter (#701).
+                                self.guard
+                                    .register_readonly_progress(&tc.name, &tc.arguments);
+                            } else if terminal {
                                 self.guard
                                     .register_progress_terminal(&tc.name, &tc.arguments);
                             } else {

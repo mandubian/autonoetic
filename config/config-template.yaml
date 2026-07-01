@@ -435,6 +435,13 @@ max_session_turns: 25
 #     because re-listing never returns new data. The corrective trip message
 #     tells the agent to spawn directly with a free-text message or end the
 #     turn. Set to 0 to disable the fast path.
+#   child_failure_loop_penalty: loops added to the no-progress counter on each
+#     child task failure (issue #704). A queued agent_spawn returns ok and
+#     resets progress, but a child that later fails means that spawn made no
+#     net progress — so each failure advances (does not reset) current_loops by
+#     this amount. Combined with read-only tools no longer resetting progress
+#     (#701), a spawn→probe→spawn death spiral reaches max_loops_without_progress
+#     instead of never. Set to 0 to disable (legacy behavior).
 #loop_guard:
 #  max_loops_without_progress: 10
 #  max_tool_failures: 8
@@ -443,6 +450,7 @@ max_session_turns: 25
 #  rotation_window_size: 16
 #  rotation_distinct_floor: 6
 #  roster_repeat_floor: 3
+#  child_failure_loop_penalty: 2
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.

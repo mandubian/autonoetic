@@ -2054,6 +2054,16 @@ pub struct LoopGuardConfig {
     /// resets the counter to 0.
     #[serde(default = "default_max_llm_failures")]
     pub max_llm_failures: u32,
+
+    /// Loop-counter penalty added to `current_loops` on each child task failure
+    /// (issue #704). A queued `agent_spawn` returns `ok: true` and resets the
+    /// no-progress counter, but a child that later fails means that spawn made
+    /// no net progress — so each `any_failed` result advances `current_loops`
+    /// by this amount (it does NOT reset it). Combined with read-only tools no
+    /// longer resetting progress (#701), a spawn→probe→spawn death spiral now
+    /// reaches `max_loops_without_progress`. Set to 0 to disable (legacy behavior).
+    #[serde(default = "default_child_failure_loop_penalty")]
+    pub child_failure_loop_penalty: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -2081,6 +2091,7 @@ impl Default for LoopGuardConfig {
             rotation_distinct_floor: default_rotation_distinct_floor(),
             roster_repeat_floor: default_roster_repeat_floor(),
             max_llm_failures: default_max_llm_failures(),
+            child_failure_loop_penalty: default_child_failure_loop_penalty(),
         }
     }
 }
@@ -2115,6 +2126,10 @@ fn default_roster_repeat_floor() -> u32 {
 
 fn default_max_llm_failures() -> u32 {
     3
+}
+
+fn default_child_failure_loop_penalty() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -103,6 +103,43 @@ pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
     false
 }
 
+/// Read-only, side-effect-free tools whose successful result advances no
+/// workflow (#701). A successful call to one of these must NOT reset the
+/// LoopGuard's no-progress counter — otherwise a planner can interleave one
+/// read-only probe between every failed mutation and keep
+/// `max_loops_without_progress` from ever tripping (observed in
+/// `session-cc54cec3`, which wasted ~30 planner rounds this way).
+///
+/// This is the vetted subset observed in the death-spiral post-mortem plus the
+/// obvious state-query tools. Being conservative is deliberate: labelling a
+/// tool that actually mutates state as read-only would let a real loop run
+/// unbounded, so only tools known to be pure reads are listed.
+pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "resolve"
+            | "workflow_state"
+            | "planframe_get"
+            | "planframe_list"
+            | "planframe_history"
+            | "approval_list"
+            | "approval_status"
+            | "agent_inspect"
+            | "artifact_inspect"
+            | "session_peek"
+            | "tool_discover"
+            | "agent_revision_schema"
+            | "promotion_query"
+            | "knowledge_recall"
+            | "knowledge_search"
+            | "digest_query"
+            | "observability_search"
+            | "observability_read"
+            | "observability_read_reasoning"
+            | "execution_search"
+    )
+}
+
 pub(crate) fn load_manifest_loop_guard_declaration(agent_dir: &Path) -> Option<LoopGuardDeclaration> {
     let skill_path = agent_dir.join("SKILL.md");
     let skill = std::fs::read_to_string(skill_path).ok()?;
