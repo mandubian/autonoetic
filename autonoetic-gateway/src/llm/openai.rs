@@ -206,18 +206,33 @@ impl OpenAiDriver {
             && self.provider.capabilities.supports_tools
             && model_supports_tools
         {
-            body["tools"] = json!(req
-                .tools
-                .iter()
-                .map(|t| json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.input_schema,
-                    }
-                }))
-                .collect::<Vec<_>>());
+            // OpenRouter passes `cache_control` through to Anthropic/Gemini
+            // upstreams for tool definitions too (same mechanism as the system
+            // message). When the system prefix is being cached AND we're routing
+            // to a cache_control-honoring model, mark the last tool so the whole
+            // tool catalog is cached across turns. OpenAI-family and plain
+            // providers cache automatically by prefix and must not see the field.
+            let mark_tools = cache_system;
+            body["tools"] = serde_json::Value::Array(
+                req.tools
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let mut entry = json!({
+                            "type": "function",
+                            "function": {
+                                "name": t.name,
+                                "description": t.description,
+                                "parameters": t.input_schema,
+                            }
+                        });
+                        if mark_tools && i == req.tools.len() - 1 {
+                            entry["function"]["cache_control"] = json!({ "type": "ephemeral" });
+                        }
+                        entry
+                    })
+                    .collect(),
+            );
             if self.provider.capabilities.supports_tool_choice {
                 body["tool_choice"] = json!("auto");
             }
@@ -1181,6 +1196,112 @@ mod tests {
         assert!(!model_supports_openrouter_cache_control("openai/gpt-5"));
         assert!(!model_supports_openrouter_cache_control("deepseek/deepseek-v4"));
     }
+
+    // -----------------------------------------------------------------------
+    // Tools-array caching (cache_control on the last tool definition)
+    // -----------------------------------------------------------------------
+
+    use crate::llm::ToolDefinition;
+
+    fn tool_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("desc for {name}"),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    fn req_with_tools(
+        model: &str,
+        tools: Vec<ToolDefinition>,
+        prefix_bytes: Option<usize>,
+    ) -> CompletionRequest {
+        let mut req = req_with_system(model, "system", prefix_bytes);
+        req.tools = tools;
+        req
+    }
+
+    #[test]
+    fn openrouter_claude_marks_last_tool_with_cache_control() {
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("alpha"), tool_def("beta"), tool_def("gamma")];
+        let req = req_with_tools(
+            "anthropic/claude-sonnet-5",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools_arr.len(), 3);
+        assert!(tools_arr[0]["function"]["cache_control"].is_null(), "first tool must not be marked");
+        assert!(tools_arr[1]["function"]["cache_control"].is_null(), "middle tool must not be marked");
+        assert_eq!(tools_arr[2]["function"]["cache_control"]["type"], "ephemeral");
+        // Schemas preserved.
+        assert_eq!(tools_arr[2]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn openrouter_gemini_marks_last_tool_with_cache_control() {
+        let driver = driver_with("google/gemini-2.5-pro", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("solo")];
+        let req = req_with_tools(
+            "google/gemini-2.5-pro",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["tools"][0]["function"]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn openrouter_claude_leaves_tools_plain_without_prefix() {
+        // No system_cache_prefix_bytes → caching off → tools unmarked.
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("alpha"), tool_def("beta")];
+        let req = req_with_tools(
+            "anthropic/claude-sonnet-5",
+            tools,
+            None,
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().unwrap();
+        assert!(tools_arr[0]["function"]["cache_control"].is_null());
+        assert!(tools_arr[1]["function"]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn openrouter_openai_model_leaves_tools_plain() {
+        // OpenAI-family via OpenRouter caches automatically — no cache_control on tools.
+        let driver = driver_with("openai/gpt-5", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("alpha"), tool_def("beta")];
+        let req = req_with_tools(
+            "openai/gpt-5",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().unwrap();
+        assert!(tools_arr[0]["function"]["cache_control"].is_null());
+        assert!(tools_arr[1]["function"]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn direct_openai_leaves_tools_plain() {
+        // Direct OpenAI (OpenAiEffort) uses prompt_cache_key, never cache_control.
+        let driver = driver_with("gpt-5", ReasoningStyle::OpenAiEffort);
+        let tools = vec![tool_def("alpha"), tool_def("beta")];
+        let req = req_with_tools(
+            "gpt-5",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().unwrap();
+        assert!(tools_arr[0]["function"]["cache_control"].is_null());
+        assert!(tools_arr[1]["function"]["cache_control"].is_null());
+    }
+
+
 
     #[test]
     fn stream_request_includes_usage_option() {
