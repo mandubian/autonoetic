@@ -167,15 +167,30 @@ async fn test_promotion_evaluator_fail_rejected() {
     let store = ContentStore::new(&gateway_dir).expect("content store should create");
     let content_handle = store.write(script_content).expect("content should write");
 
-    // --- Step 2: Evaluator fails (pass=false) ---
+    // --- Step 2: Evaluator fails ---
+    // `sealed_evaluator` is an execution role (#580): `pass` is derived from a
+    // real execution trace via exit_code, not from a `pass` argument. Seed a
+    // FAILING run (exit_code != 0) and cite its trace so the recorded verdict is
+    // pass=false. A store is required to resolve the trace.
     let eval_manifest = evaluator_manifest();
     let eval_policy = PolicyEngine::new(eval_manifest.clone());
     let registry = default_registry();
 
+    let gw_store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let fail_trace_id = "trace-eval-fail-001";
+    support::promotion_trace::seed_execution_trace(
+        &gw_store,
+        "session-eval-fail",
+        fail_trace_id,
+        1, // non-zero exit => failed run => pass=false
+    );
+
     let eval_args = serde_json::json!({
         "artifact_id": artifact_id,
         "role": "sealed_evaluator",
-        "pass": false,  // Evaluator FAILED
+        "execution_trace_id": fail_trace_id,  // failing run => pass derived false
         "findings": [
             {
                 "severity": "critical",
@@ -197,10 +212,10 @@ async fn test_promotion_evaluator_fail_rejected() {
             Some("session-eval-fail"),
             None,
             Some(&config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
-        .expect("evaluator promotion.record with pass=false should succeed");
+        .expect("evaluator promotion.record with a failing trace should record ok");
 
     let eval_parsed: serde_json::Value = serde_json::from_str(&eval_result).unwrap();
     assert_eq!(eval_parsed.get("ok").and_then(|v| v.as_bool()), Some(true));
