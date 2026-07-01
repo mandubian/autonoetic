@@ -110,6 +110,7 @@ Always write working, syntactically correct Python code."#
         metadata: None,
                 thinking: None,
                 prompt_cache_key: None,
+                system_cache_prefix_bytes: None,
     };
 
     let resp = driver.complete(&req).await?;

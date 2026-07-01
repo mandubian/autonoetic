@@ -30,8 +30,8 @@ prompt_budget:
   warn_at_pct: 80
   # Safety margin subtracted from context window before enforcement
   margin_tokens: 1024
-  # Whether to compress tool schemas to {"type": "object"} on turns after turn 0
-  # Default: false — stripping schemas causes LLM tool-call divergence
+  # DEPRECATED (no-op). Tool schemas are never compressed; tool tokens are
+  # saved losslessly via provider tool-array caching (prompt_cache_enabled).
   compress_tool_schemas_after_turn_0: false
 ```
 
@@ -46,13 +46,15 @@ classifies the turn as `context_overflow`.
 |----------|----------|
 | `trim_history` | Remove oldest message groups, preserving tool-call/result pairs. |
 | `capsule` | Hierarchical state-capsule summarization of old turns (LLM call). |
-| `tool_schema_compression` | Replace tool JSON schemas with `{"type": "object"}` placeholders. Last resort — damages tool-calling accuracy. |
 | `demote_tools` | Drop Specialized-tier tools, keep Core + Workflow. |
 
 Strategy names match those emitted in `GovernorAction` diagnostics and
-causal events. Schema compression runs late in the pipeline because
-stripping tool schemas causes the LLM to hallucinate parameters and
-diverge from the expected tool-call contract.
+causal events. (A `tool_schema_compression` strategy previously appeared
+here but was removed: stripping tool schemas to `{}` corrupted tool-calling
+on turn 1+ — the model needs the full schema on every turn, and prompt
+caching is a billing optimization, not a "remember the tools" mechanism.
+Tool tokens are now saved losslessly via provider tool-array caching; see
+`prompt_cache_enabled`.)
 
 ### Section Caps
 
@@ -143,13 +145,33 @@ When unset (default), the tier filter is determined by runtime state:
 
 The approval-exception ensures that `approval_status`, `approval_withdraw`, and other approval-prefixed tools are always available when approvals are pending, so the agent can check and respond to approval decisions.
 
-## Tool Schema Compression
+## Tool Tokens & Prompt Caching
 
-When `compress_tool_schemas_after_turn_0` is `true`, tool definitions on turn 1+ have their JSON schemas replaced with `{"type": "object"}`. This saves significant tokens for agents with many tools.
+Tool definitions are sent in full on every turn — the model needs the
+complete schema (property names, types, required fields) to call tools
+correctly, and there is no "the model remembers turn-0 tools" mechanism
+in any provider's tools API. A previous `compress_tool_schemas_after_turn_0`
+option stripped schemas to `{"type": "object"}` on turn 1+ to save tokens;
+it has been **removed** because it corrupted tool-calling (hallucinated
+parameters, missing required fields).
 
-**Disabled by default.** Stripping tool schemas damages the LLM's ability to call tools correctly — without property names, types, and required fields, the model hallucinates parameters and produces malformed tool calls. Most LLM providers also cache identical tool arrays at reduced cost (~10%), so changing schemas between turns defeats prompt caching and is counterproductive.
+Token cost for the (large, byte-stable) tool catalog is instead recovered
+**losslessly** via provider prompt caching. When `prompt_cache_enabled` is
+`true` (default), cache-capable drivers attach `cache_control: {type: ephemeral}`
+to both the stable system prefix and the last tool definition:
 
-The context governor still compresses schemas as a **last resort** when the context budget is exhausted (after history trimming and capsule summarization), regardless of this setting.
+- **Anthropic** — caches the tools block + the system prefix (2 of the 4
+  allowed breakpoints).
+- **OpenRouter** routing a **Claude/Gemini** model — same `cache_control`
+  passthrough on tools and system.
+- **OpenAI** / **llama.cpp** / plain OpenAI-compatible — cache automatically
+  by prefix; no markers are emitted (they would be ignored or rejected).
+- **Gemini direct API** — no wire-format `cache_control` field (caching is a
+  separate explicit Cached Content resource, out of scope here).
+
+Repeated turns re-read the full tool catalog at cache rates. The
+`compress_tool_schemas_after_turn_0` config field is retained only for
+backward-compat and is a no-op.
 
 ## Foundation Layering
 

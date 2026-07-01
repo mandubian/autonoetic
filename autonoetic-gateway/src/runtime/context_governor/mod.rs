@@ -18,7 +18,6 @@ pub mod capsule;
 pub mod demotion;
 pub mod error;
 pub mod resolver;
-pub mod schema_compress;
 pub mod strategies;
 pub mod trimming;
 
@@ -39,13 +38,7 @@ use std::path::PathBuf;
 impl ContextGovernor {
     /// Build the default pipeline.
     ///
-    /// Order: history trimming → capsule summarization → schema compression
-    /// → tool demotion.
-    ///
-    /// Schema compression is intentionally late in the pipeline: stripping
-    /// tool schemas damages the LLM's ability to call tools correctly (wrong
-    /// parameter names, missing required fields, hallucinated arguments).
-    /// It should only run when trimming and summarization are insufficient.
+    /// Order: history trimming → capsule summarization → tool demotion.
     pub fn new(config: &GovernorConfig) -> Self {
         let mut capsule = capsule::CapsuleStrategy::new(
             config.http_client.clone(),
@@ -57,7 +50,6 @@ impl ContextGovernor {
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             Box::new(trimming::TrimHistoryStrategy),
             Box::new(capsule),
-            Box::new(schema_compress::ToolSchemaCompressionStrategy::new()),
             Box::new(demotion::ToolDemotionStrategy),
         ];
         Self { strategies }
@@ -65,15 +57,13 @@ impl ContextGovernor {
 
     /// Build the aggressive pipeline for overflow recovery retry.
     ///
-    /// Skips the LLM-tier capsule strategy (already attempted) and forces
-    /// schema compression on turn 0 + goes straight to lossy reduction
-    /// (trim + demote).
+    /// Skips the LLM-tier capsule strategy (already attempted) and goes
+    /// straight to lossy reduction (trim + demote).
     pub fn new_aggressive(config: &GovernorConfig) -> Self {
+        let _ = config; // no capsule to build in the aggressive path
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             // Skip capsule (already attempted in prior run)
             Box::new(trimming::TrimHistoryStrategy),
-            // Force schema compression on every turn (even turn 0)
-            Box::new(schema_compress::ToolSchemaCompressionStrategy::forced()),
             Box::new(demotion::ToolDemotionStrategy),
         ];
         Self { strategies }

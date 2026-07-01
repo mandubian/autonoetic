@@ -478,6 +478,9 @@ prompt_budget:
   tool_definitions_max_tokens: 0
   warn_at_pct: 75.0
   margin_tokens: 4096
+  # DEPRECATED (no-op). Tool schemas are never compressed; stripping them to
+  # {"type": "object"} corrupted tool-calling on turn 1+. Tool tokens are now
+  # saved losslessly via provider tool-array caching (prompt_cache_enabled).
   compress_tool_schemas_after_turn_0: false
   # Maximum number of tool definitions sent per turn (0 = unlimited).
   # Excess tools are dropped from lowest tier first (Specialized → Workflow → Core).
