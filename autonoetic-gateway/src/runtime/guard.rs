@@ -876,6 +876,24 @@ mod tests {
         );
     }
 
+    /// Roster directory reads (`agent_list`, `agent_discover`) are idempotent
+    /// read-only probes and must also skip the `current_loops` reset (#701).
+    /// They are handled by the same `register_readonly_progress` path, so a
+    /// planner cannot use them to keep the no-progress counter pinned.
+    #[test]
+    fn roster_directory_reads_do_not_reset_loop_counter() {
+        let mut guard = LoopGuard::new(3);
+        assert!(guard.check_loop().is_ok()); // current_loops -> 1
+        assert!(guard.check_loop().is_ok()); // -> 2
+        guard.register_readonly_progress("agent_list", r#"{}"#); // still 2
+        assert!(guard.check_loop().is_ok()); // -> 3
+        guard.register_readonly_progress("agent_discover", r#"{"intent":"find researcher"}"#); // still 3
+        assert!(
+            guard.check_loop().is_err(), // -> 4
+            "roster directory reads must not reset current_loops"
+        );
+    }
+
     /// Sanity contrast: a genuine (non-read-only) success DOES reset the
     /// counter, so the read-only carve-out is what changes behavior.
     #[test]

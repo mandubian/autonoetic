@@ -111,9 +111,10 @@ pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
 /// `session-cc54cec3`, which wasted ~30 planner rounds this way).
 ///
 /// This is the vetted subset observed in the death-spiral post-mortem plus the
-/// obvious state-query tools. Being conservative is deliberate: labelling a
-/// tool that actually mutates state as read-only would let a real loop run
-/// unbounded, so only tools known to be pure reads are listed.
+/// obvious state-query tools (including roster directory reads). Being
+/// conservative is deliberate: labelling a tool that actually mutates state as
+/// read-only would let a real loop run unbounded, so only tools known to be
+/// pure reads are listed.
 pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -124,7 +125,9 @@ pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
             | "planframe_history"
             | "approval_list"
             | "approval_status"
+            | "agent_discover"
             | "agent_inspect"
+            | "agent_list"
             | "artifact_inspect"
             | "session_peek"
             | "tool_discover"
