@@ -960,8 +960,10 @@ fn fetch_approval_rows(client: &RoomClient, root_session_id: &str) -> Vec<Approv
         "root_session_id": root_session_id,
         "limit": 500u32,
         // Resolution events (`approval.cancelled`, `plan.withdrawn`) are Normal
-        // altitude — fetch at detail so superseded gates are not re-listed.
-        "min_altitude": "detail",
+        // altitude, gate lifecycle (`plan.pending`, `approval.approved`) is
+        // Attention — `normal` captures both while excluding high-volume Detail
+        // plumbing that would otherwise crowd out gates under `limit`.
+        "min_altitude": "normal",
     });
     let entries: Vec<SessionTimelineEntry> = match rpc(client, "session.timeline.list", params) {
         Ok(v) => v

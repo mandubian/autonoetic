@@ -875,6 +875,79 @@ fn planframe_amend_supersedes_pending_revision() {
     );
 }
 
+/// Race guard: if the prior revision's approval is no longer pending when an
+/// amend runs (operator decided it concurrently), supersession must be skipped
+/// — the old revision is NOT marked cancelled and NO `plan.withdrawn` is emitted.
+#[test]
+fn planframe_amend_skips_supersede_when_prior_approval_no_longer_pending() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-race/planner";
+
+    let propose = json!({
+        "title": "Initial plan",
+        "objective": "First draft",
+        "steps": [{ "step_id": "s1", "title": "Implement" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    // Simulate a concurrent operator decision: the v1 approval is no longer
+    // pending by the time the amend runs. (Any non-pending state makes the
+    // supersede's own cancel_approval fail with rows == 0.)
+    store
+        .cancel_approval(
+            &format!("apr-plan-{plan_id}-v1"),
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .expect("pre-cancel of v1 approval");
+
+    let amend = json!({
+        "plan_id": plan_id,
+        "steps": [
+            { "step_id": "s1", "title": "Implement" },
+            { "step_id": "s2", "title": "Package" }
+        ],
+        "reason": "Expanded scope"
+    });
+    registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    // Supersede was skipped: v1's revision status is untouched (not Cancelled).
+    let v1 = store.load_plan_frame_revision(&plan_id, 1).unwrap().unwrap();
+    assert_eq!(v1.status, PlanStatus::AwaitingApproval);
+
+    // No plan.withdrawn emitted for the amend.
+    let tl = store
+        .list_session_timeline("root-session-race", None, 50, None, None)
+        .unwrap();
+    assert!(
+        !tl.entries.iter().any(|e| e.event_type == "plan.withdrawn"),
+        "no plan.withdrawn should be emitted when the prior approval was already decided"
+    );
+
+    // v2 still created and awaiting approval.
+    let v2 = store.load_plan_frame_revision(&plan_id, 2).unwrap().unwrap();
+    assert_eq!(v2.status, PlanStatus::AwaitingApproval);
+}
+
 #[test]
 fn planframe_history_returns_full_revision_chain() {
     let dir = tempdir().unwrap();

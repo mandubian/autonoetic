@@ -185,7 +185,21 @@ fn supersede_pending_plan_revision(
 
     let now = now_rfc3339();
     let old_request_id = plan_approval_request_id(plan_id, old_version);
-    let _ = store.cancel_approval(&old_request_id, actor_id, &now);
+    // Only supersede if we actually cancelled a still-pending gate.
+    // `cancel_approval` errors when the row is no longer pending (rows == 0):
+    // if the operator decided (approved/rejected) the old revision concurrently,
+    // we must NOT withdraw an already-decided revision. Bail without touching
+    // the revision status or emitting `plan.withdrawn`.
+    if let Err(e) = store.cancel_approval(&old_request_id, actor_id, &now) {
+        tracing::debug!(
+            target: "plan_frame",
+            error = %e,
+            plan_id = %plan_id,
+            version = %old_version,
+            "skip supersede: prior revision approval no longer pending (decided concurrently or absent)"
+        );
+        return;
+    }
     if let Err(e) = store.update_plan_frame_status(
         plan_id,
         old_version,
