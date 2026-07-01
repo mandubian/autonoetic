@@ -2087,6 +2087,11 @@ impl AgentExecutor {
                             .as_ref()
                             .map(|c| c.prompt_budget.dedup_tool_results)
                             .unwrap_or(true),
+                        collapse_repeated_errors: self
+                            .config
+                            .as_ref()
+                            .map(|c| c.prompt_budget.collapse_repeated_errors)
+                            .unwrap_or(true),
                     },
                 ),
                 tools,
@@ -3203,6 +3208,12 @@ impl AgentExecutor {
                     result.clone(),
                 ));
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+                    // Recurring-error detector (#703): feed every result — the
+                    // method no-ops on non-errors and fingerprints both `ok:false`
+                    // errors and `any_failed` child failures (via failure_summary),
+                    // so one unrecoverable cause surfacing through different tools
+                    // trips the guard even when no single tool's budget is hit.
+                    self.guard.register_error(_name, result);
                     if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
                         let error_type = parsed.get("error_type")
                             .and_then(|v| v.as_str())

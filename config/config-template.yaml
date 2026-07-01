@@ -442,6 +442,14 @@ max_session_turns: 25
 #     this amount. Combined with read-only tools no longer resetting progress
 #     (#701), a spawn→probe→spawn death spiral reaches max_loops_without_progress
 #     instead of never. Set to 0 to disable (legacy behavior).
+#   recurring_error_window / recurring_error_distinct_tools: recurring-error
+#     detector (issue #703). Each error tool-result is fingerprinted (volatile
+#     ids/timestamps/numbers stripped) and tracked in a sliding window of the
+#     last `recurring_error_window` errors. When the same fingerprint surfaces
+#     from `recurring_error_distinct_tools` or more distinct tool names, the
+#     guard trips — catching an agent rotating through different tools that all
+#     hit one unrecoverable root cause (which per-tool budgets miss). Set the
+#     window to 0 to disable.
 #loop_guard:
 #  max_loops_without_progress: 10
 #  max_tool_failures: 8
@@ -451,6 +459,8 @@ max_session_turns: 25
 #  rotation_distinct_floor: 6
 #  roster_repeat_floor: 3
 #  child_failure_loop_penalty: 2
+#  recurring_error_window: 10
+#  recurring_error_distinct_tools: 3
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
@@ -489,6 +499,13 @@ prompt_budget:
   # tools often produces identical output across turns; this saves tokens while
   # keeping the full results in storage. Enabled by default.
   # dedup_tool_results: true
+  # Collapse *recurring errors* (issue #705). Unlike dedup_tool_results
+  # (byte-identical, consecutive), this fingerprints the error text (volatile
+  # ids/timestamps/numbers stripped) so the same root-cause failure surfacing
+  # non-consecutively — the hallmark of an install/spawn death spiral — is
+  # collapsed to a marker on all but its most recent occurrence. Full results
+  # remain in storage. Enabled by default.
+  # collapse_repeated_errors: true
   # Chars-per-token ratio used by the prompt-budget estimator. The default
   # (3.0) is conservative — it matches Qwen3 / Llama3 / GPT-4o on code/JSON
   # content, which is typically 2.2–3.5 chars/token. The previous default

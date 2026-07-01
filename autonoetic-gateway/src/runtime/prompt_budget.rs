@@ -30,6 +30,13 @@ pub struct HistorySanitizeOptions {
     /// short marker. The matching `tool_call_id` is preserved so the
     /// assistant/tool pairing required by providers remains valid.
     pub dedup_tool_results: bool,
+    /// When true, `Role::Tool` messages that carry the *same normalized error*
+    /// (issue #705) — even non-consecutively and with different volatile ids —
+    /// are collapsed to a short marker, keeping only the most recent occurrence
+    /// in full. Unlike `dedup_tool_results` (byte-identical, consecutive), this
+    /// uses the error fingerprint so a death-spiral's repeated failure context
+    /// is not re-sent in full on every round.
+    pub collapse_repeated_errors: bool,
 }
 
 impl Default for HistorySanitizeOptions {
@@ -46,6 +53,9 @@ impl Default for HistorySanitizeOptions {
             // Most repeated tool reads are uninformative after the first
             // occurrence; collapsing them saves tokens without losing storage.
             dedup_tool_results: true,
+            // A recurring error (death spiral) re-sends the same failure context
+            // every round; collapse all but the latest occurrence (#705).
+            collapse_repeated_errors: true,
         }
     }
 }
@@ -63,7 +73,11 @@ pub fn sanitize_history_for_request(
     history: &[Message],
     opts: &HistorySanitizeOptions,
 ) -> Vec<Message> {
-    if !opts.strip_reasoning && opts.max_tool_result_chars == 0 && !opts.dedup_tool_results {
+    if !opts.strip_reasoning
+        && opts.max_tool_result_chars == 0
+        && !opts.dedup_tool_results
+        && !opts.collapse_repeated_errors
+    {
         return history.to_vec();
     }
 
@@ -85,11 +99,64 @@ pub fn sanitize_history_for_request(
         })
         .collect();
 
+    if opts.collapse_repeated_errors {
+        // Fingerprint from the ORIGINAL content (truncation above can split the
+        // JSON so it no longer parses). `sanitized` is 1:1 with `history` by
+        // index, so decisions map directly.
+        collapse_repeated_error_results(&mut sanitized, history);
+    }
+
     if opts.dedup_tool_results {
         dedup_duplicate_tool_results(&mut sanitized);
     }
 
     sanitized
+}
+
+/// Collapse `Role::Tool` messages carrying the same normalized error fingerprint
+/// (issue #705). The most recent occurrence of each recurring error is kept in
+/// full; earlier ones are replaced with a short marker (keeping `tool_call_id`
+/// so provider assistant/tool pairing stays valid). `originals` supplies the
+/// pre-truncation content used to compute fingerprints.
+fn collapse_repeated_error_results(sanitized: &mut [Message], originals: &[Message]) {
+    use std::collections::HashMap;
+
+    // fingerprint -> (occurrence count, index of last occurrence)
+    let mut stats: HashMap<u64, (u32, usize)> = HashMap::new();
+
+    // Compute fingerprints once per original tool message, keyed by index, so
+    // the collapse pass below does not re-parse the same JSON.
+    let mut fingerprints: Vec<Option<u64>> = Vec::with_capacity(originals.len());
+    for (i, msg) in originals.iter().enumerate() {
+        if msg.role != Role::Tool || msg.content.is_empty() {
+            fingerprints.push(None);
+            continue;
+        }
+        let fp = crate::runtime::error_fingerprint::fingerprint_result(&msg.content);
+        if let Some(h) = fp {
+            let entry = stats.entry(h).or_insert((0, i));
+            entry.0 += 1;
+            entry.1 = i;
+        }
+        fingerprints.push(fp);
+    }
+
+    for (i, msg) in sanitized.iter_mut().enumerate() {
+        if msg.role != Role::Tool || msg.content.is_empty() {
+            continue;
+        }
+        let Some(fp) = fingerprints.get(i).copied().flatten() else {
+            continue;
+        };
+        if let Some(&(count, last_idx)) = stats.get(&fp) {
+            // Collapse only recurring errors, and never the latest occurrence.
+            if count >= 2 && i != last_idx {
+                msg.content =
+                    "[repeated error — same root cause as a later tool result; collapsed to save context]"
+                        .to_string();
+            }
+        }
+    }
 }
 
 /// Replace duplicate `Role::Tool` message contents with a short marker. The
@@ -1045,6 +1112,7 @@ mod tests {
                 strip_reasoning: true,
                 max_tool_result_chars: 2000,
                 dedup_tool_results: false,
+                collapse_repeated_errors: false,
             },
         );
 
@@ -1095,6 +1163,7 @@ mod tests {
                 strip_reasoning: false,
                 max_tool_result_chars: 0,
                 dedup_tool_results: false,
+                collapse_repeated_errors: false,
             },
         );
 
@@ -1119,6 +1188,7 @@ mod tests {
                 strip_reasoning: false,
                 max_tool_result_chars: 100,
                 dedup_tool_results: false,
+                collapse_repeated_errors: false,
             },
         );
 
@@ -1146,6 +1216,7 @@ mod tests {
                 strip_reasoning: false,
                 max_tool_result_chars: 100,
                 dedup_tool_results: false,
+                collapse_repeated_errors: false,
             },
         );
 
@@ -1203,6 +1274,7 @@ mod tests {
                 strip_reasoning: false,
                 max_tool_result_chars: 0,
                 dedup_tool_results: true,
+                collapse_repeated_errors: false,
             },
         );
 
@@ -1255,6 +1327,7 @@ mod tests {
                 strip_reasoning: false,
                 max_tool_result_chars: 0,
                 dedup_tool_results: true,
+                collapse_repeated_errors: false,
             },
         );
 
@@ -1292,6 +1365,7 @@ mod tests {
                 strip_reasoning: false,
                 max_tool_result_chars: 0,
                 dedup_tool_results: false,
+                collapse_repeated_errors: false,
             },
         );
 
@@ -1327,12 +1401,145 @@ mod tests {
                 strip_reasoning: false,
                 max_tool_result_chars: 100,
                 dedup_tool_results: true,
+                collapse_repeated_errors: false,
             },
         );
 
         // Both are truncated identically, so the second collapses.
         assert!(sanitized[0].content.contains("[..."));
         assert_eq!(sanitized[1].content, "[duplicate result — see above]");
+    }
+
+    fn tool_err(id: &str, wf: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: format!(
+                r#"{{"ok":false,"error":"workflow {wf} was reactivated and cannot accept child-session spawns"}}"#
+            ),
+            tool_calls: vec![],
+            tool_call_id: Some(id.to_string()),
+            reasoning_content: None,
+            reasoning_details: None,
+        }
+    }
+
+    /// #705: the same normalized error (different volatile workflow ids),
+    /// appearing non-consecutively, collapses to a marker on all but the most
+    /// recent occurrence; the latest is kept in full.
+    #[test]
+    fn collapse_repeated_errors_keeps_only_latest() {
+        let history = vec![
+            tool_err("tc_1", "wf-aaa111"),
+            Message::assistant("try another approach"),
+            tool_err("tc_2", "wf-bbb222"),
+            Message::assistant("try yet another"),
+            tool_err("tc_3", "wf-ccc333"),
+        ];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: false,
+                collapse_repeated_errors: true,
+            },
+        );
+
+        let marker = "[repeated error";
+        assert!(sanitized[0].content.starts_with(marker), "first collapsed");
+        assert_eq!(sanitized[0].tool_call_id.as_deref(), Some("tc_1"));
+        assert!(sanitized[2].content.starts_with(marker), "middle collapsed");
+        // Latest occurrence kept in full.
+        assert!(sanitized[4].content.contains("reactivated"));
+        assert!(!sanitized[4].content.starts_with(marker));
+        // Storage untouched.
+        assert!(history[0].content.contains("wf-aaa111"));
+    }
+
+    /// A one-off error is not collapsed (needs >= 2 occurrences).
+    #[test]
+    fn collapse_repeated_errors_leaves_single_error() {
+        let history = vec![tool_err("tc_1", "wf-solo")];
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: false,
+                collapse_repeated_errors: true,
+            },
+        );
+        assert!(sanitized[0].content.contains("reactivated"));
+    }
+
+    /// Distinct errors are not collapsed into each other.
+    #[test]
+    fn collapse_repeated_errors_ignores_distinct_errors() {
+        let history = vec![
+            Message {
+                role: Role::Tool,
+                content: r#"{"ok":false,"error":"disk full"}"#.to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: r#"{"ok":false,"error":"permission denied"}"#.to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: false,
+                collapse_repeated_errors: true,
+            },
+        );
+        assert!(sanitized[0].content.contains("disk full"));
+        assert!(sanitized[1].content.contains("permission denied"));
+    }
+
+    /// Successful (non-error) repeated results are left to `dedup_tool_results`,
+    /// not touched by the error-collapse pass.
+    #[test]
+    fn collapse_repeated_errors_ignores_successful_results() {
+        let history = vec![
+            Message {
+                role: Role::Tool,
+                content: r#"{"ok":true,"stdout":"same"}"#.to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: r#"{"ok":true,"stdout":"same"}"#.to_string(),
+                tool_calls: vec![],
+                tool_call_id: Some("tc_2".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 0,
+                dedup_tool_results: false,
+                collapse_repeated_errors: true,
+            },
+        );
+        assert!(sanitized[0].content.contains("stdout"));
+        assert!(sanitized[1].content.contains("stdout"));
     }
 
     #[test]
