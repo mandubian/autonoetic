@@ -1585,6 +1585,22 @@ impl AgentExecutor {
                 self.persona.as_deref(),
                 Some(guidance_rendered.as_str()),
             );
+            // Prompt-cache boundary (#): everything composed so far — foundation
+            // doctrine, SKILL instructions, tool/builtin guidance, output
+            // contract, persona, user context — is byte-identical across turns
+            // in this session, so it is safe to mark as a provider cache prefix.
+            // The volatile tails appended below (memory context, degradation
+            // notice, per-turn re-signed state attestation) must NOT be cached.
+            let system_cache_prefix_bytes = if self
+                .config
+                .as_ref()
+                .map(|c| c.prompt_budget.prompt_cache_enabled)
+                .unwrap_or(true)
+            {
+                Some(system_instructions.len())
+            } else {
+                None
+            };
             if let Some(ref snippet) = memory_context {
                 system_instructions.push_str("\n\n");
                 system_instructions.push_str(snippet);
@@ -2102,6 +2118,20 @@ impl AgentExecutor {
                 // Stable per-session key so providers that support prompt
                 // caching reuse the cached prompt prefix across turns.
                 prompt_cache_key: Some(session_id.clone()),
+                // Cache boundary: the leading `system_cache_prefix_bytes` of the
+                // system message are stable across turns; cache-capable drivers
+                // put a cache_control breakpoint there (Anthropic / OpenRouter
+                // Claude+Gemini). Clamped to the actual system-message length in
+                // case sanitization changed it.
+                system_cache_prefix_bytes: system_cache_prefix_bytes.map(|n| {
+                    n.min(
+                        history
+                            .iter()
+                            .find(|m| m.role == crate::llm::Role::System)
+                            .map(|m| m.content.len())
+                            .unwrap_or(0),
+                    )
+                }),
             };
 
             // --- Pre-process hook: transform input before LLM call ---

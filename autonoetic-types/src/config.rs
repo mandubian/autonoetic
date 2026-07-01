@@ -2536,6 +2536,18 @@ pub struct PromptBudgetConfig {
     #[serde(default = "default_collapse_repeated_errors")]
     pub collapse_repeated_errors: bool,
 
+    /// Mark the stable leading portion of the system prompt (foundation
+    /// doctrine + SKILL instructions + guidance + output contract) as a
+    /// provider prompt-cache prefix. Cache-capable drivers (Anthropic; and
+    /// OpenRouter when routing Claude/Gemini) attach
+    /// `cache_control: {type: ephemeral}` to that prefix so repeated turns in a
+    /// session re-read it at cache rates instead of full price; the volatile
+    /// per-turn tail (state attestation, degradation notice) is never cached.
+    /// OpenAI and llama.cpp reuse a stable prefix automatically regardless.
+    /// Enabled by default.
+    #[serde(default = "default_prompt_cache_enabled")]
+    pub prompt_cache_enabled: bool,
+
     /// Override the chars-per-token ratio used by the prompt budget
     /// estimator. `None` (the default) means "use the built-in default of
     /// 3.0 chars/token". Operators running a tokenizer that is known to
@@ -2573,6 +2585,10 @@ fn default_collapse_repeated_errors() -> bool {
     true
 }
 
+fn default_prompt_cache_enabled() -> bool {
+    true
+}
+
 impl Default for PromptBudgetConfig {
     fn default() -> Self {
         Self {
@@ -2588,6 +2604,7 @@ impl Default for PromptBudgetConfig {
             max_tool_result_chars: default_max_tool_result_chars(),
             dedup_tool_results: default_dedup_tool_results(),
             collapse_repeated_errors: default_collapse_repeated_errors(),
+            prompt_cache_enabled: default_prompt_cache_enabled(),
             chars_per_token: None,
         }
     }

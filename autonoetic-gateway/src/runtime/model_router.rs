@@ -421,6 +421,7 @@ impl ModelRouter for LlmClassifierRouter {
             metadata: None,
             thinking: None,
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         };
 
         let result = tokio::time::timeout(
