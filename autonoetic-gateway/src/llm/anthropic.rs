@@ -78,7 +78,7 @@ impl AnthropicDriver {
         });
 
         if !system_text.is_empty() {
-            body["system"] = json!(system_text.trim());
+            body["system"] = build_system_with_cache(&system_text, req.system_cache_prefix_bytes);
         }
 
         let t = req.temperature.or(self.provider.temperature);
@@ -111,6 +111,37 @@ impl AnthropicDriver {
         }
 
         body
+    }
+}
+
+/// Build the Anthropic `system` field, optionally splitting it at
+/// `prefix_bytes` and attaching `cache_control: {type: ephemeral}` to the
+/// stable leading block. Anthropic caches the prompt prefix (tools + the marked
+/// system block) so repeated turns re-read it at cache rates. Falls back to a
+/// plain trimmed string when no valid boundary is supplied.
+fn build_system_with_cache(system_text: &str, prefix_bytes: Option<usize>) -> serde_json::Value {
+    let ephemeral = || json!({ "type": "ephemeral" });
+    match prefix_bytes {
+        // Whole system is stable (no volatile tail this turn) → one cached block.
+        Some(n) if n >= system_text.len() && !system_text.trim().is_empty() => {
+            json!([{ "type": "text", "text": system_text.trim(), "cache_control": ephemeral() }])
+        }
+        // Stable prefix + volatile suffix → cache the prefix only.
+        Some(n) if n > 0 && n < system_text.len() && system_text.is_char_boundary(n) => {
+            let (prefix, suffix) = system_text.split_at(n);
+            let mut blocks = vec![json!({
+                "type": "text",
+                "text": prefix.trim_end(),
+                "cache_control": ephemeral(),
+            })];
+            let suffix = suffix.trim();
+            if !suffix.is_empty() {
+                blocks.push(json!({ "type": "text", "text": suffix }));
+            }
+            json!(blocks)
+        }
+        // No / invalid boundary → legacy plain string.
+        _ => json!(system_text.trim()),
     }
 }
 
@@ -468,5 +499,46 @@ fn parse_stop_reason(s: &str) -> StopReason {
         "max_tokens" => StopReason::MaxTokens,
         "tool_use" => StopReason::ToolUse,
         other => StopReason::Other(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_system_with_cache;
+
+    #[test]
+    fn splits_system_and_caches_stable_prefix() {
+        let system = "STABLE DOCTRINE\n\n[state attestation] turn=7";
+        let prefix = "STABLE DOCTRINE".len();
+        let v = build_system_with_cache(system, Some(prefix));
+        let arr = v.as_array().expect("structured system");
+        assert_eq!(arr[0]["text"], "STABLE DOCTRINE");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert!(arr[1]["cache_control"].is_null());
+        assert!(arr[1]["text"].as_str().unwrap().contains("turn=7"));
+    }
+
+    #[test]
+    fn whole_stable_system_is_one_cached_block() {
+        let system = "ALL STABLE";
+        let v = build_system_with_cache(system, Some(system.len()));
+        let arr = v.as_array().expect("structured system");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["text"], "ALL STABLE");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn no_boundary_falls_back_to_plain_string() {
+        let v = build_system_with_cache("plain system", None);
+        assert_eq!(v, serde_json::json!("plain system"));
+    }
+
+    #[test]
+    fn invalid_boundary_falls_back_to_plain_string() {
+        // A byte offset that isn't a char boundary must not panic — fall back.
+        let system = "héllo world"; // 'é' is 2 bytes at index 1..3
+        let v = build_system_with_cache(system, Some(2));
+        assert!(v.is_string(), "non-char-boundary must fall back to string");
     }
 }

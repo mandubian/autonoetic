@@ -34,6 +34,46 @@ fn model_supports_tools(model: &str) -> bool {
     true
 }
 
+/// Whether an OpenRouter model id routes to a provider that honors Anthropic-style
+/// `cache_control` breakpoints (Claude, Gemini). OpenRouter ids are namespaced
+/// (`anthropic/claude-…`, `google/gemini-…`); we also match bare family names.
+fn model_supports_openrouter_cache_control(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("anthropic/")
+        || m.starts_with("google/")
+        || m.contains("claude")
+        || m.contains("gemini")
+}
+
+/// Build an OpenRouter system-message `content` array that marks the stable
+/// leading `prefix_bytes` with `cache_control: {type: ephemeral}` and leaves the
+/// volatile suffix uncached. Falls back to the plain string when no valid
+/// boundary is supplied.
+fn openrouter_cached_system_content(
+    content: &str,
+    prefix_bytes: Option<usize>,
+) -> serde_json::Value {
+    let ephemeral = || json!({ "type": "ephemeral" });
+    match prefix_bytes {
+        Some(n) if n >= content.len() && !content.trim().is_empty() => {
+            json!([{ "type": "text", "text": content, "cache_control": ephemeral() }])
+        }
+        Some(n) if n > 0 && n < content.len() && content.is_char_boundary(n) => {
+            let (prefix, suffix) = content.split_at(n);
+            let mut parts = vec![json!({
+                "type": "text",
+                "text": prefix,
+                "cache_control": ephemeral(),
+            })];
+            if !suffix.trim().is_empty() {
+                parts.push(json!({ "type": "text", "text": suffix }));
+            }
+            json!(parts)
+        }
+        _ => json!(content),
+    }
+}
+
 fn model_is_reasoning_model(model: &str) -> bool {
     let m = model.to_lowercase();
     m.starts_with("o1")
@@ -64,6 +104,17 @@ impl OpenAiDriver {
     }
 
     fn build_body(&self, req: &CompletionRequest, stream: bool) -> serde_json::Value {
+        // OpenRouter passes `cache_control` through to Anthropic/Gemini models
+        // (OpenAI-family models cache automatically and ignore it). Only emit it
+        // for OpenRouter + a Claude/Gemini model with a stable prefix boundary,
+        // so strict OpenAI-compatible providers never see the extra field.
+        let cache_system = req.system_cache_prefix_bytes.is_some()
+            && matches!(
+                self.provider.capabilities.reasoning,
+                crate::llm::provider::ReasoningStyle::OpenRouterUnified
+            )
+            && model_supports_openrouter_cache_control(&self.provider.model);
+
         let messages: Vec<serde_json::Value> = req
             .messages
             .iter()
@@ -71,7 +122,14 @@ impl OpenAiDriver {
                 let mut msg = json!({ "role": m.role.as_str() });
 
                 if !m.content.is_empty() {
-                    msg["content"] = json!(m.content);
+                    if m.role == Role::System && cache_system {
+                        msg["content"] = openrouter_cached_system_content(
+                            &m.content,
+                            req.system_cache_prefix_bytes,
+                        );
+                    } else {
+                        msg["content"] = json!(m.content);
+                    }
                 }
                 if !m.tool_calls.is_empty() {
                     msg["tool_calls"] = json!(m
@@ -805,6 +863,7 @@ mod tests {
             metadata: None,
             thinking: Some(ThinkingConfig { effort, budget_tokens: budget }),
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         }
     }
 
@@ -986,6 +1045,7 @@ mod tests {
             metadata: None,
             thinking: None,
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         };
         let body = driver.build_body(&req, false);
         // reasoning_details replayed; plain reasoning_content suppressed.
@@ -1007,6 +1067,7 @@ mod tests {
             metadata: None,
             thinking: None,
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         };
         let body = driver.build_body(&req, false);
         assert_eq!(body["messages"][0]["reasoning_content"], "plain");
@@ -1029,6 +1090,63 @@ mod tests {
         req.prompt_cache_key = Some("session-abc".to_string());
         let body = driver.build_body(&req, false);
         assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    fn req_with_system(model: &str, system: &str, prefix_bytes: Option<usize>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            messages: vec![Message::system(system), Message::user("hi")],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            metadata: None,
+            thinking: None,
+            prompt_cache_key: None,
+            system_cache_prefix_bytes: prefix_bytes,
+        }
+    }
+
+    #[test]
+    fn openrouter_claude_marks_system_cache_prefix() {
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let system = "STABLE DOCTRINE\n\n[state] volatile";
+        let prefix = "STABLE DOCTRINE".len();
+        let body = driver.build_body(&req_with_system("anthropic/claude-sonnet-5", system, Some(prefix)), false);
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "system content must be structured, got {content}");
+        assert_eq!(content[0]["text"], "STABLE DOCTRINE");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert!(content[1]["cache_control"].is_null(), "volatile suffix must not be cached");
+        assert!(content[1]["text"].as_str().unwrap().contains("volatile"));
+    }
+
+    #[test]
+    fn openrouter_openai_model_leaves_system_plain() {
+        // OpenAI-family model via OpenRouter caches automatically — no cache_control.
+        let driver = driver_with("openai/gpt-5", ReasoningStyle::OpenRouterUnified);
+        let system = "STABLE DOCTRINE\n\n[state] volatile";
+        let prefix = "STABLE DOCTRINE".len();
+        let body = driver.build_body(&req_with_system("openai/gpt-5", system, Some(prefix)), false);
+        assert!(body["messages"][0]["content"].is_string(), "non-Claude/Gemini stays a plain string");
+    }
+
+    #[test]
+    fn plain_provider_never_gets_cache_control() {
+        // llama.cpp / groq (ReasoningStyle::None) rely on automatic prefix reuse.
+        let driver = driver_with("some-local-model", ReasoningStyle::None);
+        let system = "STABLE DOCTRINE\n\n[state] volatile";
+        let prefix = "STABLE DOCTRINE".len();
+        let body = driver.build_body(&req_with_system("some-local-model", system, Some(prefix)), false);
+        assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn openrouter_cache_control_gating_by_model() {
+        assert!(model_supports_openrouter_cache_control("anthropic/claude-sonnet-5"));
+        assert!(model_supports_openrouter_cache_control("google/gemini-2.5-pro"));
+        assert!(model_supports_openrouter_cache_control("some/claude-clone"));
+        assert!(!model_supports_openrouter_cache_control("openai/gpt-5"));
+        assert!(!model_supports_openrouter_cache_control("deepseek/deepseek-v4"));
     }
 
     #[test]

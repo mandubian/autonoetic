@@ -417,6 +417,16 @@ pub struct CompletionRequest {
     /// providers that support it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Byte length of the leading portion of the (single) system message that
+    /// is STABLE across turns and therefore safe to mark as a provider cache
+    /// prefix. The volatile suffix (state attestation, degradation notice,
+    /// per-turn memory context) follows this boundary. `None` disables the
+    /// cache breakpoint. Cache-capable drivers (Anthropic; OpenRouter routing
+    /// Claude/Gemini) split the system content here and attach
+    /// `cache_control: {type: ephemeral}` to the prefix block; other providers
+    /// ignore it (llama.cpp/OpenAI reuse a stable prefix automatically).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_cache_prefix_bytes: Option<usize>,
 }
 
 impl CompletionRequest {
@@ -430,6 +440,7 @@ impl CompletionRequest {
             metadata: None,
             thinking: None,
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         }
     }
 }

@@ -514,6 +514,14 @@ prompt_budget:
   # collapsed to a marker on all but its most recent occurrence. Full results
   # remain in storage. Enabled by default.
   # collapse_repeated_errors: true
+  # Mark the stable leading portion of the system prompt (foundation doctrine +
+  # SKILL instructions + guidance + output contract) as a provider prompt-cache
+  # prefix. Cache-capable drivers attach cache_control:{type:ephemeral} there —
+  # Anthropic (otherwise sends NO cache markers → caching was off) and OpenRouter
+  # when routing Claude/Gemini. The volatile per-turn tail (state attestation,
+  # degradation notice) sits after the breakpoint and is never cached. OpenAI and
+  # llama.cpp reuse a stable prefix automatically. Enabled by default.
+  # prompt_cache_enabled: true
   # Chars-per-token ratio used by the prompt-budget estimator. The default
   # (3.0) is conservative — it matches Qwen3 / Llama3 / GPT-4o on code/JSON
   # content, which is typically 2.2–3.5 chars/token. The previous default
