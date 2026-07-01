@@ -630,12 +630,48 @@ fn build_header(
 }
 
 /// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
-fn count_active_gates(entries: &[SessionTimelineEntry], resolved: &HashSet<String>) -> usize {
-    entries.iter().filter(|e| {
-        matches!(e.event_type.as_str(),
-            "approval.pending" | "plan.pending" | "user.ask.pending" | "escalation.pending"
-        ) && !resolved.contains(approval_or_interaction_id(e).as_deref().unwrap_or(&e.event_id))
-    }).count()
+/// Delegates to `gate_for_entry` so plan gates honour version-keyed resolution
+/// (a superseded `plan.pending` vN is no longer counted).
+fn count_active_gates(
+    entries: &[SessionTimelineEntry],
+    resolved: &HashSet<String>,
+    acted: &HashSet<String>,
+) -> usize {
+    entries
+        .iter()
+        .filter(|e| gate_for_entry(e, resolved, acted).is_some())
+        .count()
+}
+
+/// Map a plan approval request id (`apr-plan-{plan_id}-vN`) back to the
+/// version-keyed plan gate key (`{plan_id}:vN`) so a cancelled plan approval
+/// resolves the matching `plan.pending` — even on sessions predating
+/// `plan.withdrawn`.
+fn plan_gate_key_from_approval_id(request_id: &str) -> Option<String> {
+    let rest = request_id.strip_prefix("apr-plan-")?;
+    let (plan_id, version) = rest.rsplit_once("-v")?;
+    Some(format!("{plan_id}:v{version}"))
+}
+
+/// Fold one timeline entry's resolution effect into `resolved`. Shared by the
+/// initial fetch and the incremental page loop so both stay consistent.
+fn record_timeline_resolution(resolved: &mut HashSet<String>, e: &SessionTimelineEntry) {
+    match e.event_type.as_str() {
+        "approval.approved" | "approval.rejected" | "approval.cancelled" => {
+            if let Some(id) = &e.refs.approval_request_id {
+                resolved.insert(id.clone());
+                if let Some(key) = plan_gate_key_from_approval_id(id) {
+                    resolved.insert(key);
+                }
+            }
+        }
+        "plan.approved" | "plan.withdrawn" | "plan.cancelled" | "plan.rejected" => {
+            if let Some(key) = plan_gate_key(e) {
+                resolved.insert(key);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn approval_or_interaction_id(e: &SessionTimelineEntry) -> Option<String> {
@@ -673,7 +709,7 @@ fn collect_approval_rows(
                 ("APPROVAL", e.refs.approval_request_id.clone()
                     .or_else(|| approval_or_interaction_id(e)))
             }
-            "plan.pending" => ("PLAN", e.refs.plan_id.clone()),
+            "plan.pending" => ("PLAN", plan_gate_key(e)),
             "user.ask.pending" => {
                 ("ASK", e.refs.interaction_id.clone()
                     .or_else(|| approval_or_interaction_id(e)))
@@ -923,7 +959,9 @@ fn fetch_approval_rows(client: &RoomClient, root_session_id: &str) -> Vec<Approv
     let params = serde_json::json!({
         "root_session_id": root_session_id,
         "limit": 500u32,
-        "min_altitude": "attention",
+        // Resolution events (`approval.cancelled`, `plan.withdrawn`) are Normal
+        // altitude — fetch at detail so superseded gates are not re-listed.
+        "min_altitude": "detail",
     });
     let entries: Vec<SessionTimelineEntry> = match rpc(client, "session.timeline.list", params) {
         Ok(v) => v
@@ -937,16 +975,10 @@ fn fetch_approval_rows(client: &RoomClient, root_session_id: &str) -> Vec<Approv
             .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
-    let resolved: HashSet<String> = entries
-        .iter()
-        .filter_map(|e| match e.event_type.as_str() {
-            "approval.approved" | "approval.rejected" | "approval.cancelled" => {
-                e.refs.approval_request_id.clone()
-            }
-            "plan.approved" => e.refs.plan_id.clone(),
-            _ => None,
-        })
-        .collect();
+    let mut resolved: HashSet<String> = HashSet::new();
+    for e in &entries {
+        record_timeline_resolution(&mut resolved, e);
+    }
     collect_approval_rows(&entries, &resolved, &HashSet::new())
 }
 
@@ -3899,7 +3931,7 @@ pub fn run(
         if repaint_after_input {
             let early_spinner = SPINNER_FRAMES[spinner_frame];
             let early_stats = compute_session_stats(&entries);
-            let early_gate_count = count_active_gates(&entries, &resolved);
+            let early_gate_count = count_active_gates(&entries, &resolved, &acted);
             let early_approval_rows = collect_approval_rows(&entries, &resolved, &acted);
             let early_pending_plans =
                 unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
@@ -4065,19 +4097,7 @@ pub fn run(
                             cursor = Some(last.event_id.clone());
                         }
                         for e in &page.entries {
-                            if matches!(
-                                e.event_type.as_str(),
-                                "approval.approved" | "approval.rejected" | "approval.cancelled"
-                            ) {
-                                if let Some(id) = &e.refs.approval_request_id {
-                                    resolved.insert(id.clone());
-                                }
-                            }
-                            if e.event_type == "plan.approved" {
-                                if let Some(key) = plan_gate_key(e) {
-                                    resolved.insert(key);
-                                }
-                            }
+                            record_timeline_resolution(&mut resolved, e);
                             // Emergency stop terminates the session tree; stop
                             // treating it as async-processing so idle
                             // optimization kicks in immediately.
@@ -4403,7 +4423,7 @@ pub fn run(
         } else {
             compute_viewport_offset(safe_selected, list_height, &row_heights)
         };
-        let gate_count = count_active_gates(&entries, &resolved);
+        let gate_count = count_active_gates(&entries, &resolved, &acted);
         let approval_rows = collect_approval_rows(&entries, &resolved, &acted);
         let info_panel = if info_panel_open {
             Some(build_info_panel(
@@ -7583,8 +7603,49 @@ mod tests {
         v1_pending.payload = Some(r#"{"plan_id":"plan-1","version":1}"#.into());
 
         let entries = vec![v1_pending];
-        let mut resolved = HashSet::from(["plan-1:v1".to_string()]);
+        let resolved = HashSet::from(["plan-1:v1".to_string()]);
         assert!(find_active_gate(&entries, &resolved, &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn plan_v1_pending_hidden_when_plan_approval_cancelled() {
+        let mut v1_pending = gate_entry("plan.pending");
+        v1_pending.refs.plan_id = Some("plan-2c568f2ca6c3".into());
+        v1_pending.payload =
+            Some(r#"{"plan_id":"plan-2c568f2ca6c3","version":1}"#.into());
+
+        let mut v1_cancelled = gate_entry("approval.cancelled");
+        v1_cancelled.refs.approval_request_id =
+            Some("apr-plan-plan-2c568f2ca6c3-v1".into());
+
+        let entries = vec![v1_pending, v1_cancelled];
+        let mut resolved = HashSet::new();
+        record_timeline_resolution(&mut resolved, &entries[1]);
+        assert!(find_active_gate(&entries, &resolved, &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn plan_v1_pending_hidden_after_superseded_by_amend() {
+        let mut v1_pending = gate_entry("plan.pending");
+        v1_pending.refs.plan_id = Some("plan-1".into());
+        v1_pending.payload = Some(r#"{"plan_id":"plan-1","version":1}"#.into());
+
+        let mut v1_withdrawn = gate_entry("plan.withdrawn");
+        v1_withdrawn.refs.plan_id = Some("plan-1".into());
+        v1_withdrawn.payload =
+            Some(r#"{"plan_id":"plan-1","version":1,"superseded_by":2}"#.into());
+
+        let mut v2_pending = gate_entry("plan.pending");
+        v2_pending.refs.plan_id = Some("plan-1".into());
+        v2_pending.payload = Some(r#"{"plan_id":"plan-1","version":2}"#.into());
+
+        let entries = vec![v1_pending, v1_withdrawn, v2_pending];
+        let mut resolved = HashSet::new();
+        record_timeline_resolution(&mut resolved, &entries[1]);
+        let gate = find_active_gate(&entries, &resolved, &HashSet::new()).unwrap();
+        assert_eq!(gate.id, "plan-1");
+        assert_eq!(gate.kind, GateKind::Plan);
+        assert_eq!(count_active_gates(&entries, &resolved, &HashSet::new()), 1);
     }
 
     #[test]

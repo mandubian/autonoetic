@@ -169,6 +169,73 @@ pub fn plan_approval_request_id(plan_id: &str, version: u32) -> String {
     format!("apr-plan-{plan_id}-v{version}")
 }
 
+/// Close a still-pending plan revision superseded by a newer amendment: cancel
+/// its approval gate, mark the revision `cancelled`, and emit `plan.withdrawn`
+/// so timeline consumers stop offering the old gate.
+fn supersede_pending_plan_revision(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    plan_id: &str,
+    old_version: u32,
+    superseded_by: u32,
+    session_id: &str,
+    root_session_id: &str,
+    actor_id: &str,
+) {
+    use autonoetic_types::session_timeline::TimelineRefs;
+
+    let now = now_rfc3339();
+    let old_request_id = plan_approval_request_id(plan_id, old_version);
+    let _ = store.cancel_approval(&old_request_id, actor_id, &now);
+    if let Err(e) = store.update_plan_frame_status(
+        plan_id,
+        old_version,
+        PlanStatus::Cancelled,
+        Some(actor_id),
+        Some(&now),
+    ) {
+        tracing::warn!(
+            target: "plan_frame",
+            error = %e,
+            plan_id = %plan_id,
+            version = %old_version,
+            "failed to mark superseded plan revision cancelled"
+        );
+    }
+
+    let role = crate::runtime::session_timeline::derive_role(actor_id);
+    let principal = autonoetic_types::principal::Principal::agent(actor_id.to_string());
+    let refs = TimelineRefs {
+        plan_id: Some(plan_id.to_string()),
+        approval_request_id: Some(old_request_id),
+        ..Default::default()
+    };
+    let event = crate::runtime::session_timeline::build_timeline_event(
+        root_session_id.to_string(),
+        session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        "plan.withdrawn",
+        None,
+        Some(serde_json::json!({
+            "plan_id": plan_id,
+            "version": old_version,
+            "superseded_by": superseded_by,
+            "reason": "superseded by amended revision",
+        })),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(
+            target: "session_timeline",
+            error = %e,
+            plan_id = %plan_id,
+            version = %old_version,
+            "plan.withdrawn timeline emit failed (supersede)"
+        );
+    }
+}
+
 /// Create the canonical `ApprovalRequest` for a plan revision.
 /// The approval row lives in the standard `approvals` table; the plan content
 /// remains in `plan_frames`.
@@ -1237,16 +1304,19 @@ impl NativeTool for PlanFrameAmendTool {
         // Keep the approval request aligned with the latest revision (#565).
         // Cosmetic amendments that inherit approval need no new gate. Envelope
         // changes (or amendments on a still-pending revision) open a new gate
-        // for the new revision and cancel any still-pending gate for the old
-        // revision without changing the old revision's plan status.
+        // for the new revision and supersede any still-pending gate for the old
+        // revision (cancel approval, mark revision cancelled, emit plan.withdrawn).
         if !inherit {
             let session_id = _session_id.unwrap_or(&current.root_session_id);
             if current.status == PlanStatus::AwaitingApproval {
-                let old_request_id = plan_approval_request_id(&current.plan_id, old_version);
-                let _ = store.cancel_approval(
-                    &old_request_id,
+                supersede_pending_plan_revision(
+                    &store,
+                    &current.plan_id,
+                    old_version,
+                    new_version,
+                    session_id,
+                    &current.root_session_id,
                     &manifest.agent.id,
-                    &now_rfc3339(),
                 );
             }
             if let Err(e) = create_plan_approval_request(
