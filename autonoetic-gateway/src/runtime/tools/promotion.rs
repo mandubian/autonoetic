@@ -106,7 +106,7 @@ impl NativeTool for PromotionRecordTool {
                     },
                     "execution_trace_id": {
                         "type": "string",
-                        "description": "Execution trace id from a sandbox/artifact run. Required for unit_test_runner, static_evaluator, sealed_evaluator, and evaluator roles. pass is derived from exit_code=0."
+                        "description": "UUID returned as execution_trace_id on the artifact_exec or sandbox_exec result for this run. Required for unit_test_runner, static_evaluator, sealed_evaluator, and evaluator roles. pass is derived from exit_code=0."
                     },
                     "pass": {
                         "type": "boolean",
@@ -156,7 +156,8 @@ impl NativeTool for PromotionRecordTool {
             priority: 10,
             prose: "**Recording your verdict.** When your evaluation/audit reaches a verdict, call \
 `promotion_record` with the `artifact_ref` you reviewed. Execution roles (`unit_test_runner`, \
-`sealed_evaluator`) must attach `execution_trace_id` from the run — the gateway \
+`sealed_evaluator`) must attach `execution_trace_id` from the run — copy the UUID from the \
+`artifact_exec` / `sandbox_exec` tool result (`execution_trace_id` field); the gateway \
 derives `pass` from `exit_code=0`; do not declare success without a trace. The `auditor` and \
 `static_evaluator` roles set `pass` explicitly; only `critical` findings can veto an otherwise-passing \
 audit. Include `findings` and `summary` as advisory annotation. Use those exact field names — not \
@@ -284,7 +285,7 @@ call this — e.g. no tests found; follow that role-specific guidance.)"
                         )
                         .with_code("missing_execution_evidence")
                         .with_repair_hint(
-                            "Run the evaluation in sandbox/artifact_exec, then attach the returned execution trace id.",
+                            "Run the evaluation in sandbox/artifact_exec, then attach the execution_trace_id UUID from that tool result.",
                         )
                         .to_error_response(),
                     );
@@ -302,6 +303,10 @@ call this — e.g. no tests found; follow that role-specific guidance.)"
                         None::<String>,
                     )
                     .with_code("execution_trace_not_found")
+                    .with_repair_hint(
+                        "Copy the execution_trace_id UUID from your artifact_exec or sandbox_exec \
+                         tool result. Do not use artifact_ref, session_id, file paths, or digests.",
+                    )
                     .to_error_response());
                 };
                 let pass = crate::runtime::promotion_evidence::trace_indicates_pass(&trace);

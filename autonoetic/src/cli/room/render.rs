@@ -1302,6 +1302,11 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "approval.cancelled" => format!("approval cancelled ({})", field("request_id").unwrap_or_default()),
         "plan.pending" => format!("plan proposed: {}", field("title").unwrap_or_default()),
         "plan.approved" => format!("plan approved ({})", field("plan_id").unwrap_or_default()),
+        "plan.withdrawn" => format!(
+            "plan withdrawn v{} (superseded by v{})",
+            field("version").unwrap_or_else(|| "?".into()),
+            field("superseded_by").unwrap_or_else(|| "?".into()),
+        ),
         "wiki.proposed" => format!("wiki proposed: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
         "wiki.promoted" => format!("wiki promoted: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
         "wiki.rejected" => format!("wiki rejected: {} — {}", field("title").unwrap_or_default(), field("reason").unwrap_or_else(|| "no reason".into())),
