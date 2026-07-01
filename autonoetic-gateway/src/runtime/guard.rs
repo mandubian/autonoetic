@@ -145,6 +145,13 @@ pub struct LoopGuard {
     pub last_progress_fingerprint: Option<(String, u64)>,
     pub consecutive_progress_count: u32,
     pub child_failure_count: u32,
+    /// Loop-counter penalty applied on each child failure (#704). A queued
+    /// `agent_spawn` returns `ok: true` and resets `current_loops` via
+    /// `register_progress`, but if that child later fails the spawn produced
+    /// no net progress — so `register_child_failure` advances `current_loops`
+    /// by this amount (it does NOT reset it). 0 restores the legacy behavior.
+    #[serde(default = "default_child_failure_loop_penalty")]
+    pub child_failure_loop_penalty: u32,
     /// Repair-loop-aware accounting (RFC D.4). When `repair_mode` is true,
     /// `check_loop` counts against the repair budget instead of
     /// `max_loops_without_progress`, so a healthy repair cycle does not trip
@@ -189,6 +196,7 @@ impl LoopGuard {
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            child_failure_loop_penalty: default_child_failure_loop_penalty(),
             recent_fingerprints: VecDeque::new(),
             trip_reason: None,
             repair_mode: false,
@@ -215,6 +223,7 @@ impl LoopGuard {
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            child_failure_loop_penalty: cfg.child_failure_loop_penalty,
             recent_fingerprints: VecDeque::new(),
             trip_reason: None,
             repair_mode: false,
@@ -376,8 +385,20 @@ impl LoopGuard {
     }
 
     /// Track a child agent task failure (from workflow.wait returning any_failed: true).
+    ///
+    /// Also advances `current_loops` by `child_failure_loop_penalty` (#704): the
+    /// `agent_spawn` that queued this child reset the no-progress counter when it
+    /// returned `ok: true`, but a failed child means that spawn produced no net
+    /// progress. This penalizes the loop counter (it does NOT reset it), so a
+    /// spawn → probe → spawn → probe death spiral reaches
+    /// `max_loops_without_progress` after a couple of child-failure cycles
+    /// instead of never. `child_failure_count` (the separate P-7.20 budget) is
+    /// still incremented and is unaffected by progress resets.
     pub fn register_child_failure(&mut self) {
         self.child_failure_count += 1;
+        self.current_loops = self
+            .current_loops
+            .saturating_add(self.child_failure_loop_penalty);
     }
 
     /// Track an LLM transport/endpoint failure. Counts consecutively — a
@@ -399,7 +420,19 @@ impl LoopGuard {
     /// This prevents agents from spinning on repeated identical successful calls
     /// (e.g., web.search returning the same cached results).
     pub fn register_progress(&mut self, tool_name: &str, arguments: &str) {
-        self.register_progress_inner(tool_name, arguments, false);
+        self.register_progress_inner(tool_name, arguments, false, false);
+    }
+
+    /// Track a successful call to a read-only, side-effect-free tool (#701).
+    /// Read-only probes (`resolve`, `workflow_state`, `planframe_get`,
+    /// `approval_list`, `knowledge_search`, …) advance no workflow, so they must
+    /// NOT reset `current_loops` — otherwise a planner can interleave one probe
+    /// between every failed mutation and keep `max_loops_without_progress` from
+    /// ever tripping. The rotating-polling window and roster fast-path are still
+    /// updated (a read-only tool is the primary rotation candidate); only the
+    /// `current_loops` reset is skipped.
+    pub fn register_readonly_progress(&mut self, tool_name: &str, arguments: &str) {
+        self.register_progress_inner(tool_name, arguments, false, true);
     }
 
     /// Track a successful tool call whose result carried
@@ -409,7 +442,7 @@ impl LoopGuard {
     /// progress accounting (max_loops_without_progress / consecutive
     /// progress count) is otherwise unchanged.
     pub fn register_progress_terminal(&mut self, tool_name: &str, arguments: &str) {
-        self.register_progress_inner(tool_name, arguments, true);
+        self.register_progress_inner(tool_name, arguments, true, false);
     }
 
     fn register_progress_inner(
@@ -417,6 +450,7 @@ impl LoopGuard {
         tool_name: &str,
         arguments: &str,
         terminal_side_effect: bool,
+        read_only: bool,
     ) {
         let fp = compute_fingerprint(
             tool_name,
@@ -481,8 +515,12 @@ impl LoopGuard {
             });
         }
 
-        let would_reset_loops = is_new
-            || self.consecutive_progress_count <= self.max_consecutive_same_progress;
+        // Read-only tools never reset the no-progress counter (#701). The
+        // fingerprint window and roster fast-path above still ran, so rotating
+        // read-only polling is still caught — we only skip the `current_loops`
+        // reset and its budget bookkeeping.
+        let would_reset_loops = !read_only
+            && (is_new || self.consecutive_progress_count <= self.max_consecutive_same_progress);
 
         if would_reset_loops {
             let allowed_by_budget = match self.progress_budget_tools.get(tool_name) {
@@ -536,6 +574,7 @@ impl Default for LoopGuard {
             last_progress_fingerprint: None,
             consecutive_progress_count: 0,
             child_failure_count: 0,
+            child_failure_loop_penalty: default_child_failure_loop_penalty(),
             recent_fingerprints: VecDeque::new(),
             trip_reason: None,
             repair_mode: false,
@@ -620,6 +659,10 @@ fn default_roster_repeat_floor() -> u32 {
 
 fn default_max_llm_failures() -> u32 {
     3
+}
+
+fn default_child_failure_loop_penalty() -> u32 {
+    2
 }
 
 /// Read-only roster directory tools whose results are idempotent: repeating
@@ -813,6 +856,122 @@ mod tests {
             guard.last_trip_reason(),
             Some(crate::runtime::guard::LoopGuardTripReason::ChildFailureBudget { .. })
         ));
+    }
+
+    /// #701: a read-only probe must NOT reset `current_loops`. Without the fix,
+    /// interleaving one probe between every no-op turn keeps the guard from
+    /// ever tripping. With it, `register_readonly_progress` leaves the counter
+    /// climbing so `max_loops_without_progress` still fires.
+    #[test]
+    fn readonly_progress_does_not_reset_loop_counter() {
+        let mut guard = LoopGuard::new(3);
+        assert!(guard.check_loop().is_ok()); // current_loops -> 1
+        assert!(guard.check_loop().is_ok()); // -> 2
+        // A read-only probe returns ok but must not reset the counter.
+        guard.register_readonly_progress("workflow_state", r#"{}"#);
+        assert!(guard.check_loop().is_ok()); // -> 3
+        assert!(
+            guard.check_loop().is_err(),
+            "read-only progress must not have reset current_loops"
+        );
+    }
+
+    /// Roster directory reads (`agent_list`, `agent_discover`) are idempotent
+    /// read-only probes and must also skip the `current_loops` reset (#701).
+    /// They are handled by the same `register_readonly_progress` path, so a
+    /// planner cannot use them to keep the no-progress counter pinned.
+    #[test]
+    fn roster_directory_reads_do_not_reset_loop_counter() {
+        let mut guard = LoopGuard::new(3);
+        assert!(guard.check_loop().is_ok()); // current_loops -> 1
+        assert!(guard.check_loop().is_ok()); // -> 2
+        guard.register_readonly_progress("agent_list", r#"{}"#); // still 2
+        assert!(guard.check_loop().is_ok()); // -> 3
+        guard.register_readonly_progress("agent_discover", r#"{"intent":"find researcher"}"#); // still 3
+        assert!(
+            guard.check_loop().is_err(), // -> 4
+            "roster directory reads must not reset current_loops"
+        );
+    }
+
+    /// Sanity contrast: a genuine (non-read-only) success DOES reset the
+    /// counter, so the read-only carve-out is what changes behavior.
+    #[test]
+    fn mutating_progress_still_resets_loop_counter() {
+        let mut guard = LoopGuard::new(3);
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        guard.register_progress("content_write", r#"{"name":"out","content":"x"}"#);
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_ok());
+        assert!(guard.check_loop().is_err());
+    }
+
+    /// Read-only rotation is still caught by the rotating-polling detector —
+    /// the fingerprint window keeps filling even though `current_loops` never
+    /// resets. Guards against the carve-out silently disabling detector #3.
+    #[test]
+    fn readonly_progress_still_feeds_rotation_detector() {
+        let mut guard = rotation_guard(8, 5);
+        let rotation = [
+            ("workflow_state", r#"{}"#),
+            ("planframe_get", r#"{}"#),
+            ("approval_list", r#"{}"#),
+            ("promotion_query", r#"{}"#),
+            ("resolve", r#"{"name":"f"}"#),
+        ];
+        for _ in 0..3 {
+            for (tool, args) in &rotation {
+                guard.register_readonly_progress(tool, args);
+                if guard.last_trip_reason().is_some() {
+                    assert!(matches!(
+                        guard.last_trip_reason().unwrap(),
+                        LoopGuardTripReason::RotatingPollingPattern { .. }
+                    ));
+                    return;
+                }
+            }
+        }
+        panic!("rotating-polling detector should trip on read-only rotation");
+    }
+
+    /// #704: a child failure penalizes `current_loops` (default penalty 2) in
+    /// addition to bumping `child_failure_count`. This makes a spawn→probe
+    /// death spiral trip `NoMeaningfulProgress` even when the child budget
+    /// hasn't been reached.
+    #[test]
+    fn child_failure_penalizes_loop_counter() {
+        let mut guard = LoopGuard::new(5);
+        assert_eq!(guard.child_failure_loop_penalty, 2);
+        // A spawn queued ok and reset progress.
+        guard.register_progress("agent_spawn", r#"{"agent_id":"builder.default"}"#);
+        assert_eq!(guard.current_loops, 0);
+        // The child later fails: +2 to current_loops, +1 to child_failure_count.
+        guard.register_child_failure();
+        assert_eq!(guard.current_loops, 2);
+        assert_eq!(guard.child_failure_count, 1);
+        guard.register_child_failure(); // current_loops -> 4
+        assert_eq!(guard.current_loops, 4);
+        // 4 < 5 loop budget and 2 < 5 child budget, so still ok...
+        assert!(guard.check_loop().is_ok()); // check_loop bumps to 5
+        // ...next check_loop trips on NoMeaningfulProgress, not child budget.
+        let err = guard.check_loop().expect_err("loop budget should trip");
+        assert!(err.to_string().contains("meaningful progress"), "{err}");
+    }
+
+    /// The penalty is configurable; 0 restores legacy behavior (child failure
+    /// only touches `child_failure_count`).
+    #[test]
+    fn child_failure_penalty_zero_is_legacy_behavior() {
+        let cfg = autonoetic_types::config::LoopGuardConfig {
+            child_failure_loop_penalty: 0,
+            ..Default::default()
+        };
+        let mut guard = LoopGuard::with_config(&cfg);
+        guard.register_child_failure();
+        assert_eq!(guard.current_loops, 0, "penalty 0 must not touch current_loops");
+        assert_eq!(guard.child_failure_count, 1);
     }
 
     #[test]

@@ -449,13 +449,14 @@ Controls the per-session runaway loop detection. Independent of `max_session_tur
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `loop_guard.max_loops_without_progress` | u32 | `5` | Maximum turns without meaningful progress before suspension. Reset by any tool call returning `ok: true` with a new (tool, arguments) fingerprint. |
+| `loop_guard.max_loops_without_progress` | u32 | `5` | Maximum turns without meaningful progress before suspension. Reset by mutating tool calls that count as progress (a new or still-allowed (tool, arguments) fingerprint, up to `max_consecutive_same_progress` repeats). Read-only, side-effect-free tools (`resolve`, `workflow_state`, `planframe_get`, `approval_list`, `knowledge_search`, …) do NOT reset it (issue #701) — they advance no workflow, so a planner cannot keep the counter pinned by interleaving one probe between every failed mutation. |
 | `loop_guard.max_tool_failures` | u32 | `5` | Maximum total failures per tool name before suspension. NOT reset by `register_progress()`. Catches alternating-failure patterns where the same tool keeps failing regardless of arguments. |
 | `loop_guard.max_consecutive_same_progress` | u32 | `1` | Number of consecutive identical (tool, arguments) calls allowed before repeats stop counting as progress. Default `1` means the first call counts as progress, but the second identical call does not. |
 | `loop_guard.max_child_failures` | u32 | `5` | Maximum total child-agent spawn failures before suspension. Prevents agents from repeatedly spawning failing children. |
 | `loop_guard.rotation_window_size` | usize | `16` | **Rotating-polling detector window (issue #287).** *System-config only* (not overridable from agent manifests). The detector tracks the last N successful-tool-call fingerprints; trips when the window is full and has only `rotation_distinct_floor` or fewer distinct values. Set to `0` to disable the detector entirely. |
 | `loop_guard.rotation_distinct_floor` | usize | `6` | **Rotating-polling detector floor (issue #287).** *System-config only* (not overridable from agent manifests). When the window is full and the distinct fingerprint count is `<=` this value, the guard trips. Default `6` paired with default window `16` means any rotation that uses 6 or fewer unique calls in the last 16 trips; healthy varied work with 7+ unique calls passes. |
 | `loop_guard.roster_repeat_floor` | u32 | `3` | **Redundant-roster-polling fast path.** Trips when a read-only roster tool (`agent_list`, `agent_inspect`, `agent_discover`) is called this many times consecutively with the same normalized arguments — without waiting for `rotation_window_size` to fill. These directory reads are idempotent (re-listing never adds fields), so a tight repeat is a stuck spawn, not progress. The corrective trip message tells the agent that reasoning agents take a free-text `message` and to spawn directly or end the turn. Set to `0` to disable the fast path (the generic rotating-polling detector still applies). |
+| `loop_guard.child_failure_loop_penalty` | u32 | `2` | **Child-failure loop penalty (issue #704).** Loops added to `current_loops` on each child task failure (`workflow_wait` returning `any_failed: true`). A queued `agent_spawn` returns `ok: true` and resets progress, but a child that later fails means that spawn produced no net progress — so each failure *advances* (does not reset) the no-progress counter by this amount, in addition to bumping `max_child_failures`'s separate budget. Combined with read-only tools no longer resetting progress (#701), a `spawn → probe → spawn` death spiral reaches `max_loops_without_progress` after a couple of cycles instead of never. Set to `0` to disable (legacy behavior). |
 
 Example:
 
@@ -468,6 +469,7 @@ loop_guard:
   rotation_window_size: 16
   rotation_distinct_floor: 6
   roster_repeat_floor: 3
+  child_failure_loop_penalty: 2
 ```
 
 The loop guard trips when ANY of these conditions is met:
