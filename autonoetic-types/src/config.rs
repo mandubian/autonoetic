@@ -2463,12 +2463,19 @@ pub struct PromptBudgetConfig {
     #[serde(default = "default_prompt_budget_margin")]
     pub margin_tokens: usize,
 
-    /// Strip tool JSON schemas to `{"type": "object"}` after the first turn to save tokens.
-    /// Disabled by default — most LLM providers require full schemas on every request,
-    /// and stripping them causes tool-call divergence (wrong params, missing required fields).
-    /// The context governor will still compress schemas as a last resort when the
-    /// context budget is exceeded, regardless of this setting.
+    /// DEPRECATED — no longer used; tool schemas are never compressed.
+    ///
+    /// Stripping tool JSON schemas to a minimal `{"type": "object"}` placeholder after turn 0 corrupted tool-calling
+    /// (the model needs the full schema on every turn; prompt caching is a
+    /// billing optimization, not a "remember the tools" mechanism). The
+    /// governor's schema-compression strategy was removed for the same reason.
+    /// Tool tokens are now saved losslessly via provider tool-array caching
+    /// (see `prompt_cache_enabled`). Retained only for config backward-compat.
     #[serde(default)]
+    #[deprecated(
+        since = "0.x",
+        note = "no longer used; tool schemas are never compressed. Retained for config backward-compat."
+    )]
     pub compress_tool_schemas_after_turn_0: bool,
 
     /// Maximum number of tool definitions to send to the LLM per turn.
@@ -2596,6 +2603,7 @@ impl Default for PromptBudgetConfig {
             tool_definitions_max_tokens: 0,
             warn_at_pct: default_prompt_budget_warn_pct(),
             margin_tokens: default_prompt_budget_margin(),
+            #[allow(deprecated)]
             compress_tool_schemas_after_turn_0: false,
             max_tool_definitions: 0,
             progressive_tool_disclosure: false,

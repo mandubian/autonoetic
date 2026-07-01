@@ -1552,17 +1552,7 @@ impl AgentExecutor {
                         &self.discovered_tools,
                     );
                 }
-                let turn_index = self.turn_counter.saturating_sub(1);
-                let should_compress = self
-                    .config
-                    .as_ref()
-                    .map(|c| c.prompt_budget.compress_tool_schemas_after_turn_0)
-                    .unwrap_or(false);
-                if should_compress {
-                    crate::runtime::prompt_budget::compress_tool_definitions(t, turn_index as usize)
-                } else {
-                    t
-                }
+                t
             };
 
             // Update system message — composed after the tool list so

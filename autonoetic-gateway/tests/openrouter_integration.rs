@@ -105,6 +105,7 @@ async fn test_openrouter_tool_call() -> anyhow::Result<()> {
         metadata: None,
         thinking: None,
         prompt_cache_key: None,
+        system_cache_prefix_bytes: None,
     };
 
     let resp = driver.complete(&req).await?;
@@ -133,15 +134,21 @@ async fn test_openrouter_tool_call() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Integration test — validates that tool compression (replacing full schemas
-/// with `{}`) still produces valid tool calls on subsequent turns.
+/// Integration test — validates that full tool schemas produce valid tool
+/// calls across multiple turns, and that OpenRouter's cache_control breakpoint
+/// on the tools array is exercised when a stable system prefix is supplied.
+///
+/// (Previously this test demonstrated the now-removed `compress_tool_definitions`
+/// path, which stripped schemas to a minimal `{"type": "object"}` placeholder on turn 1+ and corrupted tool-calling.
+/// The schemas are now sent in full every turn; the token savings come from
+/// provider tool-array caching instead.)
 ///
 /// Run with:
-///   OPENROUTER_API_KEY=<key> cargo test -p autonoetic-gateway --test openrouter_integration -- --nocapture tool_compression
+///   OPENROUTER_API_KEY=<key> cargo test -p autonoetic-gateway --test openrouter_integration -- --nocapture tool_caching
 ///
 /// Skipped automatically when OPENROUTER_API_KEY is not set.
 #[tokio::test]
-async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
+async fn test_openrouter_tool_caching() -> anyhow::Result<()> {
     if std::env::var("OPENROUTER_API_KEY").is_err() {
         eprintln!("Skipping integration test: OPENROUTER_API_KEY not set");
         return Ok(());
@@ -153,7 +160,7 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
     use autonoetic_gateway::llm::ToolDefinition;
     use serde_json::json;
 
-    // Turn 0: full tool schema
+    // Full schema, identical on both turns (byte-stable → cacheable).
     let full_tool = ToolDefinition {
         name: "get_weather".to_string(),
         description: "Get the current weather for a given city.".to_string(),
@@ -167,22 +174,28 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
         }),
     };
 
+    // Stable system prefix for caching; the volatile tail (empty here) would
+    // follow the boundary in a real session.
+    let system_prompt = "You are a helpful assistant. Use tools when appropriate.";
+    let prefix_bytes = Some(system_prompt.len());
+
     let req_turn0 = CompletionRequest {
         model: model.to_string(),
         messages: vec![
-            Message::system("You are a helpful assistant. Use tools when appropriate."),
+            Message::system(system_prompt),
             Message::user("What's the weather in Tokyo?"),
         ],
-        tools: vec![full_tool],
+        tools: vec![full_tool.clone()],
         max_tokens: Some(512),
         temperature: Some(0.0),
         metadata: None,
         thinking: None,
         prompt_cache_key: None,
+        system_cache_prefix_bytes: prefix_bytes,
     };
 
     let resp_turn0 = driver.complete(&req_turn0).await?;
-    println!("=== Turn 0 (full schema) ===");
+    println!("=== Turn 0 (full schema + cache breakpoint) ===");
     println!("Tool calls: {:?}", resp_turn0.tool_calls);
     assert!(
         !resp_turn0.tool_calls.is_empty(),
@@ -190,20 +203,15 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
     );
     assert_eq!(resp_turn0.tool_calls[0].name, "get_weather");
 
-    // Turn 1: compressed tool schema (empty `{}`) — this is what compress_tool_definitions does
-    let compressed_tool = ToolDefinition {
-        name: "get_weather".to_string(),
-        description: "Get the current weather for a given city.".to_string(),
-        input_schema: json!({}),
-    };
-
     let args_turn0: serde_json::Value = serde_json::from_str(&resp_turn0.tool_calls[0].arguments)?;
     let city_turn0 = args_turn0["city"].as_str().unwrap_or("Tokyo");
 
+    // Turn 1: SAME full schema (no compression) + cache breakpoint. The model
+    // must still be able to call the tool with the correct parameter shape.
     let req_turn1 = CompletionRequest {
         model: model.to_string(),
         messages: vec![
-            Message::system("You are a helpful assistant. Use tools when appropriate."),
+            Message::system(system_prompt),
             Message::user("What's the weather in Tokyo?"),
             Message::tool_result(
                 &resp_turn0.tool_calls[0].id,
@@ -213,26 +221,26 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
             Message::assistant("The weather in Tokyo is sunny, 22°C."),
             Message::user("How about in Seoul?"),
         ],
-        tools: vec![compressed_tool],
+        tools: vec![full_tool],
         max_tokens: Some(512),
         temperature: Some(0.0),
         metadata: None,
         thinking: None,
         prompt_cache_key: None,
+        system_cache_prefix_bytes: prefix_bytes,
     };
 
     let resp_turn1 = driver.complete(&req_turn1).await?;
-    println!("=== Turn 1 (compressed schema) ===");
+    println!("=== Turn 1 (full schema + cache breakpoint) ===");
     println!("Tool calls: {:?}", resp_turn1.tool_calls);
 
-    // The model should still be able to call the tool with compressed schema
     assert!(
         !resp_turn1.tool_calls.is_empty(),
-        "Turn 1 (compressed): expected tool call — model should still know the tool"
+        "Turn 1: expected tool call with the full schema intact"
     );
     assert_eq!(
         resp_turn1.tool_calls[0].name, "get_weather",
-        "Turn 1 (compressed): expected get_weather tool call"
+        "Turn 1: expected get_weather tool call"
     );
 
     let args_turn1: serde_json::Value = serde_json::from_str(&resp_turn1.tool_calls[0].arguments)?;
@@ -240,10 +248,10 @@ async fn test_openrouter_tool_compression() -> anyhow::Result<()> {
     println!("Turn 1 tool called with city: {}", city_turn1);
     assert!(
         city_turn1.to_lowercase().contains("seoul"),
-        "Turn 1 (compressed): expected city=Seoul, got: {}",
+        "Turn 1: expected city=Seoul, got: {}",
         city_turn1
     );
 
-    println!("=== Tool compression validation PASSED ===");
+    println!("=== Tool caching validation PASSED ===");
     Ok(())
 }

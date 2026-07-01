@@ -89,15 +89,7 @@ impl AnthropicDriver {
         }
 
         if !req.tools.is_empty() {
-            body["tools"] = json!(req
-                .tools
-                .iter()
-                .map(|t| json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.input_schema,
-                }))
-                .collect::<Vec<_>>());
+            body["tools"] = build_tools_with_cache(&req.tools, req.system_cache_prefix_bytes);
         }
 
         if let Some(ref thinking) = req.thinking {
@@ -145,6 +137,38 @@ fn build_system_with_cache(system_text: &str, prefix_bytes: Option<usize>) -> se
         // No / invalid boundary → legacy plain string.
         _ => json!(system_text.trim()),
     }
+}
+
+/// Build the Anthropic `tools` array. When `prefix_bytes` indicates the
+/// session has a stable system prefix (i.e. prompt caching is active), attach
+/// `cache_control: {type: ephemeral}` to the **last** tool so Anthropic caches
+/// the whole tool catalog. The tool set + schemas are byte-identical across
+/// turns, so this is a large, cacheable block. Anthropic allows up to 4 cache
+/// breakpoints; this uses one (plus optionally one on the system block = 2).
+///
+/// Without a prefix boundary the tools are emitted plainly (legacy path).
+fn build_tools_with_cache(
+    tools: &[super::ToolDefinition],
+    prefix_bytes: Option<usize>,
+) -> serde_json::Value {
+    let mark_cache = prefix_bytes.is_some();
+    let cached = tools.len().saturating_sub(1);
+    tools
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut entry = json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            });
+            if mark_cache && i == cached {
+                entry["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            entry
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
 
 #[async_trait::async_trait]
@@ -506,7 +530,16 @@ fn parse_stop_reason(s: &str) -> StopReason {
 
 #[cfg(test)]
 mod tests {
-    use super::build_system_with_cache;
+    use super::{build_system_with_cache, build_tools_with_cache};
+    use crate::llm::ToolDefinition;
+
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("desc for {name}"),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
 
     #[test]
     fn splits_system_and_caches_stable_preserving_whitespace() {
@@ -565,5 +598,50 @@ mod tests {
         let system = "héllo world"; // 'é' is 2 bytes at index 1..3
         let v = build_system_with_cache(system, Some(2));
         assert!(v.is_string(), "non-char-boundary must fall back to string");
+    }
+
+    #[test]
+    fn tools_mark_last_with_cache_control_when_prefix_present() {
+        let tools = vec![tool("alpha"), tool("beta"), tool("gamma")];
+        let v = build_tools_with_cache(&tools, Some(64));
+        let arr = v.as_array().expect("tools array");
+        assert_eq!(arr.len(), 3);
+        // Only the last tool gets the cache breakpoint.
+        assert!(
+            arr[0]["cache_control"].is_null(),
+            "first tool must not be marked"
+        );
+        assert!(
+            arr[1]["cache_control"].is_null(),
+            "middle tool must not be marked"
+        );
+        assert_eq!(arr[2]["cache_control"]["type"], "ephemeral");
+        // Schemas are preserved (no compression).
+        assert_eq!(arr[2]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn tools_leave_plain_when_no_prefix() {
+        // No system_cache_prefix_bytes → prompt caching off → tools unmarked.
+        let tools = vec![tool("alpha"), tool("beta")];
+        let v = build_tools_with_cache(&tools, None);
+        let arr = v.as_array().expect("tools array");
+        assert!(arr[0]["cache_control"].is_null());
+        assert!(arr[1]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn tools_single_tool_marked_when_prefix_present() {
+        let tools = vec![tool("solo")];
+        let v = build_tools_with_cache(&tools, Some(10));
+        let arr = v.as_array().expect("tools array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn tools_empty_returns_empty_array() {
+        let v = build_tools_with_cache(&[], Some(10));
+        assert!(v.as_array().unwrap().is_empty());
     }
 }

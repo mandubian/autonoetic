@@ -436,28 +436,6 @@ pub fn cap_tool_definitions_preserving_discovered(
     rest
 }
 
-/// Compress tool definitions for subsequent turns.
-///
-/// On turn 0, returns full tool definitions. On subsequent turns,
-/// replaces detailed JSON schemas with minimal `{}` schemas since
-/// the model already knows the tools from the first turn.
-pub fn compress_tool_definitions(
-    tools: Vec<ToolDefinition>,
-    turn_number: usize,
-) -> Vec<ToolDefinition> {
-    if turn_number == 0 {
-        return tools;
-    }
-    tools
-        .into_iter()
-        .map(|t| ToolDefinition {
-            name: t.name,
-            description: t.description,
-            input_schema: serde_json::json!({"type": "object"}),
-        })
-        .collect()
-}
-
 /// Result of applying a prompt budget enforcement strategy.
 #[derive(Debug)]
 pub struct EnforcementResult {
@@ -913,42 +891,6 @@ mod tests {
         assert!(breakdown.utilization_pct.is_some());
         assert!(breakdown.utilization_pct.unwrap() > 0.0);
         assert!(breakdown.utilization_pct.unwrap() < 100.0);
-    }
-
-    #[test]
-    fn test_compress_tool_definitions_turn_zero_keeps_full() {
-        let tools = vec![ToolDefinition {
-            name: "content_write".to_string(),
-            description: "Write content".to_string(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-        }];
-
-        let compressed = compress_tool_definitions(tools.clone(), 0);
-        assert_eq!(compressed.len(), 1);
-        assert_eq!(compressed[0].input_schema["type"], "object");
-    }
-
-    #[test]
-    fn test_compress_tool_definitions_subsequent_turns_minimal() {
-        let tools = vec![
-            ToolDefinition {
-                name: "content_write".to_string(),
-                description: "Write content".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            },
-            ToolDefinition {
-                name: "web_search".to_string(),
-                description: "Search web".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
-            },
-        ];
-
-        let compressed = compress_tool_definitions(tools, 3);
-        assert_eq!(compressed.len(), 2);
-        assert_eq!(compressed[0].input_schema, serde_json::json!({"type": "object"}));
-        assert_eq!(compressed[1].input_schema, serde_json::json!({"type": "object"}));
-        assert_eq!(compressed[0].name, "content_write");
-        assert_eq!(compressed[1].name, "web_search");
     }
 
     #[test]
