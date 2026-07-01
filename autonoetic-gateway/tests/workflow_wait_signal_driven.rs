@@ -256,8 +256,9 @@ async fn signal_wakes_wait_within_100ms() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Deadline path: with a short timeout and no transitions, workflow.wait
-/// returns at the deadline with tasks still running.
+/// Deadline path: with a short timeout, a matching `max_wait_secs` (which
+/// disables auto-extension, #702), and no transitions, workflow.wait returns at
+/// the deadline with tasks still running.
 #[tokio::test]
 async fn deadline_returns_with_tasks_still_running() -> anyhow::Result<()> {
     let (_temp, config, store) = setup()?;
@@ -274,10 +275,13 @@ async fn deadline_returns_with_tasks_still_running() -> anyhow::Result<()> {
     let parent_dir = config.agents_dir.join("planner.default");
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
 
+    // max_wait_secs == timeout_secs disables server-side extension so this
+    // exercises the single-chunk deadline return.
     let args = serde_json::json!({
         "workflow_id": workflow_id,
         "task_ids": [task_a, task_b],
-        "timeout_secs": 2
+        "timeout_secs": 2,
+        "max_wait_secs": 2
     });
     let args_str = serde_json::to_string(&args)?;
 
@@ -321,6 +325,164 @@ async fn deadline_returns_with_tasks_still_running() -> anyhow::Result<()> {
         elapsed
     );
 
+    Ok(())
+}
+
+/// #702 auto-extension: a completion arriving well AFTER the per-chunk
+/// `timeout_secs` (and past the first fallback-poll boundary) is still caught
+/// within a single `workflow_wait` call — the gateway re-issues the wait
+/// server-side rather than returning a non-terminal result to the LLM. Without
+/// auto-extension a `timeout_secs=1` call would return `join_satisfied=false`
+/// around the ~5s fallback boundary; with it, the call keeps waiting and
+/// returns `true` when the late transition fires.
+#[tokio::test]
+async fn auto_extends_past_chunk_and_catches_late_completion() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let workflow_id = "wf-extend";
+    let root_session_id = "root-extend";
+    let task_a = "task-ext-a";
+    let task_b = "task-ext-b";
+
+    seed_two_tasks(&config, &store, workflow_id, root_session_id, task_a, task_b)?;
+
+    let manifest = planner_manifest();
+    let registry = Arc::new(default_registry());
+    let parent_dir = config.agents_dir.join("planner.default");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    // 1s chunk, 30s total budget: the wait must survive multiple chunks.
+    let args = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_ids": [task_a, task_b],
+        "timeout_secs": 1,
+        "max_wait_secs": 30
+    });
+    let args_str = serde_json::to_string(&args)?;
+    let config_clone = config.clone();
+    let store_clone = store.clone();
+    let manifest_clone = manifest.clone();
+
+    let wait_handle = tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let result = registry.execute(
+            "workflow_wait",
+            &manifest_clone,
+            &PolicyEngine::new(manifest_clone.clone()),
+            &parent_dir,
+            Some(&gateway_dir),
+            &args_str,
+            Some(root_session_id),
+            Some("turn-extend"),
+            Some(&config_clone),
+            Some(store_clone),
+            None,
+        );
+        (start.elapsed(), result)
+    });
+
+    // Complete only at ~7s — past the 1s chunk AND past the ~5s fallback poll,
+    // so a non-extending wait would already have returned non-terminal.
+    tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+    for tid in [task_a, task_b] {
+        workflow_store::update_task_run_status(
+            &config,
+            Some(store.as_ref()),
+            workflow_id,
+            tid,
+            TaskRunStatus::Succeeded,
+            Some("done".to_string()),
+            None,
+            None,
+        )?;
+    }
+
+    let (elapsed, result) =
+        tokio::time::timeout(std::time::Duration::from_secs(25), wait_handle)
+            .await
+            .map_err(|_| anyhow::anyhow!("workflow.wait timed out"))??;
+
+    let result = result?;
+    let parsed: serde_json::Value = serde_json::from_str(&result)?;
+    assert_eq!(parsed["ok"].as_bool(), Some(true));
+    assert_eq!(
+        parsed["join_satisfied"].as_bool(),
+        Some(true),
+        "auto-extension must catch the late completion in one call"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(6),
+        "wait must have extended past the first chunk/fallback boundary, got {:?}",
+        elapsed
+    );
+    Ok(())
+}
+
+/// #702 budget cap: with no completions, the wait extends only up to
+/// `max_wait_secs` and then returns non-terminal (it does not block forever).
+#[tokio::test]
+async fn auto_extension_stops_at_max_wait_budget() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let workflow_id = "wf-budget";
+    let root_session_id = "root-budget";
+    let task_a = "task-bud-a";
+    let task_b = "task-bud-b";
+
+    seed_two_tasks(&config, &store, workflow_id, root_session_id, task_a, task_b)?;
+
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = Arc::new(default_registry());
+    let parent_dir = config.agents_dir.join("planner.default");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    // 1s chunk, 8s total budget, no transitions ever.
+    let args = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_ids": [task_a, task_b],
+        "timeout_secs": 1,
+        "max_wait_secs": 8
+    });
+    let args_str = serde_json::to_string(&args)?;
+
+    let wait_handle = tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let result = registry.execute(
+            "workflow_wait",
+            &manifest,
+            &policy,
+            &parent_dir,
+            Some(&gateway_dir),
+            &args_str,
+            Some(root_session_id),
+            Some("turn-budget"),
+            Some(&config),
+            Some(store),
+            None,
+        );
+        (start.elapsed(), result)
+    });
+
+    let (elapsed, result) =
+        tokio::time::timeout(std::time::Duration::from_secs(25), wait_handle)
+            .await
+            .map_err(|_| anyhow::anyhow!("workflow.wait timed out"))??;
+
+    let result = result?;
+    let parsed: serde_json::Value = serde_json::from_str(&result)?;
+    assert_eq!(parsed["ok"].as_bool(), Some(true));
+    assert_eq!(parsed["join_satisfied"].as_bool(), Some(false));
+    // Extended past the first chunk (proves auto-extension ran)...
+    assert!(
+        elapsed >= std::time::Duration::from_secs(6),
+        "expected extension past one chunk, got {:?}",
+        elapsed
+    );
+    // ...but stopped near the budget rather than blocking indefinitely.
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "expected to stop near max_wait budget, got {:?}",
+        elapsed
+    );
     Ok(())
 }
 

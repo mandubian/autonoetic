@@ -1211,6 +1211,19 @@ pub struct GatewayConfig {
     #[serde(default = "default_workflow_wait_secs")]
     pub default_workflow_wait_secs: u64,
 
+    /// Server-side total wall-clock budget for a single `workflow.wait` call
+    /// (issue #702). When a wait chunk (`timeout_secs`, default
+    /// `default_workflow_wait_secs`) elapses with tasks still running, the
+    /// gateway re-issues the wait internally — without returning to the LLM —
+    /// until a task reaches a terminal state or this total budget is exhausted.
+    /// This eliminates the expensive `wait → timeout → full LLM round → wait`
+    /// churn where the model re-reads the whole context only to re-issue the
+    /// same wait. Callers may lower it per-call via `max_wait_secs`. Set equal
+    /// to `default_workflow_wait_secs` (or 0) to disable auto-extension.
+    /// Default: 300 (5 minutes).
+    #[serde(default = "default_workflow_wait_max_total_secs")]
+    pub workflow_wait_max_total_secs: u64,
+
     #[serde(default)]
     pub hooks: Vec<crate::hooks::HookConfig>,
 
@@ -2383,6 +2396,10 @@ fn default_workflow_wait_secs() -> u64 {
     30
 }
 
+fn default_workflow_wait_max_total_secs() -> u64 {
+    300
+}
+
 fn default_evidence_mode() -> String {
     "full".to_string()
 }
@@ -2970,6 +2987,7 @@ impl Default for GatewayConfig {
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
             default_workflow_wait_secs: default_workflow_wait_secs(),
+            workflow_wait_max_total_secs: default_workflow_wait_max_total_secs(),
             hooks: Vec::new(),
             scheduled_jobs: ScheduledJobsConfig::default(),
             promotion_governor: PromotionGovernorConfig::default(),
