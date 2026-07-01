@@ -42,7 +42,7 @@ static PREFIXED_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static LONG_HEX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b[0-9a-f]{12,}\b").expect("valid hex regex"));
+    LazyLock::new(|| Regex::new(r"\b[0-9a-fA-F]{12,}\b").expect("valid hex regex"));
 
 // No word boundaries: also strips digits fused to a unit (`30s`, `120s`) so
 // `timed out after 30s` and `after 120s` share a fingerprint.
@@ -75,7 +75,9 @@ pub fn hash_normalized(normalized: &str) -> u64 {
 /// result is not an error. Recognizes:
 /// - `ok: false`, or the presence of `error` / `error_type`
 /// - `any_failed: true` (e.g. `workflow_wait` surfacing a failed child), whose
-///   root cause lives in `failure_summary[].{reason,message}`
+///   root cause lives in `failure_summary[].{reason,message,result_summary}`.
+///   `result_summary` is included because `workflow_wait` populates it with the
+///   child failure text.
 pub fn extract_error_text(result_json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(result_json).ok()?;
     let obj = value.as_object()?;
@@ -108,6 +110,7 @@ pub fn extract_error_text(result_json: &str) -> Option<String> {
                 .get("reason")
                 .and_then(|v| v.as_str())
                 .or_else(|| item.get("message").and_then(|v| v.as_str()))
+                .or_else(|| item.get("result_summary").and_then(|v| v.as_str()))
                 .or_else(|| item.get("error").and_then(|v| v.as_str()))
             {
                 parts.push(s.to_string());
@@ -175,6 +178,28 @@ mod tests {
             "workflow wf-abc123def456 was reactivated and cannot accept child-session spawns",
         );
         assert_eq!(fp.unwrap(), hash_normalized(&normalized));
+    }
+
+    #[test]
+    fn uppercase_hex_is_normalized() {
+        let a = normalize_error_text("artifact ar-abc123def456 not found");
+        let b = normalize_error_text("artifact ar-ABC123DEF456 not found");
+        assert_eq!(a, b, "uppercase hex digests must normalize to same fingerprint");
+        assert_eq!(hash_normalized(&a), hash_normalized(&b));
+    }
+
+    #[test]
+    fn any_failed_uses_result_summary() {
+        let fp_reason = fingerprint_result(
+            r#"{"ok":true,"any_failed":true,"failure_summary":[{"reason":"workflow wf-abc123def456 was reactivated"}]}"#,
+        );
+        let fp_result_summary = fingerprint_result(
+            r#"{"ok":true,"any_failed":true,"failure_summary":[{"result_summary":"workflow wf-abc123def456 was reactivated"}]}"#,
+        );
+        assert_eq!(
+            fp_reason, fp_result_summary,
+            "result_summary must fingerprint the same as reason"
+        );
     }
 
     #[test]

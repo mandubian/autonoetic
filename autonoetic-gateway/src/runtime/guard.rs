@@ -444,9 +444,15 @@ impl LoopGuard {
     /// through different tools, which the per-tool failure budget cannot see.
     ///
     /// No-ops when the result carries no error, when the detector is disabled
-    /// (`recurring_error_window == 0`), or when the guard has already tripped.
+    /// (`recurring_error_window == 0` or `recurring_error_distinct_tools < 2`),
+    /// when the guard has already tripped, or while `repair_mode` is active
+    /// (response-validation repair cycles already have their own bounded loop).
     pub fn register_error(&mut self, tool_name: &str, result_json: &str) {
-        if self.recurring_error_window == 0 || self.trip_reason.is_some() {
+        if self.recurring_error_window == 0
+            || self.recurring_error_distinct_tools < 2
+            || self.trip_reason.is_some()
+            || self.repair_mode
+        {
             return;
         }
         let Some(hash) = crate::runtime::error_fingerprint::fingerprint_result(result_json) else {
@@ -1121,6 +1127,33 @@ mod tests {
         };
         let mut guard = LoopGuard::with_config(&cfg);
         for tool in ["a", "b", "c", "d"] {
+            guard.register_error(tool, r#"{"ok":false,"error":"same error"}"#);
+        }
+        assert!(guard.last_trip_reason().is_none());
+    }
+
+    /// `recurring_error_distinct_tools: 0` (or 1) disables the detector because
+    /// the whole point is recurrence across *distinct* tools.
+    #[test]
+    fn recurring_error_distinct_tools_below_two_disables_detector() {
+        let cfg = autonoetic_types::config::LoopGuardConfig {
+            recurring_error_distinct_tools: 0,
+            ..Default::default()
+        };
+        let mut guard = LoopGuard::with_config(&cfg);
+        for tool in ["a", "b", "c", "d"] {
+            guard.register_error(tool, r#"{"ok":false,"error":"same error"}"#);
+        }
+        assert!(guard.last_trip_reason().is_none());
+    }
+
+    /// Repair mode suppresses the recurring-error detector so response-
+    /// validation repair cycles do not trip the outer guard.
+    #[test]
+    fn recurring_error_detector_noops_in_repair_mode() {
+        let mut guard = LoopGuard::new(100);
+        guard.enter_repair_mode(10);
+        for tool in ["a", "b", "c"] {
             guard.register_error(tool, r#"{"ok":false,"error":"same error"}"#);
         }
         assert!(guard.last_trip_reason().is_none());

@@ -123,23 +123,29 @@ fn collapse_repeated_error_results(sanitized: &mut [Message], originals: &[Messa
 
     // fingerprint -> (occurrence count, index of last occurrence)
     let mut stats: HashMap<u64, (u32, usize)> = HashMap::new();
+
+    // Compute fingerprints once per original tool message, keyed by index, so
+    // the collapse pass below does not re-parse the same JSON.
+    let mut fingerprints: Vec<Option<u64>> = Vec::with_capacity(originals.len());
     for (i, msg) in originals.iter().enumerate() {
         if msg.role != Role::Tool || msg.content.is_empty() {
+            fingerprints.push(None);
             continue;
         }
-        if let Some(fp) = crate::runtime::error_fingerprint::fingerprint_result(&msg.content) {
-            let entry = stats.entry(fp).or_insert((0, i));
+        let fp = crate::runtime::error_fingerprint::fingerprint_result(&msg.content);
+        if let Some(h) = fp {
+            let entry = stats.entry(h).or_insert((0, i));
             entry.0 += 1;
             entry.1 = i;
         }
+        fingerprints.push(fp);
     }
 
     for (i, msg) in sanitized.iter_mut().enumerate() {
         if msg.role != Role::Tool || msg.content.is_empty() {
             continue;
         }
-        let Some(fp) = crate::runtime::error_fingerprint::fingerprint_result(&originals[i].content)
-        else {
+        let Some(fp) = fingerprints.get(i).copied().flatten() else {
             continue;
         };
         if let Some(&(count, last_idx)) = stats.get(&fp) {
