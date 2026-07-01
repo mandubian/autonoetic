@@ -2465,7 +2465,7 @@ pub struct PromptBudgetConfig {
 
     /// DEPRECATED — no longer used; tool schemas are never compressed.
     ///
-    /// Stripping tool JSON schemas to `{}` after turn 0 corrupted tool-calling
+    /// Stripping tool JSON schemas to a minimal `{"type": "object"}` placeholder after turn 0 corrupted tool-calling
     /// (the model needs the full schema on every turn; prompt caching is a
     /// billing optimization, not a "remember the tools" mechanism). The
     /// governor's schema-compression strategy was removed for the same reason.

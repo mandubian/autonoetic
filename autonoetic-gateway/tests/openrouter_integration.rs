@@ -139,7 +139,7 @@ async fn test_openrouter_tool_call() -> anyhow::Result<()> {
 /// on the tools array is exercised when a stable system prefix is supplied.
 ///
 /// (Previously this test demonstrated the now-removed `compress_tool_definitions`
-/// path, which stripped schemas to `{}` on turn 1+ and corrupted tool-calling.
+/// path, which stripped schemas to a minimal `{"type": "object"}` placeholder on turn 1+ and corrupted tool-calling.
 /// The schemas are now sent in full every turn; the token savings come from
 /// provider tool-array caching instead.)
 ///

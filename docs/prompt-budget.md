@@ -50,7 +50,7 @@ classifies the turn as `context_overflow`.
 
 Strategy names match those emitted in `GovernorAction` diagnostics and
 causal events. (A `tool_schema_compression` strategy previously appeared
-here but was removed: stripping tool schemas to `{}` corrupted tool-calling
+here but was removed: stripping tool schemas to a minimal `{"type": "object"}` placeholder corrupted tool-calling
 on turn 1+ — the model needs the full schema on every turn, and prompt
 caching is a billing optimization, not a "remember the tools" mechanism.
 Tool tokens are now saved losslessly via provider tool-array caching; see

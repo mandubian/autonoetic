@@ -172,8 +172,6 @@ fn build_tools_with_cache(
 }
 
 #[async_trait::async_trait]
-
-#[async_trait::async_trait]
 impl LlmDriver for AnthropicDriver {
     async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let body = self.build_body(req, false);
