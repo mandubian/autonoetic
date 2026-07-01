@@ -7,8 +7,10 @@ Code running inside **`sandbox.exec`** or as an **`execution_mode: script`** ent
 ```python
 import autonoetic_sdk
 sdk = autonoetic_sdk.init()
-invocation = autonoetic_sdk.load_invocation()  # or load_input(); task = invocation.input, metadata = invocation.metadata
+invocation = autonoetic_sdk.load_invocation()  # task = invocation.input, metadata = invocation.metadata
 ```
+
+For the common case where you only need the input payload, `autonoetic_sdk.load_input()` is a shortcut that returns the normalized input directly.
 
 ## Memory Operations (`sdk.memory`)
 
@@ -35,6 +37,8 @@ There is **no `sdk.knowledge` module** — use `sdk.memory` for persistence.
 State persists across script invocations (e.g. cron reruns):
 
 ```python
+import autonoetic_sdk
+
 sdk = autonoetic_sdk.init()
 count = sdk.state.get("count", 0)
 sdk.state.set("count", count + 1)
