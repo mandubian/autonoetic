@@ -127,15 +127,17 @@ fn build_system_with_cache(system_text: &str, prefix_bytes: Option<usize>) -> se
             json!([{ "type": "text", "text": system_text.trim(), "cache_control": ephemeral() }])
         }
         // Stable prefix + volatile suffix → cache the prefix only.
+        // Preserve the boundary whitespace inserted by lifecycle.rs; only trim
+        // overall leading/trailing whitespace so the two blocks concatenate
+        // identically to the original prompt.
         Some(n) if n > 0 && n < system_text.len() && system_text.is_char_boundary(n) => {
             let (prefix, suffix) = system_text.split_at(n);
             let mut blocks = vec![json!({
                 "type": "text",
-                "text": prefix.trim_end(),
+                "text": prefix,
                 "cache_control": ephemeral(),
             })];
-            let suffix = suffix.trim();
-            if !suffix.is_empty() {
+            if !suffix.trim().is_empty() {
                 blocks.push(json!({ "type": "text", "text": suffix }));
             }
             json!(blocks)
@@ -505,6 +507,29 @@ fn parse_stop_reason(s: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::build_system_with_cache;
+
+    #[test]
+    fn splits_system_and_caches_stable_preserving_whitespace() {
+        // lifecycle.rs inserts \n\n between the stable prefix and volatile tails
+        // (memory/degradation/attestation). The boundary whitespace must be
+        // preserved so the two blocks concatenate identically to the original.
+        let system = "STABLE DOCTRINE\n\n[state attestation] turn=7";
+        let prefix = "STABLE DOCTRINE\n\n".len();
+        let v = build_system_with_cache(system, Some(prefix));
+        let arr = v.as_array().expect("structured system");
+        assert_eq!(arr[0]["text"], "STABLE DOCTRINE\n\n");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert!(arr[1]["cache_control"].is_null());
+        assert_eq!(arr[1]["text"], "[state attestation] turn=7");
+
+        // Concatenation reproduces the original exactly.
+        let joined = format!(
+            "{}{}",
+            arr[0]["text"].as_str().unwrap(),
+            arr[1]["text"].as_str().unwrap()
+        );
+        assert_eq!(joined, system);
+    }
 
     #[test]
     fn splits_system_and_caches_stable_prefix() {
