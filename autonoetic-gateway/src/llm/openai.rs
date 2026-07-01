@@ -260,17 +260,26 @@ impl OpenAiDriver {
             }
         }
 
-        // Prompt caching: send a stable key so repeated turns in a session
-        // reuse cached prompt-prefix tokens. OpenRouter and OpenAI both accept
-        // top-level `prompt_cache_key`; other OpenAI-compatible providers
-        // ignore unknown fields, so gate on the providers known to honor it.
+        // Prompt caching: keep repeated turns landing on the same cached prefix.
+        // The stable-routing field differs by provider:
+        // - OpenAI (`OpenAiEffort`) has a real top-level `prompt_cache_key`.
+        // - OpenRouter has NO `prompt_cache_key`; it uses top-level `session_id`
+        //   (≤256 chars) for sticky routing so a session's turns reuse the same
+        //   upstream provider instance — the affinity that makes its (implicit or
+        //   `cache_control`-marked) cache actually hit. See OpenRouter prompt-
+        //   caching docs.
+        // Other OpenAI-compatible providers ignore unknown fields.
         if let Some(ref key) = req.prompt_cache_key {
-            if matches!(
-                self.provider.capabilities.reasoning,
-                crate::llm::provider::ReasoningStyle::OpenRouterUnified
-                    | crate::llm::provider::ReasoningStyle::OpenAiEffort
-            ) {
-                body["prompt_cache_key"] = json!(key);
+            match self.provider.capabilities.reasoning {
+                crate::llm::provider::ReasoningStyle::OpenAiEffort => {
+                    body["prompt_cache_key"] = json!(key);
+                }
+                crate::llm::provider::ReasoningStyle::OpenRouterUnified => {
+                    // session_id is capped at 256 chars by OpenRouter.
+                    let sid: String = key.chars().take(256).collect();
+                    body["session_id"] = json!(sid);
+                }
+                crate::llm::provider::ReasoningStyle::None => {}
             }
         }
 
@@ -1074,22 +1083,46 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_key_emitted_for_openrouter() {
+    fn openrouter_uses_session_id_not_prompt_cache_key() {
+        // OpenRouter has no prompt_cache_key; the stable-routing field is
+        // top-level `session_id` (sticky routing → cache affinity).
         let driver = driver_with("deepseek/deepseek-v4-flash", ReasoningStyle::OpenRouterUnified);
         let mut req = req_with_thinking("deepseek/deepseek-v4-flash", ThinkingEffort::Low, None);
         req.prompt_cache_key = Some("session-abc".to_string());
         let body = driver.build_body(&req, false);
-        assert_eq!(body["prompt_cache_key"], "session-abc");
+        assert_eq!(body["session_id"], "session-abc");
+        assert!(body.get("prompt_cache_key").is_none(), "OpenRouter must not get prompt_cache_key");
     }
 
     #[test]
-    fn prompt_cache_key_omitted_for_plain_provider() {
-        // A provider with ReasoningStyle::None (e.g. groq) doesn't get the key.
+    fn openrouter_session_id_capped_at_256_chars() {
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let mut req = req_with_thinking("anthropic/claude-sonnet-5", ThinkingEffort::Low, None);
+        req.prompt_cache_key = Some("x".repeat(300));
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["session_id"].as_str().unwrap().chars().count(), 256);
+    }
+
+    #[test]
+    fn openai_emits_prompt_cache_key() {
+        // Direct OpenAI (OpenAiEffort) uses the real top-level prompt_cache_key.
+        let driver = driver_with("gpt-5", ReasoningStyle::OpenAiEffort);
+        let mut req = req_with_thinking("gpt-5", ThinkingEffort::Low, None);
+        req.prompt_cache_key = Some("session-abc".to_string());
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["prompt_cache_key"], "session-abc");
+        assert!(body.get("session_id").is_none());
+    }
+
+    #[test]
+    fn plain_provider_gets_neither_cache_routing_field() {
+        // ReasoningStyle::None (e.g. groq, llama.cpp) gets neither field.
         let driver = driver_with("llama-3.1-70b", ReasoningStyle::None);
         let mut req = req_with_thinking("llama-3.1-70b", ThinkingEffort::Low, None);
         req.prompt_cache_key = Some("session-abc".to_string());
         let body = driver.build_body(&req, false);
         assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("session_id").is_none());
     }
 
     fn req_with_system(model: &str, system: &str, prefix_bytes: Option<usize>) -> CompletionRequest {
