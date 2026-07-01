@@ -35,6 +35,18 @@ impl std::fmt::Display for ValidationViolation {
     }
 }
 
+/// Order-independent fingerprint of a violation set (`(rule, message)` pairs,
+/// sorted). Two repair attempts that produce the same fingerprint made no
+/// progress — the same content failed the same way — so retrying is wasteful.
+fn violation_fingerprint(violations: &[ValidationViolation]) -> Vec<(String, String)> {
+    let mut fp: Vec<(String, String)> = violations
+        .iter()
+        .map(|v| (v.rule.clone(), v.message.clone()))
+        .collect();
+    fp.sort();
+    fp
+}
+
 /// Convert validation violations into feedback events for the trajectory monitor.
 pub fn violations_to_feedback_events(violations: &[ValidationViolation]) -> Vec<FeedbackEvent> {
     violations
@@ -1467,6 +1479,10 @@ impl GatewayExecutionService {
                     &format!("{} ({})", violation_summary, violations.len()),
                 );
 
+                // Fingerprint of the violation set we're asking the agent to
+                // fix this attempt, to detect a no-progress respawn below.
+                let pre_repair_fingerprint = violation_fingerprint(&violations);
+
                 let repaired = match self
                     .respawn_from_checkpoint(
                         agent_id,
@@ -1569,6 +1585,28 @@ impl GatewayExecutionService {
                     violation_count = violations.len(),
                     "response.repair.fail"
                 );
+
+                // No-progress short-circuit: the respawn reproduced the exact
+                // same violation set it was asked to fix. Another full-context
+                // respawn is unlikely to differ, so stop instead of burning the
+                // remaining repair budget (same "mechanical, not reactive"
+                // principle as the LoopGuard no-progress trip).
+                if violation_fingerprint(&violations) == pre_repair_fingerprint {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        attempt = attempt,
+                        violation_count = violations.len(),
+                        "response.repair.no_progress: identical violations after respawn, stopping early"
+                    );
+                    self.persist_validation_feedback(&result.session_id, &violations);
+                    return Err(violations_to_final_error(
+                        &violations,
+                        &result.session_id,
+                        true,
+                        result.assistant_reply.as_deref(),
+                    ));
+                }
 
                 if std::time::Instant::now() >= deadline {
                     tracing::warn!(
@@ -1826,6 +1864,32 @@ impl GatewayExecutionService {
 mod tests {
     use super::*;
     use crate::execution::{ArtifactMetadata, ContentFile};
+
+    fn violation(rule: &str, msg: &str) -> ValidationViolation {
+        ValidationViolation {
+            rule: rule.into(),
+            message: msg.into(),
+            repair_hint: String::new(),
+        }
+    }
+
+    #[test]
+    fn violation_fingerprint_is_order_independent() {
+        let a = vec![violation("schema", "missing field x"), violation("evidence", "no trace")];
+        let b = vec![violation("evidence", "no trace"), violation("schema", "missing field x")];
+        assert_eq!(violation_fingerprint(&a), violation_fingerprint(&b));
+    }
+
+    #[test]
+    fn violation_fingerprint_distinguishes_progress() {
+        // Same rule, different message (partial progress) => different fingerprint.
+        let before = vec![violation("schema", "missing x and y")];
+        let after = vec![violation("schema", "missing y")];
+        assert_ne!(violation_fingerprint(&before), violation_fingerprint(&after));
+        // A resolved violation (fewer) => different fingerprint.
+        let none: Vec<ValidationViolation> = vec![];
+        assert_ne!(violation_fingerprint(&before), violation_fingerprint(&none));
+    }
 
     fn make_result(
         artifacts: Vec<ArtifactMetadata>,
