@@ -1215,12 +1215,12 @@ pub struct GatewayConfig {
     /// (issue #702). When a wait chunk (`timeout_secs`, default
     /// `default_workflow_wait_secs`) elapses with tasks still running, the
     /// gateway re-issues the wait internally — without returning to the LLM —
-    /// until a task reaches a terminal state or this total budget is exhausted.
-    /// This eliminates the expensive `wait → timeout → full LLM round → wait`
-    /// churn where the model re-reads the whole context only to re-issue the
-    /// same wait. Callers may lower it per-call via `max_wait_secs`. Set equal
-    /// to `default_workflow_wait_secs` (or 0) to disable auto-extension.
-    /// Default: 300 (5 minutes).
+    /// until all watched task IDs reach a terminal state or this total budget
+    /// is exhausted. This eliminates the expensive `wait → timeout → full LLM
+    /// round → wait` churn where the model re-reads the whole context only to
+    /// re-issue the same wait. Callers may lower it per-call via `max_wait_secs`.
+    /// Set equal to `default_workflow_wait_secs` (or 0) to disable
+    /// auto-extension. Default: 300 (5 minutes).
     #[serde(default = "default_workflow_wait_max_total_secs")]
     pub workflow_wait_max_total_secs: u64,
 

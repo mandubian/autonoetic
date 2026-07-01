@@ -354,7 +354,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Suspends until watched task_ids reach terminal state (Succeeded, Failed, Cancelled, Aborted). Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. Wakes immediately on child-state transitions. The gateway auto-extends the wait server-side up to max_wait_secs (default 300s) WITHOUT returning control to you between chunks, so you do NOT need to re-issue workflow_wait after a non-terminal return — just call it once and it blocks until the tasks finish or the budget is exhausted. Pass timeout_secs=0 to probe current status without waiting. When task_ids is empty or omitted, waits for all tasks in the current workflow.".to_string(),
+            description: "Suspends until watched task_ids reach terminal state (Succeeded, Failed, Cancelled, Aborted). Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. Wakes immediately on child-state transitions. The gateway auto-extends the wait server-side up to max_wait_secs (configured by workflow_wait_max_total_secs) WITHOUT returning control to you between chunks, so you do NOT need to re-issue workflow_wait after a non-terminal return — just call it once and it blocks until the tasks finish or the budget is exhausted. Pass timeout_secs=0 to probe current status without waiting. When task_ids is empty or omitted, waits for all tasks in the current workflow.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -377,7 +377,7 @@ impl NativeTool for WorkflowWaitTool {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 1800,
-                        "description": "Total server-side wall-clock budget for this call (issue #702). Omit to use workflow_wait_max_total_secs (default 300s). The wait auto-extends up to this without returning to you; it returns as soon as tasks finish. Floored at one timeout_secs chunk."
+                        "description": "Total server-side wall-clock budget for this call (issue #702). Omit to use workflow_wait_max_total_secs. The wait auto-extends up to this without returning to you; it returns as soon as tasks finish. Floored at one timeout_secs chunk."
                     }
                 },
                 "additionalProperties": false
@@ -581,14 +581,15 @@ const STALL_GRACE_SECS: i64 = 30;
 const FALLBACK_POLL_SECS: u64 = 5;
 
 /// Wrap [`signal_driven_wait`] in a server-side re-poll loop (issue #702). Each
-/// iteration waits one `chunk_secs` chunk; if it elapses with tasks still
-/// running (not terminal, not missing), the wait is re-issued WITHOUT returning
-/// to the LLM, until a task reaches a terminal state, a task goes missing, or
-/// the accumulated wall-clock reaches `max_total_secs`. Because
-/// `signal_driven_wait` wakes immediately on a child-state `Notify`, a task
-/// that finishes mid-chunk returns right away — the extension only spends real
-/// time when tasks genuinely keep running. The returned `waited_secs` is the
-/// accumulated total across chunks, so the caller reports one coherent wait.
+/// iteration waits one `chunk_secs` chunk (capped by the remaining total
+/// budget); if it elapses with tasks still running (not terminal, not missing),
+/// the wait is re-issued WITHOUT returning to the LLM, until all watched task
+/// IDs reach a terminal state, a task goes missing, or the accumulated
+/// wall-clock reaches `max_total_secs`. Because `signal_driven_wait` wakes
+/// immediately on a child-state `Notify`, a task that finishes mid-chunk returns
+/// right away — the extension only spends real time when tasks genuinely keep
+/// running. The returned `waited_secs` is the accumulated total across chunks,
+/// so the caller reports one coherent wait.
 #[allow(clippy::too_many_arguments)]
 async fn signal_driven_wait_with_extension(
     config: &GatewayConfig,
@@ -611,13 +612,18 @@ async fn signal_driven_wait_with_extension(
 ) {
     let mut total_waited = 0u64;
     loop {
+        // Cap the next chunk by the remaining total budget so we don't
+        // overshoot `max_total_secs` by almost a whole chunk.
+        let remaining = max_total_secs.saturating_sub(total_waited);
+        let this_chunk = chunk_secs.min(remaining).max(1);
+
         let (tasks_status, all_done, any_failed, any_not_found, waited, failed_count, failures) =
             signal_driven_wait(
                 config,
                 store,
                 workflow_id,
                 task_ids,
-                chunk_secs,
+                this_chunk,
                 notify,
                 gateway_dir,
                 session_id,
@@ -822,7 +828,10 @@ async fn signal_driven_wait(
             );
         }
 
-        let fallback = tokio::time::sleep(std::time::Duration::from_secs(FALLBACK_POLL_SECS));
+        let time_to_deadline = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let fallback = tokio::time::sleep(
+            std::time::Duration::from_secs(FALLBACK_POLL_SECS).min(time_to_deadline),
+        );
         tokio::pin!(fallback);
 
         if let Some(n) = notify {

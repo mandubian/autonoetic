@@ -486,6 +486,78 @@ async fn auto_extension_stops_at_max_wait_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #702 chunk cap: the final chunk must be truncated by the remaining total
+/// budget so we don't overshoot `max_wait_secs` by almost a whole chunk.
+#[tokio::test]
+async fn auto_extension_final_chunk_respects_remaining_budget() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let workflow_id = "wf-budget-chunk";
+    let root_session_id = "root-budget-chunk";
+    let task_a = "task-bud-chunk-a";
+    let task_b = "task-bud-chunk-b";
+
+    seed_two_tasks(&config, &store, workflow_id, root_session_id, task_a, task_b,
+    )?;
+
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = Arc::new(default_registry());
+    let parent_dir = config.agents_dir.join("planner.default");
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    // 4s chunk, 6s total budget. Without chunk capping the second iteration
+    // would wait another ~4s, overshooting the budget to ~8s. With capping,
+    // the second chunk is clamped to 2s and we land near 6s.
+    let args = serde_json::json!({
+        "workflow_id": workflow_id,
+        "task_ids": [task_a, task_b],
+        "timeout_secs": 4,
+        "max_wait_secs": 6
+    });
+    let args_str = serde_json::to_string(&args)?;
+
+    let wait_handle = tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let result = registry.execute(
+            "workflow_wait",
+            &manifest,
+            &policy,
+            &parent_dir,
+            Some(&gateway_dir),
+            &args_str,
+            Some(root_session_id),
+            Some("turn-budget-chunk"),
+            Some(&config),
+            Some(store),
+            None,
+        );
+        (start.elapsed(), result)
+    });
+
+    let (elapsed, result) =
+        tokio::time::timeout(std::time::Duration::from_secs(25), wait_handle)
+            .await
+            .map_err(|_| anyhow::anyhow!("workflow.wait timed out"))??;
+
+    let result = result?;
+    let parsed: serde_json::Value = serde_json::from_str(&result)?;
+    assert_eq!(parsed["ok"].as_bool(), Some(true));
+    assert_eq!(parsed["join_satisfied"].as_bool(), Some(false));
+    // Must extend past the first 4s chunk...
+    assert!(
+        elapsed >= std::time::Duration::from_secs(4),
+        "expected at least one full chunk, got {:?}",
+        elapsed
+    );
+    // ...but must not overshoot the 6s budget by more than a small margin.
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "expected final chunk capped near 6s budget, got {:?}",
+        elapsed
+    );
+    Ok(())
+}
+
 /// Sequential transitions: both tasks transition one at a time with a delay,
 /// and the total wait is bounded by signal response time, not polling interval.
 #[tokio::test]

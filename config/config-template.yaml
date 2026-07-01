@@ -143,9 +143,9 @@ approval_timeout_secs: 3600
 # Server-side total wall-clock budget for a single workflow.wait call (#702).
 # When a timeout_secs chunk elapses with tasks still running, the gateway
 # re-issues the wait internally — WITHOUT a full LLM round — up to this total,
-# returning as soon as a task finishes. Eliminates the wasteful
-# wait→timeout→LLM-round→wait churn. Callers may lower it per-call via
-# max_wait_secs. Set equal to default_workflow_wait_secs (or 0) to disable
+# returning as soon as all watched task_ids reach a terminal state. Eliminates
+# the wasteful wait→timeout→LLM-round→wait churn. Callers may lower it per-call
+# via max_wait_secs. Set equal to default_workflow_wait_secs (or 0) to disable
 # auto-extension. Default: 300.
 # workflow_wait_max_total_secs: 300
 
