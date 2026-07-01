@@ -19,6 +19,10 @@ pub enum ReasoningStyle {
     /// OpenRouter silently ignores the field on models that don't support
     /// reasoning, so the driver emits it unconditionally whenever `thinking` is set.
     OpenRouterUnified,
+    /// OpenCode Go gateway (opencode.ai/zen/go). Supports Anthropic-style
+    /// `cache_control` breakpoints on all models except GLM/Zhipu, plus
+    /// per-session `prompt_cache_key` and `prompt_cache_retention: "24h"`.
+    OpenCodeGo,
 }
 
 /// Flags describing what a provider's API supports.
@@ -141,6 +145,7 @@ fn reasoning_style_for_provider(provider: &str) -> ReasoningStyle {
     match provider {
         "openai" | "codex" => ReasoningStyle::OpenAiEffort,
         "openrouter" => ReasoningStyle::OpenRouterUnified,
+        "opencode" => ReasoningStyle::OpenCodeGo,
         _ => ReasoningStyle::None,
     }
 }
