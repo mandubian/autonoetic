@@ -20,6 +20,7 @@ pub mod context;
 pub mod crypto;
 pub mod curator_journal;
 pub mod disclosure;
+pub mod error_fingerprint;
 pub mod eval_stats;
 pub mod failure_classification;
 pub mod fuzzy_match;

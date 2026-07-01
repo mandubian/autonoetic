@@ -2064,6 +2064,21 @@ pub struct LoopGuardConfig {
     /// reaches `max_loops_without_progress`. Set to 0 to disable (legacy behavior).
     #[serde(default = "default_child_failure_loop_penalty")]
     pub child_failure_loop_penalty: u32,
+
+    /// Recurring-error detector window (issue #703). The guard fingerprints each
+    /// error tool-result (volatile ids/timestamps/numbers stripped) and tracks
+    /// the last N in a sliding window. Set to 0 to disable the detector.
+    #[serde(default = "default_recurring_error_window")]
+    pub recurring_error_window: usize,
+
+    /// Recurring-error trip threshold (issue #703). When the same normalized
+    /// error fingerprint has surfaced from at least this many *distinct* tool
+    /// names within `recurring_error_window`, the guard trips with
+    /// `RecurringUnrecoverableError`. Catches an agent rotating through
+    /// different tools that all hit one unrecoverable root cause — a pattern the
+    /// per-tool failure budgets miss.
+    #[serde(default = "default_recurring_error_distinct_tools")]
+    pub recurring_error_distinct_tools: usize,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -2092,6 +2107,8 @@ impl Default for LoopGuardConfig {
             roster_repeat_floor: default_roster_repeat_floor(),
             max_llm_failures: default_max_llm_failures(),
             child_failure_loop_penalty: default_child_failure_loop_penalty(),
+            recurring_error_window: default_recurring_error_window(),
+            recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
         }
     }
 }
@@ -2130,6 +2147,14 @@ fn default_max_llm_failures() -> u32 {
 
 fn default_child_failure_loop_penalty() -> u32 {
     2
+}
+
+fn default_recurring_error_window() -> usize {
+    10
+}
+
+fn default_recurring_error_distinct_tools() -> usize {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2485,6 +2510,15 @@ pub struct PromptBudgetConfig {
     #[serde(default = "default_dedup_tool_results")]
     pub dedup_tool_results: bool,
 
+    /// Collapse *recurring errors* (issue #705) in the LLM request. Unlike
+    /// `dedup_tool_results` (byte-identical, consecutive), this fingerprints the
+    /// error text (volatile ids/timestamps/numbers stripped) so the same
+    /// root-cause failure surfacing non-consecutively — the hallmark of an
+    /// install/spawn death spiral — is collapsed to a marker on all but its most
+    /// recent occurrence. The full results are still stored. Enabled by default.
+    #[serde(default = "default_collapse_repeated_errors")]
+    pub collapse_repeated_errors: bool,
+
     /// Override the chars-per-token ratio used by the prompt budget
     /// estimator. `None` (the default) means "use the built-in default of
     /// 3.0 chars/token". Operators running a tokenizer that is known to
@@ -2518,6 +2552,10 @@ fn default_dedup_tool_results() -> bool {
     true
 }
 
+fn default_collapse_repeated_errors() -> bool {
+    true
+}
+
 impl Default for PromptBudgetConfig {
     fn default() -> Self {
         Self {
@@ -2532,6 +2570,7 @@ impl Default for PromptBudgetConfig {
             strip_reasoning_from_request: default_strip_reasoning(),
             max_tool_result_chars: default_max_tool_result_chars(),
             dedup_tool_results: default_dedup_tool_results(),
+            collapse_repeated_errors: default_collapse_repeated_errors(),
             chars_per_token: None,
         }
     }

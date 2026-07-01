@@ -68,6 +68,16 @@ pub enum LoopGuardTripReason {
     /// terminal). Retrying the same call can never succeed, so end the turn
     /// immediately instead of letting the agent burn its tool-failure budget.
     WorkflowTerminal { workflow_id: String },
+    /// Trip condition #8 — the same normalized error fingerprint has surfaced
+    /// from `distinct_tools.len()` different tool names within the recent
+    /// window (issue #703). The agent is trying different approaches against
+    /// one unrecoverable root cause — a pattern the per-tool failure budget
+    /// misses because each tool's individual count stays low.
+    RecurringUnrecoverableError {
+        error_hash: u64,
+        distinct_tools: Vec<String>,
+        occurrences: u32,
+    },
 }
 
 impl LoopGuardTripReason {
@@ -81,6 +91,9 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::RedundantRosterPolling { .. } => "redundant_roster_polling",
             LoopGuardTripReason::LlmFailureBudget { .. } => "llm_failure_budget",
             LoopGuardTripReason::WorkflowTerminal { .. } => "workflow_terminal",
+            LoopGuardTripReason::RecurringUnrecoverableError { .. } => {
+                "recurring_unrecoverable_error"
+            }
         }
     }
 
@@ -96,6 +109,7 @@ impl LoopGuardTripReason {
     /// - `RedundantRosterPolling`→ P-7.19 (no semantic progress across successes)
     /// - `LlmFailureBudget`       → P-7.5 (consecutive failures)
     /// - `WorkflowTerminal`       → P-7.5 (deterministic tool failure)
+    /// - `RecurringUnrecoverableError` → P-7.7 (no progress across different tools)
     pub fn rule_id(&self) -> &'static str {
         match self {
             LoopGuardTripReason::ToolFailureBudget { .. } => "P-7.5",
@@ -105,6 +119,9 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::RedundantRosterPolling { .. } => "P-7.19",
             LoopGuardTripReason::LlmFailureBudget { .. } => "P-7.5",
             LoopGuardTripReason::WorkflowTerminal { .. } => "P-7.5",
+            // Same "no progress despite trying different tools" family as
+            // NoMeaningfulProgress.
+            LoopGuardTripReason::RecurringUnrecoverableError { .. } => "P-7.7",
         }
     }
 }
@@ -169,6 +186,17 @@ pub struct LoopGuard {
     /// (rotating-polling detector).
     #[serde(default)]
     pub recent_fingerprints: VecDeque<u64>,
+    /// Sliding window of `(normalized_error_fingerprint, tool_name)` for the
+    /// last `recurring_error_window` *error* tool-results. Trip condition #8
+    /// (recurring-unrecoverable-error detector, issue #703).
+    #[serde(default)]
+    pub recent_error_fingerprints: VecDeque<(u64, String)>,
+    /// Trip condition #8 — recent-error window size. 0 disables the detector.
+    #[serde(default = "default_recurring_error_window")]
+    pub recurring_error_window: usize,
+    /// Trip condition #8 — distinct-tool threshold for the same error hash.
+    #[serde(default = "default_recurring_error_distinct_tools")]
+    pub recurring_error_distinct_tools: usize,
     /// Trip reason recorded when any condition fires. Cleared on construction
     /// and never reset — once a guard has tripped, subsequent calls are
     /// errors. `last_trip_reason` exposes this for causal-event emission.
@@ -198,6 +226,9 @@ impl LoopGuard {
             child_failure_count: 0,
             child_failure_loop_penalty: default_child_failure_loop_penalty(),
             recent_fingerprints: VecDeque::new(),
+            recent_error_fingerprints: VecDeque::new(),
+            recurring_error_window: default_recurring_error_window(),
+            recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
             trip_reason: None,
             repair_mode: false,
             repair_loops: 0,
@@ -225,6 +256,9 @@ impl LoopGuard {
             child_failure_count: 0,
             child_failure_loop_penalty: cfg.child_failure_loop_penalty,
             recent_fingerprints: VecDeque::new(),
+            recent_error_fingerprints: VecDeque::new(),
+            recurring_error_window: cfg.recurring_error_window,
+            recurring_error_distinct_tools: cfg.recurring_error_distinct_tools,
             trip_reason: None,
             repair_mode: false,
             repair_loops: 0,
@@ -399,6 +433,51 @@ impl LoopGuard {
         self.current_loops = self
             .current_loops
             .saturating_add(self.child_failure_loop_penalty);
+    }
+
+    /// Track an error tool-result for the recurring-unrecoverable-error
+    /// detector (#703). Fingerprints the error (volatile ids/timestamps/numbers
+    /// stripped) and records `(fingerprint, tool_name)` in a sliding window.
+    /// Trips `RecurringUnrecoverableError` when the same fingerprint has been
+    /// seen from at least `recurring_error_distinct_tools` distinct tool names
+    /// within the window — the agent is hitting one unrecoverable root cause
+    /// through different tools, which the per-tool failure budget cannot see.
+    ///
+    /// No-ops when the result carries no error, when the detector is disabled
+    /// (`recurring_error_window == 0`), or when the guard has already tripped.
+    pub fn register_error(&mut self, tool_name: &str, result_json: &str) {
+        if self.recurring_error_window == 0 || self.trip_reason.is_some() {
+            return;
+        }
+        let Some(hash) = crate::runtime::error_fingerprint::fingerprint_result(result_json) else {
+            return;
+        };
+
+        if self.recent_error_fingerprints.len() >= self.recurring_error_window {
+            self.recent_error_fingerprints.pop_front();
+        }
+        self.recent_error_fingerprints
+            .push_back((hash, tool_name.to_string()));
+
+        // Distinct tool names that produced this same error hash in the window.
+        let mut distinct: Vec<String> = Vec::new();
+        let mut occurrences = 0u32;
+        for (h, tool) in &self.recent_error_fingerprints {
+            if *h == hash {
+                occurrences += 1;
+                if !distinct.iter().any(|t| t == tool) {
+                    distinct.push(tool.clone());
+                }
+            }
+        }
+
+        if distinct.len() >= self.recurring_error_distinct_tools {
+            self.trip_reason = Some(LoopGuardTripReason::RecurringUnrecoverableError {
+                error_hash: hash,
+                distinct_tools: distinct,
+                occurrences,
+            });
+        }
     }
 
     /// Track an LLM transport/endpoint failure. Counts consecutively — a
@@ -576,6 +655,9 @@ impl Default for LoopGuard {
             child_failure_count: 0,
             child_failure_loop_penalty: default_child_failure_loop_penalty(),
             recent_fingerprints: VecDeque::new(),
+            recent_error_fingerprints: VecDeque::new(),
+            recurring_error_window: default_recurring_error_window(),
+            recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
             trip_reason: None,
             repair_mode: false,
             repair_loops: 0,
@@ -642,6 +724,18 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
              Cannot spawn new tasks against it — resume or start a new workflow.",
             workflow_id
         ),
+        LoopGuardTripReason::RecurringUnrecoverableError {
+            distinct_tools,
+            occurrences,
+            ..
+        } => anyhow::anyhow!(
+            "LoopGuard tripped: the same error recurred {} times across {} different \
+             tools ({}) — this root cause is unrecoverable by retrying or switching \
+             tools. Escalate to the operator or change strategy (issue #703).",
+            occurrences,
+            distinct_tools.len(),
+            distinct_tools.join(", ")
+        ),
     }
 }
 
@@ -663,6 +757,14 @@ fn default_max_llm_failures() -> u32 {
 
 fn default_child_failure_loop_penalty() -> u32 {
     2
+}
+
+fn default_recurring_error_window() -> usize {
+    10
+}
+
+fn default_recurring_error_distinct_tools() -> usize {
+    3
 }
 
 /// Read-only roster directory tools whose results are idempotent: repeating
@@ -954,6 +1056,74 @@ mod tests {
         guard.register_child_failure();
         assert_eq!(guard.current_loops, 0, "penalty 0 must not touch current_loops");
         assert_eq!(guard.child_failure_count, 1);
+    }
+
+    /// #703: the same normalized error surfacing from 3 distinct tools trips
+    /// `RecurringUnrecoverableError`, even though no single tool reached its
+    /// failure budget.
+    #[test]
+    fn recurring_error_across_distinct_tools_trips() {
+        let mut guard = LoopGuard::new(100); // high loop budget: recurring-error is the cause
+        let err = |id: &str| {
+            format!(
+                r#"{{"ok":false,"error":"workflow wf-{id} was reactivated and cannot accept child-session spawns"}}"#
+            )
+        };
+        // Same root cause (volatile wf id differs) from three different tools.
+        guard.register_error("agent_spawn", &err("aaa111"));
+        assert!(guard.last_trip_reason().is_none(), "1 tool: no trip");
+        guard.register_error("agent_revision_create_from_intent", &err("bbb222"));
+        assert!(guard.last_trip_reason().is_none(), "2 tools: no trip");
+        guard.register_error("workflow_wait", &err("ccc333"));
+
+        let err_ = guard.check_loop().expect_err("3 distinct tools must trip");
+        assert!(err_.to_string().contains("across 3 different tools"), "{err_}");
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(LoopGuardTripReason::RecurringUnrecoverableError { .. })
+        ));
+        assert_eq!(guard.last_trip_reason().unwrap().rule_id(), "P-7.7");
+    }
+
+    /// The same error from the SAME tool repeatedly does not trip #703 (that's
+    /// the per-tool failure budget's job) — distinct tools is the trigger.
+    #[test]
+    fn recurring_error_same_tool_does_not_trip_recurring_detector() {
+        let mut guard = LoopGuard::new(100);
+        for _ in 0..5 {
+            guard.register_error("agent_spawn", r#"{"ok":false,"error":"disk full"}"#);
+        }
+        assert!(
+            !matches!(
+                guard.last_trip_reason(),
+                Some(LoopGuardTripReason::RecurringUnrecoverableError { .. })
+            ),
+            "same-tool repetition must not trip the cross-tool detector"
+        );
+    }
+
+    /// Distinct errors across tools do not trip — only a shared fingerprint does.
+    #[test]
+    fn distinct_errors_across_tools_do_not_trip() {
+        let mut guard = LoopGuard::new(100);
+        guard.register_error("agent_spawn", r#"{"ok":false,"error":"disk full"}"#);
+        guard.register_error("workflow_wait", r#"{"ok":false,"error":"permission denied"}"#);
+        guard.register_error("planframe_get", r#"{"ok":false,"error":"not found"}"#);
+        assert!(guard.last_trip_reason().is_none());
+    }
+
+    /// `recurring_error_window: 0` disables the detector.
+    #[test]
+    fn recurring_error_window_zero_disables_detector() {
+        let cfg = autonoetic_types::config::LoopGuardConfig {
+            recurring_error_window: 0,
+            ..Default::default()
+        };
+        let mut guard = LoopGuard::with_config(&cfg);
+        for tool in ["a", "b", "c", "d"] {
+            guard.register_error(tool, r#"{"ok":false,"error":"same error"}"#);
+        }
+        assert!(guard.last_trip_reason().is_none());
     }
 
     #[test]
