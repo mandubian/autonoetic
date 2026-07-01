@@ -970,7 +970,7 @@ mod tests {
     use crate::llm::provider::{
         AuthStrategy, DriverKind, ProviderCapabilities, ReasoningStyle, ResolvedProvider,
     };
-    use crate::llm::{CompletionRequest, Message, ToolDefinition};
+    use crate::llm::{CompletionRequest, Message};
     use autonoetic_types::agent::{ThinkingConfig, ThinkingEffort};
 
     fn driver_with(model: &str, reasoning: ReasoningStyle) -> OpenAiDriver {
