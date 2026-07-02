@@ -1151,7 +1151,7 @@ fn gateway_pending_lists_unified_queue() {
             payload: None,
         },
         approval_level: ApprovalLevel::Operator,
-        created_at: "2026-07-02T10:00:00Z".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
         reason: Some("fetch a dataset".to_string()),
         evidence_ref: None,
         workflow_id: None,

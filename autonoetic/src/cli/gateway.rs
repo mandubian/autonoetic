@@ -2133,7 +2133,16 @@ pub async fn handle_gateway_pending(
             Some(s) => format!("{s}s"),
             None => "-".to_string(),
         };
-        let summary: String = p.summary.chars().take(60).collect();
+        // Collapse control whitespace (a free-form summary such as an
+        // escalation's planner_synthesis may contain newlines/tabs) so each
+        // decision stays on one row, and mark truncation with an ellipsis.
+        let flat = p.summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let summary = if flat.chars().count() > 60 {
+            let head: String = flat.chars().take(59).collect();
+            format!("{head}\u{2026}")
+        } else {
+            flat
+        };
         println!(
             "{:<12} {:<40} {:>8}  {:<28} {}",
             kind, p.id, age, p.answer.method, summary
