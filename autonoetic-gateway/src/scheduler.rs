@@ -669,15 +669,26 @@ async fn check_stuck_running_tasks(
                 let heartbeat_age_secs = claim_opt.as_ref().and_then(|claim| {
                     chrono::DateTime::parse_from_rfc3339(&claim.heartbeat_at)
                         .ok()
-                        .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_seconds() as u64)
+                        .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_seconds())
                 });
+
+                let heartbeat_age_label = heartbeat_age_secs.map_or_else(
+                    || "unknown".to_string(),
+                    |secs| {
+                        if secs >= 0 {
+                            format!("{}s ago", secs)
+                        } else {
+                            format!("{}s in the future", -secs)
+                        }
+                    },
+                );
 
                 let (status, result_summary, checkpoint_status, event_type) =
                     if action == autonoetic_types::config::StuckTaskNoEvidenceAction::Fail {
                         let summary = format!(
-                            "stuck_no_evidence: task running for {}s with no completion evidence; last heartbeat {}s ago",
+                            "stuck_no_evidence: task running for {}s with no completion evidence; last heartbeat {}",
                             elapsed_secs,
-                            heartbeat_age_secs.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string())
+                            heartbeat_age_label
                         );
                         (
                             autonoetic_types::workflow::TaskRunStatus::Failed,
