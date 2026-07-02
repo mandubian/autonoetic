@@ -879,6 +879,24 @@ fn default_allow_missing_peer_constitution_digest() -> bool {
     true
 }
 
+/// Action taken by the stuck-task sweeper when a `Running` task has a stale
+/// heartbeat / no progress and no completion evidence (session manifest,
+/// digest, checkpoint, or implicit artifact).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StuckTaskNoEvidenceAction {
+    /// Resolve the stuck task as `Failed` and finalize its session as failed.
+    Fail,
+    /// Preserve legacy behavior: resolve the stuck task as `Succeeded`.
+    Succeed,
+}
+
+impl Default for StuckTaskNoEvidenceAction {
+    fn default() -> Self {
+        StuckTaskNoEvidenceAction::Fail
+    }
+}
+
 /// Top-level Gateway daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1083,6 +1101,13 @@ pub struct GatewayConfig {
     /// Default: 600 (10 minutes).
     #[serde(default = "default_stuck_task_timeout_secs_val")]
     pub stuck_task_timeout_secs: Option<u64>,
+
+    /// What the stuck-task sweeper should do when a `Running` task has no completion
+    /// evidence and no fresh heartbeat. `fail` (default) resolves the task as `Failed`
+    /// and emits a `task.stuck` anomaly event. `succeed` preserves legacy behavior and
+    /// force-completes it as `Succeeded`.
+    #[serde(default)]
+    pub stuck_task_no_evidence_action: StuckTaskNoEvidenceAction,
 
     /// Evidence mode configuration.
     /// Controls how much tool/LLM execution data is saved to evidence files for debugging.
@@ -3043,6 +3068,7 @@ impl Default for GatewayConfig {
             continuation_key: None,
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
+            stuck_task_no_evidence_action: StuckTaskNoEvidenceAction::default(),
             evidence_mode: default_evidence_mode(),
             session_report: SessionReportConfig::default(),
             digest_agent: DigestAgentConfig::default(),
