@@ -2600,6 +2600,41 @@ struct RevisionPromoteArgs {
     smoke_test_input: Option<String>,
 }
 
+/// Best-effort ledger write for a terminal promotion-attempt outcome
+/// (issue #720). Failures are logged but do not block the tool response.
+fn record_promotion_attempt_outcome(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+    content_digest: &str,
+    outcome: &str,
+    gate: Option<&str>,
+    error_code: Option<&str>,
+    session_id: Option<&str>,
+    workflow_id: Option<&str>,
+) {
+    let attempt_id = format!("patt-{}", uuid::Uuid::new_v4());
+    if let Err(e) = store.record_promotion_attempt(
+        &attempt_id,
+        agent_id,
+        revision_id,
+        content_digest,
+        outcome,
+        gate,
+        error_code,
+        session_id,
+        workflow_id,
+    ) {
+        tracing::warn!(
+            target: "promotion",
+            agent_id = %agent_id,
+            revision_id = %revision_id,
+            error = %e,
+            "Failed to record promotion attempt outcome"
+        );
+    }
+}
+
 pub struct AgentRevisionPromoteTool;
 
 impl NativeTool for AgentRevisionPromoteTool {
@@ -2719,6 +2754,23 @@ do not re-issue."
             args.revision_id,
             rev.status
         );
+
+        // Convenience closure for the durable promotion-attempt ledger (issue #720).
+        // Captures the common context so each terminal gate only supplies the
+        // outcome-specific fields.
+        let record_attempt = |outcome: &str, gate: Option<&str>, error_code: Option<&str>| {
+            record_promotion_attempt_outcome(
+                &gateway_store,
+                &args.agent_id,
+                &args.revision_id,
+                &rev.content_digest,
+                outcome,
+                gate,
+                error_code,
+                session_id,
+                run_context.and_then(|rc| rc.workflow_id.as_deref()),
+            );
+        };
 
         let single_flight_scope = if let (Some(config), Some(session_id)) = (config, session_id) {
             let root_session_id = crate::runtime::content_store::root_session_id(session_id);
@@ -3699,6 +3751,7 @@ do not re-issue."
                     gateway_dir,
                     &args.agent_id,
                     &args.revision_id,
+                    Some(&rev.content_digest),
                 )? {
                     crate::runtime::promotion_governor::emit_rejected_event(
                         gateway_store.as_ref(),
@@ -3708,6 +3761,7 @@ do not re-issue."
                         &args.revision_id,
                         &rejection,
                     );
+                    record_attempt("rejected", Some("governor"), Some(rejection.error));
                     return Ok(rejection.to_tool_error().to_string());
                 }
             }
@@ -3734,6 +3788,11 @@ do not re-issue."
                         );
                     }
                     Ok(crate::sentinel::GateOutcome::Blocked { reason, critical_count }) => {
+                        record_attempt(
+                            "rejected",
+                            Some("sentinel"),
+                            Some("sentinel_critical_findings_block_promotion"),
+                        );
                         return Ok(serde_json::json!({
                             "ok": false,
                             "error_type": "sentinel_gate",
@@ -3749,6 +3808,7 @@ do not re-issue."
                         .to_string());
                     }
                     Err(e) => {
+                        record_attempt("rejected", Some("sentinel"), Some("sentinel_gate_failed"));
                         // Fail-closed: timeout or sweep error blocks promotion.
                         return Ok(serde_json::json!({
                             "ok": false,
@@ -3804,6 +3864,7 @@ do not re-issue."
         // candidate revision. This runs even for an unchanged existing agent.
         if args.smoke_test_task_id.is_some() || args.smoke_test_workflow_id.is_some() {
             let Some(workflow_id) = args.smoke_test_workflow_id.as_deref() else {
+                record_attempt("rejected", Some("smoke_test"), Some("smoke_test_required"));
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "validation",
@@ -3815,6 +3876,7 @@ do not re-issue."
                 .to_string());
             };
             let Some(task_id) = args.smoke_test_task_id.as_deref() else {
+                record_attempt("rejected", Some("smoke_test"), Some("smoke_test_required"));
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "validation",
@@ -3834,6 +3896,7 @@ do not re-issue."
                 &args.revision_id,
                 args.smoke_test_input.as_deref(),
             ) {
+                record_attempt("rejected", Some("smoke_test"), Some("smoke_test_failed_or_mismatched"));
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "validation",
@@ -3857,6 +3920,7 @@ do not re-issue."
             {
                 let input = args.smoke_test_input.as_deref().unwrap_or("").trim();
                 if input.is_empty() {
+                    record_attempt("rejected", Some("smoke_test"), Some("smoke_test_input_required"));
                     return Ok(serde_json::json!({
                         "ok": false,
                         "error_type": "validation",
@@ -3888,6 +3952,7 @@ do not re-issue."
                         args.agent_id
                     )
                 };
+                record_attempt("rejected", Some("smoke_test"), Some("smoke_test_required"));
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "validation",
@@ -3934,6 +3999,8 @@ do not re-issue."
             args.required_eval_run_id.as_deref(),
             pre_authorization.as_deref(),
         )?;
+
+        record_attempt("promoted", None, None);
 
         crate::bootstrap::update_latest_symlink(gateway_dir, &args.agent_id, &args.revision_id);
 

@@ -90,6 +90,7 @@ max_background_due_per_tick: 32
 #   flapping_lookback: 4            # How many recent promotions to scan
 #   eval_regression_streak: 3       # Adjacent increases needed to halt
 #   eval_regression_lookback: 6     # How many recent promotions to scan
+#   max_promotion_attempts_per_revision: 3  # Rejected attempts per digest before operator ack
 
 # ── Response Validation & Repair ──────────────────────────────────────
 # When enabled, the gateway validates agent outputs against declared constraints.

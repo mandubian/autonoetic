@@ -809,7 +809,7 @@ impl Default for ConstitutionConfig {
 /// default paths, the `CURRENT` pointer, and the lock-inventory tests all stay
 /// in sync from this one edit. The guard test
 /// `current_file_matches_active_constitution_version` fails CI if the two drift.
-pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.06.26";
+pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.07.02";
 
 pub fn default_constitution_source_path() -> PathBuf {
     PathBuf::from(format!(
@@ -1437,6 +1437,12 @@ pub struct PromotionGovernorConfig {
     /// streak. Default: 6.
     #[serde(default = "default_promotion_governor_eval_regression_lookback")]
     pub eval_regression_lookback: usize,
+
+    /// Maximum number of rejected promotion attempts for the same
+    /// `(alias, content_digest)` before further attempts are blocked until an
+    /// operator ack resets the counter (issue #720). Default: 3.
+    #[serde(default = "default_promotion_governor_max_promotion_attempts_per_revision")]
+    pub max_promotion_attempts_per_revision: usize,
 }
 
 impl Default for PromotionGovernorConfig {
@@ -1448,6 +1454,8 @@ impl Default for PromotionGovernorConfig {
             flapping_lookback: default_promotion_governor_flapping_lookback(),
             eval_regression_streak: default_promotion_governor_eval_regression_streak(),
             eval_regression_lookback: default_promotion_governor_eval_regression_lookback(),
+            max_promotion_attempts_per_revision:
+                default_promotion_governor_max_promotion_attempts_per_revision(),
         }
     }
 }
@@ -1505,6 +1513,10 @@ fn default_promotion_governor_eval_regression_streak() -> usize {
 
 fn default_promotion_governor_eval_regression_lookback() -> usize {
     6
+}
+
+fn default_promotion_governor_max_promotion_attempts_per_revision() -> usize {
+    3
 }
 
 fn default_fast_scheduler_enabled() -> bool {

@@ -35,6 +35,7 @@ fn enabled_config() -> PromotionGovernorConfig {
         flapping_lookback: 4,
         eval_regression_streak: 3,
         eval_regression_lookback: 6,
+        max_promotion_attempts_per_revision: 3,
     }
 }
 
@@ -134,7 +135,7 @@ fn governor_disabled_passes_unconditionally() {
         enabled: false,
         ..enabled_config()
     };
-    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-new").unwrap();
+    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-new", None).unwrap();
     assert!(rejection.is_none());
 }
 
@@ -366,7 +367,7 @@ fn run_governor_returns_velocity_before_flapping() {
         );
     }
     // candidate matches one of them → flapping would also fire
-    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-1")
+    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-1", None)
         .unwrap()
         .unwrap();
     assert_eq!(rejection.error, "promotion_velocity_exceeded");
@@ -377,7 +378,7 @@ fn run_governor_returns_none_when_clear() {
     let (_temp, store, gateway_dir) = temp_setup();
     let cfg = enabled_config();
     let rejection =
-        run_governor_checks(&cfg, &store, &gateway_dir, "agent.clean", "rev-fresh").unwrap();
+        run_governor_checks(&cfg, &store, &gateway_dir, "agent.clean", "rev-fresh", None).unwrap();
     assert!(rejection.is_none());
 }
 

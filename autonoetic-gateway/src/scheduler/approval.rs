@@ -291,6 +291,24 @@ pub fn apply_decision(
         }
     }
 
+    // ── 1c. Promotion attempt ledger reset (issue #720) ────────────────
+    if decision.status == ApprovalStatus::Approved {
+        if let ScheduledAction::RevisionPromote { agent_id, revision_id, .. } = &decision.action {
+            if let Ok(Some(rev)) = store.get_agent_revision(revision_id) {
+                if let Err(e) = store.reset_promotion_attempts(agent_id, &rev.content_digest) {
+                    tracing::warn!(
+                        target: "approval",
+                        request_id = %decision.request_id,
+                        agent_id = %agent_id,
+                        revision_id = %revision_id,
+                        error = %e,
+                        "Failed to reset promotion attempt ledger after approval"
+                    );
+                }
+            }
+        }
+    }
+
     // ── 1b. PlanFrame side-effects ─────────────────────────────────────
     if let ScheduledAction::PlanFrame { plan_id, version, envelope } = &decision.action {
         use autonoetic_types::session_timeline::TimelineRefs;

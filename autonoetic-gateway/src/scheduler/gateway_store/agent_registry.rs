@@ -752,6 +752,96 @@ impl GatewayStore {
         Ok(results)
     }
 
+    // ── Promotion attempt ledger (issue #720) ──────────────────────────
+
+    /// Record one terminal outcome of a promotion attempt. `outcome` is either
+    /// `'rejected'` (a gate blocked the promote) or `'promoted'` (the alias was
+    /// updated). The ledger is keyed by `content_digest` so a rebuilt identical
+    /// revision shares the same attempt budget.
+    pub fn record_promotion_attempt(
+        &self,
+        attempt_id: &str,
+        alias_id: &str,
+        revision_id: &str,
+        content_digest: &str,
+        outcome: &str,
+        gate: Option<&str>,
+        error_code: Option<&str>,
+        session_id: Option<&str>,
+        workflow_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO promotion_attempts (
+                attempt_id, alias_id, revision_id, content_digest, outcome,
+                gate, error_code, session_id, workflow_id, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                attempt_id,
+                alias_id,
+                revision_id,
+                content_digest,
+                outcome,
+                gate,
+                error_code,
+                session_id,
+                workflow_id,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Count rejected promotion attempts for `(alias_id, content_digest)`.
+    /// Used by the attempt-exhaustion governor check (issue #720).
+    pub fn count_promotion_attempt_rejections(
+        &self,
+        alias_id: &str,
+        content_digest: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM promotion_attempts
+             WHERE alias_id = ?1 AND content_digest = ?2 AND outcome = 'rejected'",
+            params![alias_id, content_digest],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Reset the rejected-attempt counter for `(alias_id, content_digest)`.
+    /// Called when an operator approves the `RevisionPromote` ack for this
+    /// revision, or resolves an exhaustion escalation.
+    pub fn reset_promotion_attempts(
+        &self,
+        alias_id: &str,
+        content_digest: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM promotion_attempts
+             WHERE alias_id = ?1 AND content_digest = ?2 AND outcome = 'rejected'",
+            params![alias_id, content_digest],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Transactional variant used when the caller already holds a rusqlite
+    /// transaction and wants the count read serialized with other writes.
+    pub fn count_promotion_attempt_rejections_in_tx(
+        tx: &rusqlite::Transaction,
+        alias_id: &str,
+        content_digest: &str,
+    ) -> Result<usize> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM promotion_attempts
+             WHERE alias_id = ?1 AND content_digest = ?2 AND outcome = 'rejected'",
+            params![alias_id, content_digest],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Find agent IDs that were promoted under a given session envelope
     /// (by matching `pre_authorization` JSON containing the envelope_id).
     /// Returns `(agent_id, promotion_id, created_at)` tuples.

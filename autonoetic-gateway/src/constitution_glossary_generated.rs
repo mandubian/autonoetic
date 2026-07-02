@@ -51,6 +51,7 @@ pub(crate) static GLOSSARY: &[(&str, &str)] = &[
     ("P-2.26", "**All executed gate roles must pass.** When a federation gate role (`static_evaluator`, `unit_test_runner`, `sealed_evaluator`) has recorded a verdict for a revision's artifact, the promotion gate mechanically checks that **every** such role recorded `pass=true`."),
     ("P-2.27", "A **session capability envelope**, locked by operator decision, pre-authorizes tool calls within its scope."),
     ("P-2.28", "**Smoke-test gate for new agents.** New agents declaring `NetworkAccess` or `CodeExecution` require a successful execution trace before promotion to `Ready`."),
+    ("P-2.29", "**Promotion attempt exhaustion gate.** Too many rejected promotion attempts for the same `(alias, content_digest)` across sessions blocks further attempts until an operator acknowledges the revision."),
     ("P-2.3", "Identical operations within a session deduplicate."),
     ("P-2.4", "Approved hosts auto-approve subsequent calls within the root session."),
     ("P-2.5", "Approval response surfaces `detected_hosts` for operator visibility."),
