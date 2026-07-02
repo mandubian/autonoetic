@@ -5678,7 +5678,7 @@ fn actor_color(actor: ActorKind) -> Color {
         ActorKind::Auditor => Color::LightMagenta,
         ActorKind::Tool => Color::DarkGray,
         ActorKind::ExternalSurface => Color::Blue,
-        ActorKind::Runtime => Color::Red,
+        ActorKind::Runtime => Color::LightCyan,
         ActorKind::Other => Color::White,
     }
 }
