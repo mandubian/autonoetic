@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 60;
+const SCHEMA_VERSION_LATEST: i64 = 61;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -545,7 +545,41 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_workflow_singleton_index_v58(conn)?;
     apply_promotion_attempt_ledger_v59(conn)?;
     apply_approval_expires_at_v60(conn)?;
+    apply_approval_waiters_v61(conn)?;
 
+    Ok(())
+}
+
+fn apply_approval_waiters_v61(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 61 {
+        return Ok(());
+    }
+
+    // #723: sessions that joined an existing pending approval (root-scoped,
+    // structurally-identical action) so its resolution fans in to all of them.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS approval_waiters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            workflow_id TEXT,
+            task_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(request_id, session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_approval_waiters_request
+            ON approval_waiters(request_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![61, "approval_waiters", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 
