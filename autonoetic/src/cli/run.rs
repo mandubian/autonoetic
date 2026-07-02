@@ -566,7 +566,7 @@ pub async fn handle_run(
         let resolved_target = resolved_agent_id.as_deref().unwrap_or("planner.default");
         let room_args = super::common::RoomArgs {
             root_session_id: Some(session_id),
-            min_altitude: "normal".to_string(),
+            min_altitude: "detail".to_string(),
             resume: false,
             agent: Some(resolved_target.to_string()),
             follow: true,

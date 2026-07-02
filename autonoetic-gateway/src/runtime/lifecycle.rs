@@ -1721,6 +1721,7 @@ impl AgentExecutor {
                         compression_cfg.cloned(),
                         self.manifest.compression.clone(),
                         plan_anchor,
+                        self.capsule_state.clone(),
                     );
                     let governor = if self.overflow_recovery {
                         tracing::info!(

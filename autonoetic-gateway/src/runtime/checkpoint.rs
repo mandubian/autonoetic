@@ -248,6 +248,10 @@ impl SessionCheckpoint {
         if let Some(ref cm) = self.compression_metadata {
             runtime.compression_metadata = cm.clone();
         }
+        // Restore the prior state capsule so the next governor run evolves it
+        // incrementally instead of re-bootstrapping from an empty shell.
+        // `#[serde(default)]` on the field means old checkpoints restore `None`.
+        runtime.capsule_state = self.capsule_state.clone();
         runtime.suppress_until_turn =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(self.suppress_until_turn));
         runtime
@@ -1069,6 +1073,83 @@ mod tests {
         assert_eq!(loaded.turn_counter, checkpoint.turn_counter);
         assert_eq!(loaded.history.len(), 1);
         assert_eq!(loaded.yield_reason, YieldReason::Hibernation);
+    }
+
+    #[test]
+    fn test_checkpoint_round_trips_capsule_state() {
+        // The capsule must survive save/load so that on resume the governor
+        // evolves it incrementally instead of re-bootstrapping from an empty
+        // shell (regression guard for the prior-capsule-reuse wiring).
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+
+        use crate::runtime::context_governor::capsule::{CapsuleDecision, StateCapsule};
+        let capsule = StateCapsule {
+            version: 4,
+            session_id: "session-123".to_string(),
+            last_update_turn: 9,
+            objective_and_criteria: "Accumulated objective".to_string(),
+            decisions_and_rationale: vec![CapsuleDecision {
+                turn: 2,
+                summary: "decided".into(),
+                rationale: "because".into(),
+                referenced_ids: vec![],
+            }],
+            stable_identifiers: vec![],
+            open_tasks: vec![],
+            prior_decisions_summary: None,
+            previous_version_handle: Some("sha-prev".into()),
+            source_history_handle: Some("sha-self".into()),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: "session-123".to_string(),
+            turn_id: "turn-001".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: Some(capsule),
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+
+        save_checkpoint(&config, &checkpoint).expect("should save");
+        let loaded = load_checkpoint(&config, &checkpoint.session_id, &checkpoint.turn_id)
+            .expect("should load")
+            .expect("should have checkpoint");
+
+        let loaded_capsule = loaded
+            .capsule_state
+            .as_ref()
+            .expect("capsule_state should round-trip");
+        assert_eq!(loaded_capsule.version, 4);
+        assert_eq!(loaded_capsule.objective_and_criteria, "Accumulated objective");
+        assert_eq!(loaded_capsule.previous_version_handle.as_deref(), Some("sha-prev"));
+        assert_eq!(loaded_capsule.source_history_handle.as_deref(), Some("sha-self"));
     }
 
     #[test]

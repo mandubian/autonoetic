@@ -2432,8 +2432,39 @@ impl GatewayExecutionService {
         anyhow::ensure!(!message.trim().is_empty(), "message must not be empty");
 
         let cred_bindings = credential_bindings.to_vec();
+
+        // Pre-resolve the effective agent_id for lock keying.
+        //
+        // When a session already has a binding (e.g. the root session is bound
+        // to planner.collaborative), `resolve_and_pin_session_with_revision`
+        // inside the closure will return the *bound* agent — not the requested
+        // `agent_id`.  If we acquire the per-agent execution lock with the
+        // requested agent_id while actually running a different agent, we
+        // contaminate the lock of an unrelated agent, blocking all its real
+        // executions for the entire turn duration.
+        //
+        // This pre-resolution ensures the lock is keyed by the agent that will
+        // actually execute, preventing cross-agent lock contamination.
+        let lock_agent_id = if let Some(gs) = self.gateway_store.as_ref() {
+            match gs.get_session_agent_binding(session_id) {
+                Ok(Some(binding)) => binding.agent_id,
+                _ => agent_id.to_string(),
+            }
+        } else {
+            agent_id.to_string()
+        };
+        if lock_agent_id != agent_id {
+            tracing::info!(
+                target: "execution",
+                requested_agent_id = %agent_id,
+                resolved_agent_id = %lock_agent_id,
+                session_id = %session_id,
+                "Lock key resolved to bound agent (differs from requested)"
+            );
+        }
+
         let mut result = self
-            .execute_with_reliability_controls(agent_id, || async move {
+            .execute_with_reliability_controls(&lock_agent_id, || async move {
                 let repo = AgentRepository::from_config(&self.config);
 
             if let Some(source_id) = source_agent_id {
@@ -2523,6 +2554,7 @@ impl GatewayExecutionService {
                     agent_id
                 );
             };
+            let resolve_start = std::time::Instant::now();
             let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session_with_revision(
                 session_id,
                 session_id, // root_session_id = session_id for single sessions
@@ -2535,6 +2567,7 @@ impl GatewayExecutionService {
                 agent_id = %agent_ref.agent_id,
                 revision_id = %agent_ref.revision_id,
                 session_id = session_id,
+                elapsed_ms = resolve_start.elapsed().as_millis(),
                 "Resolved session to pinned revision"
             );
             let gateway_dir = crate::execution::gateway_root_dir(&self.config);
@@ -2677,6 +2710,13 @@ impl GatewayExecutionService {
                 } else {
                     vec![]
                 };
+                tracing::info!(
+                    target: "script_exec",
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    "Calling execute_script_in_sandbox"
+                );
+                let script_exec_start = std::time::Instant::now();
                 let script_result = execute_script_in_sandbox(
                     &loaded.dir,
                     &script_path,
@@ -2692,6 +2732,14 @@ impl GatewayExecutionService {
                     Some(&gateway_dir),
                 )
                 .await;
+                tracing::info!(
+                    target: "script_exec",
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    elapsed_ms = script_exec_start.elapsed().as_millis(),
+                    success = script_result.is_ok(),
+                    "execute_script_in_sandbox returned"
+                );
 
                 // Record completion/failure in session report and causal_events
                 match &script_result {
@@ -3845,6 +3893,12 @@ impl GatewayExecutionService {
         F: FnOnce() -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
+        let rel_start = std::time::Instant::now();
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            "Acquiring agent admission semaphore"
+        );
         let agent_admission = self.agent_admission_semaphore(agent_id).await;
         let _admission_permit = agent_admission.try_acquire_owned().map_err(|_| {
             anyhow::anyhow!(
@@ -3852,9 +3906,27 @@ impl GatewayExecutionService {
                 agent_id
             )
         })?;
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            elapsed_ms = rel_start.elapsed().as_millis(),
+            "Acquired agent admission semaphore"
+        );
 
+        let lock_start = std::time::Instant::now();
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            "Acquiring agent execution lock"
+        );
         let agent_lock = self.agent_execution_lock(agent_id).await;
         let _agent_guard = agent_lock.lock().await;
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            elapsed_ms = lock_start.elapsed().as_millis(),
+            "Acquired agent execution lock"
+        );
 
         let _execution_permit = self
             .execution_semaphore
@@ -3867,7 +3939,16 @@ impl GatewayExecutionService {
                 )
             })?;
 
-        operation().await
+        let op_start = std::time::Instant::now();
+        let result = operation().await;
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            elapsed_ms = op_start.elapsed().as_millis(),
+            success = result.is_ok(),
+            "Reliability-controlled operation completed"
+        );
+        result
     }
 
     pub async fn agent_admission_semaphore(&self, agent_id: &str) -> Arc<Semaphore> {
