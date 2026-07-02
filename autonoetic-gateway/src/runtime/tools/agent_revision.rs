@@ -2818,6 +2818,7 @@ do not re-issue."
                             occurred_at: chrono::Utc::now().to_rfc3339(),
                         },
                     )?;
+                    record_attempt("coalesced", None, None);
                     return Ok(serde_json::json!({
                         "ok": true,
                         "status": "coalesced",
@@ -3113,6 +3114,11 @@ do not re-issue."
                         if let Some(guard) = single_flight_guard.as_mut() {
                             guard.disarm();
                         }
+                        record_attempt(
+                            "approval_required",
+                            Some("capability_delta"),
+                            Some("capability_delta_requires_approval"),
+                        );
                         let request_id = existing.request_id.clone();
                         return Ok(serde_json::json!({
                             "ok": existing.status
@@ -3185,6 +3191,12 @@ do not re-issue."
                     guard.disarm();
                 }
 
+                record_attempt(
+                    "approval_required",
+                    Some("capability_delta"),
+                    Some("capability_delta_requires_approval"),
+                );
+
                 return Ok(serde_json::json!({
                     "ok": false,
                     "error_type": "permission",
@@ -3251,6 +3263,11 @@ do not re-issue."
             let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
             let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
             let Some(record) = promo_store.get_promotion(artifact_id) else {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("promotion_record_missing"),
+                );
                 return Ok(Some(
                     ToolError::permission(missing_record_message.to_string())
                         .with_code("promotion_record_missing")
@@ -3263,6 +3280,11 @@ do not re-issue."
 
             let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
             if record.content_digest.as_deref() != Some(rev.content_digest.as_str()) {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("promotion_gate_content_digest_mismatch"),
+                );
                 return Ok(Some(
                     ToolError::permission(format!(
                         "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
@@ -3276,6 +3298,11 @@ do not re-issue."
             }
 
             if !record.auditor_pass {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("auditor_pass_missing"),
+                );
                 return Ok(Some(
                     ToolError::permission(format!(
                         "Promotion gate: auditor did not pass for artifact '{}'. \
@@ -3288,6 +3315,11 @@ do not re-issue."
                 ));
             }
             let Some(audit_id) = record.auditor_id.as_deref() else {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("auditor_identity_missing"),
+                );
                 return Ok(Some(
                     ToolError::permission(format!(
                         "Promotion gate: auditor identity missing for artifact '{}' (P-2.17). \
@@ -3307,6 +3339,11 @@ do not re-issue."
                         || record.sealed_evaluator_pass
                         || record.static_evaluator_pass)
                     {
+                        record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("evaluator_pass_missing"),
+                        );
                         return Ok(Some(
                             ToolError::permission(format!(
                                 "Promotion gate: no evaluator role passed for artifact '{}'. \
@@ -3324,6 +3361,11 @@ do not re-issue."
                         .or(record.sealed_evaluator_id.as_deref())
                         .or(record.static_evaluator_id.as_deref())
                     else {
+                        record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("evaluator_identity_missing"),
+                        );
                         return Ok(Some(
                             ToolError::permission(format!(
                                 "Promotion gate: evaluator identity missing for artifact '{}' (P-2.17). \
@@ -3337,6 +3379,11 @@ do not re-issue."
                         ));
                     };
                     if eval_id == audit_id {
+                        record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("gate_identity_collision"),
+                        );
                         return Ok(Some(
                             ToolError::permission(format!(
                                 "Promotion gate: evaluator and auditor are the same agent '{}' (P-2.17). \
@@ -3356,6 +3403,11 @@ do not re-issue."
                     // evaluator in this mode, the proposer is the relevant
                     // counterparty for the self-approval ban.
                     if audit_id == rev.created_by_id {
+                        record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("gate_identity_collision"),
+                        );
                         return Ok(Some(
                             ToolError::permission(format!(
                                 "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (P-2.17, audit-only). \
@@ -3376,6 +3428,11 @@ do not re-issue."
 
             // P-2.26: All executed gate roles must pass.
             if record.unit_test_runner_id.is_some() && !record.unit_test_runner_pass {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("unit_test_runner_pass_missing"),
+                );
                 return Ok(Some(
                     ToolError::permission(format!(
                         "Promotion gate: unit_test_runner did not pass for artifact '{}' (P-2.26). \
@@ -3395,6 +3452,11 @@ do not re-issue."
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if has_unresolved {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("unresolved_dependencies"),
+                );
                 return Ok(Some(
                     ToolError::permission(
                         "Promotion gate: revision has unresolved dependencies. \
@@ -3413,6 +3475,11 @@ do not re-issue."
                     &record,
                 )?
             {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some(code.as_str()),
+                );
                 return Ok(Some(
                     ToolError::permission(message)
                         .with_code(&code)
@@ -3542,6 +3609,11 @@ do not re-issue."
                 .map(|c| c.allow_zero_capability_direct_promote)
                 .unwrap_or(true);
             if !(inoffensive && cursor_allows) {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_incomplete"),
+                    Some("promotion_incomplete"),
+                );
                 let (message, repair_hint) = if !inoffensive {
                     (
                         format!(
@@ -3594,6 +3666,11 @@ do not re-issue."
                 let proposer = rev.created_by_id.as_str();
                 for id in &fed_ids {
                     if id == proposer {
+                        record_attempt(
+                            "rejected",
+                            Some("full_jury"),
+                            Some("jury_identity_collision"),
+                        );
                         return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
                             "Promotion gate (FullJury): federation role '{}' is the same identity \
                          that proposed revision '{}' (P-2.17). Each federation role must be \
@@ -3610,6 +3687,11 @@ do not re-issue."
                     for i in 0..fed_ids.len() {
                         for j in (i + 1)..fed_ids.len() {
                             if fed_ids[i] == fed_ids[j] {
+                                record_attempt(
+                                    "rejected",
+                                    Some("full_jury"),
+                                    Some("jury_identity_collision"),
+                                );
                                 return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
                                     "Promotion gate (FullJury): federation roles '{}' and '{}' \
                                  are the same agent (P-2.17). Each federation role must be \
@@ -3635,6 +3717,11 @@ do not re-issue."
                     None => gateway_store.find_approved_escalation_for_artifact(artifact_id)?,
                 };
                 if escalation.is_none() {
+                    record_attempt(
+                        "rejected",
+                        Some("full_jury"),
+                        Some("jury_escalation_required"),
+                    );
                     return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
                         "Promotion gate (FullJury): revision '{}' has federation role verdicts \
                      but no approved operator escalation. \
@@ -3688,6 +3775,11 @@ do not re-issue."
                     .any(|a| a == &args.agent_id)
             {
                 if args.required_eval_run_id.is_none() {
+                    record_attempt(
+                        "rejected",
+                        Some("protected_agent"),
+                        Some("protected_agent_requires_eval_run"),
+                    );
                     return Ok(serde_json::json!({
                         "ok": false,
                         "error_type": "permission",
@@ -3715,6 +3807,11 @@ do not re-issue."
             if force_requested {
                 let reason = args.force_reason.as_deref().unwrap_or("").trim();
                 if reason.is_empty() {
+                    record_attempt(
+                        "validation_failed",
+                        Some("governor_force"),
+                        Some("governor_force_requires_reason"),
+                    );
                     return Ok(serde_json::json!({
                         "ok": false,
                         "error_type": "validation",
@@ -3725,6 +3822,11 @@ do not re-issue."
                     .to_string());
                 }
                 if reason.len() > 512 {
+                    record_attempt(
+                        "validation_failed",
+                        Some("governor_force"),
+                        Some("governor_force_reason_too_long"),
+                    );
                     return Ok(serde_json::json!({
                         "ok": false,
                         "error_type": "validation",

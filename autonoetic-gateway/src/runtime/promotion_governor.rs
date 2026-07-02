@@ -81,6 +81,11 @@ impl GovernorRejection {
 ///
 /// `content_digest` is required for the attempt-exhaustion check; pass `None`
 /// to skip that check.
+///
+/// Note: attempt exhaustion (issue #720) is checked here but is gated by its
+/// own `max_promotion_attempts_per_revision` knob, not by `config.enabled`.
+/// When the governor is disabled, only attempt exhaustion runs; when enabled,
+/// all checks run in order (velocity, flapping, eval-regression, exhaustion).
 pub fn run_governor_checks(
     config: &PromotionGovernorConfig,
     store: &GatewayStore,
@@ -89,17 +94,16 @@ pub fn run_governor_checks(
     revision_id: &str,
     content_digest: Option<&str>,
 ) -> Result<Option<GovernorRejection>> {
-    if !config.enabled {
-        return Ok(None);
-    }
-    if let Some(r) = check_velocity(config, store, agent_id)? {
-        return Ok(Some(r));
-    }
-    if let Some(r) = check_flapping(config, store, agent_id, revision_id)? {
-        return Ok(Some(r));
-    }
-    if let Some(r) = check_eval_regression(config, store, gateway_dir, agent_id)? {
-        return Ok(Some(r));
+    if config.enabled {
+        if let Some(r) = check_velocity(config, store, agent_id)? {
+            return Ok(Some(r));
+        }
+        if let Some(r) = check_flapping(config, store, agent_id, revision_id)? {
+            return Ok(Some(r));
+        }
+        if let Some(r) = check_eval_regression(config, store, gateway_dir, agent_id)? {
+            return Ok(Some(r));
+        }
     }
     if let Some(digest) = content_digest {
         if let Some(r) = check_attempt_exhaustion(config, store, agent_id, digest)? {
