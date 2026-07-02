@@ -1094,6 +1094,7 @@ impl LiveContentNode {
 
 /// Live session content pane: a sectioned tree showing plans, artifacts, and drafts.
 /// Toggle with `c`, `j`/`k` to navigate, `o` to open the selected item.
+#[derive(Clone)]
 struct LiveContentPane {
     /// All selectable nodes in order (no section headers — sections are rendered as
     /// separators based on the section_bounds).
@@ -1273,6 +1274,7 @@ fn open_content_draft(
 
 /// Open the selected node in the live content pane.
 /// Shared by the Enter and `o` key handlers.
+/// Returns `true` if a view/detail was opened (and the popup should be closed).
 fn open_content_pane_node(
     pane: &LiveContentPane,
     idx: usize,
@@ -1285,7 +1287,8 @@ fn open_content_pane_node(
     artifact_file_view: &mut Option<ArtifactFileView>,
     content_view: &mut Option<ContentView>,
     status: &mut Option<String>,
-) {
+    live_content_pane: &mut Option<LiveContentPane>,
+) -> bool {
     let idx = idx.min(pane.nodes.len().saturating_sub(1));
     if let Some(ref node) = pane.nodes.get(idx) {
         match node {
@@ -1308,6 +1311,8 @@ fn open_content_pane_node(
                                 *detail_scroll = 0;
                                 *detail_h_scroll = 0;
                                 *status = Some("plan detail · Esc close".to_string());
+                                *live_content_pane = None;
+                                return true;
                             }
                         }
                     }
@@ -1346,6 +1351,8 @@ fn open_content_pane_node(
                                 scroll: 0,
                             });
                             *status = Some("artifact files · j/k navigate · o open · Esc close".to_string());
+                            *live_content_pane = None;
+                            return true;
                         }
                     }
                     Err(e) => *status = Some(format!("artifact list failed: {e}")),
@@ -1366,6 +1373,8 @@ fn open_content_pane_node(
                                 content: content.to_string(),
                                 scroll: 0,
                             });
+                            *live_content_pane = None;
+                            return true;
                         } else {
                             *status = Some("artifact.read_file: no content field".to_string());
                         }
@@ -1375,9 +1384,14 @@ fn open_content_pane_node(
             }
             LiveContentNode::Draft { name, .. } => {
                 *content_view = open_content_draft(client, root_session_id, name, status);
+                if content_view.is_some() {
+                    *live_content_pane = None;
+                    return true;
+                }
             }
         }
     }
+    false
 }
 
 /// Extract artifact_ref from a timeline entry, if it has one.
@@ -3189,13 +3203,17 @@ pub fn run(
                         KeyCode::Enter => {
                             if detail.is_some() {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
-                            } else if let Some(ref pane) = live_content_pane {
-                                open_content_pane_node(
-                                    pane, pane.selected, client, root_session_id,
+                            } else if let Some(pane) = live_content_pane.clone() {
+                                let opened = open_content_pane_node(
+                                    &pane, pane.selected, client, root_session_id,
                                     &mut detail, &mut detail_scroll, &mut detail_h_scroll,
                                     &mut artifact_viewer, &mut artifact_file_view,
                                     &mut content_view, &mut status,
+                                    &mut live_content_pane,
                                 );
+                                if !opened {
+                                    // keep popup open if nothing opened
+                                }
                             } else if let Some((_, src)) = view_indexed.get(selected) {
                                 // Open detail for the selected row
                                 if let Some(msg) = open_row_detail_or_plan_review(
@@ -3615,12 +3633,13 @@ pub fn run(
                             // Open the selected item in the live content pane
                             if content_view.is_some() {
                                 // already viewing content; ignore
-                            } else if let Some(pane) = live_content_pane.as_ref() {
-                                open_content_pane_node(
-                                    pane, pane.selected, client, root_session_id,
+                            } else if let Some(pane) = live_content_pane.clone() {
+                                let _ = open_content_pane_node(
+                                    &pane, pane.selected, client, root_session_id,
                                     &mut detail, &mut detail_scroll, &mut detail_h_scroll,
                                     &mut artifact_viewer, &mut artifact_file_view,
                                     &mut content_view, &mut status,
+                                    &mut live_content_pane,
                                 );
                             } else if artifact_file_view.is_some() {
                             } else if let Some(ref viewer) = artifact_viewer {
