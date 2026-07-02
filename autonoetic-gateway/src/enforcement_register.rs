@@ -610,6 +610,14 @@ mod tests {
                 repeats: 3,
                 floor: 3,
             },
+            // RepeatedIrrecoverableRejection (#718) is the single-tool fast
+            // path for P-7.7 (re-asking one already-answered gate), canonically
+            // detected by no_meaningful_progress; it shares the P-7.7 entry.
+            LoopGuardTripReason::RepeatedIrrecoverableRejection {
+                tool: "agent_revision_promote".into(),
+                error_hash: 0,
+                occurrences: 3,
+            },
         ];
         for r in &auxiliary {
             let entry = enforcement_register()
