@@ -249,7 +249,11 @@ impl NativeTool for ArtifactExecTool {
             )?
             .artifact_id
         } else {
-            return Ok(ToolError::resource("artifact_exec requires GatewayStore to be configured", None::<String>).to_error_response());
+            return Ok(ToolError::resource(
+                "artifact_exec requires GatewayStore to be configured",
+                None::<String>,
+            )
+            .to_error_response());
         };
 
         if let Some(ticket_id) = &args.deployment_ticket {
@@ -282,7 +286,8 @@ impl NativeTool for ArtifactExecTool {
                     return Ok(ToolError::resource(
                         format!("deployment_ticket '{}' not found or expired", ticket_id),
                         Some("Re-run artifact.prepare to get a new deployment ticket.".to_string()),
-                    ).to_error_response());
+                    )
+                    .to_error_response());
                 }
             }
         }
@@ -342,7 +347,8 @@ impl NativeTool for ArtifactExecTool {
                         &normalized_targets,
                         &artifact_code,
                         Some(&bundle.artifact_canonical_digest),
-                        &manifest.capabilities,                    );
+                        &manifest.capabilities,
+                    );
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                         if cache.find(&fingerprint).is_none() {
                             let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
@@ -374,15 +380,17 @@ impl NativeTool for ArtifactExecTool {
             policy.can_exec_shell_detailed(&command)
         };
         if !decision.is_allowed() {
-            return Err(autonoetic_types::tool_error::tagged::Tagged::permission_with_rules(
-                anyhow::anyhow!(decision.explain_shell_denial("Artifact execution")),
-                decision
-                    .enforced_rules
-                    .into_iter()
-                    .map(|rule| rule.to_string())
-                    .collect(),
-            )
-            .into());
+            return Err(
+                autonoetic_types::tool_error::tagged::Tagged::permission_with_rules(
+                    anyhow::anyhow!(decision.explain_shell_denial("Artifact execution")),
+                    decision
+                        .enforced_rules
+                        .into_iter()
+                        .map(|rule| rule.to_string())
+                        .collect(),
+                )
+                .into(),
+            );
         }
 
         let remote_analysis =
@@ -618,13 +626,14 @@ impl NativeTool for ArtifactExecTool {
                             }
                             approval_validated_for_command = true;
                         }
-                        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                        crate::runtime::human_gate::GateResult::AlreadyPending {
+                            gate_id, ..
+                        } => {
                             let (cmd, pending_action) = match store.get_approval(&gate_id)? {
                                 Some(pending) => match &pending.action {
-                                    ScheduledAction::SandboxExec { command, .. } => (
-                                        command.clone(),
-                                        pending.action.clone(),
-                                    ),
+                                    ScheduledAction::SandboxExec { command, .. } => {
+                                        (command.clone(), pending.action.clone())
+                                    }
                                     _ => (command.clone(), pending.action.clone()),
                                 },
                                 None => (command.clone(), action.clone()),
@@ -652,11 +661,14 @@ impl NativeTool for ArtifactExecTool {
                                     reason: Some(reason),
                                     evidence_ref: None,
                                     decision_reason: None,
-                                    approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                    approval_level:
+                                        autonoetic_types::background::ApprovalLevel::Operator,
                                     min_dwell_ms: None,
                                     confirm_phrase: None,
                                     code_excerpts: None,
                                     risk_summary: None,
+
+                                    expires_at: None,
                                 },
                                 "artifact_exec",
                                 summary.clone(),
@@ -691,21 +703,26 @@ impl NativeTool for ArtifactExecTool {
                         crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
                             // Populate code excerpts + risk summary for operator inspection.
                             if let Some(gw_dir) = gateway_dir {
-                                let excerpts = crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
+                                let excerpts = crate::runtime::code_excerpts::build_code_excerpts(
+                                    &artifact_id,
+                                    gw_dir,
+                                );
                                 let _ = store.set_approval_code_excerpts(
-                                    &gate_id, excerpts.as_deref(), None,
+                                    &gate_id,
+                                    excerpts.as_deref(),
+                                    None,
                                 );
                                 let artifact_store = crate::ArtifactStore::new(gw_dir).ok();
-                                let risk_summary = crate::runtime::code_excerpts::build_risk_summary(
-                                    Some(&concrete_targets),
-                                    None,
-                                    &artifact_id,
-                                    artifact_store.as_ref(),
-                                );
-                                if let Some(rs) = risk_summary {
-                                    let _ = store.set_approval_code_excerpts(
-                                        &gate_id, None, Some(&rs),
+                                let risk_summary =
+                                    crate::runtime::code_excerpts::build_risk_summary(
+                                        Some(&concrete_targets),
+                                        None,
+                                        &artifact_id,
+                                        artifact_store.as_ref(),
                                     );
+                                if let Some(rs) = risk_summary {
+                                    let _ =
+                                        store.set_approval_code_excerpts(&gate_id, None, Some(&rs));
                                 }
                             }
 
@@ -725,11 +742,14 @@ impl NativeTool for ArtifactExecTool {
                                     reason: Some(reason),
                                     evidence_ref: None,
                                     decision_reason: None,
-                                    approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                    approval_level:
+                                        autonoetic_types::background::ApprovalLevel::Operator,
                                     min_dwell_ms: None,
                                     confirm_phrase: None,
                                     code_excerpts: None,
                                     risk_summary: None,
+
+                                    expires_at: None,
                                 },
                                 "artifact_exec",
                                 summary.clone(),
@@ -835,16 +855,13 @@ impl NativeTool for ArtifactExecTool {
         // directory from the recorded fixture set.
         if let Some(fs_ref) = &args.fixture_set_ref {
             if let Some(store) = &gateway_store {
-                let fixture_set = store.get_fixture_set(fs_ref)?.ok_or_else(|| {
-                    anyhow::anyhow!("Fixture set '{}' not found", fs_ref)
-                })?;
+                let fixture_set = store
+                    .get_fixture_set(fs_ref)?
+                    .ok_or_else(|| anyhow::anyhow!("Fixture set '{}' not found", fs_ref))?;
                 let recording_session = store
                     .get_recording_session(&fixture_set.recording_session_id)?
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Recording session for fixture set '{}' not found",
-                            fs_ref
-                        )
+                        anyhow::anyhow!("Recording session for fixture set '{}' not found", fs_ref)
                     })?;
                 let staging_dir = gw_dir
                     .join("recordings")
@@ -969,17 +986,16 @@ impl NativeTool for ArtifactExecTool {
         // enforcing seal (netns + nftables transparent redirect) is a
         // future scope (5.2c-enforcing). Until then, raw-socket clients
         // escape.
-        let sealed_proxy =
-            crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
-                manifest.sandbox_network,
-                temp_base.clone(),
-                &mut extra_env,
-                &mut overrides,
-                Some(gw_dir),
-                session_id,
-                gateway_store.clone(),
-                Some(&manifest.agent.id),
-            )?;
+        let sealed_proxy = crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
+            manifest.sandbox_network,
+            temp_base.clone(),
+            &mut extra_env,
+            &mut overrides,
+            Some(gw_dir),
+            session_id,
+            gateway_store.clone(),
+            Some(&manifest.agent.id),
+        )?;
 
         let exec_kind = crate::exec_request::ExecutionKind::shell(command.clone());
         let runner = SandboxRunner::spawn_with_session_content_and_env(
@@ -1028,9 +1044,8 @@ impl NativeTool for ArtifactExecTool {
         // mocked-vs-live coverage without re-running its own analyzer.
         if !informational_remote_patterns.is_empty() {
             body["network_isolated_run"] = serde_json::Value::Bool(true);
-            body["detected_patterns"] =
-                serde_json::to_value(&informational_remote_patterns)
-                    .unwrap_or(serde_json::Value::Array(vec![]));
+            body["detected_patterns"] = serde_json::to_value(&informational_remote_patterns)
+                .unwrap_or(serde_json::Value::Array(vec![]));
         }
 
         if !overrides.share_net {
@@ -1216,16 +1231,13 @@ fn execute_with_ticket(
     // directory from the recorded fixture set.
     if let Some(fs_ref) = &args.fixture_set_ref {
         if let Some(store) = &gateway_store {
-            let fixture_set = store.get_fixture_set(fs_ref)?.ok_or_else(|| {
-                anyhow::anyhow!("Fixture set '{}' not found", fs_ref)
-            })?;
+            let fixture_set = store
+                .get_fixture_set(fs_ref)?
+                .ok_or_else(|| anyhow::anyhow!("Fixture set '{}' not found", fs_ref))?;
             let recording_session = store
                 .get_recording_session(&fixture_set.recording_session_id)?
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Recording session for fixture set '{}' not found",
-                        fs_ref
-                    )
+                    anyhow::anyhow!("Recording session for fixture set '{}' not found", fs_ref)
                 })?;
             let staging_dir = gw_dir
                 .join("recordings")
@@ -1492,8 +1504,16 @@ mod tests {
 
         let count = super::copy_fixture_dir(src.path(), dst.path()).unwrap();
         assert_eq!(count, 2);
-        assert!(dst.path().join("api.example.com").join("GET-items.json").exists());
-        assert!(dst.path().join("api.example.com").join("POST-submit.json").exists());
+        assert!(dst
+            .path()
+            .join("api.example.com")
+            .join("GET-items.json")
+            .exists());
+        assert!(dst
+            .path()
+            .join("api.example.com")
+            .join("POST-submit.json")
+            .exists());
     }
 
     #[test]
@@ -1545,8 +1565,8 @@ mod tests {
                 id: "unit_test_runner.default".to_string(),
                 name: "Unit Test Runner".to_string(),
                 description: "test".to_string(),
-            singleton: false,
-        },
+                singleton: false,
+            },
             capabilities: vec![
                 Capability::SandboxFunctions {
                     allowed: vec![
@@ -1600,8 +1620,8 @@ mod tests {
                 id: "static_evaluator.default".to_string(),
                 name: "Static Evaluator".to_string(),
                 description: "test".to_string(),
-            singleton: false,
-        },
+                singleton: false,
+            },
             capabilities: vec![
                 Capability::SandboxFunctions {
                     allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],

@@ -473,6 +473,7 @@ fn task_run_status_snake(s: TaskRunStatus) -> &'static str {
         TaskRunStatus::Running => "running",
         TaskRunStatus::AwaitingApproval => "awaiting_approval",
         TaskRunStatus::Paused => "paused",
+        TaskRunStatus::Stale => "stale",
         TaskRunStatus::Aborting => "aborting",
         TaskRunStatus::Aborted => "aborted",
         TaskRunStatus::Succeeded => "succeeded",
@@ -592,7 +593,9 @@ pub fn append_workflow_event(
         event_type = %event.event_type,
         "append_workflow_event: appended to SQLite"
     );
-    if let Some(draft) = crate::runtime::operator_activity::classify_workflow_event(&event.event_type) {
+    if let Some(draft) =
+        crate::runtime::operator_activity::classify_workflow_event(&event.event_type)
+    {
         let root_session_id = store
             .resolve_root_session_id(&event.workflow_id)
             .ok()
@@ -885,8 +888,7 @@ pub fn workflow_approval_gate_active(
     let mut pending_approval_request_ids = Vec::new();
     if let Some(store) = store {
         for task_id in &awaiting_task_ids {
-            if let Ok(Some(request_id)) = store.get_pending_approval_request_id_for_task(task_id)
-            {
+            if let Ok(Some(request_id)) = store.get_pending_approval_request_id_for_task(task_id) {
                 pending_approval_request_ids.push(request_id);
             }
         }
@@ -985,13 +987,17 @@ pub fn update_task_run_status(
     {
         let is_terminal = matches!(
             status,
-            TaskRunStatus::Succeeded | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled | TaskRunStatus::Aborted
+            TaskRunStatus::Succeeded
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled
+                | TaskRunStatus::Aborted
         );
         let was_non_terminal = !matches!(
             previous_status,
-            TaskRunStatus::Succeeded | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled | TaskRunStatus::Aborted
+            TaskRunStatus::Succeeded
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled
+                | TaskRunStatus::Aborted
         );
         if is_terminal && was_non_terminal && !task.session_id.is_empty() {
             if let Some(store) = store {
@@ -1110,7 +1116,10 @@ pub fn update_task_run_status(
         let mut payload = serde_json::json!({ "status": status });
         if let Some(ref summary) = result_summary {
             if let Some(obj) = payload.as_object_mut() {
-                obj.insert("result_summary".to_string(), serde_json::Value::String(summary.clone()));
+                obj.insert(
+                    "result_summary".to_string(),
+                    serde_json::Value::String(summary.clone()),
+                );
             }
         }
         if let Some(ref failure) = task_failure {
@@ -1243,6 +1252,7 @@ pub fn update_task_run_status(
                 | TaskRunStatus::Failed
                 | TaskRunStatus::Cancelled
                 | TaskRunStatus::Aborted
+                | TaskRunStatus::Stale
         );
         let wf_not_emergency_stopped = !matches!(
             wf.status,
@@ -1252,10 +1262,7 @@ pub fn update_task_run_status(
         // Bug fix: removed !wf.join_task_ids.is_empty() check - check_join_condition correctly
         // returns true for empty join_task_ids, and workflows with empty join_task_ids need to
         // transition to Resumable when tasks complete
-        if is_terminal
-            && wf_not_emergency_stopped
-            && wf.status != WorkflowRunStatus::Resumable
-        {
+        if is_terminal && wf_not_emergency_stopped && wf.status != WorkflowRunStatus::Resumable {
             if let Ok(true) = check_join_condition(config, store, workflow_id) {
                 join_just_satisfied = true;
                 let mut wf_mut = wf;
@@ -1376,7 +1383,10 @@ pub(crate) fn schedule_task_stage_retry(
     result_summary: Option<String>,
     decision: &StageRetryDecision,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(decision.retry_scheduled, "stage retry is not scheduled for this task");
+    anyhow::ensure!(
+        decision.retry_scheduled,
+        "stage retry is not scheduled for this task"
+    );
 
     let mut task = load_task_run(config, store, workflow_id, task_id)?
         .ok_or_else(|| anyhow::anyhow!("task '{}' not in workflow '{}'", task_id, workflow_id))?;
@@ -1437,7 +1447,10 @@ fn gather_join_child_summaries(
     };
 
     let task_map: std::collections::HashMap<String, TaskRun> = match &all_tasks {
-        Ok(tasks) => tasks.iter().map(|t| (t.task_id.clone(), t.clone())).collect(),
+        Ok(tasks) => tasks
+            .iter()
+            .map(|t| (t.task_id.clone(), t.clone()))
+            .collect(),
         Err(_) => return Vec::new(),
     };
 
@@ -1487,16 +1500,15 @@ fn build_child_state_notification(
     task_failure: Option<&crate::runtime::failure_classification::WorkflowFailureMetadata>,
 ) -> ChildStateNotification {
     let failure_class = task_failure.and_then(|failure| failure.failure_class);
-    let install_conflict_detail = if failure_class
-        == Some(autonoetic_types::tool_error::FailureClass::InstallConflict)
-    {
-        result_summary
-            .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-            .map(ToString::to_string)
-    } else {
-        None
-    };
+    let install_conflict_detail =
+        if failure_class == Some(autonoetic_types::tool_error::FailureClass::InstallConflict) {
+            result_summary
+                .map(str::trim)
+                .filter(|summary| !summary.is_empty())
+                .map(ToString::to_string)
+        } else {
+            None
+        };
 
     ChildStateNotification {
         workflow_id: task.workflow_id.clone(),
@@ -1695,9 +1707,7 @@ pub fn fail_running_tasks_for_session(
     let tasks = list_task_runs_for_workflow(config, store, &wf_id)?;
     let mut failed = 0usize;
     for task in tasks {
-        if task.session_id == session_id
-            && task.status == TaskRunStatus::Running
-        {
+        if task.session_id == session_id && task.status == TaskRunStatus::Running {
             let task_id = task.task_id.clone();
             let summary = format!("child session terminated: {}", reason);
             match update_task_run_status(
@@ -1762,8 +1772,11 @@ pub fn fail_workflow_for_root_session(
     for mut task in tasks {
         let is_terminal = matches!(
             task.status,
-            TaskRunStatus::Succeeded | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled | TaskRunStatus::Aborted
+            TaskRunStatus::Succeeded
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled
+                | TaskRunStatus::Aborted
+                | TaskRunStatus::Stale
         );
         if is_terminal {
             continue;
@@ -1787,7 +1800,8 @@ pub fn fail_workflow_for_root_session(
         // but without the signal emission that would wake an already-dead root).
         if !task.session_id.is_empty() {
             if let Some(store) = store {
-                if let Err(e) = store.finalize_session_transcript(&task.session_id, &now, "failed") {
+                if let Err(e) = store.finalize_session_transcript(&task.session_id, &now, "failed")
+                {
                     tracing::warn!(
                         target: "workflow",
                         session_id = %task.session_id,
@@ -2365,7 +2379,8 @@ pub fn check_join_condition(
                     TaskRunStatus::Succeeded
                     | TaskRunStatus::Failed
                     | TaskRunStatus::Cancelled
-                    | TaskRunStatus::Aborted => {
+                    | TaskRunStatus::Aborted
+                    | TaskRunStatus::Stale => {
                         continue;
                     }
                     _ => {
@@ -2456,8 +2471,7 @@ pub fn apply_emergency_stop_to_workflow(
         if !task.session_id.is_empty() {
             if let Some(store) = store {
                 let now = now_rfc3339();
-                if let Err(e) =
-                    store.finalize_session_transcript(&task.session_id, &now, "failed")
+                if let Err(e) = store.finalize_session_transcript(&task.session_id, &now, "failed")
                 {
                     tracing::warn!(
                         target: "workflow",
@@ -3119,8 +3133,16 @@ mod tests {
             .iter()
             .find(|e| e.event_type == "scheduled_job.completed")
             .expect("scheduled_job.completed must reach the timeline");
-        assert!(completed.payload.as_deref().unwrap_or("").contains("next=21"));
-        assert!(completed.payload.as_deref().unwrap_or("").contains("fibonacci-next"));
+        assert!(completed
+            .payload
+            .as_deref()
+            .unwrap_or("")
+            .contains("next=21"));
+        assert!(completed
+            .payload
+            .as_deref()
+            .unwrap_or("")
+            .contains("fibonacci-next"));
     }
 
     #[test]
@@ -3196,7 +3218,10 @@ mod tests {
             loaded.side_effect_state,
             Some(autonoetic_types::tool_error::SideEffectState::Unknown)
         );
-        assert_eq!(loaded.dedupe_key.as_deref(), Some("durable:coder.default:r1"));
+        assert_eq!(
+            loaded.dedupe_key.as_deref(),
+            Some("durable:coder.default:r1")
+        );
     }
 
     #[test]
@@ -3512,15 +3537,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            reroute_chat_ingest_for_active_workflow_child_session(
-                &cfg,
-                None,
-                "root-corrupt/child-y"
-            )
-            .unwrap()
-            .is_none()
-        );
+        assert!(reroute_chat_ingest_for_active_workflow_child_session(
+            &cfg,
+            None,
+            "root-corrupt/child-y"
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -3841,6 +3864,78 @@ mod tests {
     }
 
     #[test]
+    fn join_treats_stale_as_terminal() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "join-stale-root", None).unwrap();
+
+        for (task_id, status) in [
+            ("task-ok", TaskRunStatus::AwaitingApproval),
+            ("task-stale", TaskRunStatus::AwaitingApproval),
+        ] {
+            let task = TaskRun {
+                task_id: task_id.to_string(),
+                workflow_id: wf.workflow_id.clone(),
+                agent_id: "a".to_string(),
+                session_id: format!("join-stale-root/{task_id}-x"),
+                parent_session_id: "join-stale-root".to_string(),
+                status,
+                created_at: now_rfc3339(),
+                updated_at: now_rfc3339(),
+                source_agent_id: None,
+                result_summary: None,
+                join_group: Some("main".to_string()),
+                message: None,
+                metadata: None,
+                retry_count: 0,
+                last_failure_class: None,
+                retry_policy: None,
+                side_effect_state: None,
+                dedupe_key: None,
+            };
+            save_task_run(&cfg, None, &task).unwrap();
+        }
+
+        let mut run = load_workflow_run(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        run.join_task_ids = vec!["task-ok".to_string(), "task-stale".to_string()];
+        save_workflow_run(&cfg, None, &run).unwrap();
+
+        assert!(!check_join_condition(&cfg, None, &wf.workflow_id).unwrap());
+
+        update_task_run_status(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-ok",
+            TaskRunStatus::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        update_task_run_status(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-stale",
+            TaskRunStatus::Stale,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            check_join_condition(&cfg, None, &wf.workflow_id).unwrap(),
+            "Stale join task should be treated as terminal"
+        );
+    }
+
+    #[test]
     fn join_satisfied_event_is_not_re_emitted_once_workflow_is_resumable() {
         let dir = tempdir().unwrap();
         let agents = dir.path().join("agents");
@@ -3910,7 +4005,10 @@ mod tests {
             .into_iter()
             .filter(|e| e.event_type == "workflow.join.satisfied")
             .count();
-        assert_eq!(join_events, 1, "workflow.join.satisfied should only be emitted once");
+        assert_eq!(
+            join_events, 1,
+            "workflow.join.satisfied should only be emitted once"
+        );
     }
 
     #[test]
@@ -4519,11 +4617,9 @@ mod tests {
             .unwrap();
         assert_eq!(failed.payload["failure_class"], "transient_infra");
         assert_eq!(failed.payload["retry_advice"], "retry_same_stage");
-        assert!(
-            !events
-                .iter()
-                .any(|e| e.event_type == "workflow.stage_budget_exhausted")
-        );
+        assert!(!events
+            .iter()
+            .any(|e| e.event_type == "workflow.stage_budget_exhausted"));
     }
 
     #[test]
@@ -4532,8 +4628,8 @@ mod tests {
         let agents = dir.path().join("agents");
         std::fs::create_dir_all(&agents).unwrap();
         let cfg = test_config(&agents);
-        let wf = ensure_workflow_for_root_session(&cfg, None, "retry-exhausted-root", None)
-            .unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, None, "retry-exhausted-root", None).unwrap();
 
         let task = TaskRun {
             task_id: "task-retry-exhausted".to_string(),
@@ -4592,8 +4688,7 @@ mod tests {
         let agents = dir.path().join("agents");
         std::fs::create_dir_all(&agents).unwrap();
         let cfg = test_config(&agents);
-        let wf = ensure_workflow_for_root_session(&cfg, None, "retry-schedule-root", None)
-            .unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, None, "retry-schedule-root", None).unwrap();
 
         let task = TaskRun {
             task_id: "task-retry-schedule".to_string(),
@@ -4761,7 +4856,8 @@ mod tests {
             dedupe_key: None,
         };
 
-        let decision = evaluate_stage_retry(&task, TaskRunStatus::Failed, Some("request timed out"));
+        let decision =
+            evaluate_stage_retry(&task, TaskRunStatus::Failed, Some("request timed out"));
         assert!(!decision.retry_scheduled);
         let failure = decision.failure.expect("failure metadata");
         assert_eq!(
@@ -5271,8 +5367,8 @@ mod tests {
         let cfg = test_config(&agents);
         let gateway_dir = agents.join(".gateway");
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "child-wait-root", None)
-            .unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "child-wait-root", None).unwrap();
 
         let task = TaskRun {
             task_id: "task-child-wait".to_string(),
@@ -5335,7 +5431,8 @@ mod tests {
             })
             .expect("child-state notification should be queued");
         let signal: crate::scheduler::signal::Signal =
-            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+            serde_json::from_value(child_signal.payload.clone())
+                .expect("signal should deserialize");
         match signal {
             crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
                 assert_eq!(notification.task_id, "task-child-wait");
@@ -5357,8 +5454,7 @@ mod tests {
         let cfg = test_config(&agents);
         let gateway_dir = agents.join(".gateway");
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "nested-root", None)
-            .unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "nested-root", None).unwrap();
 
         let task = TaskRun {
             task_id: "task-nested-child".to_string(),
@@ -5426,7 +5522,8 @@ mod tests {
             })
             .expect("nested parent session should receive the child-state notification");
         let signal: crate::scheduler::signal::Signal =
-            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+            serde_json::from_value(child_signal.payload.clone())
+                .expect("signal should deserialize");
         match signal {
             crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
                 assert_eq!(notification.task_id, "task-nested-child");
@@ -5499,7 +5596,8 @@ mod tests {
             })
             .expect("root session should receive the child-state notification fallback");
         let signal: crate::scheduler::signal::Signal =
-            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+            serde_json::from_value(child_signal.payload.clone())
+                .expect("signal should deserialize");
         match signal {
             crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
                 assert_eq!(notification.task_id, "task-missing-parent");
@@ -5607,8 +5705,8 @@ mod tests {
         let cfg = test_config(&agents);
         let gateway_dir = agents.join(".gateway");
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "fail-tasks-root", None)
-            .unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "fail-tasks-root", None).unwrap();
 
         // Two tasks: one bound to the dead session, one bound to a different session.
         let dead_session = "fail-tasks-root/coder-dead".to_string();

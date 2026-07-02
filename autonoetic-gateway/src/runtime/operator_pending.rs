@@ -57,6 +57,8 @@ pub struct PendingDecision {
     pub created_at: String,
     /// Seconds since `created_at`, or `None` if the timestamp is unparseable.
     pub age_secs: Option<i64>,
+    /// True when the decision's own TTL has passed (approval -> stale, interaction -> expired).
+    pub is_expired: bool,
     /// One-line human summary for a queue row.
     pub summary: String,
     /// How to resolve this item.
@@ -74,11 +76,7 @@ fn age_secs(created_at: &str, now: DateTime<Utc>) -> Option<i64> {
 fn approval_action_label(action: &autonoetic_types::background::ScheduledAction) -> String {
     serde_json::to_value(action)
         .ok()
-        .and_then(|v| {
-            v.get("type")
-                .and_then(|t| t.as_str())
-                .map(str::to_string)
-        })
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
         .unwrap_or_else(|| "action".to_string())
 }
 
@@ -106,6 +104,31 @@ pub fn collect_pending_for_root(
                 params: serde_json::json!({ "request_id": app.request_id }),
             },
             age_secs: age_secs(&app.created_at, now),
+            is_expired: false,
+            id: app.request_id,
+            root_session_id: app.root_session_id,
+            agent_id: app.agent_id,
+            workflow_id: app.workflow_id,
+            created_at: app.created_at,
+            summary,
+        });
+    }
+
+    // 1b. Stale approvals — still resolvable, but the operator missed the TTL window.
+    for app in store.get_stale_approvals_for_root(root_session_id)? {
+        let label = approval_action_label(&app.action);
+        let summary = match app.reason.as_deref() {
+            Some(r) if !r.trim().is_empty() => format!("{label} (stale): {r}"),
+            _ => format!("{label} — stale approval"),
+        };
+        out.push(PendingDecision {
+            kind: PendingKind::Approval,
+            answer: AnswerHint {
+                method: "approvals.approve".to_string(),
+                params: serde_json::json!({ "request_id": app.request_id }),
+            },
+            age_secs: age_secs(&app.created_at, now),
+            is_expired: true,
             id: app.request_id,
             root_session_id: app.root_session_id,
             agent_id: app.agent_id,
@@ -124,12 +147,32 @@ pub fn collect_pending_for_root(
                 params: serde_json::json!({ "interaction_id": i.interaction_id }),
             },
             age_secs: age_secs(&i.created_at, now),
+            is_expired: false,
             id: i.interaction_id,
             root_session_id: Some(i.root_session_id),
             agent_id: i.agent_id,
             workflow_id: None,
             created_at: i.created_at,
             summary: i.question,
+        });
+    }
+
+    // 2b. Expired interactions — still answerable, but past the original TTL.
+    for i in store.get_expired_interactions_for_root_session(root_session_id)? {
+        out.push(PendingDecision {
+            kind: PendingKind::Interaction,
+            answer: AnswerHint {
+                method: "interaction.answer".to_string(),
+                params: serde_json::json!({ "interaction_id": i.interaction_id }),
+            },
+            age_secs: age_secs(&i.created_at, now),
+            is_expired: true,
+            id: i.interaction_id,
+            root_session_id: Some(i.root_session_id),
+            agent_id: i.agent_id,
+            workflow_id: None,
+            created_at: i.created_at,
+            summary: format!("{} (expired)", i.question),
         });
     }
 
@@ -157,6 +200,7 @@ pub fn collect_pending_for_root(
                 params: serde_json::json!({ "escalation_id": e.escalation_id }),
             },
             age_secs: age_secs(&e.created_at, now),
+            is_expired: false,
             id: e.escalation_id,
             root_session_id: Some(e.root_session_id),
             agent_id: e.agent_id,
@@ -175,6 +219,7 @@ pub fn collect_pending_for_root(
                 params: serde_json::json!({ "plan_id": p.plan_id }),
             },
             age_secs: age_secs(&p.created_at, now),
+            is_expired: false,
             id: p.plan_id,
             root_session_id: Some(p.root_session_id),
             agent_id: p.created_by_agent_id,

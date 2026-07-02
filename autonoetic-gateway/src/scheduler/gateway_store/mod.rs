@@ -3,11 +3,11 @@ mod agent_registry;
 mod approvals;
 mod artifacts;
 pub mod attack_patterns;
+mod channel_bindings;
 pub mod constitutional_proposals;
 mod credentials;
 mod escalations;
 mod evaluations;
-mod channel_bindings;
 mod gate_messages;
 mod hook_deliveries;
 mod improvement_cycles;
@@ -18,8 +18,6 @@ mod notifications;
 mod operator_activity;
 pub use operator_activity::OperatorActivityInsert;
 mod observability;
-mod session_spawn_lineage;
-mod session_timeline;
 pub mod plan_frames;
 pub mod post_promotion_reviews;
 mod reclamation;
@@ -32,15 +30,18 @@ pub mod sentinel_disagreements;
 pub mod session_envelopes;
 pub mod session_inference;
 mod session_outcomes;
+mod session_spawn_lineage;
+mod session_timeline;
 pub mod singleton_index;
 mod user_interactions;
 mod user_profiles;
 mod util;
-mod workflow;
-mod workbenches;
 mod validation_waivers;
+mod workbenches;
+mod workflow;
 
 use anyhow::Result;
+use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::notification::NotificationStatus;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
@@ -140,6 +141,9 @@ pub struct GatewayStore {
     /// before reads of the timeline, or on drop. This batches high-frequency
     /// observability writes (turn/tool/agent events) into fewer transactions.
     live_digest_buffer: Mutex<Vec<LiveDigestEventRecord>>,
+    /// Runtime config used to compute approval/interaction TTLs. Set once at
+    /// daemon startup; tests that open the store directly use default values.
+    config: Mutex<Option<Arc<GatewayConfig>>>,
 }
 
 impl GatewayStore {
@@ -167,6 +171,7 @@ impl GatewayStore {
             session_read_cache:
                 crate::runtime::session_read_cache::SessionReadCacheRegistry::default(),
             live_digest_buffer: Mutex::new(Vec::with_capacity(LIVE_DIGEST_BUFFER_CAPACITY)),
+            config: Mutex::new(None),
         };
         {
             let mut conn = store.conn.lock().unwrap();
@@ -187,6 +192,17 @@ impl GatewayStore {
             migrate::backfill_workflow_index(&conn, gateway_dir)?;
         }
         Ok(store)
+    }
+
+    /// Runtime config used to compute approval/interaction TTLs. Set once at
+    /// daemon startup; tests that open the store directly use default values.
+    pub fn set_config(&self, config: Arc<GatewayConfig>) {
+        let mut g = self.config.lock().expect("config mutex poisoned");
+        *g = Some(config);
+    }
+
+    fn config(&self) -> Option<Arc<GatewayConfig>> {
+        self.config.lock().expect("config mutex poisoned").clone()
     }
 
     /// Wire the gateway hook executor for [`autonoetic_types::hooks::HookEvent::PolicyDecision`].
@@ -422,7 +438,14 @@ impl GatewayStore {
         approved_at: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        plan_frames::update_plan_frame_status(&conn, plan_id, version, status, approved_by, approved_at)
+        plan_frames::update_plan_frame_status(
+            &conn,
+            plan_id,
+            version,
+            status,
+            approved_by,
+            approved_at,
+        )
     }
 
     pub fn load_active_plan_for_workflow(
@@ -471,7 +494,10 @@ impl GatewayStore {
     // Workbenches
     // -------------------------------------------------------------------------
 
-    pub fn save_workbench(&self, wb: &autonoetic_types::workbench::WorkbenchProjection) -> Result<()> {
+    pub fn save_workbench(
+        &self,
+        wb: &autonoetic_types::workbench::WorkbenchProjection,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         workbenches::save_workbench(&conn, wb)
     }
@@ -519,7 +545,10 @@ impl GatewayStore {
         workbenches::update_workbench_last_checkpoint(&conn, workbench_id, timestamp)
     }
 
-    pub fn save_checkpoint(&self, cp: &autonoetic_types::workbench::WorkbenchCheckpoint) -> Result<()> {
+    pub fn save_checkpoint(
+        &self,
+        cp: &autonoetic_types::workbench::WorkbenchCheckpoint,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         workbenches::save_checkpoint(&conn, cp)
     }
@@ -1105,7 +1134,8 @@ mod tests {
             origin_node_id: None,
         })?;
 
-        let results = store.search_session_transcripts(None, None, None, Some("completed"), None, 10)?;
+        let results =
+            store.search_session_transcripts(None, None, None, Some("completed"), None, 10)?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, "completed");
         assert_eq!(results[0].ended_at.as_deref(), Some(ended.as_str()));
@@ -1157,10 +1187,7 @@ mod tests {
         assert_eq!(fetched.artifact_id, "art_artifact123");
         assert_eq!(fetched.agent_id, "my.agent");
         assert_eq!(fetched.role_verdicts.len(), 2);
-        assert_eq!(
-            fetched.role_verdicts[0].role.as_str(),
-            "static_evaluator"
-        );
+        assert_eq!(fetched.role_verdicts[0].role.as_str(), "static_evaluator");
         assert!(fetched.role_verdicts[0].passed);
         assert_eq!(
             fetched.role_verdicts[1].findings_summary,
@@ -1190,10 +1217,11 @@ mod tests {
         );
         assert!(resolved.resolved_at.is_some());
         assert_eq!(resolved.decided_by.as_deref(), Some("cli-operator"));
-        assert_eq!(resolved.decision_reason.as_deref(), Some("Looks good, promote"));
+        assert_eq!(
+            resolved.decision_reason.as_deref(),
+            Some("Looks good, promote")
+        );
 
         Ok(())
     }
 }
-
-

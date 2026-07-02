@@ -124,13 +124,12 @@ impl NativeTool for ArtifactPrepareTool {
         let sid =
             session_id.ok_or_else(|| anyhow::anyhow!("artifact.prepare requires a session_id"))?;
 
-        let resolved =
-            crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
-                &args.artifact_ref,
-                sid,
-                &store,
-                gw_dir,
-            )?;
+        let resolved = crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+            &args.artifact_ref,
+            sid,
+            &store,
+            gw_dir,
+        )?;
         let artifact_id = resolved.artifact_id;
 
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
@@ -186,7 +185,8 @@ impl NativeTool for ArtifactPrepareTool {
                     return Ok(ToolError::resource(
                         "required_credentials: secret for referenced credential not found in vault",
                         None::<String>,
-                    ).to_error_response());
+                    )
+                    .to_error_response());
                 }
                 tracing::info!(
                     target: "artifact_prepare",
@@ -335,16 +335,17 @@ impl NativeTool for ArtifactPrepareTool {
                     if let Some(fp) = fingerprint_for_backfill {
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                             if cache.find(&fp).is_none() {
-                                let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                                    fingerprint: fp,
-                                    agent_id: manifest.agent.id.clone(),
-                                    remote_targets: targets.clone(),
-                                    code_content: artifact_code.clone(),
-                                    approval_request_id: String::new(),
-                                    approved_at: chrono::Utc::now().to_rfc3339(),
-                                    approved_by: "operator".to_string(),
-                                    last_used_at: chrono::Utc::now().to_rfc3339(),
-                                };
+                                let entry =
+                                    crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                        fingerprint: fp,
+                                        agent_id: manifest.agent.id.clone(),
+                                        remote_targets: targets.clone(),
+                                        code_content: artifact_code.clone(),
+                                        approval_request_id: String::new(),
+                                        approved_at: chrono::Utc::now().to_rfc3339(),
+                                        approved_by: "operator".to_string(),
+                                        last_used_at: chrono::Utc::now().to_rfc3339(),
+                                    };
                                 let _ = cache.record(entry);
                             }
                         }
@@ -380,8 +381,9 @@ impl NativeTool for ArtifactPrepareTool {
                 .to_string())
             }
             crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
-                let pending = store.get_approval(&gate_id)?.unwrap_or_else(|| {
-                    ApprovalRequest {
+                let pending = store
+                    .get_approval(&gate_id)?
+                    .unwrap_or_else(|| ApprovalRequest {
                         request_id: gate_id.clone(),
                         agent_id: manifest.agent.id.clone(),
                         session_id: sid.to_string(),
@@ -396,13 +398,16 @@ impl NativeTool for ArtifactPrepareTool {
                         reason: Some(summary.clone()),
                         evidence_ref: None,
                         decision_reason: None,
-                        approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+                        approval_level: crate::scheduler::approval::resolve_approval_level(
+                            cfg, &action,
+                        ),
                         min_dwell_ms: None,
                         confirm_phrase: None,
                         code_excerpts: None,
                         risk_summary: None,
-                    }
-                });
+
+                        expires_at: None,
+                    });
                 let approval = build_approval_details(
                     &pending,
                     "artifact_prepare",
@@ -428,10 +433,9 @@ impl NativeTool for ArtifactPrepareTool {
             }
             crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
                 // Populate code excerpts + risk summary for operator inspection.
-                let excerpts = crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
-                let _ = store.set_approval_code_excerpts(
-                    &gate_id, excerpts.as_deref(), None,
-                );
+                let excerpts =
+                    crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
+                let _ = store.set_approval_code_excerpts(&gate_id, excerpts.as_deref(), None);
                 let artifact_store_ref = crate::ArtifactStore::new(gw_dir).ok();
                 let risk_summary = crate::runtime::code_excerpts::build_risk_summary(
                     Some(&targets),
@@ -440,9 +444,7 @@ impl NativeTool for ArtifactPrepareTool {
                     artifact_store_ref.as_ref(),
                 );
                 if let Some(rs) = risk_summary {
-                    let _ = store.set_approval_code_excerpts(
-                        &gate_id, None, Some(&rs),
-                    );
+                    let _ = store.set_approval_code_excerpts(&gate_id, None, Some(&rs));
                 }
 
                 let approval = build_approval_details(
@@ -461,11 +463,15 @@ impl NativeTool for ArtifactPrepareTool {
                         reason: Some(summary.clone()),
                         evidence_ref: None,
                         decision_reason: None,
-                        approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
+                        approval_level: crate::scheduler::approval::resolve_approval_level(
+                            cfg, &action,
+                        ),
                         min_dwell_ms: None,
                         confirm_phrase: None,
                         code_excerpts: None,
                         risk_summary: None,
+
+                        expires_at: None,
                     },
                     "artifact_prepare",
                     summary.clone(),

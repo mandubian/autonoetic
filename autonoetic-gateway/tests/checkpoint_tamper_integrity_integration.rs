@@ -11,16 +11,16 @@
 //! `record_checkpoint_integrity_violation` handler directly.
 
 use autonoetic_gateway::execution::record_checkpoint_integrity_violation;
-use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::background::{
-    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
-};
+use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
     checkpoints_dir, is_integrity_error, load_latest_checkpoint_strict, sanitize_path_component,
     save_checkpoint, turn_id_for, SessionCheckpoint, YieldReason,
 };
-use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::guard::LoopGuard;
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use autonoetic_types::background::{
+    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
+};
 use autonoetic_types::config::GatewayConfig;
 use tempfile::tempdir;
 
@@ -62,6 +62,8 @@ fn make_pending_approval(
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut request)?;
     Ok(())
@@ -128,7 +130,11 @@ fn hmac_tamper_on_resume_emits_event_and_revokes_approval() -> anyhow::Result<()
     let cp_path = checkpoints_dir(&config)
         .join(sanitize_path_component(session_id))
         .join(format!("{}.checkpoint.json", turn_id_for(1)));
-    assert!(cp_path.exists(), "checkpoint file should exist: {:?}", cp_path);
+    assert!(
+        cp_path.exists(),
+        "checkpoint file should exist: {:?}",
+        cp_path
+    );
     let original = std::fs::read_to_string(&cp_path)?;
     let mut envelope: serde_json::Value = serde_json::from_str(&original)?;
     envelope["hmac_hex"] = serde_json::json!("deadbeef00".repeat(8));
@@ -163,7 +169,10 @@ fn hmac_tamper_on_resume_emits_event_and_revokes_approval() -> anyhow::Result<()
         .get_approval("apr-tamper")?
         .expect("approval should exist");
     assert_eq!(approval.status, Some(ApprovalStatus::Cancelled));
-    assert_eq!(approval.decision_reason.as_deref(), Some("integrity_violation"));
+    assert_eq!(
+        approval.decision_reason.as_deref(),
+        Some("integrity_violation")
+    );
 
     Ok(())
 }
@@ -199,19 +208,25 @@ fn action_mismatch_revokes_already_approved_approval() -> anyhow::Result<()> {
     );
 
     // The already-approved row must be force-cancelled.
-    let approval = store.get_approval("apr-mismatch")?.expect("approval exists");
+    let approval = store
+        .get_approval("apr-mismatch")?
+        .expect("approval exists");
     assert_eq!(
         approval.status,
         Some(ApprovalStatus::Cancelled),
         "action-mismatch should force-cancel an approved row"
     );
-    assert_eq!(approval.decision_reason.as_deref(), Some("integrity_violation"));
+    assert_eq!(
+        approval.decision_reason.as_deref(),
+        Some("integrity_violation")
+    );
 
     let events = store.search_causal_events(Some(session_id), None, 50)?;
     assert!(
         events
             .iter()
-            .any(|e| e.action == "checkpoint_tampered" && e.target.as_deref() == Some("apr-mismatch")),
+            .any(|e| e.action == "checkpoint_tampered"
+                && e.target.as_deref() == Some("apr-mismatch")),
         "checkpoint_tampered event must reference the approval id"
     );
 

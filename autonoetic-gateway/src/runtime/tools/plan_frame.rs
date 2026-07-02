@@ -93,7 +93,9 @@ fn materialize_plan_grants(
         for cap in &loaded.manifest.capabilities {
             if let autonoetic_types::capability::Capability::NetworkAccess { hosts: decl } = cap {
                 for h in decl {
-                    if h == "*" { continue; }
+                    if h == "*" {
+                        continue;
+                    }
                     hosts.insert(h.clone());
                 }
             }
@@ -114,9 +116,10 @@ fn materialize_plan_grants(
 }
 
 fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
-    manifest.capabilities.iter().any(|c| {
-        matches!(c, Capability::PlanFrameAccess { .. })
-    })
+    manifest
+        .capabilities
+        .iter()
+        .any(|c| matches!(c, Capability::PlanFrameAccess { .. }))
 }
 
 /// Whether a set of `PlanFrameAccess` patterns grants `operation`. Pure so it
@@ -261,7 +264,11 @@ fn create_plan_approval_request(
 ) -> anyhow::Result<String> {
     use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
     let request_id = plan_approval_request_id(&plan.plan_id, plan.version);
-    let root_session_id = session_id.split('/').next().unwrap_or(session_id).to_string();
+    let root_session_id = session_id
+        .split('/')
+        .next()
+        .unwrap_or(session_id)
+        .to_string();
     let mut req = ApprovalRequest {
         request_id: request_id.clone(),
         agent_id: manifest.agent.id.clone(),
@@ -286,6 +293,8 @@ fn create_plan_approval_request(
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut req)?;
     Ok(request_id)
@@ -413,11 +422,23 @@ impl NativeTool for PlanFrameProposeTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway store not available",
+                Some(
+                    "Ensure the gateway database is initialized and the store path is accessible.",
+                ),
+            )
+            .with_code("gateway_store_unavailable")
+            .to_error_response());
         };
 
         let Some(config) = config else {
-            return Ok(ToolError::execution("Gateway config not available", Some("Ensure the gateway configuration is loaded and valid.")).with_code("gateway_config_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway config not available",
+                Some("Ensure the gateway configuration is loaded and valid."),
+            )
+            .with_code("gateway_config_unavailable")
+            .to_error_response());
         };
 
         let session_id = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
@@ -463,15 +484,27 @@ impl NativeTool for PlanFrameProposeTool {
                         validation_id: v.validation_id,
                         title: v.title,
                         class: match v.class.as_deref() {
-                            Some("security_review") => autonoetic_types::plan_frame::ValidationClass::SecurityReview,
-                            Some("correctness_check") => autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck,
-                            Some("quality_check") => autonoetic_types::plan_frame::ValidationClass::QualityCheck,
-                            Some("packaging_check") => autonoetic_types::plan_frame::ValidationClass::PackagingCheck,
+                            Some("security_review") => {
+                                autonoetic_types::plan_frame::ValidationClass::SecurityReview
+                            }
+                            Some("correctness_check") => {
+                                autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck
+                            }
+                            Some("quality_check") => {
+                                autonoetic_types::plan_frame::ValidationClass::QualityCheck
+                            }
+                            Some("packaging_check") => {
+                                autonoetic_types::plan_frame::ValidationClass::PackagingCheck
+                            }
                             _ => autonoetic_types::plan_frame::ValidationClass::MechanicalSafety,
                         },
                         requirement: match v.requirement.as_deref() {
-                            Some("advisory") => autonoetic_types::plan_frame::ValidationRequirement::Advisory,
-                            Some("waived") => autonoetic_types::plan_frame::ValidationRequirement::Waived,
+                            Some("advisory") => {
+                                autonoetic_types::plan_frame::ValidationRequirement::Advisory
+                            }
+                            Some("waived") => {
+                                autonoetic_types::plan_frame::ValidationRequirement::Waived
+                            }
                             _ => autonoetic_types::plan_frame::ValidationRequirement::Required,
                         },
                     })
@@ -559,7 +592,11 @@ impl NativeTool for PlanFrameProposeTool {
             version: 1,
         });
         updated_workflow.updated_at = now_rfc3339();
-        crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &updated_workflow)?;
+        crate::scheduler::workflow_store::save_workflow_run(
+            config,
+            Some(&store),
+            &updated_workflow,
+        )?;
 
         let event_id = {
             let bytes = uuid::Uuid::new_v4();
@@ -738,7 +775,14 @@ impl NativeTool for PlanFrameGetTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway store not available",
+                Some(
+                    "Ensure the gateway database is initialized and the store path is accessible.",
+                ),
+            )
+            .with_code("gateway_store_unavailable")
+            .to_error_response());
         };
 
         let plan = if let Some(pid) = &args.plan_id {
@@ -748,7 +792,8 @@ impl NativeTool for PlanFrameGetTool {
                 store.load_plan_frame(pid)?
             }
         } else {
-            let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required when plan_id not specified"))?;
+            let sid = session_id
+                .ok_or_else(|| anyhow::anyhow!("session_id required when plan_id not specified"))?;
             let root = sid.split('/').next().unwrap_or(sid);
             let wf_id = store.resolve_workflow_id(root)?;
             match wf_id {
@@ -825,7 +870,14 @@ impl NativeTool for PlanFrameListTool {
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let Some(store) = gateway_store else {
-            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway store not available",
+                Some(
+                    "Ensure the gateway database is initialized and the store path is accessible.",
+                ),
+            )
+            .with_code("gateway_store_unavailable")
+            .to_error_response());
         };
 
         let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required"))?;
@@ -906,22 +958,49 @@ impl NativeTool for PlanFrameApproveTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway store not available",
+                Some(
+                    "Ensure the gateway database is initialized and the store path is accessible.",
+                ),
+            )
+            .with_code("gateway_store_unavailable")
+            .to_error_response());
         };
 
         let Some(plan) = store.load_plan_frame(&args.plan_id)? else {
-            return Ok(ToolError::not_found("Plan", Some("Create a plan first or check the plan ID.")).with_code("plan_not_found").to_error_response());
+            return Ok(ToolError::not_found(
+                "Plan",
+                Some("Create a plan first or check the plan ID."),
+            )
+            .with_code("plan_not_found")
+            .to_error_response());
         };
 
         if plan.status != PlanStatus::AwaitingApproval {
-            return Ok(ToolError::conflict(format!("Plan is in '{}' status; only awaiting_approval plans can be approved", plan.status.as_str()), Some("Ensure the plan is in AwaitingApproval status before approving.")).with_code("plan_wrong_status").to_error_response());
+            return Ok(ToolError::conflict(
+                format!(
+                    "Plan is in '{}' status; only awaiting_approval plans can be approved",
+                    plan.status.as_str()
+                ),
+                Some("Ensure the plan is in AwaitingApproval status before approving."),
+            )
+            .with_code("plan_wrong_status")
+            .to_error_response());
         }
 
         let Some(config) = config else {
-            return Ok(ToolError::execution("Gateway config not available", Some("Ensure the gateway configuration is loaded and valid.")).with_code("gateway_config_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway config not available",
+                Some("Ensure the gateway configuration is loaded and valid."),
+            )
+            .with_code("gateway_config_unavailable")
+            .to_error_response());
         };
 
-        let approver = args.approved_by.unwrap_or_else(|| manifest.agent.id.clone());
+        let approver = args
+            .approved_by
+            .unwrap_or_else(|| manifest.agent.id.clone());
         let request_id = plan_approval_request_id(&plan.plan_id, plan.version);
 
         // Route through the standard approval decision path (#565). This calls
@@ -951,12 +1030,8 @@ impl NativeTool for PlanFrameApproveTool {
         // `apply_decision` already materialized grants; re-run the pure
         // count path to surface `grants_materialized` in the tool response.
         // The grant insertion is idempotent, so this is safe.
-        let grants_materialized = materialize_plan_grants(&store,
-            Some(config),
-            &plan,
-            &decision.decided_by,
-            &now,
-        );
+        let grants_materialized =
+            materialize_plan_grants(&store, Some(config), &plan, &decision.decided_by, &now);
 
         if let Err(e) = crate::scheduler::workflow_store::append_workflow_event(
             config,
@@ -1129,15 +1204,32 @@ impl NativeTool for PlanFrameAmendTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway store not available",
+                Some(
+                    "Ensure the gateway database is initialized and the store path is accessible.",
+                ),
+            )
+            .with_code("gateway_store_unavailable")
+            .to_error_response());
         };
 
         let Some(current) = store.load_plan_frame(&args.plan_id)? else {
-            return Ok(ToolError::not_found("Plan", Some("Create a plan first or check the plan ID.")).with_code("plan_not_found").to_error_response());
+            return Ok(ToolError::not_found(
+                "Plan",
+                Some("Create a plan first or check the plan ID."),
+            )
+            .with_code("plan_not_found")
+            .to_error_response());
         };
 
         if current.status == PlanStatus::Completed || current.status == PlanStatus::Cancelled {
-            return Ok(ToolError::conflict(format!("Cannot amend a {} plan", current.status.as_str()), Some("Only plans in mutable status (not Completed or Cancelled) can be amended.")).with_code("plan_wrong_status").to_error_response());
+            return Ok(ToolError::conflict(
+                format!("Cannot amend a {} plan", current.status.as_str()),
+                Some("Only plans in mutable status (not Completed or Cancelled) can be amended."),
+            )
+            .with_code("plan_wrong_status")
+            .to_error_response());
         }
 
         let old_version = current.version;
@@ -1160,7 +1252,8 @@ impl NativeTool for PlanFrameAmendTool {
                             return Ok(ToolError::validation(
                                 &format!(
                                     "Unknown step_status `{}` for step `{}`. Valid values: {}",
-                                    ss, s.step_id,
+                                    ss,
+                                    s.step_id,
                                     VALID_STATUSES.join(", "),
                                 ),
                                 Some("Use one of the valid step_status values."),
@@ -1188,9 +1281,7 @@ impl NativeTool for PlanFrameAmendTool {
                             .or_else(|| prev.and_then(|p| p.agent_id.clone()));
                         let depends_on = match &s.depends_on {
                             Some(d) if !d.is_empty() => d.clone(),
-                            _ => prev
-                                .map(|p| p.depends_on.clone())
-                                .unwrap_or_default(),
+                            _ => prev.map(|p| p.depends_on.clone()).unwrap_or_default(),
                         };
                         let notes = s.notes.or_else(|| prev.and_then(|p| p.notes.clone()));
                         let status = match s.step_status.as_deref() {
@@ -1236,15 +1327,27 @@ impl NativeTool for PlanFrameAmendTool {
                         validation_id: v.validation_id,
                         title: v.title,
                         class: match v.class.as_deref() {
-                            Some("security_review") => autonoetic_types::plan_frame::ValidationClass::SecurityReview,
-                            Some("correctness_check") => autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck,
-                            Some("quality_check") => autonoetic_types::plan_frame::ValidationClass::QualityCheck,
-                            Some("packaging_check") => autonoetic_types::plan_frame::ValidationClass::PackagingCheck,
+                            Some("security_review") => {
+                                autonoetic_types::plan_frame::ValidationClass::SecurityReview
+                            }
+                            Some("correctness_check") => {
+                                autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck
+                            }
+                            Some("quality_check") => {
+                                autonoetic_types::plan_frame::ValidationClass::QualityCheck
+                            }
+                            Some("packaging_check") => {
+                                autonoetic_types::plan_frame::ValidationClass::PackagingCheck
+                            }
                             _ => autonoetic_types::plan_frame::ValidationClass::MechanicalSafety,
                         },
                         requirement: match v.requirement.as_deref() {
-                            Some("advisory") => autonoetic_types::plan_frame::ValidationRequirement::Advisory,
-                            Some("waived") => autonoetic_types::plan_frame::ValidationRequirement::Waived,
+                            Some("advisory") => {
+                                autonoetic_types::plan_frame::ValidationRequirement::Advisory
+                            }
+                            Some("waived") => {
+                                autonoetic_types::plan_frame::ValidationRequirement::Waived
+                            }
                             _ => autonoetic_types::plan_frame::ValidationRequirement::Required,
                         },
                     })
@@ -1283,8 +1386,7 @@ impl NativeTool for PlanFrameAmendTool {
             probe.capability_envelope = capability_envelope.clone();
             probe
         });
-        let inherit = current.status == PlanStatus::Approved
-            && envelope_diff.is_cosmetic_only();
+        let inherit = current.status == PlanStatus::Approved && envelope_diff.is_cosmetic_only();
 
         let new_revision = PlanFrame {
             plan_id: current.plan_id.clone(),
@@ -1333,12 +1435,9 @@ impl NativeTool for PlanFrameAmendTool {
                     &manifest.agent.id,
                 );
             }
-            if let Err(e) = create_plan_approval_request(
-                &store,
-                &new_revision,
-                manifest,
-                session_id,
-            ) {
+            if let Err(e) =
+                create_plan_approval_request(&store, &new_revision, manifest, session_id)
+            {
                 tracing::warn!(
                     target: "plan_frame",
                     error = %e,
@@ -1558,7 +1657,14 @@ impl NativeTool for PlanFrameHistoryTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::execution("Gateway store not available", Some("Ensure the gateway database is initialized and the store path is accessible.")).with_code("gateway_store_unavailable").to_error_response());
+            return Ok(ToolError::execution(
+                "Gateway store not available",
+                Some(
+                    "Ensure the gateway database is initialized and the store path is accessible.",
+                ),
+            )
+            .with_code("gateway_store_unavailable")
+            .to_error_response());
         };
 
         let revisions = store.list_plan_revisions(&args.plan_id)?;
@@ -1572,7 +1678,8 @@ impl NativeTool for PlanFrameHistoryTool {
             }))?);
         }
 
-        let summaries: Vec<PlanFrameSummary> = revisions.iter().map(|r| r.compact_summary()).collect();
+        let summaries: Vec<PlanFrameSummary> =
+            revisions.iter().map(|r| r.compact_summary()).collect();
 
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -1617,7 +1724,10 @@ mod authority_tests {
     // An authority is granted only by an exact `planframe.approve` right.
     #[test]
     fn explicit_grant_confers_approval_authority() {
-        assert!(patterns_allow(&pats(&["planframe.approve"]), "planframe.approve"));
+        assert!(patterns_allow(
+            &pats(&["planframe.approve"]),
+            "planframe.approve"
+        ));
         assert!(patterns_allow(
             &pats(&["planframe.propose", "planframe.approve"]),
             "planframe.approve"

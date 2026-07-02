@@ -1036,10 +1036,26 @@ pub struct GatewayConfig {
     pub root_session_budget: RootSessionBudgetConfig,
 
     /// Maximum seconds a workflow task may remain in `AwaitingApproval` before it is
-    /// automatically marked `Failed`. Set to 0 to disable (not recommended for production).
+    /// automatically marked `Stale`. Set to 0 to disable (not recommended for production).
+    /// A `Stale` task preserves its checkpoint (the approval can still be resolved later)
+    /// and counts as terminal for workflow joins, but is visibly not `Failed`.
     /// Default: 600 (10 minutes).
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
+
+    /// Maximum seconds a **standalone** (non-workflow) approval may remain pending
+    /// before it is flagged as stale. Unlike workflow tasks, a stale standalone
+    /// approval is NOT automatically cancelled — it is surfaced as stale in
+    /// `operator.pending` so operators can resolve it. Set to 0 to disable.
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_standalone_approval_timeout_secs")]
+    pub standalone_approval_timeout_secs: u64,
+
+    /// Maximum seconds a user interaction may remain pending before it is
+    /// automatically marked `expired`. Set to 0 to disable.
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_interaction_timeout_secs")]
+    pub interaction_timeout_secs: u64,
 
     /// Maximum number of concurrent pending approvals per root_session_id (P-7.17).
     /// When a new approval request would push the count above this cap, the insert is
@@ -2450,7 +2466,15 @@ fn default_max_background_due_per_tick() -> usize {
 }
 
 fn default_approval_timeout_secs() -> u64 {
-    3600
+    600
+}
+
+fn default_standalone_approval_timeout_secs() -> u64 {
+    86400
+}
+
+fn default_interaction_timeout_secs() -> u64 {
+    86400
 }
 
 fn default_max_pending_approvals_per_root() -> usize {
@@ -3092,6 +3116,8 @@ impl Default for GatewayConfig {
             session_budget: SessionBudgetConfig::default(),
             root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
+            standalone_approval_timeout_secs: default_standalone_approval_timeout_secs(),
+            interaction_timeout_secs: default_interaction_timeout_secs(),
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
             max_pending_escalations_per_root: default_max_pending_escalations_per_root(),
             default_grant_ttl_secs: default_grant_ttl_secs(),

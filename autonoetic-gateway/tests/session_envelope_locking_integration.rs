@@ -4,10 +4,10 @@ use autonoetic_gateway::runtime::session_envelope::{
     envelope_expansion_hint, lock_session_envelope, propose_discovered_envelope,
     revoke_session_envelope,
 };
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::scheduler::{
     list_session_envelopes, lock_session_envelope_operator, propose_session_envelope,
 };
-use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
 use autonoetic_types::causal_chain::ExecutionTraceRecord;
 use tempfile::tempdir;
@@ -70,11 +70,13 @@ fn locked_envelope_covers_host_outside_lock_still_needs_approval() -> anyhow::Re
     ))?;
 
     // propose_session_envelope auto-locks — no manual lock needed.
-    let proposal = propose_session_envelope(&store, root, "operator", None, "operator")?
-        .expect("proposal");
+    let proposal =
+        propose_session_envelope(&store, root, "operator", None, "operator")?.expect("proposal");
 
     assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
-    assert!(!store.session_grants_cover_targets(root, &["geocoding-api.open-meteo.com".to_string()]));
+    assert!(
+        !store.session_grants_cover_targets(root, &["geocoding-api.open-meteo.com".to_string()])
+    );
 
     let hint = envelope_expansion_hint(
         &store,
@@ -84,7 +86,10 @@ fn locked_envelope_covers_host_outside_lock_still_needs_approval() -> anyhow::Re
             "geocoding-api.open-meteo.com".to_string(),
         ],
     );
-    assert!(hint.is_none(), "locked host should not trigger expansion hint");
+    assert!(
+        hint.is_none(),
+        "locked host should not trigger expansion hint"
+    );
     let _ = proposal;
     Ok(())
 }
@@ -101,12 +106,15 @@ fn explicit_propose_lists_observed_hosts() -> anyhow::Result<()> {
     ))?;
 
     let list_before = list_session_envelopes(&store, root)?;
-    assert_eq!(list_before.observed_hosts, vec!["api.open-meteo.com".to_string()]);
+    assert_eq!(
+        list_before.observed_hosts,
+        vec!["api.open-meteo.com".to_string()]
+    );
     assert!(list_before.proposed.is_empty());
 
     // propose_session_envelope auto-locks, so the result is an active envelope.
-    let proposal = propose_session_envelope(&store, root, "operator", None, "operator")?
-        .expect("proposal");
+    let proposal =
+        propose_session_envelope(&store, root, "operator", None, "operator")?.expect("proposal");
     assert!(!proposal.skipped);
 
     let list_after = list_session_envelopes(&store, root)?;
@@ -156,6 +164,8 @@ fn approval_timeline_gets_expansion_hint_for_observed_host() -> anyhow::Result<(
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval)?;
 
@@ -165,7 +175,8 @@ fn approval_timeline_gets_expansion_hint_for_observed_host() -> anyhow::Result<(
         .iter()
         .find(|e| e.event_type == "approval.pending")
         .expect("approval.pending event");
-    let payload: serde_json::Value = serde_json::from_str(pending.payload.as_deref().unwrap_or("{}"))?;
+    let payload: serde_json::Value =
+        serde_json::from_str(pending.payload.as_deref().unwrap_or("{}"))?;
     assert!(payload.get("envelope_expansion_hint").is_some());
     Ok(())
 }
@@ -186,8 +197,8 @@ fn revoke_locked_envelope_revokes_grants_and_removes_row() -> anyhow::Result<()>
         .expect("proposal");
     assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
 
-    let revoked = revoke_session_envelope(&store, proposal.envelope_id, "operator")?
-        .expect("revoked record");
+    let revoked =
+        revoke_session_envelope(&store, proposal.envelope_id, "operator")?.expect("revoked record");
     assert_eq!(revoked.root_session_id, root);
     assert!(revoked.locked_at.is_some());
     assert!(store.get_envelope_by_id(proposal.envelope_id)?.is_none());

@@ -14,7 +14,9 @@ use autonoetic_gateway::scheduler::approval::{
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
-use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction};
+use autonoetic_types::background::{
+    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
+};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use tempfile::tempdir;
@@ -171,7 +173,13 @@ fn create_pending_approval(
         request_id: request_id.to_string(),
         agent_id: agent_id.to_string(),
         session_id: session_id.to_string(),
-        root_session_id: Some(session_id.split('/').next().unwrap_or(session_id).to_string()),
+        root_session_id: Some(
+            session_id
+                .split('/')
+                .next()
+                .unwrap_or(session_id)
+                .to_string(),
+        ),
         workflow_id: None,
         task_id: None,
         action: sandbox_action(),
@@ -187,6 +195,8 @@ fn create_pending_approval(
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut request)?;
     Ok(())
@@ -199,7 +209,7 @@ fn agent_with_gate_decider_can_approve_other_agents_gate() -> anyhow::Result<()>
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 
-        write_agent_dir(
+    write_agent_dir(
         &agents_dir,
         "decider.default",
         &[Capability::GateDecider {
@@ -214,7 +224,8 @@ fn agent_with_gate_decider_can_approve_other_agents_gate() -> anyhow::Result<()>
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "decider.default")?;
     seed_decider_session(&store, "other-session", "decider.default")?;
-    create_pending_approval(&store,
+    create_pending_approval(
+        &store,
         "apr-decider",
         "coder.default",
         "root-session/coder-abc",
@@ -243,7 +254,10 @@ fn agent_with_gate_decider_can_approve_other_agents_gate() -> anyhow::Result<()>
     let p220 = events
         .iter()
         .find(|e| e.enforced_rules.iter().any(|r| r == "P-2.20"));
-    assert!(p220.is_some(), "agent-decider approval must emit P-2.20 causal event");
+    assert!(
+        p220.is_some(),
+        "agent-decider approval must emit P-2.20 causal event"
+    );
 
     Ok(())
 }
@@ -256,9 +270,13 @@ fn agent_without_gate_decider_cannot_approve() -> anyhow::Result<()> {
     std::fs::create_dir_all(&gateway_dir)?;
 
     // Agent lacks GateDecider entirely.
-    write_agent_dir(&agents_dir, "regular.default", &[Capability::ReadAccess {
-        scopes: vec!["*".to_string()],
-    }]);
+    write_agent_dir(
+        &agents_dir,
+        "regular.default",
+        &[Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
+        }],
+    );
 
     let cfg = GatewayConfig {
         agents_dir: agents_dir.clone(),
@@ -266,7 +284,12 @@ fn agent_without_gate_decider_cannot_approve() -> anyhow::Result<()> {
     };
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "regular.default")?;
-    create_pending_approval(&store, "apr-regular", "coder.default", "root-session/coder-abc")?;
+    create_pending_approval(
+        &store,
+        "apr-regular",
+        "coder.default",
+        "root-session/coder-abc",
+    )?;
 
     let err = approve_request_with_options(
         &cfg,
@@ -433,7 +456,12 @@ fn agent_decider_without_session_id_is_rejected_r_10_7() -> anyhow::Result<()> {
     };
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "noid.default")?;
-    create_pending_approval(&store, "apr-noid", "coder.default", "root-session/coder-abc")?;
+    create_pending_approval(
+        &store,
+        "apr-noid",
+        "coder.default",
+        "root-session/coder-abc",
+    )?;
 
     let err = approve_request_with_options(
         &cfg,
@@ -482,7 +510,12 @@ fn agent_decider_can_reject_with_capability() -> anyhow::Result<()> {
     let store = GatewayStore::open(&gateway_dir)?;
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "rejecter.default")?;
     seed_decider_session(&store, "other-session", "rejecter.default")?;
-    create_pending_approval(&store, "apr-reject", "coder.default", "root-session/coder-abc")?;
+    create_pending_approval(
+        &store,
+        "apr-reject",
+        "coder.default",
+        "root-session/coder-abc",
+    )?;
 
     // Rejection is a blocking decision, so decider motivation is required.
     let decision = reject_request_with_options(
@@ -528,7 +561,12 @@ fn agent_decider_escalates_to_human_when_uncertain() -> anyhow::Result<()> {
     seed_decider_session(&store, "other-session", "escalator.default")?;
 
     // Create an approval gate.
-    create_pending_approval(&store, "apr-escalate", "coder.default", "root-session/coder-xyz")?;
+    create_pending_approval(
+        &store,
+        "apr-escalate",
+        "coder.default",
+        "root-session/coder-xyz",
+    )?;
 
     let manifest = agent_manifest(
         "escalator.default",
@@ -553,7 +591,10 @@ fn agent_decider_escalates_to_human_when_uncertain() -> anyhow::Result<()> {
 
     // The original gate should still be pending.
     let original = store.get_approval("apr-escalate")?.unwrap();
-    assert!(original.status.is_none(), "original gate must remain pending after escalation");
+    assert!(
+        original.status.is_none(),
+        "original gate must remain pending after escalation"
+    );
 
     // The escalation gate should reference the original.
     if let autonoetic_gateway::runtime::human_gate::GateResult::Suspended { gate_id, .. } = result {
@@ -596,7 +637,12 @@ fn escalation_without_gate_decider_capability_fails() -> anyhow::Result<()> {
     };
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
     seed_decider_revision(&agents_dir, &gateway_dir, &store, "partial.default")?;
-    create_pending_approval(&store, "apr-partial", "coder.default", "root-session/coder-xyz")?;
+    create_pending_approval(
+        &store,
+        "apr-partial",
+        "coder.default",
+        "root-session/coder-xyz",
+    )?;
 
     let manifest = agent_manifest(
         "partial.default",

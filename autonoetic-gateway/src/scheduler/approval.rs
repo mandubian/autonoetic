@@ -248,10 +248,9 @@ pub fn apply_decision(
                     {
                         let ttl_secs =
                             i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
-                        let base =
-                            chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
-                                .map(|dt| dt.with_timezone(&chrono::Utc))
-                                .unwrap_or_else(|_| chrono::Utc::now());
+                        let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now());
                         let t = base + chrono::Duration::seconds(ttl_secs);
                         Some(t.to_rfc3339())
                     } else {
@@ -310,7 +309,12 @@ pub fn apply_decision(
     }
 
     // ── 1b. PlanFrame side-effects ─────────────────────────────────────
-    if let ScheduledAction::PlanFrame { plan_id, version, envelope } = &decision.action {
+    if let ScheduledAction::PlanFrame {
+        plan_id,
+        version,
+        envelope,
+    } = &decision.action
+    {
         use autonoetic_types::session_timeline::TimelineRefs;
         let plan_status = match decision.status {
             ApprovalStatus::Approved => PlanStatus::Approved,
@@ -353,15 +357,18 @@ pub fn apply_decision(
             }
 
             // Canonical plan-approval timeline event.
-            let (principal, role) = crate::runtime::session_timeline::decider_seat(&decision.decided_by,
-            );
+            let (principal, role) =
+                crate::runtime::session_timeline::decider_seat(&decision.decided_by);
             let refs = TimelineRefs {
                 plan_id: Some(plan_id.clone()),
                 approval_request_id: Some(decision.request_id.clone()),
                 ..Default::default()
             };
             let event = crate::runtime::session_timeline::build_timeline_event(
-                decision.root_session_id.clone().unwrap_or_else(|| decision.session_id.clone()),
+                decision
+                    .root_session_id
+                    .clone()
+                    .unwrap_or_else(|| decision.session_id.clone()),
                 decision.session_id.clone(),
                 None,
                 &principal,
@@ -386,17 +393,19 @@ pub fn apply_decision(
     }
 
     // ── 2. Linked escalation resolution (approve + reject) ──────────────
-    if matches!(decision.status, ApprovalStatus::Approved | ApprovalStatus::Rejected) {
+    if matches!(
+        decision.status,
+        ApprovalStatus::Approved | ApprovalStatus::Rejected
+    ) {
         if let ScheduledAction::SessionEscalate { payload, .. } = &decision.action {
             if let Some(payload) = payload {
                 if payload.get("type").and_then(|v| v.as_str()) == Some("promotion_review") {
                     if let Some(esc_id) = payload.get("escalation_id").and_then(|v| v.as_str()) {
-                        let esc_status =
-                            if decision.status == ApprovalStatus::Approved {
-                                autonoetic_types::escalation::EscalationStatus::Approved
-                            } else {
-                                autonoetic_types::escalation::EscalationStatus::Rejected
-                            };
+                        let esc_status = if decision.status == ApprovalStatus::Approved {
+                            autonoetic_types::escalation::EscalationStatus::Approved
+                        } else {
+                            autonoetic_types::escalation::EscalationStatus::Rejected
+                        };
                         if let Err(e) = store.resolve_escalation(
                             esc_id,
                             esc_status,
@@ -518,12 +527,9 @@ fn notify_session_of_decision(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
 
-    if let Err(e) = super::signal::write_signal(
-        Some(store),
-        session_id,
-        &decision.request_id,
-        &signal,
-    ) {
+    if let Err(e) =
+        super::signal::write_signal(Some(store), session_id, &decision.request_id, &signal)
+    {
         tracing::warn!(
             target: "approval",
             request_id = %decision.request_id,
@@ -581,7 +587,12 @@ fn emit_wiki_timeline(
     store: &crate::scheduler::gateway_store::GatewayStore,
     decision: &ApprovalDecision,
 ) {
-    let ScheduledAction::WikiProposal { ref page_id, ref title, .. } = decision.action else {
+    let ScheduledAction::WikiProposal {
+        ref page_id,
+        ref title,
+        ..
+    } = decision.action
+    else {
         return;
     };
 
@@ -591,6 +602,7 @@ fn emit_wiki_timeline(
         ApprovalStatus::Rejected => "wiki.rejected",
         ApprovalStatus::Cancelled if is_agent_withdrawal => "wiki.withdrawn",
         ApprovalStatus::Cancelled => "wiki.rejected",
+        ApprovalStatus::Stale => return,
     };
     let role = crate::runtime::session_timeline::derive_role(&decision.agent_id);
     let principal = autonoetic_types::principal::Principal::agent(decision.agent_id.clone());
@@ -603,7 +615,10 @@ fn emit_wiki_timeline(
     });
     if is_agent_withdrawal {
         if let Some(obj) = payload.as_object_mut() {
-            obj.insert("cancelled_by".into(), serde_json::json!(decision.decided_by));
+            obj.insert(
+                "cancelled_by".into(),
+                serde_json::json!(decision.decided_by),
+            );
         }
     }
     let event = crate::runtime::session_timeline::build_timeline_event(
@@ -900,12 +915,23 @@ pub fn approve_request_with_options(
         let index_path = wiki_dir.join("index.toml");
         let mut index: Vec<toml::Value> = if index_path.exists() {
             let index_content = std::fs::read_to_string(&index_path).map_err(|e| {
-                anyhow::anyhow!("Failed to read wiki index '{}': {}", index_path.display(), e)
+                anyhow::anyhow!(
+                    "Failed to read wiki index '{}': {}",
+                    index_path.display(),
+                    e
+                )
             })?;
             let parsed: toml::Value = index_content.parse().map_err(|e| {
-                anyhow::anyhow!("Failed to parse wiki index '{}': {}", index_path.display(), e)
+                anyhow::anyhow!(
+                    "Failed to parse wiki index '{}': {}",
+                    index_path.display(),
+                    e
+                )
             })?;
-            parsed.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default()
+            parsed
+                .get("pages")
+                .and_then(|p| p.as_array().cloned())
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -913,15 +939,24 @@ pub fn approve_request_with_options(
             let mut m = toml::map::Map::new();
             m.insert("id".to_string(), toml::Value::String(page_id.clone()));
             m.insert("title".to_string(), toml::Value::String(title.clone()));
-            m.insert("file".to_string(), toml::Value::String(format!("{}.md", page_id)));
-            m.insert("tags".to_string(), toml::Value::Array(
-                tags.iter().map(|t| toml::Value::String(t.clone())).collect()
-            ));
+            m.insert(
+                "file".to_string(),
+                toml::Value::String(format!("{}.md", page_id)),
+            );
+            m.insert(
+                "tags".to_string(),
+                toml::Value::Array(
+                    tags.iter()
+                        .map(|t| toml::Value::String(t.clone()))
+                        .collect(),
+                ),
+            );
             m
         });
-        if let Some(pos) = index.iter().position(|e| {
-            e.get("id").and_then(|v| v.as_str()) == Some(page_id.as_str())
-        }) {
+        if let Some(pos) = index
+            .iter()
+            .position(|e| e.get("id").and_then(|v| v.as_str()) == Some(page_id.as_str()))
+        {
             index[pos] = entry;
         } else {
             index.push(entry);
@@ -1036,7 +1071,13 @@ pub fn cancel_request(
         wiki_materialized_meta: None,
         hook_executor,
     };
-    apply_decision(config, gateway_store, &decision, &ApproveOptions::default(), &context)?;
+    apply_decision(
+        config,
+        gateway_store,
+        &decision,
+        &ApproveOptions::default(),
+        &context,
+    )?;
 
     Ok(decision)
 }
@@ -1067,7 +1108,13 @@ pub fn cancel_pending_approval_for_workflow_task(
         wiki_materialized_meta: None,
         hook_executor: None,
     };
-    apply_decision(config, gateway_store, &decision, &ApproveOptions::default(), &context)?;
+    apply_decision(
+        config,
+        gateway_store,
+        &decision,
+        &ApproveOptions::default(),
+        &context,
+    )?;
 
     Ok(Some(request_id))
 }
@@ -1187,6 +1234,7 @@ fn unblock_task_on_approval(
             autonoetic_types::workflow::TaskRunStatus::Failed,
             "task.cancelled",
         ),
+        ApprovalStatus::Stale => return,
     };
 
     // Emit the approval decision event before updating status so chat CLI sees it.
@@ -1208,9 +1256,13 @@ fn unblock_task_on_approval(
     );
 
     let result_summary = match (new_status, &decision.reason) {
-        (autonoetic_types::workflow::TaskRunStatus::Failed, Some(r)) => {
-            Some(format!("approval_{}: {}", approval_event_type.strip_prefix("task.").unwrap_or("rejected"), r))
-        }
+        (autonoetic_types::workflow::TaskRunStatus::Failed, Some(r)) => Some(format!(
+            "approval_{}: {}",
+            approval_event_type
+                .strip_prefix("task.")
+                .unwrap_or("rejected"),
+            r
+        )),
         _ => None,
     };
     if let Err(e) = super::workflow_store::update_task_run_status(
@@ -1341,6 +1393,7 @@ fn decision_is_blocking(
             request.approval_level != ApprovalLevel::Operator
                 || action_is_external_or_irreversible(&request.action)
         }
+        ApprovalStatus::Stale => false,
     }
 }
 
@@ -1471,7 +1524,12 @@ fn emit_decider_obligation_event(
         timestamp: now.to_rfc3339(),
         category: "decider_obligation".to_string(),
         action: action.to_string(),
-        status: if action == "refused" { "error" } else { "success" }.to_string(),
+        status: if action == "refused" {
+            "error"
+        } else {
+            "success"
+        }
+        .to_string(),
         enforced_rules: vec!["O-1".to_string()],
         target: Some(request.request_id.clone()),
         payload: Some(
@@ -1546,11 +1604,12 @@ fn decide_request_with_options(
             match repo.get_sync_from_store(agent_id, &gateway_dir, Some(store)) {
                 Ok(loaded) => {
                     let policy = crate::policy::PolicyEngine::new(loaded.manifest.clone());
-                    let kind_label = if matches!(request.action, ScheduledAction::SessionEscalate { .. }) {
-                        "escalation"
-                    } else {
-                        "approval"
-                    };
+                    let kind_label =
+                        if matches!(request.action, ScheduledAction::SessionEscalate { .. }) {
+                            "escalation"
+                        } else {
+                            "approval"
+                        };
                     if !policy.can_decide_gate(kind_label).is_allowed() {
                         anyhow::bail!(
                             "Agent '{}' lacks GateDecider capability for {} gates (P-2.20)",
@@ -1690,8 +1749,8 @@ fn parse_agent_decider_id(decided_by: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        should_notify_parent_session, should_resume_waiting_session, ApproveOptions,
-        approve_request_with_options,
+        approve_request_with_options, should_notify_parent_session, should_resume_waiting_session,
+        ApproveOptions,
     };
     use crate::scheduler::workflow_store::{
         ensure_workflow_for_root_session, load_task_run, save_task_run,
@@ -1699,8 +1758,8 @@ mod tests {
     use autonoetic_types::background::{
         ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
     };
-    use autonoetic_types::notification::NotificationType;
     use autonoetic_types::config::GatewayConfig;
+    use autonoetic_types::notification::NotificationType;
     use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
     use tempfile::tempdir;
 
@@ -1743,6 +1802,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut req).unwrap();
 
@@ -1775,6 +1836,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         let sandbox = || ScheduledAction::SandboxExec {
             command: "x".to_string(),
@@ -1795,29 +1858,94 @@ mod tests {
         let local = mk(ApprovalLevel::Operator, sandbox());
 
         // Operator rejection without a reason → blocked (mirror of Ri-0.3).
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, None).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            None
+        )
+        .is_err());
         // …with a reason → allowed.
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, Some("out of scope")).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            Some("out of scope")
+        )
+        .is_ok());
         // Whitespace-only reason doesn't count.
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, Some("   ")).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            Some("   ")
+        )
+        .is_err());
         // Approving a reversible, operator-level action without a reason → allowed (DEFERRED).
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Approved, None).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Approved,
+            None
+        )
+        .is_ok());
         // Mechanical decider (no principal) is exempt even on rejection.
-        assert!(super::enforce_decider_motivation(&cfg, &local, "gateway", &ApprovalStatus::Rejected, None).is_ok());
-        assert!(super::enforce_decider_motivation(&cfg, &local, "emergency_stop:estop-1", &ApprovalStatus::Cancelled, None).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "gateway",
+            &ApprovalStatus::Rejected,
+            None
+        )
+        .is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "emergency_stop:estop-1",
+            &ApprovalStatus::Cancelled,
+            None
+        )
+        .is_ok());
         // Approving an external/irreversible action without a reason → blocked.
         let ext = mk(ApprovalLevel::Operator, install());
-        assert!(super::enforce_decider_motivation(&cfg, &ext, "operator", &ApprovalStatus::Approved, None).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &ext,
+            "operator",
+            &ApprovalStatus::Approved,
+            None
+        )
+        .is_err());
         // Approving an elevated-authority gate without a reason → blocked.
         let elevated = mk(ApprovalLevel::Admin, sandbox());
-        assert!(super::enforce_decider_motivation(&cfg, &elevated, "operator", &ApprovalStatus::Approved, None).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &elevated,
+            "operator",
+            &ApprovalStatus::Approved,
+            None
+        )
+        .is_err());
 
         // Disabled config → no enforcement at all.
         let cfg_off = GatewayConfig {
-            decider_obligations: autonoetic_types::config::DeciderObligationsConfig { enabled: false },
+            decider_obligations: autonoetic_types::config::DeciderObligationsConfig {
+                enabled: false,
+            },
             ..Default::default()
         };
-        assert!(super::enforce_decider_motivation(&cfg_off, &local, "operator", &ApprovalStatus::Rejected, None).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg_off,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            None
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1855,6 +1983,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
 
         super::emit_decider_obligation_event(
@@ -1865,7 +1995,9 @@ mod tests {
             "refused",
         );
 
-        let events = store.search_causal_events(Some("sess-o1"), None, 10).unwrap();
+        let events = store
+            .search_causal_events(Some("sess-o1"), None, 10)
+            .unwrap();
         let ev = events
             .iter()
             .find(|e| e.category == "decider_obligation")
@@ -1918,6 +2050,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store
             .create_approval(&mut req("apr-a", "root-a/coder-1"))
@@ -2152,6 +2286,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut request).unwrap();
 
@@ -2241,6 +2377,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut request).unwrap();
 
@@ -2443,6 +2581,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut request).unwrap();
 
@@ -2515,6 +2655,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut request).unwrap();
 

@@ -37,6 +37,7 @@ fn make_request(ix: usize, root_session_id: &str) -> ApprovalRequest {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     }
 }
 

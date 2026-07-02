@@ -502,6 +502,7 @@ pub async fn handle_gateway_approvals(
                         autonoetic_types::background::ApprovalStatus::Approved => "approved",
                         autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
                         autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
+                        autonoetic_types::background::ApprovalStatus::Stale => "stale",
                     }).unwrap_or("pending"));
                     println!("Created:       {}", a.created_at);
                     if let Some(ref at) = a.decided_at { println!("Decided at:    {}", at); }

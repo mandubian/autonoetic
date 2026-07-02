@@ -51,7 +51,7 @@ fn test_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
-            open_web: false,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -223,7 +223,10 @@ fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
         session_id: Some("ses-new"),
         run_context: None,
         config: None,
-        context: DecisionContext::tier1("credential request to localhost (network access)", "NetworkAccess policy"),
+        context: DecisionContext::tier1(
+            "credential request to localhost (network access)",
+            "NetworkAccess policy",
+        ),
         summary: "fetch API".into(),
         approval_ref: None,
         pre_validated: false,
@@ -233,9 +236,21 @@ fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"P-2.1"), "must record P-2.1, got {:?}", rules);
-    assert!(rules.contains(&"P-2.2"), "must record P-2.2, got {:?}", rules);
-    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
+    assert!(
+        rules.contains(&"P-2.1"),
+        "must record P-2.1, got {:?}",
+        rules
+    );
+    assert!(
+        rules.contains(&"P-2.2"),
+        "must record P-2.2, got {:?}",
+        rules
+    );
+    assert!(
+        rules.contains(&"P-2.18"),
+        "must record P-2.18, got {:?}",
+        rules
+    );
     Ok(())
 }
 
@@ -270,6 +285,8 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval)?;
     store.record_decision(
@@ -334,7 +351,10 @@ fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
         session_id: Some("ses-ui"),
         run_context: None,
         config: None,
-        context: DecisionContext::tier1("operator input required (test)", "agent requested an operator decision"),
+        context: DecisionContext::tier1(
+            "operator input required (test)",
+            "agent requested an operator decision",
+        ),
         summary: String::new(),
         approval_ref: None,
         pre_validated: false,
@@ -344,8 +364,16 @@ fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"P-2.13"), "must record P-2.13, got {:?}", rules);
-    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
+    assert!(
+        rules.contains(&"P-2.13"),
+        "must record P-2.13, got {:?}",
+        rules
+    );
+    assert!(
+        rules.contains(&"P-2.18"),
+        "must record P-2.18, got {:?}",
+        rules
+    );
     Ok(())
 }
 
@@ -366,7 +394,10 @@ fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
         session_id: Some("ses-esc"),
         run_context: None,
         config: None,
-        context: DecisionContext::tier1("operator input required (test)", "agent requested an operator decision"),
+        context: DecisionContext::tier1(
+            "operator input required (test)",
+            "agent requested an operator decision",
+        ),
         summary: String::new(),
         approval_ref: None,
         pre_validated: false,
@@ -376,7 +407,11 @@ fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
+    assert!(
+        rules.contains(&"P-2.18"),
+        "must record P-2.18, got {:?}",
+        rules
+    );
     Ok(())
 }
 
@@ -412,7 +447,11 @@ fn r_2_19_gate_enrichment_recorded_with_sender() -> Result<()> {
     };
 
     svc.add_gate_message(&gate_id, "operator", "What is the API used for?")?;
-    svc.add_gate_message(&gate_id, "system", "Agent context: data retrieval for analysis")?;
+    svc.add_gate_message(
+        &gate_id,
+        "system",
+        "Agent context: data retrieval for analysis",
+    )?;
 
     let msgs = svc.get_gate_messages(&gate_id)?;
     assert!(msgs.len() >= 3, "should have seed + 2 added messages");

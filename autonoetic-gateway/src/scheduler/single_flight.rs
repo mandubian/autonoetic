@@ -215,7 +215,10 @@ pub fn attach_approval_request(
     approval_request_id: &str,
 ) -> anyhow::Result<()> {
     let path = reservation_path(config, workflow_id, dedupe_key);
-    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)?;
     let mut body = String::new();
     file.read_to_string(&mut body)?;
     let mut reservation: SingleFlightReservation = serde_json::from_str(&body)?;
@@ -326,7 +329,9 @@ fn reservation_is_active(
 
 fn reservation_is_fresh(reservation: &SingleFlightReservation) -> bool {
     parse_timestamp(&reservation.updated_at)
-        .map(|updated_at| updated_at + Duration::minutes(PENDING_RESERVATION_FRESHNESS_MINUTES) > Utc::now())
+        .map(|updated_at| {
+            updated_at + Duration::minutes(PENDING_RESERVATION_FRESHNESS_MINUTES) > Utc::now()
+        })
         .unwrap_or(false)
 }
 
@@ -337,7 +342,10 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
 }
 
 fn is_durable_stage_kind(stage_kind: &str) -> bool {
-    matches!(stage_kind, "install" | "promote" | "rollback" | "durable_build")
+    matches!(
+        stage_kind,
+        "install" | "promote" | "rollback" | "durable_build"
+    )
 }
 
 fn normalize_intent_digest(message: &str) -> String {
@@ -543,14 +551,24 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval).unwrap();
-        attach_approval_request(&cfg, &workflow.workflow_id, &spec.dedupe_key, approval_request_id)
-            .unwrap();
+        attach_approval_request(
+            &cfg,
+            &workflow.workflow_id,
+            &spec.dedupe_key,
+            approval_request_id,
+        )
+        .unwrap();
 
         match try_acquire_reservation(&cfg, Some(&store), &spec, None, None).unwrap() {
             AcquireOutcome::Coalesced(existing) => {
-                assert_eq!(existing.approval_request_id.as_deref(), Some(approval_request_id));
+                assert_eq!(
+                    existing.approval_request_id.as_deref(),
+                    Some(approval_request_id)
+                );
                 assert!(existing.existing_task_id.is_none());
             }
             AcquireOutcome::Acquired(_) => panic!("duplicate approval request should coalesce"),

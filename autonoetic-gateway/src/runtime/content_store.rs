@@ -792,10 +792,8 @@ mod tests {
         let h2 = store.write(b"fn main() {}\n").unwrap();
         store.register_name(session, "config.yaml", &h1).unwrap();
         store.register_name(session, "src/main.rs", &h2).unwrap(); // nested
-        // A malicious/odd name must never escape the live directory.
-        store
-            .register_name(session, "../escape.txt", &h1)
-            .unwrap();
+                                                                   // A malicious/odd name must never escape the live directory.
+        store.register_name(session, "../escape.txt", &h1).unwrap();
         // Empty and `.`-only names resolve to the dir itself — must be skipped,
         // not error the whole projection.
         store.register_name(session, "", &h1).unwrap();
@@ -809,8 +807,14 @@ mod tests {
             !written.iter().any(|n| n.contains("..")),
             "unsafe name must be skipped: {written:?}"
         );
-        assert_eq!(std::fs::read(dir.join("config.yaml")).unwrap(), b"port: 8080\n");
-        assert_eq!(std::fs::read(dir.join("src/main.rs")).unwrap(), b"fn main() {}\n");
+        assert_eq!(
+            std::fs::read(dir.join("config.yaml")).unwrap(),
+            b"port: 8080\n"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("src/main.rs")).unwrap(),
+            b"fn main() {}\n"
+        );
         // The traversal name must not have written outside `live/`.
         assert!(!dir.parent().unwrap().join("escape.txt").exists());
 
@@ -819,7 +823,10 @@ mod tests {
         store.register_name(session, "only.txt", &h2).unwrap();
         let (dir2, written2) = store.project_live(session).unwrap();
         assert_eq!(written2, vec!["only.txt".to_string()]);
-        assert!(!dir2.join("config.yaml").exists(), "stale file should be cleared");
+        assert!(
+            !dir2.join("config.yaml").exists(),
+            "stale file should be cleared"
+        );
         assert!(dir2.join("only.txt").exists());
     }
 
@@ -1258,7 +1265,10 @@ mod tests {
         let listed = store.list_names_with_handles(session).unwrap();
         assert_eq!(listed.len(), 2, "both drafts should be listed from t=0");
         let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["config/secrets.yaml", "skills/weather/SKILL.md"]);
+        assert_eq!(
+            names,
+            vec!["config/secrets.yaml", "skills/weather/SKILL.md"]
+        );
 
         // load_manifest gives visibility — the RPC's visibility badge source.
         let manifest = store.load_manifest(session).unwrap();
@@ -1279,9 +1289,16 @@ mod tests {
         assert_eq!(vis_for("skills/weather/SKILL.md"), "session");
 
         // read_by_name_or_handle resolves each name back to its bytes.
-        let one = store.read_by_name_or_handle(session, "skills/weather/SKILL.md").unwrap();
-        assert_eq!(String::from_utf8_lossy(&one), "# title\n\nbody of draft one");
-        let two = store.read_by_name_or_handle(session, "config/secrets.yaml").unwrap();
+        let one = store
+            .read_by_name_or_handle(session, "skills/weather/SKILL.md")
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&one),
+            "# title\n\nbody of draft one"
+        );
+        let two = store
+            .read_by_name_or_handle(session, "config/secrets.yaml")
+            .unwrap();
         assert_eq!(String::from_utf8_lossy(&two), "SECRET-LIKE");
     }
 
@@ -1298,12 +1315,7 @@ mod tests {
 
         let h = store.write(b"shared").unwrap();
         store
-            .register_name_with_visibility(
-                child,
-                "shared/lib.py",
-                &h,
-                ContentVisibility::Global,
-            )
+            .register_name_with_visibility(child, "shared/lib.py", &h, ContentVisibility::Global)
             .unwrap();
 
         // The local child manifest knows the handle + global visibility.
@@ -1326,7 +1338,9 @@ mod tests {
             "the global manifest must record the handle for cross-session probes"
         );
 
-        let got = store.read_by_name_or_handle(child, "shared/lib.py").unwrap();
+        let got = store
+            .read_by_name_or_handle(child, "shared/lib.py")
+            .unwrap();
         assert_eq!(got, b"shared");
     }
 

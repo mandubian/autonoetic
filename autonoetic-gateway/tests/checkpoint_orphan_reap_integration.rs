@@ -4,6 +4,7 @@
 //! its signed checkpoint file must be reaped (not leaked on disk). A startup
 //! reaper clears orphans left behind by a crash during reject/cancel.
 
+use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
     checkpoints_dir, reap_orphan_checkpoints, sanitize_path_component, save_checkpoint,
     turn_id_for, SessionCheckpoint, YieldReason,
@@ -11,7 +12,6 @@ use autonoetic_gateway::runtime::checkpoint::{
 use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::scheduler::approval::{apply_decision, ApproveOptions, DecisionContext};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_gateway::llm::Message;
 use autonoetic_types::background::{
     ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
 };
@@ -56,6 +56,8 @@ fn make_approval(store: &GatewayStore, request_id: &str, session_id: &str) {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut request).unwrap();
 }
@@ -121,7 +123,11 @@ fn apply(
         decided_by: "operator".to_string(),
         reason: Some("test".to_string()),
         root_session_id: Some(
-            session_id.split('/').next().unwrap_or(session_id).to_string(),
+            session_id
+                .split('/')
+                .next()
+                .unwrap_or(session_id)
+                .to_string(),
         ),
         workflow_id: None,
         task_id: None,
@@ -156,7 +162,13 @@ fn reject_reaps_bound_checkpoint() -> anyhow::Result<()> {
     save_checkpoint(&config, &bound_checkpoint(session_id, 1, "apr-reject"))?;
     assert!(cp_path(&config, session_id, 1).exists());
 
-    apply(&config, &store, "apr-reject", session_id, ApprovalStatus::Rejected);
+    apply(
+        &config,
+        &store,
+        "apr-reject",
+        session_id,
+        ApprovalStatus::Rejected,
+    );
 
     assert!(
         !cp_path(&config, session_id, 1).exists(),
@@ -180,7 +192,13 @@ fn cancel_reaps_bound_checkpoint() -> anyhow::Result<()> {
     make_approval(&store, "apr-cancel", session_id);
     save_checkpoint(&config, &bound_checkpoint(session_id, 2, "apr-cancel"))?;
 
-    apply(&config, &store, "apr-cancel", session_id, ApprovalStatus::Cancelled);
+    apply(
+        &config,
+        &store,
+        "apr-cancel",
+        session_id,
+        ApprovalStatus::Cancelled,
+    );
 
     assert!(
         !cp_path(&config, session_id, 2).exists(),
@@ -204,7 +222,13 @@ fn approved_keeps_checkpoint_for_resume() -> anyhow::Result<()> {
     make_approval(&store, "apr-approve", session_id);
     save_checkpoint(&config, &bound_checkpoint(session_id, 1, "apr-approve"))?;
 
-    apply(&config, &store, "apr-approve", session_id, ApprovalStatus::Approved);
+    apply(
+        &config,
+        &store,
+        "apr-approve",
+        session_id,
+        ApprovalStatus::Approved,
+    );
 
     assert!(
         cp_path(&config, session_id, 1).exists(),
@@ -260,7 +284,10 @@ fn startup_reaper_clears_orphans_but_keeps_active() -> anyhow::Result<()> {
     save_checkpoint(&config, &bound_checkpoint(approved_session, 1, "apr-appr"))?;
 
     let reaped = reap_orphan_checkpoints(&config, &store)?;
-    assert_eq!(reaped, 2, "reaper should clear the rejected + missing orphans");
+    assert_eq!(
+        reaped, 2,
+        "reaper should clear the rejected + missing orphans"
+    );
 
     assert!(
         !cp_path(&config, orphan_session, 1).exists(),

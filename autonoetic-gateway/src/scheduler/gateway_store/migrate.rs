@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 59;
+const SCHEMA_VERSION_LATEST: i64 = 60;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -544,7 +544,30 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_spawn_lineage_v57(conn)?;
     apply_workflow_singleton_index_v58(conn)?;
     apply_promotion_attempt_ledger_v59(conn)?;
+    apply_approval_expires_at_v60(conn)?;
 
+    Ok(())
+}
+
+fn apply_approval_expires_at_v60(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 60 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE approvals ADD COLUMN expires_at TEXT;
+        CREATE INDEX IF NOT EXISTS idx_approvals_expires_at ON approvals(expires_at, status);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![60, "approval_expires_at", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 
@@ -678,9 +701,7 @@ fn apply_agent_revision_detected_network_hosts_v56(conn: &mut Connection) -> Res
         |row| row.get(0),
     )?;
     if col_count == 0 {
-        conn.execute_batch(
-            "ALTER TABLE agent_revisions ADD COLUMN detected_network_hosts TEXT;",
-        )?;
+        conn.execute_batch("ALTER TABLE agent_revisions ADD COLUMN detected_network_hosts TEXT;")?;
     }
 
     conn.execute(
@@ -711,16 +732,17 @@ fn apply_drop_approval_similarity_v55(conn: &mut Connection) -> Result<()> {
             |row| row.get(0),
         )?;
         if col_count > 0 {
-            conn.execute(
-                &format!("ALTER TABLE approvals DROP COLUMN {col}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE approvals DROP COLUMN {col}"), [])?;
         }
     }
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![55_i64, "drop_approval_similarity", chrono::Utc::now().to_rfc3339()],
+        params![
+            55_i64,
+            "drop_approval_similarity",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -756,11 +778,17 @@ fn apply_promotion_pre_authorization_v52(conn: &mut Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if current >= 52 { return Ok(()); }
+    if current >= 52 {
+        return Ok(());
+    }
     conn.execute_batch("ALTER TABLE promotion_history ADD COLUMN pre_authorization TEXT;")?;
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![52_i64, "promotion_pre_authorization", chrono::Utc::now().to_rfc3339()],
+        params![
+            52_i64,
+            "promotion_pre_authorization",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -771,7 +799,9 @@ fn apply_agent_suspension_v53(conn: &mut Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if current >= 53 { return Ok(()); }
+    if current >= 53 {
+        return Ok(());
+    }
     let tx = conn.transaction()?;
     tx.execute_batch(
         "ALTER TABLE agent_aliases ADD COLUMN suspended_at TEXT;
@@ -852,11 +882,7 @@ fn apply_session_envelopes_v50(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            50_i64,
-            "session_envelopes",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![50_i64, "session_envelopes", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -1060,11 +1086,7 @@ fn apply_operator_activity_v45(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            45_i64,
-            "operator_activity",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![45_i64, "operator_activity", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -1097,11 +1119,7 @@ fn apply_stage_transitions_v37(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            37_i64,
-            "stage_transitions",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![37_i64, "stage_transitions", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -1195,7 +1213,11 @@ fn apply_improvement_cycles_v39(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![39_i64, "improvement_cycles", chrono::Utc::now().to_rfc3339()],
+        params![
+            39_i64,
+            "improvement_cycles",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -1215,7 +1237,10 @@ fn apply_credential_label_v40(conn: &mut Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     if col_count == 0 {
-        conn.execute("ALTER TABLE credentials ADD COLUMN label TEXT DEFAULT NULL", [])?;
+        conn.execute(
+            "ALTER TABLE credentials ADD COLUMN label TEXT DEFAULT NULL",
+            [],
+        )?;
     }
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
@@ -1397,7 +1422,11 @@ fn apply_validation_waivers_v44(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![44_i64, "validation_waivers", chrono::Utc::now().to_rfc3339()],
+        params![
+            44_i64,
+            "validation_waivers",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -2446,11 +2475,7 @@ fn apply_security_findings_v26(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            26_i64,
-            "security_findings",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![26_i64, "security_findings", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -2632,11 +2657,7 @@ fn apply_gate_messages_v31(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            31_i64,
-            "gate_messages",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![31_i64, "gate_messages", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -2701,11 +2722,7 @@ fn apply_escalations_v33(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            33_i64,
-            "escalations_table",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![33_i64, "escalations_table", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

@@ -48,7 +48,7 @@ fn planner_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
-            open_web: false,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -134,6 +134,8 @@ fn agent_spawn_blocked_while_workflow_task_awaiting_approval() -> anyhow::Result
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval)?;
 
@@ -250,6 +252,8 @@ fn cancelling_awaiting_approval_task_withdraws_pending_approval() -> anyhow::Res
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval)?;
 

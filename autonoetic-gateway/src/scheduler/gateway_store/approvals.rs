@@ -8,7 +8,7 @@ use super::GatewayStore;
 
 impl GatewayStore {
     pub fn create_approval(&self, request: &mut ApprovalRequest) -> Result<()> {
-        crate::scheduler::approval_hardening::enrich_request(request);
+        crate::scheduler::approval_hardening::enrich_request(request, self.config().as_deref());
         let conn = self.conn.lock().unwrap();
 
         if let Some(ref root_session_id) = request.root_session_id {
@@ -41,13 +41,14 @@ impl GatewayStore {
             .risk_summary
             .as_ref()
             .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let expires_at = request.expires_at.as_deref();
         conn.execute(
             "INSERT INTO approvals (
                 request_id, agent_id, session_id, root_session_id, workflow_id, task_id,
                 action_type, action_payload, reason, evidence_ref, status, created_at,
                 approval_level,
-                min_dwell_ms, confirm_phrase, code_excerpts, risk_summary
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                min_dwell_ms, confirm_phrase, code_excerpts, risk_summary, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 request.request_id,
                 request.agent_id,
@@ -66,6 +67,7 @@ impl GatewayStore {
                 request.confirm_phrase,
                 code_excerpts_json,
                 risk_summary_json,
+                expires_at,
             ],
         )?;
         // Release the conn lock before timeline emit — create_live_digest_event
@@ -82,10 +84,8 @@ impl GatewayStore {
         risk_summary: Option<&autonoetic_types::background::RiskSummary>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let code_json = code_excerpts
-            .map(|v| serde_json::to_string(v).unwrap_or_default());
-        let risk_json = risk_summary
-            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let code_json = code_excerpts.map(|v| serde_json::to_string(v).unwrap_or_default());
+        let risk_json = risk_summary.map(|v| serde_json::to_string(v).unwrap_or_default());
         conn.execute(
             "UPDATE approvals SET code_excerpts = ?1, risk_summary = ?2 WHERE request_id = ?3",
             params![code_json, risk_json, request_id],
@@ -113,7 +113,7 @@ impl GatewayStore {
         request_id: &str,
     ) -> Result<Option<ApprovalRequest>> {
         conn.query_row(
-            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, min_dwell_ms, confirm_phrase, code_excerpts, risk_summary FROM approvals WHERE request_id = ?1",
+            "SELECT request_id, agent_id, session_id, action_payload, created_at, workflow_id, task_id, root_session_id, status, decided_at, decided_by, reason, evidence_ref, approval_level, decision_reason, min_dwell_ms, confirm_phrase, code_excerpts, risk_summary, expires_at FROM approvals WHERE request_id = ?1",
             params![request_id],
             |row| {
                 let action_payload: String = row.get(3)?;
@@ -122,6 +122,7 @@ impl GatewayStore {
                     "approved" => Some(autonoetic_types::background::ApprovalStatus::Approved),
                     "rejected" => Some(autonoetic_types::background::ApprovalStatus::Rejected),
                     "cancelled" => Some(autonoetic_types::background::ApprovalStatus::Cancelled),
+                    "stale" => Some(autonoetic_types::background::ApprovalStatus::Stale),
                     _ => None,
                 });
                 let action = serde_json::from_str(&action_payload).map_err(|e| {
@@ -131,6 +132,7 @@ impl GatewayStore {
                 let approval_level: ApprovalLevel = serde_json::from_str(&level_str).unwrap_or(ApprovalLevel::Operator);
                 let code_excerpts_json: Option<String> = row.get(17)?;
                 let risk_summary_json: Option<String> = row.get(18)?;
+                let expires_at: Option<String> = row.get(19)?;
                 let code_excerpts = code_excerpts_json
                     .and_then(|s| serde_json::from_str::<Vec<autonoetic_types::background::CodeExcerpt>>(&s).ok());
                 let risk_summary = risk_summary_json
@@ -155,6 +157,7 @@ impl GatewayStore {
                     confirm_phrase: row.get(16)?,
                     code_excerpts,
                     risk_summary,
+                    expires_at,
                 })
             },
         ).optional().map_err(Into::into)
@@ -180,12 +183,12 @@ impl GatewayStore {
         let ctx = {
             let conn = self.conn.lock().unwrap();
             let rows = conn.execute(
-                "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_reason = ?4, decided_by_kind = ?5 WHERE request_id = ?6 AND status = 'pending'",
+                "UPDATE approvals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_reason = ?4, decided_by_kind = ?5 WHERE request_id = ?6 AND status IN ('pending', 'stale')",
                 params![status, decided_by, decided_at, decision_reason, decided_by_kind, request_id],
             )?;
             if rows == 0 {
                 anyhow::bail!(
-                    "Approval {} is no longer pending (already decided or not found)",
+                    "Approval {} is no longer pending or stale (already decided or not found)",
                     request_id
                 );
             }
@@ -313,6 +316,29 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_stale_approvals_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<ApprovalRequest>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id FROM approvals WHERE root_session_id = ?1 AND status = 'stale'",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for id_result in rows {
+            let id = id_result?;
+            if let Some(app) = Self::get_approval_with_conn(&conn, &id)? {
+                results.push(app);
+            }
+        }
+        Ok(results)
+    }
+
     pub fn get_approved_approvals_for_root(
         &self,
         root_session_id: &str,
@@ -399,9 +425,15 @@ impl GatewayStore {
             {
                 if a_id == agent_id
                     && r_id == revision_id
-                    && a_caps.iter().cloned().collect::<std::collections::HashSet<String>>()
+                    && a_caps
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
                         == added
-                    && b_caps.iter().cloned().collect::<std::collections::HashSet<String>>()
+                    && b_caps
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
                         == broadened
                 {
                     return Self::get_approval_with_conn(&conn, &id).map(|opt| {
@@ -409,9 +441,15 @@ impl GatewayStore {
                             // Surface the stored status so callers can distinguish
                             // pending from already-approved matches.
                             req.status = match status.as_str() {
-                                "approved" => Some(autonoetic_types::background::ApprovalStatus::Approved),
-                                "rejected" => Some(autonoetic_types::background::ApprovalStatus::Rejected),
-                                "cancelled" => Some(autonoetic_types::background::ApprovalStatus::Cancelled),
+                                "approved" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Approved)
+                                }
+                                "rejected" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Rejected)
+                                }
+                                "cancelled" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Cancelled)
+                                }
                                 _ => None,
                             };
                             req
@@ -475,17 +513,29 @@ impl GatewayStore {
                 if a_id == agent_id
                     && r_id == revision_id
                     && a_outgoing == outgoing_revision_id
-                    && a_caps.iter().cloned().collect::<std::collections::HashSet<String>>()
+                    && a_caps
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
                         == added
-                    && b_caps.iter().cloned().collect::<std::collections::HashSet<String>>()
+                    && b_caps
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
                         == broadened
                 {
                     return Self::get_approval_with_conn(&conn, &id).map(|opt| {
                         opt.map(|mut req| {
                             req.status = match status.as_str() {
-                                "approved" => Some(autonoetic_types::background::ApprovalStatus::Approved),
-                                "rejected" => Some(autonoetic_types::background::ApprovalStatus::Rejected),
-                                "cancelled" => Some(autonoetic_types::background::ApprovalStatus::Cancelled),
+                                "approved" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Approved)
+                                }
+                                "rejected" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Rejected)
+                                }
+                                "cancelled" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Cancelled)
+                                }
                                 _ => None,
                             };
                             req
@@ -497,10 +547,7 @@ impl GatewayStore {
         Ok(None)
     }
 
-    pub fn list_all_approvals_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<ApprovalRequest>> {
+    pub fn list_all_approvals_for_session(&self, session_id: &str) -> Result<Vec<ApprovalRequest>> {
         let root = crate::runtime::content_store::root_session_id(session_id);
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -556,7 +603,10 @@ impl GatewayStore {
         .map_err(Into::into)
     }
 
-    pub fn get_pending_approval_request_id_for_task(&self, task_id: &str) -> Result<Option<String>> {
+    pub fn get_pending_approval_request_id_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT request_id FROM approvals WHERE task_id = ?1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
@@ -594,10 +644,7 @@ impl GatewayStore {
     /// detected on resume means the (possibly already-approved) approval is no
     /// longer trustworthy and must be revoked. Already-terminal approvals
     /// (rejected/cancelled) are left untouched.
-    pub fn cancel_approval_for_integrity_violation(
-        &self,
-        request_id: &str,
-    ) -> Result<bool> {
+    pub fn cancel_approval_for_integrity_violation(&self, request_id: &str) -> Result<bool> {
         const DECIDED_BY: &str = "gateway:integrity_check";
         let decided_by_kind =
             autonoetic_types::principal::decider_principal_kind(DECIDED_BY).map(|k| k.tag());
@@ -1046,6 +1093,40 @@ impl GatewayStore {
         Ok(count)
     }
 
+    /// Mark standalone (non-workflow) approvals whose `expires_at` has passed
+    /// as `stale`. The approvals are NOT cancelled — they remain resolvable if
+    /// the operator chooses to act — but they are surfaced as stale in
+    /// `operator.pending`. Returns the IDs that changed.
+    pub fn flag_expired_standalone_approvals(&self) -> Result<Vec<String>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id FROM approvals
+             WHERE status = 'pending'
+               AND workflow_id IS NULL
+               AND task_id IS NULL
+               AND expires_at IS NOT NULL
+               AND expires_at < ?1",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut flagged = Vec::new();
+        for row in rows {
+            let id = row?;
+            let changed = conn.execute(
+                "UPDATE approvals SET status = 'stale' WHERE request_id = ?1 AND status = 'pending'",
+                params![id],
+            )?;
+            if changed > 0 {
+                flagged.push(id);
+            }
+        }
+        Ok(flagged)
+    }
+
     pub fn get_approval_stats(
         &self,
         agent_id: Option<&str>,
@@ -1198,6 +1279,7 @@ mod decided_by_kind_tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+            expires_at: None,
         }
     }
 
@@ -1222,7 +1304,13 @@ mod decided_by_kind_tests {
         let mut a = pending("apr-h");
         store.create_approval(&mut a).unwrap();
         store
-            .record_decision("apr-h", "approved", "operator", "2026-06-01T01:00:00Z", None)
+            .record_decision(
+                "apr-h",
+                "approved",
+                "operator",
+                "2026-06-01T01:00:00Z",
+                None,
+            )
             .unwrap();
         assert_eq!(stored_kind(&store, "apr-h").as_deref(), Some("human"));
 
@@ -1230,7 +1318,13 @@ mod decided_by_kind_tests {
         let mut b = pending("apr-a");
         store.create_approval(&mut b).unwrap();
         store
-            .record_decision("apr-a", "approved", "auditor.default", "2026-06-01T01:00:00Z", None)
+            .record_decision(
+                "apr-a",
+                "approved",
+                "auditor.default",
+                "2026-06-01T01:00:00Z",
+                None,
+            )
             .unwrap();
         assert_eq!(
             stored_kind(&store, "apr-a").as_deref(),
@@ -1272,11 +1366,19 @@ mod decided_by_kind_tests {
         let mut a = pending("apr-r");
         store.create_approval(&mut a).unwrap();
         store
-            .record_decision("apr-r", "rejected", "operator", "2026-06-01T01:00:00Z", Some("out of scope"))
+            .record_decision(
+                "apr-r",
+                "rejected",
+                "operator",
+                "2026-06-01T01:00:00Z",
+                Some("out of scope"),
+            )
             .unwrap();
 
         // session_id "s1" is the root (pending() leaves root_session_id None).
-        let tl = store.list_session_timeline("s1", None, 50, None, None).unwrap();
+        let tl = store
+            .list_session_timeline("s1", None, 50, None, None)
+            .unwrap();
         let ev = tl
             .entries
             .iter()
@@ -1327,6 +1429,8 @@ mod decided_by_kind_tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut req).unwrap();
 
@@ -1395,10 +1499,18 @@ mod decided_by_kind_tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut req).unwrap();
         store
-            .record_decision("apr-rp-2", "approved", "operator", "2026-06-01T01:00:00Z", None)
+            .record_decision(
+                "apr-rp-2",
+                "approved",
+                "operator",
+                "2026-06-01T01:00:00Z",
+                None,
+            )
             .unwrap();
 
         let matched = store

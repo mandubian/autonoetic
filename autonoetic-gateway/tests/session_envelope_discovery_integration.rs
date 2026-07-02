@@ -111,6 +111,8 @@ fn discover_observed_hosts_includes_approved_network_actions() -> anyhow::Result
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     })?;
     store.record_decision(
         "apr-env-1",

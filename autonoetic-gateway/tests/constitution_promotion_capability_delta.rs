@@ -72,7 +72,7 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
-            open_web: false,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -267,6 +267,7 @@ fn store_revision_promote_approval(
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     };
     store.create_approval(&mut req).unwrap();
     req
@@ -756,7 +757,6 @@ fn new_agent_first_promotion_requires_operator_approval_by_default() {
         "message should name the new-agent case, got: {}",
         resp["message"]
     );
-
 }
 
 #[test]
