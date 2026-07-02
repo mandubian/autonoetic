@@ -141,7 +141,12 @@ pub fn collect_pending_for_root(
             continue;
         }
         let summary = if e.planner_synthesis.trim().is_empty() {
-            format!("promotion review: {} rev {}", e.agent_id, e.revision_id)
+            format!(
+                "{}: {} rev {}",
+                e.escalation_type.as_str().replace('_', " "),
+                e.agent_id,
+                e.revision_id
+            )
         } else {
             e.planner_synthesis.clone()
         };
