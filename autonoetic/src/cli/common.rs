@@ -429,6 +429,19 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayInteractionCommands,
     },
+    /// Unified view of everything awaiting an operator decision for a root
+    /// session — approvals, interactions, escalations, and plans in one list,
+    /// each with the command that resolves it (#722). This is the CLI form of
+    /// the `operator.pending` RPC, so a headless operator no longer has to poll
+    /// four separate command families.
+    Pending {
+        /// Root session id to list pending decisions for.
+        #[arg(long)]
+        root_session: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage system agents (declared in config, auto-scheduled on startup).
     SystemAgents {
         #[command(subcommand)]
