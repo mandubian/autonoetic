@@ -14,6 +14,7 @@ fn row_to_escalation(row: &rusqlite::Row) -> rusqlite::Result<EscalationMessage>
     let escalation_type_str: String = row.get(14)?;
     let escalation_type =
         EscalationType::parse(&escalation_type_str).unwrap_or(EscalationType::PromotionReview);
+    let approval_request_id: Option<String> = row.get(15)?;
     Ok(EscalationMessage {
         escalation_id: row.get(0)?,
         artifact_id: row.get(1)?,
@@ -30,6 +31,7 @@ fn row_to_escalation(row: &rusqlite::Row) -> rusqlite::Result<EscalationMessage>
         decision_reason: row.get(12)?,
         code_excerpts,
         escalation_type,
+        approval_request_id,
     })
 }
 
@@ -89,8 +91,8 @@ impl GatewayStore {
         conn.execute(
             "INSERT INTO escalations (escalation_id, artifact_id, artifact_digest, agent_id,
              revision_id, role_verdicts, planner_synthesis, created_at, resolved_at,
-             root_session_id, status, code_excerpts, escalation_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             root_session_id, status, code_excerpts, escalation_type, approval_request_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 escalation.escalation_id,
                 escalation.artifact_id,
@@ -105,6 +107,7 @@ impl GatewayStore {
                 escalation.status.as_str(),
                 code_excerpts_json,
                 escalation.escalation_type.as_str(),
+                escalation.approval_request_id,
             ],
         )?;
         // Release the conn lock before emitting — create_live_digest_event re-locks
@@ -140,10 +143,7 @@ impl GatewayStore {
                 autonoetic_types::session_timeline::TimelineRefs {
                     artifact_id: (!escalation.artifact_id.is_empty())
                         .then(|| escalation.artifact_id.clone()),
-                    approval_request_id: Some(format!(
-                        "apr-esc-{}",
-                        &escalation.escalation_id[..16.min(escalation.escalation_id.len())]
-                    )),
+                    approval_request_id: escalation.approval_request_id.clone(),
                     ..Default::default()
                 },
             );
@@ -176,7 +176,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id
              FROM escalations WHERE escalation_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![escalation_id], row_to_escalation)?;
@@ -188,7 +188,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id
              FROM escalations WHERE status = 'pending' ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], row_to_escalation)?;
@@ -226,7 +226,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id
              FROM escalations
              WHERE artifact_id = ?1 AND revision_id = ?2 AND status = ?3
              ORDER BY created_at DESC LIMIT 1",
@@ -246,7 +246,7 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id
              FROM escalations
              WHERE artifact_id = ?1 AND status = 'approved'
              ORDER BY created_at DESC LIMIT 1",
@@ -261,17 +261,17 @@ impl GatewayStore {
         status: EscalationStatus,
         decided_by: &str,
         decision_reason: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
 
         if !self.escalation_exists_with_conn(&conn, escalation_id)? {
             bail!("Escalation '{}' not found", escalation_id);
         }
 
-        let current_status: String = conn.query_row(
-            "SELECT status FROM escalations WHERE escalation_id = ?1",
+        let (current_status, approval_request_id): (String, Option<String>) = conn.query_row(
+            "SELECT status, approval_request_id FROM escalations WHERE escalation_id = ?1",
             params![escalation_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if current_status != "pending" {
             bail!(
@@ -292,7 +292,7 @@ impl GatewayStore {
                 escalation_id
             ],
         )?;
-        Ok(())
+        Ok(approval_request_id)
     }
 }
 

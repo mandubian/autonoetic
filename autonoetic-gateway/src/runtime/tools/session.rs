@@ -166,6 +166,7 @@ impl NativeTool for SessionEscalateTool {
                     urgency: args.urgency.clone(),
                     suggested_actions: suggested_actions.clone(),
                     payload: None,
+                    kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
                 };
                 let fallback_config = GatewayConfig {
                     agents_dir: agent_dir.parent().unwrap_or(agent_dir).to_path_buf(),

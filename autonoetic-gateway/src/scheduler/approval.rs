@@ -397,28 +397,26 @@ pub fn apply_decision(
         decision.status,
         ApprovalStatus::Approved | ApprovalStatus::Rejected
     ) {
-        if let ScheduledAction::SessionEscalate { payload, .. } = &decision.action {
-            if let Some(payload) = payload {
-                if payload.get("type").and_then(|v| v.as_str()) == Some("promotion_review") {
-                    if let Some(esc_id) = payload.get("escalation_id").and_then(|v| v.as_str()) {
-                        let esc_status = if decision.status == ApprovalStatus::Approved {
-                            autonoetic_types::escalation::EscalationStatus::Approved
-                        } else {
-                            autonoetic_types::escalation::EscalationStatus::Rejected
-                        };
-                        if let Err(e) = store.resolve_escalation(
-                            esc_id,
-                            esc_status,
-                            &decision.decided_by,
-                            decision.reason.as_deref(),
-                        ) {
-                            tracing::warn!(
-                                target: "approval",
-                                escalation_id = %esc_id,
-                                error = %e,
-                                "Failed to resolve linked escalation"
-                            );
-                        }
+        if let ScheduledAction::SessionEscalate { kind, payload, .. } = &decision.action {
+            if *kind == autonoetic_types::background::EscalationKind::PromotionReview {
+                if let Some(esc_id) = payload.as_ref().and_then(|p| p.get("escalation_id")).and_then(|v| v.as_str()) {
+                    let esc_status = if decision.status == ApprovalStatus::Approved {
+                        autonoetic_types::escalation::EscalationStatus::Approved
+                    } else {
+                        autonoetic_types::escalation::EscalationStatus::Rejected
+                    };
+                    if let Err(e) = store.resolve_escalation(
+                        esc_id,
+                        esc_status,
+                        &decision.decided_by,
+                        decision.reason.as_deref(),
+                    ) {
+                        tracing::warn!(
+                            target: "approval",
+                            escalation_id = %esc_id,
+                            error = %e,
+                            "Failed to resolve linked escalation"
+                        );
                     }
                 }
             }
