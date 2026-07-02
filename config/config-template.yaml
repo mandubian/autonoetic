@@ -119,12 +119,15 @@ approval_timeout_secs: 3600
 # Keeps task updated_at fresh during long-running child execution/finalization.
 # If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.
 # workflow_task_heartbeat_secs: 2
-# Optional: max seconds a Running task without progress before the sweeper
-# force-completes it. Resolution is ALWAYS `Succeeded` (not `Failed`); the
-# sweeper attaches whatever exit evidence it can find (manifest, digest,
-# implicit artifacts), and a no-evidence force-completion still resolves as
-# `Succeeded` so the parent workflow can proceed. Default: 600. Set to 0 to disable.
+# Optional: max seconds a Running task without progress before the stuck-task
+# sweeper resolves it. Tasks with a fresh claim heartbeat are never swept. When
+# the child session has completion evidence (manifest, digest, checkpoint, or
+# implicit artifact), the sweeper force-completes it as `Succeeded`. With no
+# evidence, `stuck_task_no_evidence_action` controls the outcome: `fail`
+# (default) resolves as `Failed` and emits a `task.stuck` anomaly event;
+# `succeed` preserves legacy behavior. Default: 600. Set to 0 to disable.
 # stuck_task_timeout_secs: 600
+# stuck_task_no_evidence_action: fail
 # Multiplier applied to approval dwell times (R++4). Default: 1.0. Set to 0 to disable (tests).
 # approval_dwell_multiplier: 1.0
 

@@ -2012,7 +2012,7 @@ fn queued_task_path(config: &GatewayConfig, workflow_id: &str, task_id: &str) ->
     queue_dir(config, workflow_id).join(format!("{task_id}.json"))
 }
 
-fn task_claim_path(config: &GatewayConfig, workflow_id: &str, task_id: &str) -> PathBuf {
+pub(crate) fn task_claim_path(config: &GatewayConfig, workflow_id: &str, task_id: &str) -> PathBuf {
     queue_dir(config, workflow_id).join(format!("{task_id}.claim.json"))
 }
 
@@ -2029,7 +2029,7 @@ fn parse_rfc3339(ts: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(ts)?.with_timezone(&Utc))
 }
 
-fn claim_is_stale(claim: &TaskExecutionClaim, stale_after_secs: u64) -> bool {
+pub(crate) fn claim_is_stale(claim: &TaskExecutionClaim, stale_after_secs: u64) -> bool {
     let Ok(heartbeat_at) = parse_rfc3339(&claim.heartbeat_at) else {
         return true;
     };

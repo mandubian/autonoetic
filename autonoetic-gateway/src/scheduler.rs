@@ -553,7 +553,27 @@ async fn check_stuck_running_tasks(
                 continue;
             }
 
+            // Respect heartbeat freshness: a task with a live claim is still
+            // active, just slow. Only sweep once the claim heartbeat itself is
+            // stale relative to the configured timeout.
+            let claim_opt =
+                workflow_store::load_task_claim(&config, &wf_id, &task.task_id).ok().flatten();
+            let claim_fresh = claim_opt.as_ref().map_or(false, |claim| {
+                !workflow_store::claim_is_stale(claim, stale_after_secs)
+            });
+            if claim_fresh {
+                tracing::debug!(
+                    target: "workflow",
+                    task_id = %task.task_id,
+                    workflow_id = %wf_id,
+                    elapsed_secs = elapsed_secs,
+                    "Stuck-task sweeper skipping task with fresh claim heartbeat"
+                );
+                continue;
+            }
+
             let mut evidence = Vec::new();
+            let mut diagnostics = Vec::new();
             let mut session_completed = false;
 
             if !task.session_id.is_empty() {
@@ -602,7 +622,7 @@ async fn check_stuck_running_tasks(
                         }
                     }
                 } else {
-                    evidence.push("session directory does not exist".to_string());
+                    diagnostics.push("session directory does not exist".to_string());
                 }
             }
 
@@ -629,9 +649,121 @@ async fn check_stuck_running_tasks(
                 }
             }
 
-            if !session_completed && evidence.is_empty() {
-                evidence.push("no evidence found — proceeding based on elapsed time".to_string());
+            let no_evidence = !session_completed && evidence.is_empty();
+
+            if no_evidence {
+                // No completion evidence. Default behavior is to fail the task
+                // so a genuinely hung/crashed execution is not silently reported
+                // as a success. Operators can opt back into legacy succeed
+                // behavior via `stuck_task_no_evidence_action: succeed`.
+                let action = config.stuck_task_no_evidence_action;
+
+                // Give a stale-claim task that might still be finalizing a
+                // larger grace period (2x) before we declare it failed.
+                if action == autonoetic_types::config::StuckTaskNoEvidenceAction::Fail
+                    && elapsed_secs < stale_after_secs.saturating_mul(2)
+                {
+                    continue;
+                }
+
+                let heartbeat_age_secs = claim_opt.as_ref().and_then(|claim| {
+                    chrono::DateTime::parse_from_rfc3339(&claim.heartbeat_at)
+                        .ok()
+                        .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_seconds() as u64)
+                });
+
+                let (status, result_summary, checkpoint_status, event_type) =
+                    if action == autonoetic_types::config::StuckTaskNoEvidenceAction::Fail {
+                        let summary = format!(
+                            "stuck_no_evidence: task running for {}s with no completion evidence; last heartbeat {}s ago",
+                            elapsed_secs,
+                            heartbeat_age_secs.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string())
+                        );
+                        (
+                            autonoetic_types::workflow::TaskRunStatus::Failed,
+                            summary,
+                            "stuck_failed".to_string(),
+                            "task.stuck".to_string(),
+                        )
+                    } else {
+                        let mut notes = evidence.clone();
+                        notes.push("no evidence found — proceeding based on elapsed time".to_string());
+                        notes.extend(diagnostics.clone());
+                        let summary = format!(
+                            "Auto-resolved stuck task: Succeeded (elapsed: {}s, evidence: {})",
+                            elapsed_secs,
+                            notes.join("; ")
+                        );
+                        (
+                            autonoetic_types::workflow::TaskRunStatus::Succeeded,
+                            summary,
+                            "stuck_auto_resolved".to_string(),
+                            "task.stuck_resolved".to_string(),
+                        )
+                    };
+
+                tracing::warn!(
+                    target: "workflow",
+                    task_id = %task.task_id,
+                    workflow_id = %wf_id,
+                    elapsed_secs = elapsed_secs,
+                    evidence = ?evidence,
+                    diagnostics = ?diagnostics,
+                    "Stuck running task detected; resolving as {:?}",
+                    status
+                );
+
+                let _ = workflow_store::update_task_run_status(
+                    &config,
+                    store,
+                    &wf_id,
+                    &task.task_id,
+                    status,
+                    Some(result_summary),
+                    None,
+                    None,
+                );
+
+                let _ = workflow_store::checkpoint_task(
+                    &config,
+                    store,
+                    &wf_id,
+                    &task.task_id,
+                    checkpoint_status,
+                    serde_json::json!({
+                        "status": status.as_str(),
+                        "evidence": evidence,
+                        "diagnostics": diagnostics,
+                        "session_completed": session_completed,
+                        "elapsed_secs": elapsed_secs,
+                        "heartbeat_age_secs": heartbeat_age_secs,
+                    }),
+                );
+
+                let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
+
+                let event = autonoetic_types::workflow::WorkflowEventRecord {
+                    event_id: format!("wevt-stuck-t-{}", &task.task_id),
+                    workflow_id: wf_id.clone(),
+                    event_type,
+                    task_id: Some(task.task_id.clone()),
+                    agent_id: Some(task.agent_id.clone()),
+                    payload: serde_json::json!({
+                        "evidence": evidence,
+                        "diagnostics": diagnostics,
+                        "session_completed": session_completed,
+                        "elapsed_secs": elapsed_secs,
+                        "heartbeat_age_secs": heartbeat_age_secs,
+                        "resolved_status": status.as_str(),
+                    }),
+                    occurred_at: chrono::Utc::now().to_rfc3339(),
+                };
+                let _ = workflow_store::append_workflow_event(&config, store, &event);
+                continue;
             }
+
+            let mut all_notes = evidence.clone();
+            all_notes.extend(diagnostics.clone());
 
             tracing::warn!(
                 target: "workflow",
@@ -639,13 +771,14 @@ async fn check_stuck_running_tasks(
                 workflow_id = %wf_id,
                 elapsed_secs = elapsed_secs,
                 evidence = ?evidence,
+                diagnostics = ?diagnostics,
                 "Stuck running task detected; force-completing as Succeeded"
             );
 
             let result_summary = format!(
                 "Auto-resolved stuck task: Succeeded (elapsed: {}s, evidence: {})",
                 elapsed_secs,
-                evidence.join("; ")
+                all_notes.join("; ")
             );
 
             let _ = workflow_store::update_task_run_status(
@@ -668,6 +801,7 @@ async fn check_stuck_running_tasks(
                 serde_json::json!({
                     "status": "succeeded",
                     "evidence": evidence,
+                    "diagnostics": diagnostics,
                     "session_completed": session_completed,
                     "elapsed_secs": elapsed_secs,
                 }),
@@ -683,6 +817,7 @@ async fn check_stuck_running_tasks(
                 agent_id: Some(task.agent_id.clone()),
                 payload: serde_json::json!({
                     "evidence": evidence,
+                    "diagnostics": diagnostics,
                     "session_completed": session_completed,
                     "elapsed_secs": elapsed_secs,
                 }),
@@ -2458,4 +2593,253 @@ async fn process_due_scheduled_jobs(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod stuck_task_tests {
+    use super::*;
+    use autonoetic_types::config::{GatewayConfig, StuckTaskNoEvidenceAction};
+    use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowEventRecord};
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn test_config(agents_dir: &Path) -> GatewayConfig {
+        GatewayConfig {
+            agents_dir: agents_dir.to_path_buf(),
+            ..GatewayConfig::default()
+        }
+    }
+
+    fn old_rfc3339(secs_ago: u64) -> String {
+        (chrono::Utc::now() - chrono::Duration::seconds(secs_ago as i64)).to_rfc3339()
+    }
+
+    fn stale_claim(
+        config: &GatewayConfig,
+        workflow_id: &str,
+        task_id: &str,
+        heartbeat_secs_ago: u64,
+    ) {
+        let claim = workflow_store::TaskExecutionClaim {
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            scheduler_instance_id: "test-instance".to_string(),
+            claimed_at: old_rfc3339(heartbeat_secs_ago + 1),
+            heartbeat_at: old_rfc3339(heartbeat_secs_ago),
+        };
+        crate::scheduler::store::write_json_file(
+            &workflow_store::task_claim_path(config, workflow_id, task_id),
+            &claim,
+        )
+        .unwrap();
+    }
+
+    fn fresh_claim(config: &GatewayConfig, workflow_id: &str, task_id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let claim = workflow_store::TaskExecutionClaim {
+            workflow_id: workflow_id.to_string(),
+            task_id: task_id.to_string(),
+            scheduler_instance_id: "test-instance".to_string(),
+            claimed_at: now.clone(),
+            heartbeat_at: now,
+        };
+        crate::scheduler::store::write_json_file(
+            &workflow_store::task_claim_path(config, workflow_id, task_id),
+            &claim,
+        )
+        .unwrap();
+    }
+
+    fn make_running_task(wf_id: &str, task_id: &str, session_id: &str, updated_secs_ago: u64) -> TaskRun {
+        TaskRun {
+            task_id: task_id.to_string(),
+            workflow_id: wf_id.to_string(),
+            agent_id: "agent".to_string(),
+            session_id: session_id.to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: old_rfc3339(updated_secs_ago + 1),
+            updated_at: old_rfc3339(updated_secs_ago),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        }
+    }
+
+    async fn run_sweeper(config: &GatewayConfig) {
+        let gateway_dir = config.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = Arc::new(crate::scheduler::gateway_store::GatewayStore::open(
+            &gateway_dir,
+        ).unwrap());
+        let exec = Arc::new(crate::execution::GatewayExecutionService::new(config.clone(), Some(store)));
+        check_stuck_running_tasks(exec).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_evidence_and_stale_heartbeat_fails() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut cfg = test_config(&agents);
+        cfg.stuck_task_timeout_secs = Some(10);
+
+        let wf = workflow_store::ensure_workflow_for_root_session(
+            &cfg, None, "stuck-fail-root", None,
+        )
+        .unwrap();
+        let task = make_running_task(&wf.workflow_id, "task-stuck", "stuck-fail-root/child", 30);
+        workflow_store::save_task_run(&cfg, None, &task).unwrap();
+        stale_claim(&cfg, &wf.workflow_id, "task-stuck", 30);
+
+        run_sweeper(&cfg).await;
+
+        let updated = workflow_store::load_task_run(&cfg, None, &wf.workflow_id, "task-stuck")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, TaskRunStatus::Failed);
+        let summary = updated.result_summary.as_deref().unwrap();
+        assert!(summary.starts_with("stuck_no_evidence"));
+
+        let events = workflow_store::load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        let stuck_events: Vec<&WorkflowEventRecord> = events
+            .iter()
+            .filter(|e| e.event_type == "task.stuck")
+            .collect();
+        assert_eq!(stuck_events.len(), 1);
+        assert_eq!(
+            stuck_events[0].payload["resolved_status"].as_str(),
+            Some("failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_evidence_still_succeeds() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut cfg = test_config(&agents);
+        cfg.stuck_task_timeout_secs = Some(10);
+
+        let wf = workflow_store::ensure_workflow_for_root_session(
+            &cfg, None, "stuck-ok-root", None,
+        )
+        .unwrap();
+        let task = make_running_task(&wf.workflow_id, "task-ok", "stuck-ok-root/child", 15);
+        workflow_store::save_task_run(&cfg, None, &task).unwrap();
+        stale_claim(&cfg, &wf.workflow_id, "task-ok", 15);
+
+        // Create session manifest showing completed status as evidence.
+        let gateway_dir = crate::execution::gateway_root_dir(&cfg);
+        let session_dir = gateway_dir.join("sessions").join(&task.session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        crate::scheduler::store::write_json_file(
+            &session_dir.join("manifest.json"),
+            &serde_json::json!({"visibility": {"status": "completed"}}),
+        )
+        .unwrap();
+
+        run_sweeper(&cfg).await;
+
+        let updated = workflow_store::load_task_run(&cfg, None, &wf.workflow_id, "task-ok")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, TaskRunStatus::Succeeded);
+        let events = workflow_store::load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        assert!(events.iter().any(|e| e.event_type == "task.stuck_resolved"));
+    }
+
+    #[tokio::test]
+    async fn fresh_heartbeat_is_not_swept() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut cfg = test_config(&agents);
+        cfg.stuck_task_timeout_secs = Some(10);
+
+        let wf = workflow_store::ensure_workflow_for_root_session(
+            &cfg, None, "stuck-fresh-root", None,
+        )
+        .unwrap();
+        let task = make_running_task(&wf.workflow_id, "task-fresh", "stuck-fresh-root/child", 15);
+        workflow_store::save_task_run(&cfg, None, &task).unwrap();
+        fresh_claim(&cfg, &wf.workflow_id, "task-fresh");
+
+        run_sweeper(&cfg).await;
+
+        let updated = workflow_store::load_task_run(&cfg, None, &wf.workflow_id, "task-fresh")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, TaskRunStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn legacy_succeed_config_force_completes() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut cfg = test_config(&agents);
+        cfg.stuck_task_timeout_secs = Some(10);
+        cfg.stuck_task_no_evidence_action = StuckTaskNoEvidenceAction::Succeed;
+
+        let wf = workflow_store::ensure_workflow_for_root_session(
+            &cfg, None, "stuck-legacy-root", None,
+        )
+        .unwrap();
+        let task = make_running_task(&wf.workflow_id, "task-legacy", "stuck-legacy-root/child", 15);
+        workflow_store::save_task_run(&cfg, None, &task).unwrap();
+        stale_claim(&cfg, &wf.workflow_id, "task-legacy", 15);
+
+        run_sweeper(&cfg).await;
+
+        let updated = workflow_store::load_task_run(&cfg, None, &wf.workflow_id, "task-legacy")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, TaskRunStatus::Succeeded);
+        let events = workflow_store::load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        assert!(events.iter().any(|e| e.event_type == "task.stuck_resolved"));
+    }
+
+    #[tokio::test]
+    async fn failed_stuck_task_still_satisfies_join() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut cfg = test_config(&agents);
+        cfg.stuck_task_timeout_secs = Some(10);
+
+        let wf = workflow_store::ensure_workflow_for_root_session(
+            &cfg, None, "stuck-join-root", None,
+        )
+        .unwrap();
+        let task = make_running_task(
+            &wf.workflow_id, "task-join-fail", "stuck-join-root/child", 30);
+        workflow_store::save_task_run(
+            &cfg, None, &task).unwrap();
+        stale_claim(
+            &cfg, &wf.workflow_id, "task-join-fail", 30);
+
+        let mut run = workflow_store::load_workflow_run(
+            &cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        run.join_task_ids = vec!["task-join-fail".to_string()];
+        workflow_store::save_workflow_run(
+            &cfg, None, &run).unwrap();
+
+        assert!(!workflow_store::check_join_condition(
+            &cfg, None, &wf.workflow_id).unwrap());
+
+        run_sweeper(&cfg).await;
+
+        assert!(workflow_store::check_join_condition(
+            &cfg, None, &wf.workflow_id).unwrap());
+    }
 }

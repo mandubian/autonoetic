@@ -60,6 +60,7 @@ pub mod root_session_budget;
 pub mod script_execute;
 pub mod session_budget;
 pub mod session_envelope;
+pub mod operator_pending;
 pub mod session_export;
 pub mod session_resume;
 pub mod session_context;
