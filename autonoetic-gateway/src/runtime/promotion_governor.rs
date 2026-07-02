@@ -286,11 +286,10 @@ pub fn check_eval_regression(
     }))
 }
 
-/// Attempt-exhaustion check (issue #720): count rejected promotion attempts
-/// for `(alias_id, content_digest)` in the durable ledger. If the count is
-/// already at or above `max_promotion_attempts_per_revision`, block the
-/// attempt with a terminal `promotion_attempts_exhausted` error. The agent
-/// must not retry; it must escalate to the operator for an ack.
+/// Non-transactional wrapper for callers that do not already hold a SQLite
+/// transaction. Opens a short read-only transaction to count rejections.
+/// Prefer `check_attempt_exhaustion_in_tx` when recording the outcome in the
+/// same transaction, to close the concurrent-promote TOCTOU window.
 pub fn check_attempt_exhaustion(
     config: &PromotionGovernorConfig,
     store: &GatewayStore,
@@ -301,6 +300,55 @@ pub fn check_attempt_exhaustion(
         return Ok(None);
     }
     let count = store.count_promotion_attempt_rejections(agent_id, content_digest)?;
+    if count < config.max_promotion_attempts_per_revision {
+        return Ok(None);
+    }
+    Ok(Some(GovernorRejection {
+        error: "promotion_attempts_exhausted",
+        message: format!(
+            "Promotion attempts exhausted for alias '{}' with content digest '{}': {} rejected \
+             attempts (cap = {}). Further retries are blocked until an operator acknowledges \
+             the revision.",
+            agent_id,
+            content_digest,
+            count,
+            config.max_promotion_attempts_per_revision
+        ),
+        repair_hint: "Do not retry. Escalate to the operator for approval of this revision; \
+                      once approved, the counter resets and promotion can proceed."
+            .to_string(),
+        payload: serde_json::json!({
+            "alias": agent_id,
+            "content_digest": content_digest,
+            "rejected_attempts": count,
+            "max_promotion_attempts_per_revision": config.max_promotion_attempts_per_revision,
+            "rule_id": "P-2.29",
+        }),
+    }))
+}
+
+/// Transactional attempt-exhaustion check (issue #720): count rejected promotion attempts
+/// for `(alias_id, content_digest)` in the durable ledger. If the count is
+/// already at or above `max_promotion_attempts_per_revision`, block the
+/// attempt with a terminal `promotion_attempts_exhausted` error. The agent
+/// must not retry; it must escalate to the operator for an ack.
+///
+/// The count is read inside the caller's SQLite transaction (`tx`) so the
+/// check is serialized with the ledger write for this attempt's terminal
+/// outcome, closing the concurrent-promote TOCTOU window.
+pub fn check_attempt_exhaustion_in_tx(
+    config: &PromotionGovernorConfig,
+    tx: &rusqlite::Transaction,
+    agent_id: &str,
+    content_digest: &str,
+) -> Result<Option<GovernorRejection>> {
+    if config.max_promotion_attempts_per_revision == 0 {
+        return Ok(None);
+    }
+    let count =
+        crate::scheduler::gateway_store::GatewayStore::count_promotion_attempt_rejections_in_tx(
+            tx, agent_id, content_digest,
+        )?;
     if count < config.max_promotion_attempts_per_revision {
         return Ok(None);
     }

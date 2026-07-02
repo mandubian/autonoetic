@@ -107,8 +107,7 @@ constitution:
   lock_path: "docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=""
+    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 ```
 
 To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
@@ -119,8 +118,7 @@ constitution:
   lock_path: ".gateway/constitution/versions/2026.06.16/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=""
+    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 ```
 
 ---
@@ -1174,8 +1172,7 @@ constitution:
   lock_path: "docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk=""
+    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4
 max_spawn_depth: 8
