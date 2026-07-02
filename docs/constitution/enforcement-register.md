@@ -4,9 +4,17 @@
 
 ## Bind-direction summary
 
-1 principle(s) (bind the agent), 2 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+2 principle(s) (bind the agent), 2 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
+
+### P-2 — Approval Gates
+
+Promotion and gate actions are bounded so that repeated mechanical rejection cannot be respawned indefinitely across sessions without operator acknowledgement.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `P-2.29` | `promotion_attempts_exhausted` | `runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt` | `promotion_attempt_exhaustion_integration.rs` | `promotion_governor.max_promotion_attempts_per_revision` |
 
 ### P-7 — Bounded progress
 

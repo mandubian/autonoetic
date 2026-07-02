@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 58;
+const SCHEMA_VERSION_LATEST: i64 = 59;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -543,6 +543,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_agent_revision_detected_network_hosts_v56(conn)?;
     apply_session_spawn_lineage_v57(conn)?;
     apply_workflow_singleton_index_v58(conn)?;
+    apply_promotion_attempt_ledger_v59(conn)?;
 
     Ok(())
 }
@@ -579,6 +580,48 @@ fn apply_workflow_singleton_index_v58(conn: &mut Connection) -> Result<()> {
         params![
             58_i64,
             "workflow_singleton_index",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_promotion_attempt_ledger_v59(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 59 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS promotion_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            alias_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            content_digest TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            gate TEXT,
+            error_code TEXT,
+            session_id TEXT,
+            workflow_id TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_promotion_attempts_alias_digest
+            ON promotion_attempts(alias_id, content_digest);
+        CREATE INDEX IF NOT EXISTS idx_promotion_attempts_alias_revision
+            ON promotion_attempts(alias_id, revision_id);
+        CREATE INDEX IF NOT EXISTS idx_promotion_attempts_created_at
+            ON promotion_attempts(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            59_i64,
+            "promotion_attempt_ledger",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

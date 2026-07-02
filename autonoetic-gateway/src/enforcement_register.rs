@@ -95,14 +95,23 @@ pub struct EnforcementEntry {
 /// Principles (rule-side, bind the agent). Seeded with the loop-guard family
 /// as the proof; grows as #303 migrates the remaining sections.
 pub fn principles() -> &'static [Principle] {
-    &[Principle {
-        id: "P-7",
-        title: "Bounded progress",
-        statement: "A session is halted when it stops making progress, on a closed, \
-                    configurable set of mechanically-detected non-progress conditions, \
-                    each emitting a typed, attributable reason. No condition relies on \
-                    agent self-report.",
-    }]
+    &[
+        Principle {
+            id: "P-2",
+            title: "Approval Gates",
+            statement: "Promotion and gate actions are bounded so that repeated mechanical \
+                        rejection cannot be respawned indefinitely across sessions without \
+                        operator acknowledgement.",
+        },
+        Principle {
+            id: "P-7",
+            title: "Bounded progress",
+            statement: "A session is halted when it stops making progress, on a closed, \
+                        configurable set of mechanically-detected non-progress conditions, \
+                        each emitting a typed, attributable reason. No condition relies on \
+                        agent self-report.",
+        },
+    ]
 }
 
 /// Rights (gateway-side, bind the gateway). Seeded with two real rights as
@@ -198,6 +207,15 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             test: "runtime::guard::tests::test_loop_guard_trips_on_child_failures",
             config: Some("loop_guard.max_child_failures"),
         },
+        // ── P-2.29 (issue #720) ──
+        EnforcementEntry {
+            clause_id: "P-2",
+            rule_id: "P-2.29",
+            check_id: "promotion_attempts_exhausted",
+            code: "runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt",
+            test: "promotion_attempt_exhaustion_integration.rs",
+            config: Some("promotion_governor.max_promotion_attempts_per_revision"),
+        },
         // ── Ri-0.13 (binds gateway) ──
         EnforcementEntry {
             clause_id: "Ri-0.13",
@@ -240,9 +258,17 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
     ]
 }
 
-/// Look up a principle by ID.
+/// Look up a principle by ID, including the numbered `P-x.y` sub-rules
+/// that are codified in the signed constitution as children of a principle.
 pub fn principle(id: &str) -> Option<&'static Principle> {
-    principles().iter().find(|p| p.id == id)
+    principles().iter().find(|p| p.id == id).or_else(|| {
+        // Numbered rules like P-2.29 inherit the parent principle statement.
+        if let Some(parent) = id.split('.').next() {
+            principles().iter().find(|p| p.id == parent)
+        } else {
+            None
+        }
+    })
 }
 
 /// Look up a right by ID.
