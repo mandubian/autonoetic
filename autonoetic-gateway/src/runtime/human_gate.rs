@@ -397,25 +397,45 @@ impl GateService {
                 //     check (execution.rs) still holds for the joined session.
                 //     The caller is registered as a waiter so resolution fans in.
                 if let Some(pending_id) = self.find_pending_identical_for_root(sid, action)? {
+                    // Only join if we can actually track the waiter for fan-in.
+                    // A workflow/task-bound waiter that registers successfully is
+                    // resumed when the shared approval resolves; without a
+                    // binding (or if registration fails) the joined session would
+                    // suspend on the shared id and never be resumed — so in that
+                    // case we fall through and mint its own approval row instead.
                     let (_root, workflow_id, task_id) = resolve_execution_context(&req);
-                    if let Err(e) = self.store.add_approval_waiter(
-                        &pending_id,
-                        sid,
-                        workflow_id.as_deref(),
-                        task_id.as_deref(),
-                    ) {
-                        tracing::warn!(
-                            target: "human_gate",
-                            request_id = %pending_id,
-                            session_id = %sid,
-                            error = %e,
-                            "failed to register approval waiter (#723)"
-                        );
+                    match (workflow_id.as_deref(), task_id.as_deref()) {
+                        (Some(wf), Some(task)) => {
+                            match self.store.add_approval_waiter(&pending_id, sid, Some(wf), Some(task))
+                            {
+                                Ok(()) => {
+                                    return Ok(GateResult::AlreadyPending {
+                                        gate_id: pending_id,
+                                        enforced_rules: vec!["P-2.3"],
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "human_gate",
+                                        request_id = %pending_id,
+                                        session_id = %sid,
+                                        error = %e,
+                                        "approval waiter registration failed; minting a \
+                                         separate approval instead of joining (#723)"
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::debug!(
+                                target: "human_gate",
+                                session_id = %sid,
+                                "no workflow/task binding to fan-in a joined approval; \
+                                 minting a separate approval (#723)"
+                            );
+                        }
                     }
-                    return Ok(GateResult::AlreadyPending {
-                        gate_id: pending_id,
-                        enforced_rules: vec!["P-2.3"],
-                    });
+                    // Fall through to step 5 (mint a new approval row).
                 }
             }
         }

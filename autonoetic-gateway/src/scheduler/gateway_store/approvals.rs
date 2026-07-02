@@ -81,6 +81,15 @@ impl GatewayStore {
         if root_session_id.is_empty() {
             return;
         }
+        // Emit at most once per root per flood window: skip if this root already
+        // has an active alert. The flag is cleared when a create for the root
+        // next succeeds (see `create_approval`).
+        {
+            let mut alerted = self.flood_alerted_roots.lock().unwrap();
+            if !alerted.insert(root_session_id.to_string()) {
+                return;
+            }
+        }
         let principal = autonoetic_types::principal::Principal::agent("gateway");
         let seat = crate::runtime::session_timeline::derive_role("gateway");
         let event = crate::runtime::session_timeline::build_timeline_event(
@@ -183,6 +192,11 @@ impl GatewayStore {
         // Release the conn lock before timeline emit — create_live_digest_event
         // re-locks the same Mutex and would deadlock otherwise.
         drop(conn);
+        // A create succeeded for this root, so it is no longer at the flood cap:
+        // reset the once-per-window alert flag (#723).
+        if let Some(ref root) = request.root_session_id {
+            self.flood_alerted_roots.lock().unwrap().remove(root);
+        }
         crate::runtime::session_timeline::emit_approval_pending_timeline_event(self, request, None);
         Ok(())
     }

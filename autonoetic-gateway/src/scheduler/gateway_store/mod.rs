@@ -144,6 +144,11 @@ pub struct GatewayStore {
     /// Runtime config used to compute approval/interaction TTLs. Set once at
     /// daemon startup; tests that open the store directly use default values.
     config: Mutex<Option<Arc<GatewayConfig>>>,
+    /// Root sessions currently at the approval-flood cap that have already had
+    /// an `operator_alert` emitted (#723). Prevents re-emitting the alert on
+    /// every rejected create while a root stays flooded; a root is removed when
+    /// a create for it next succeeds (the window reset).
+    flood_alerted_roots: Mutex<std::collections::HashSet<String>>,
 }
 
 impl GatewayStore {
@@ -172,6 +177,7 @@ impl GatewayStore {
                 crate::runtime::session_read_cache::SessionReadCacheRegistry::default(),
             live_digest_buffer: Mutex::new(Vec::with_capacity(LIVE_DIGEST_BUFFER_CAPACITY)),
             config: Mutex::new(None),
+            flood_alerted_roots: Mutex::new(std::collections::HashSet::new()),
         };
         {
             let mut conn = store.conn.lock().unwrap();
