@@ -3743,6 +3743,56 @@ impl JsonRpcRouter {
                 }
             }
 
+            "operator.pending" => {
+                #[derive(Deserialize)]
+                struct PendingParams {
+                    root_session_id: String,
+                }
+                let params: PendingParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for operator.pending: {}", e),
+                        );
+                    }
+                };
+                if params.root_session_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "root_session_id must not be empty",
+                    );
+                }
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for operator.pending",
+                    );
+                };
+                match crate::runtime::operator_pending::collect_pending_for_root(
+                    &store,
+                    &params.root_session_id,
+                    chrono::Utc::now(),
+                ) {
+                    Ok(pending) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "count": pending.len(),
+                            "pending": pending,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("operator.pending failed: {}", e),
+                    ),
+                }
+            }
+
             "admin.escalation_list" => {
                 let store = self.execution.gateway_store();
                 let Some(store) = store else {

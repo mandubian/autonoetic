@@ -1190,6 +1190,21 @@ Key properties:
 - **Audit trail**: `decided_by` and `decision_reason` recorded on resolution
 - **Admin routes**: `admin.escalation_list`, `admin.escalation_inspect`, `admin.escalation_resolve`
 
+### Unified pending-decisions view
+
+An operator's outstanding decisions live in four separate tables — `approvals`,
+`user_interactions`, `escalations`, and `plan_frames` — each with its own list
+RPC and its own answer verb. The **`operator.pending`** JSON-RPC method
+(`{root_session_id}`) is a single read-only aggregation over all four for one
+root session, returning a normalized list (oldest-first) where each item carries
+its `kind` (`approval` / `interaction` / `escalation` / `plan`), age, a one-line
+summary, and an `answer` hint naming the RPC that resolves it (`approvals.approve`,
+`interaction.answer`, `admin.escalation_resolve`, `planframes.approve`). This is
+the server-side version of the mapping the room TUI applies client-side, so a
+headless operator no longer has to poll four RPC families to see what is waiting.
+(Issue #722 Stage 1; a coherent expiry policy and a CLI answer path are staged
+follow-ups.)
+
 ---
 
 ## Recording Mode
