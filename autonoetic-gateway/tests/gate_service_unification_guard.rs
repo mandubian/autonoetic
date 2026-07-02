@@ -22,7 +22,6 @@ const ALLOWLIST: &[&str] = &[
     // GateService itself — the single allowed caller.
     "runtime/human_gate.rs",
     // Pending migrations tracked by #724.
-    "runtime/lifecycle.rs",              // SessionContinue
     "runtime/tools/credential.rs",       // CredentialPrompt
     "runtime/tools/federation.rs",       // promotion-review escalation projection (approval row routed via GateService)
     "runtime/tools/plan_frame.rs",       // PlanFrame
