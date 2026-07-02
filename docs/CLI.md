@@ -135,6 +135,17 @@ autonoetic gateway approvals approve <request_id> [--reason TEXT]
 autonoetic gateway approvals reject <request_id> [--reason TEXT]
 ```
 
+**Unified pending view (#722):** to see *everything* awaiting you for one root
+session — approvals, user interactions, escalations, and plans — in a single
+oldest-first list, each annotated with the command that resolves it:
+
+```bash
+autonoetic gateway pending --root-session <root_session_id> [--json]
+```
+
+This is the CLI form of the `operator.pending` RPC, so a headless operator no
+longer has to poll four separate command families.
+
 **Approval ID format:** Short IDs like `apr-db51b7ad` (12 chars). LLMs won't truncate these.
 
 **List output** shows each approval with its kind and details:

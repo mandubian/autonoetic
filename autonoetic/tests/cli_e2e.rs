@@ -1121,3 +1121,96 @@ fn trace_digest_prints_post_session_narrative() {
         "expected narrative in stdout, got:\n{stdout}"
     );
 }
+
+/// #722 Stage 3: `gateway pending` lists a seeded approval for the root session
+/// (JSON), and reports an empty queue for an unrelated root.
+#[test]
+fn gateway_pending_lists_unified_queue() {
+    use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir");
+    let config_path = temp.path().join("config.yaml");
+    write_config(&config_path, &agents_dir, 4013, 4213, 4);
+
+    let gateway_dir = agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+        .expect("store opens");
+
+    let root = "cli-pending-root";
+    let mut approval = ApprovalRequest {
+        request_id: "apr-cli-1".to_string(),
+        agent_id: "researcher.default".to_string(),
+        session_id: root.to_string(),
+        action: ScheduledAction::WebFetch {
+            url: "https://example.org/data".to_string(),
+            timeout_secs: None,
+            max_chars: None,
+            detected_hosts: Some(vec!["example.org".to_string()]),
+            payload: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        reason: Some("fetch a dataset".to_string()),
+        evidence_ref: None,
+        workflow_id: None,
+        task_id: None,
+        root_session_id: Some(root.to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+    };
+    store.create_approval(&mut approval).expect("seed approval");
+
+    // Owning root: JSON output should list the approval.
+    let out = run_autonoetic(
+        &[
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "gateway",
+            "pending",
+            "--root-session",
+            root,
+            "--json",
+        ],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("pending --json emits valid JSON");
+    let arr = parsed.as_array().expect("pending JSON is an array");
+    assert_eq!(arr.len(), 1, "one pending item, got:\n{stdout}");
+    assert_eq!(arr[0]["kind"], "approval");
+    assert_eq!(arr[0]["id"], "apr-cli-1");
+    assert_eq!(arr[0]["answer"]["method"], "approvals.approve");
+
+    // Unrelated root: empty queue.
+    let out2 = run_autonoetic(
+        &[
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "gateway",
+            "pending",
+            "--root-session",
+            "some-other-root",
+        ],
+        None,
+    );
+    assert!(out2.status.success());
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        stdout2.contains("No pending operator decisions"),
+        "expected empty message, got:\n{stdout2}"
+    );
+}

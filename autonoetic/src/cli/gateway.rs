@@ -2084,6 +2084,68 @@ async fn ask_approval_question_llm(
     Ok(response.text)
 }
 
+/// Unified pending-decisions list for one root session (#722 Stage 3).
+///
+/// Aggregates approvals, user interactions, escalations, and plan frames into a
+/// single oldest-first view (the CLI form of the `operator.pending` RPC) so a
+/// headless operator sees everything awaiting them in one place, each row
+/// annotated with the command that resolves it.
+pub async fn handle_gateway_pending(
+    config_path: &Path,
+    root_session: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let now = chrono::Utc::now();
+    let pending = autonoetic_gateway::runtime::operator_pending::collect_pending_for_root(
+        &gateway_store,
+        root_session,
+        now,
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pending)?);
+        return Ok(());
+    }
+
+    if pending.is_empty() {
+        println!("No pending operator decisions for root session '{root_session}'.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<12} {:<40} {:>8}  {:<28} {}",
+        "KIND", "ID", "AGE", "RESOLVE WITH", "SUMMARY"
+    );
+    for p in &pending {
+        // PendingKind serializes snake_case; render the tag for the column.
+        let kind = serde_json::to_value(p.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "decision".to_string());
+        let age = match p.age_secs {
+            Some(s) if s >= 3600 => format!("{}h", s / 3600),
+            Some(s) if s >= 60 => format!("{}m", s / 60),
+            Some(s) => format!("{s}s"),
+            None => "-".to_string(),
+        };
+        let summary: String = p.summary.chars().take(60).collect();
+        println!(
+            "{:<12} {:<40} {:>8}  {:<28} {}",
+            kind, p.id, age, p.answer.method, summary
+        );
+    }
+    println!(
+        "\n{} pending. Resolve with the listed command, e.g. `autonoetic gateway approvals approve <ID>`.",
+        pending.len()
+    );
+    Ok(())
+}
+
 pub async fn handle_gateway_interactions(
     config_path: &Path,
     command: &super::common::GatewayInteractionCommands,

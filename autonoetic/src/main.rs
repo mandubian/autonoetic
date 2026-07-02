@@ -156,6 +156,12 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Interactions { command } => {
                 cli::gateway::handle_gateway_interactions(&config_path, command).await?;
             }
+            cli::common::GatewayCommands::Pending {
+                root_session,
+                json,
+            } => {
+                cli::gateway::handle_gateway_pending(&config_path, root_session, *json).await?;
+            }
             cli::common::GatewayCommands::SystemAgents { command } => {
                 cli::gateway::handle_gateway_system_agents(&config_path, command).await?;
             }
