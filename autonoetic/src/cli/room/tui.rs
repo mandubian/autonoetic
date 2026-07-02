@@ -133,36 +133,34 @@ fn compute_viewport_offset(selected: usize, list_height: usize, row_heights: &[u
         return 0;
     }
 
-    // Step 1: bottom-anchored window. Pack rows upward from the end, stopping
-    // when the next row would overflow the viewport.
+    // Start from the bottom-anchored window: the largest suffix of rows that
+    // fits inside the viewport. This makes follow mode and jumps to the end
+    // look natural.
+    let mut offset = row_count;
     let mut height = 0usize;
-    let mut bottom_offset = row_count;
     for i in (0..row_count).rev() {
         if height + row_heights[i] > list_height {
             break;
         }
         height += row_heights[i];
-        bottom_offset = i;
+        offset = i;
     }
+    let mut end = row_count; // exclusive
 
-    if selected >= bottom_offset {
-        return bottom_offset;
-    }
-
-    // Step 2: cursor moved above the bottom window. Build a window that
-    // includes `selected` at the bottom, packing earlier rows above as long
-    // as they fit. This keeps the cursor at the bottom of the new window
-    // while showing as much context above as possible.
-    let mut new_height = 0usize;
-    let mut new_offset = selected;
-    for i in (0..=selected).rev() {
-        if new_height + row_heights[i] > list_height {
-            break;
+    // Edge-scroll upward one row at a time if the cursor is above the
+    // viewport. We only need to scroll up because the bottom window already
+    // includes every row at or below `offset`; any selection >= offset is
+    // visible. The sliding-window update is O(n) total.
+    while selected < offset && offset > 0 {
+        offset -= 1;
+        height += row_heights[offset];
+        while height > list_height {
+            end -= 1;
+            height -= row_heights[end];
         }
-        new_height += row_heights[i];
-        new_offset = i;
     }
-    new_offset
+
+    offset
 }
 
 /// Map a mouse click's terminal row to a timeline row index.
@@ -3211,16 +3209,13 @@ pub fn run(
                             if detail.is_some() {
                                 clear_detail(&mut detail, &mut detail_scroll, &mut detail_h_scroll);
                             } else if let Some(pane) = live_content_pane.clone() {
-                                let opened = open_content_pane_node(
+                                let _ = open_content_pane_node(
                                     &pane, pane.selected, client, root_session_id,
                                     &mut detail, &mut detail_scroll, &mut detail_h_scroll,
                                     &mut artifact_viewer, &mut artifact_file_view,
                                     &mut content_view, &mut status,
                                     &mut live_content_pane,
                                 );
-                                if !opened {
-                                    // keep popup open if nothing opened
-                                }
                             } else if let Some((_, src)) = view_indexed.get(selected) {
                                 // Open detail for the selected row
                                 if let Some(msg) = open_row_detail_or_plan_review(
@@ -7450,11 +7445,12 @@ mod tests {
 
     #[test]
     fn viewport_offset_pins_to_bottom_when_cursor_near_end() {
-        // 7 single-line rows, 5 visible — once the cursor is in the bottom
-        // window the last row must stay at the bottom of the viewport.
+        // 7 single-line rows, 5 visible. With edge-scrolling the viewport only
+        // moves when the cursor crosses the viewport edge, so the cursor stays
+        // inside the window while ↑/↓ move line-by-line.
         let h = vec![1usize; 7];
         assert_eq!(compute_viewport_offset(0, 5, &h), 0);
-        assert_eq!(compute_viewport_offset(1, 5, &h), 0);
+        assert_eq!(compute_viewport_offset(1, 5, &h), 1);
         assert_eq!(compute_viewport_offset(2, 5, &h), 2);
         assert_eq!(compute_viewport_offset(3, 5, &h), 2);
         assert_eq!(compute_viewport_offset(4, 5, &h), 2);
@@ -7473,14 +7469,15 @@ mod tests {
     fn viewport_offset_keeps_multiline_last_row_visible() {
         // 7 rows, last two are 2 lines tall, viewport 5 lines tall.
         // Bottom window: row 4 (1) + row 5 (2) + row 6 (2) = 5 → fits.
-        // Last row (6) must stay visible as the cursor moves from 6 down to 4.
+        // Last row (6) stays visible as the cursor moves inside the bottom
+        // window. Moving above it scrolls up one row at a time.
         let h = vec![1usize, 1, 1, 1, 1, 2, 2];
         assert_eq!(compute_viewport_offset(4, 5, &h), 4);
         assert_eq!(compute_viewport_offset(5, 5, &h), 4);
         assert_eq!(compute_viewport_offset(6, 5, &h), 4);
-        // selected=3 leaves the bottom window; viewport scrolls up to a
-        // window that includes row 3 with rows 0..3 packed above.
-        assert_eq!(compute_viewport_offset(3, 5, &h), 0);
+        // selected=3 leaves the bottom window; viewport scrolls up by one row
+        // so row 3 is at the top instead of snapping a whole page.
+        assert_eq!(compute_viewport_offset(3, 5, &h), 3);
     }
 
     #[test]
