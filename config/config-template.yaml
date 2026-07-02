@@ -458,6 +458,16 @@ max_session_turns: 25
 #     guard trips — catching an agent rotating through different tools that all
 #     hit one unrecoverable root cause (which per-tool budgets miss). Set the
 #     window to 0 to disable.
+#   max_irrecoverable_repeats: repeated-irrecoverable-rejection trip threshold
+#     (issue #718). Permission / quota / sandbox-unavailable rejections are
+#     excluded from max_tool_failures (retrying can't fix them), so the first
+#     occurrences are free — the agent legitimately ends its turn to await an
+#     operator. But re-issuing the SAME call for the SAME deterministic
+#     rejection (e.g. agent_revision_promote against a standing
+#     capability_delta_requires_approval) is a no-progress loop (P-7.7). When
+#     the same (tool, normalized-error) rejection recurs this many times the
+#     guard trips. Distinct rejections never accumulate together. Set to 0 to
+#     disable.
 #loop_guard:
 #  max_loops_without_progress: 10
 #  max_tool_failures: 8
@@ -469,6 +479,7 @@ max_session_turns: 25
 #  child_failure_loop_penalty: 2
 #  recurring_error_window: 10
 #  recurring_error_distinct_tools: 3
+#  max_irrecoverable_repeats: 3
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.

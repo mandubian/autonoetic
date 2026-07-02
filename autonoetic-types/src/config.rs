@@ -2092,6 +2092,21 @@ pub struct LoopGuardConfig {
     /// per-tool failure budgets miss.
     #[serde(default = "default_recurring_error_distinct_tools")]
     pub recurring_error_distinct_tools: usize,
+
+    /// Repeated-irrecoverable-rejection trip threshold (issue #718). Permission
+    /// / quota / sandbox-unavailable rejections are deliberately excluded from
+    /// the per-tool failure budget (`max_tool_failures`) — the agent cannot fix
+    /// them by retrying with different arguments, so the first occurrences are
+    /// free (a gateway-side block is not divergence; the agent legitimately
+    /// ends its turn to wait for an operator). But re-issuing the *same* call
+    /// and getting the *same* deterministic rejection is a no-progress loop
+    /// (P-7.7): the agent re-asked a question the gateway already answered. When
+    /// the same `(tool, normalized-error)` rejection recurs this many times the
+    /// guard trips with `RepeatedIrrecoverableRejection`. Distinct rejections
+    /// never accumulate together (fixing one gate and hitting the next is
+    /// progress). Set to 0 to disable.
+    #[serde(default = "default_max_irrecoverable_repeats")]
+    pub max_irrecoverable_repeats: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -2122,6 +2137,7 @@ impl Default for LoopGuardConfig {
             child_failure_loop_penalty: default_child_failure_loop_penalty(),
             recurring_error_window: default_recurring_error_window(),
             recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
+            max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
         }
     }
 }
@@ -2167,6 +2183,10 @@ fn default_recurring_error_window() -> usize {
 }
 
 fn default_recurring_error_distinct_tools() -> usize {
+    3
+}
+
+fn default_max_irrecoverable_repeats() -> u32 {
     3
 }
 

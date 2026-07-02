@@ -3272,6 +3272,14 @@ impl AgentExecutor {
                         if let Some(tc) = tool_calls.iter().find(|tc| tc.id == *id)
                         {
                             if irrecoverable {
+                                // #718: irrecoverable rejections are excluded
+                                // from the per-tool failure budget (retrying
+                                // can't fix them), but re-issuing the *same*
+                                // call for the *same* deterministic rejection
+                                // is a no-progress loop (P-7.7). Count it; the
+                                // guard trips once the same (tool, error)
+                                // rejection recurs past its threshold.
+                                self.guard.register_irrecoverable(&tc.name, result);
                                 if !self.blocked_state_event_emitted {
                                     let payload = serde_json::json!({
                                         "tool": tc.name,

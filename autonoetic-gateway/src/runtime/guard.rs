@@ -78,6 +78,21 @@ pub enum LoopGuardTripReason {
         distinct_tools: Vec<String>,
         occurrences: u32,
     },
+    /// Trip condition #9 — the same `(tool, normalized-error)` irrecoverable
+    /// rejection (permission / quota / sandbox-unavailable) has recurred
+    /// `occurrences` times (issue #718). These rejections are excluded from the
+    /// per-tool failure budget because the agent cannot fix them by retrying
+    /// with different arguments — but re-issuing the *identical* call and
+    /// getting the *identical* deterministic answer is a no-progress loop
+    /// (P-7.7). Unlike #8 this fires on a single tool re-hammering one gate
+    /// (e.g. `agent_revision_promote` against a standing
+    /// `capability_delta_requires_approval`), which the distinct-tools
+    /// threshold of the recurring-error detector never sees.
+    RepeatedIrrecoverableRejection {
+        tool: String,
+        error_hash: u64,
+        occurrences: u32,
+    },
 }
 
 impl LoopGuardTripReason {
@@ -93,6 +108,9 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::WorkflowTerminal { .. } => "workflow_terminal",
             LoopGuardTripReason::RecurringUnrecoverableError { .. } => {
                 "recurring_unrecoverable_error"
+            }
+            LoopGuardTripReason::RepeatedIrrecoverableRejection { .. } => {
+                "repeated_irrecoverable_rejection"
             }
         }
     }
@@ -110,6 +128,7 @@ impl LoopGuardTripReason {
     /// - `LlmFailureBudget`       → P-7.5 (consecutive failures)
     /// - `WorkflowTerminal`       → P-7.5 (deterministic tool failure)
     /// - `RecurringUnrecoverableError` → P-7.7 (no progress across different tools)
+    /// - `RepeatedIrrecoverableRejection` → P-7.7 (re-asking one answered gate)
     pub fn rule_id(&self) -> &'static str {
         match self {
             LoopGuardTripReason::ToolFailureBudget { .. } => "P-7.5",
@@ -122,6 +141,9 @@ impl LoopGuardTripReason {
             // Same "no progress despite trying different tools" family as
             // NoMeaningfulProgress.
             LoopGuardTripReason::RecurringUnrecoverableError { .. } => "P-7.7",
+            // Re-asking one gate that already gave a deterministic answer is
+            // the single-tool sibling of NoMeaningfulProgress.
+            LoopGuardTripReason::RepeatedIrrecoverableRejection { .. } => "P-7.7",
         }
     }
 }
@@ -197,6 +219,16 @@ pub struct LoopGuard {
     /// Trip condition #8 — distinct-tool threshold for the same error hash.
     #[serde(default = "default_recurring_error_distinct_tools")]
     pub recurring_error_distinct_tools: usize,
+    /// Trip condition #9 — per-`(tool, normalized-error)` recurrence counts for
+    /// irrecoverable rejections (issue #718). Keyed by `tool\0<error-hash>` so
+    /// distinct rejections and distinct tools never share a counter.
+    #[serde(default)]
+    pub irrecoverable_repeat_counts: HashMap<String, u32>,
+    /// Trip condition #9 — recurrence threshold. When a `(tool, error)` count
+    /// reaches this, the guard trips `RepeatedIrrecoverableRejection`. 0
+    /// disables the detector.
+    #[serde(default = "default_max_irrecoverable_repeats")]
+    pub max_irrecoverable_repeats: u32,
     /// Trip reason recorded when any condition fires. Cleared on construction
     /// and never reset — once a guard has tripped, subsequent calls are
     /// errors. `last_trip_reason` exposes this for causal-event emission.
@@ -229,6 +261,8 @@ impl LoopGuard {
             recent_error_fingerprints: VecDeque::new(),
             recurring_error_window: default_recurring_error_window(),
             recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
+            irrecoverable_repeat_counts: HashMap::new(),
+            max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
             trip_reason: None,
             repair_mode: false,
             repair_loops: 0,
@@ -259,6 +293,8 @@ impl LoopGuard {
             recent_error_fingerprints: VecDeque::new(),
             recurring_error_window: cfg.recurring_error_window,
             recurring_error_distinct_tools: cfg.recurring_error_distinct_tools,
+            irrecoverable_repeat_counts: HashMap::new(),
+            max_irrecoverable_repeats: cfg.max_irrecoverable_repeats,
             trip_reason: None,
             repair_mode: false,
             repair_loops: 0,
@@ -486,6 +522,51 @@ impl LoopGuard {
         }
     }
 
+    /// Track an irrecoverable (gateway-side) tool rejection — a `permission` /
+    /// `quota_exceeded` / `sandbox_unavailable` error (or a signal-derived
+    /// exit) that [`register_failure`] deliberately excludes from the per-tool
+    /// failure budget because retrying with different arguments cannot fix it.
+    ///
+    /// The first occurrences are free: a gateway-side block is not agent
+    /// divergence, and the agent legitimately ends its turn to wait for an
+    /// operator (e.g. an `agent_revision_promote` that returns
+    /// `capability_delta_requires_approval`, or a network gate awaiting
+    /// approval). But re-issuing the *same* call and getting the *same*
+    /// deterministic rejection is a no-progress loop (P-7.7) — the agent
+    /// re-asked a question the gateway already answered. When the same
+    /// `(tool, normalized-error)` rejection recurs `max_irrecoverable_repeats`
+    /// times the guard trips [`LoopGuardTripReason::RepeatedIrrecoverableRejection`].
+    ///
+    /// Distinct rejections never accumulate together: fixing one gate and
+    /// hitting the next is progress, not a loop. The counter is keyed on the
+    /// normalized error fingerprint (volatile ids/timestamps/numbers stripped)
+    /// so cosmetic churn in the message doesn't defeat the match, and it rides
+    /// in the checkpointed guard state so a post-approval resume that re-hits
+    /// the identical rejection keeps counting across the suspend.
+    ///
+    /// No-ops when the detector is disabled (`max_irrecoverable_repeats == 0`),
+    /// when the guard has already tripped, while `repair_mode` is active
+    /// (response-validation repair cycles have their own bounded loop), or when
+    /// the result carries no fingerprintable error text.
+    pub fn register_irrecoverable(&mut self, tool_name: &str, result_json: &str) {
+        if self.max_irrecoverable_repeats == 0 || self.trip_reason.is_some() || self.repair_mode {
+            return;
+        }
+        let Some(hash) = crate::runtime::error_fingerprint::fingerprint_result(result_json) else {
+            return;
+        };
+        let key = format!("{tool_name}\u{0}{hash:016x}");
+        let count = self.irrecoverable_repeat_counts.entry(key).or_insert(0);
+        *count += 1;
+        if *count >= self.max_irrecoverable_repeats {
+            self.trip_reason = Some(LoopGuardTripReason::RepeatedIrrecoverableRejection {
+                tool: tool_name.to_string(),
+                error_hash: hash,
+                occurrences: *count,
+            });
+        }
+    }
+
     /// Track an LLM transport/endpoint failure. Counts consecutively — a
     /// successful LLM call resets the counter to 0. Trips the guard at
     /// `max_llm_failures` to prevent expensive retry spirals against a
@@ -664,6 +745,8 @@ impl Default for LoopGuard {
             recent_error_fingerprints: VecDeque::new(),
             recurring_error_window: default_recurring_error_window(),
             recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
+            irrecoverable_repeat_counts: HashMap::new(),
+            max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
             trip_reason: None,
             repair_mode: false,
             repair_loops: 0,
@@ -742,6 +825,20 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
             distinct_tools.len(),
             distinct_tools.join(", ")
         ),
+        LoopGuardTripReason::RepeatedIrrecoverableRejection {
+            tool,
+            occurrences,
+            ..
+        } => anyhow::anyhow!(
+            "LoopGuard tripped: '{}' returned the same irrecoverable rejection {} \
+             times. This is a gateway-side gate (e.g. an approval requirement or a \
+             permission denial), not a fixable error — re-issuing the identical call \
+             gets the identical answer. If you are waiting on an operator approval, \
+             end your turn: the gateway resumes the session when the decision lands. \
+             Otherwise change what you are asking for or escalate (issue #718).",
+            tool,
+            occurrences
+        ),
     }
 }
 
@@ -770,6 +867,10 @@ fn default_recurring_error_window() -> usize {
 }
 
 fn default_recurring_error_distinct_tools() -> usize {
+    3
+}
+
+fn default_max_irrecoverable_repeats() -> u32 {
     3
 }
 
@@ -1175,6 +1276,158 @@ mod tests {
             guard.register_error(tool, r#"{"ok":false,"error":"same error"}"#);
         }
         assert!(guard.last_trip_reason().is_none());
+    }
+
+    // ── #718: repeated-irrecoverable-rejection detector ──────────────────
+
+    /// A stable promote-gate rejection re-hammered by a single tool trips
+    /// `RepeatedIrrecoverableRejection` at the configured threshold — the
+    /// per-tool failure budget never sees it (permission errors are excluded)
+    /// and the cross-tool #703 detector never sees it (one tool). High loop
+    /// budget so this detector is unambiguously the cause.
+    #[test]
+    fn repeated_irrecoverable_rejection_trips_on_same_tool() {
+        let mut guard = LoopGuard::new(100);
+        // request_id churns each attempt; the fingerprint must normalize it out.
+        let reject = |req: &str| {
+            format!(
+                r#"{{"ok":false,"error_type":"permission","error":"capability_delta_requires_approval","request_id":"apr-{req}"}}"#
+            )
+        };
+        // Default threshold is 3: two free re-asks, trip on the third.
+        guard.register_irrecoverable("agent_revision_promote", &reject("aaa111"));
+        assert!(guard.last_trip_reason().is_none(), "1st: free");
+        guard.register_irrecoverable("agent_revision_promote", &reject("bbb222"));
+        assert!(guard.last_trip_reason().is_none(), "2nd: free");
+        guard.register_irrecoverable("agent_revision_promote", &reject("ccc333"));
+
+        let err = guard.check_loop().expect_err("3rd identical rejection must trip");
+        assert!(err.to_string().contains("irrecoverable rejection"), "{err}");
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(LoopGuardTripReason::RepeatedIrrecoverableRejection { occurrences: 3, .. })
+        ));
+        assert_eq!(guard.last_trip_reason().unwrap().rule_id(), "P-7.7");
+        assert_eq!(
+            guard.last_trip_reason().unwrap().code(),
+            "repeated_irrecoverable_rejection"
+        );
+    }
+
+    /// Distinct rejections never accumulate together: clearing one gate and
+    /// hitting the next is progress, not a loop. Two different errors on the
+    /// same tool each keep their own counter and neither reaches the threshold.
+    #[test]
+    fn repeated_irrecoverable_distinct_errors_do_not_accumulate() {
+        let mut guard = LoopGuard::new(100);
+        let t = "agent_revision_promote";
+        guard.register_irrecoverable(t, r#"{"ok":false,"error":"capability_delta_requires_approval"}"#);
+        guard.register_irrecoverable(t, r#"{"ok":false,"error":"auditor_pass_missing"}"#);
+        guard.register_irrecoverable(t, r#"{"ok":false,"error":"jury_escalation_required"}"#);
+        assert!(
+            guard.last_trip_reason().is_none(),
+            "three DIFFERENT gates is forward progress, not a loop"
+        );
+    }
+
+    /// The counter is per-tool: the same error text from two different tools
+    /// does not merge (that cross-tool case is #703's job, which needs 3).
+    #[test]
+    fn repeated_irrecoverable_is_scoped_per_tool() {
+        let mut guard = LoopGuard::new(100);
+        let e = r#"{"ok":false,"error":"permission denied for host"}"#;
+        guard.register_irrecoverable("web_fetch", e);
+        guard.register_irrecoverable("sandbox_exec", e);
+        assert!(
+            guard.last_trip_reason().is_none(),
+            "one hit on each of two tools must not trip the single-tool detector"
+        );
+    }
+
+    /// `max_irrecoverable_repeats: 0` disables the detector entirely.
+    #[test]
+    fn repeated_irrecoverable_zero_threshold_disables() {
+        let cfg = autonoetic_types::config::LoopGuardConfig {
+            max_irrecoverable_repeats: 0,
+            ..Default::default()
+        };
+        let mut guard = LoopGuard::with_config(&cfg);
+        for _ in 0..10 {
+            guard.register_irrecoverable(
+                "agent_revision_promote",
+                r#"{"ok":false,"error":"capability_delta_requires_approval"}"#,
+            );
+        }
+        assert!(guard.last_trip_reason().is_none());
+    }
+
+    /// Repair mode suppresses the detector (repair cycles have their own bound).
+    #[test]
+    fn repeated_irrecoverable_noops_in_repair_mode() {
+        let mut guard = LoopGuard::new(100);
+        guard.enter_repair_mode(10);
+        for _ in 0..5 {
+            guard.register_irrecoverable(
+                "agent_revision_promote",
+                r#"{"ok":false,"error":"capability_delta_requires_approval"}"#,
+            );
+        }
+        assert!(guard.last_trip_reason().is_none());
+    }
+
+    /// The recurrence count rides in the checkpointed guard state, so a
+    /// post-approval resume that re-hits the identical rejection keeps counting
+    /// across the suspend rather than starting fresh (the exact scenario #718
+    /// targets: approve → resume → re-issue → same gate again).
+    #[test]
+    fn repeated_irrecoverable_count_survives_serde_roundtrip() {
+        let mut guard = LoopGuard::new(100);
+        let reject = r#"{"ok":false,"error":"capability_delta_requires_approval"}"#;
+        guard.register_irrecoverable("agent_revision_promote", reject);
+        guard.register_irrecoverable("agent_revision_promote", reject);
+        assert!(guard.last_trip_reason().is_none(), "2 of 3 before suspend");
+
+        // Simulate checkpoint persist + restore.
+        let json = serde_json::to_string(&guard).expect("serialize guard");
+        let mut resumed: LoopGuard = serde_json::from_str(&json).expect("deserialize guard");
+
+        resumed.register_irrecoverable("agent_revision_promote", reject);
+        assert!(
+            matches!(
+                resumed.last_trip_reason(),
+                Some(LoopGuardTripReason::RepeatedIrrecoverableRejection { occurrences: 3, .. })
+            ),
+            "count must persist across the suspend and trip on resume"
+        );
+    }
+
+    /// A legacy checkpoint predating #718 (no `max_irrecoverable_repeats` /
+    /// `irrecoverable_repeat_counts` fields) still deserializes, and the field
+    /// defaults enable the detector rather than silently disabling it.
+    #[test]
+    fn repeated_irrecoverable_legacy_checkpoint_defaults_enabled() {
+        // A minimal guard snapshot with none of the #718 fields present.
+        let legacy = r#"{
+            "max_loops_without_progress": 10,
+            "max_tool_failures": 8,
+            "max_consecutive_same_progress": 1,
+            "max_child_failures": 5,
+            "current_loops": 0,
+            "last_progress_fingerprint": null,
+            "consecutive_progress_count": 0,
+            "child_failure_count": 0
+        }"#;
+        let mut guard: LoopGuard =
+            serde_json::from_str(legacy).expect("legacy snapshot must deserialize");
+        assert_eq!(guard.max_irrecoverable_repeats, 3, "field defaults to 3");
+        let reject = r#"{"ok":false,"error":"capability_delta_requires_approval"}"#;
+        for _ in 0..3 {
+            guard.register_irrecoverable("agent_revision_promote", reject);
+        }
+        assert!(matches!(
+            guard.last_trip_reason(),
+            Some(LoopGuardTripReason::RepeatedIrrecoverableRejection { .. })
+        ));
     }
 
     #[test]
@@ -1659,6 +1912,15 @@ mod tests {
             LoopGuardTripReason::ChildFailureBudget { failures: 3 }.code(),
             "child_failure_budget"
         );
+        assert_eq!(
+            LoopGuardTripReason::RepeatedIrrecoverableRejection {
+                tool: "agent_revision_promote".to_string(),
+                error_hash: 0,
+                occurrences: 3,
+            }
+            .code(),
+            "repeated_irrecoverable_rejection"
+        );
     }
 
     /// Each trip reason must attribute to the constitutional rule whose
@@ -1691,6 +1953,16 @@ mod tests {
         assert_eq!(
             LoopGuardTripReason::ChildFailureBudget { failures: 3 }.rule_id(),
             "P-7.20"
+        );
+        // #718: single-tool re-ask of an answered gate is the P-7.7 family.
+        assert_eq!(
+            LoopGuardTripReason::RepeatedIrrecoverableRejection {
+                tool: "agent_revision_promote".to_string(),
+                error_hash: 0,
+                occurrences: 3,
+            }
+            .rule_id(),
+            "P-7.7"
         );
     }
 
