@@ -178,6 +178,42 @@ fn collects_and_normalizes_all_four_sources() {
 }
 
 #[test]
+fn escalation_fallback_uses_type_not_hardcoded_promotion() {
+    let (_dir, store) = store();
+    let esc = EscalationMessage {
+        escalation_id: "esc_2".to_string(),
+        artifact_id: "art_2".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-9".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "   ".to_string(), // empty after trim
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::SealedEvalInquiry,
+    };
+    store.create_escalation(&esc).unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0].summary.contains("sealed eval inquiry"),
+        "empty synthesis should fall back to the escalation type, got: {}",
+        pending[0].summary
+    );
+    assert!(
+        !pending[0].summary.contains("promotion review"),
+        "fallback must not hard-code promotion review for non-promotion escalations"
+    );
+}
+
+#[test]
 fn scopes_to_the_requested_root() {
     let (_dir, store) = store();
     seed_approval(&store, "2026-07-02T10:00:00Z");
