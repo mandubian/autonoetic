@@ -130,6 +130,12 @@ pub struct EscalationMessage {
     /// Category of escalation for channel routing and filtering.
     #[serde(default)]
     pub escalation_type: EscalationType,
+    /// Linked approval request ID when this escalation is a projection of an
+    /// approval-shaped decision (e.g. federation promotion review). Enables
+    /// bidirectional resolution: resolving the escalation also resolves the
+    /// approval, and vice versa.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_request_id: Option<String>,
 }
 
 impl EscalationMessage {
@@ -158,6 +164,7 @@ impl EscalationMessage {
             decision_reason: None,
             code_excerpts: None,
             escalation_type: EscalationType::default(),
+            approval_request_id: None,
         }
     }
 }

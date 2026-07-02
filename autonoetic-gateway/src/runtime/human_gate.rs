@@ -586,6 +586,7 @@ impl GateService {
                         "agent_decider": agent_decider,
                     })
                 }),
+                kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
             };
             if let Some(pending_id) = self.find_pending_for_targets(
                 sid,
@@ -627,6 +628,7 @@ impl GateService {
                     "agent_decider": agent_decider,
                 })
             }),
+            kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
         };
 
         let gate_id = self.create_approval_row(req, &action)?;

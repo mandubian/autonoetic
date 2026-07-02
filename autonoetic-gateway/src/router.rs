@@ -3904,20 +3904,66 @@ impl JsonRpcRouter {
                         );
                     }
                 };
+                let config = self.execution.config();
+                let hooks = self.execution.hook_executor();
                 match store.resolve_escalation(
                     &params.escalation_id,
                     status,
                     &params.decided_by,
                     params.reason.as_deref(),
                 ) {
-                    Ok(()) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::json!({
-                            "escalation_id": params.escalation_id,
-                            "status": params.status,
-                            "decided_by": params.decided_by,
-                        }),
-                    ),
+                    Ok(approval_request_id) => {
+                        // Bidirectional resolution (#724): if this escalation is a
+                        // projection of an approval row, resolve the approval too.
+                        if let Some(request_id) = approval_request_id {
+                            let approval_status =
+                                if status == autonoetic_types::escalation::EscalationStatus::Approved {
+                                    autonoetic_types::background::ApprovalStatus::Approved
+                                } else {
+                                    autonoetic_types::background::ApprovalStatus::Rejected
+                                };
+                            let result = if approval_status
+                                == autonoetic_types::background::ApprovalStatus::Approved
+                            {
+                                crate::scheduler::approval::approve_request(
+                                    &config,
+                                    Some(store.as_ref()),
+                                    &request_id,
+                                    &params.decided_by,
+                                    params.reason.clone(),
+                                    None,
+                                    None,
+                                    Some(hooks.as_ref()),
+                                )
+                            } else {
+                                crate::scheduler::approval::reject_request(
+                                    &config,
+                                    Some(store.as_ref()),
+                                    &request_id,
+                                    &params.decided_by,
+                                    params.reason.clone(),
+                                    Some(hooks.as_ref()),
+                                )
+                            };
+                            if let Err(e) = result {
+                                tracing::warn!(
+                                    target: "router",
+                                    escalation_id = %params.escalation_id,
+                                    approval_request_id = %request_id,
+                                    error = %e,
+                                    "Resolved escalation but failed to resolve linked approval"
+                                );
+                            }
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "escalation_id": params.escalation_id,
+                                "status": params.status,
+                                "decided_by": params.decided_by,
+                            }),
+                        )
+                    }
                     Err(e) => JsonRpcResponse::error(
                         req.id,
                         -32000,

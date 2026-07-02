@@ -97,6 +97,7 @@ fn seed_escalation(store: &GatewayStore, created_at: &str) {
         decision_reason: None,
         code_excerpts: None,
         escalation_type: EscalationType::default(),
+        approval_request_id: None,
     };
     store.create_escalation(&esc).unwrap();
 }
@@ -200,6 +201,7 @@ fn escalation_fallback_uses_type_not_hardcoded_promotion() {
         decision_reason: None,
         code_excerpts: None,
         escalation_type: EscalationType::SealedEvalInquiry,
+        approval_request_id: None,
     };
     store.create_escalation(&esc).unwrap();
 

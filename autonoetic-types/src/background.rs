@@ -72,6 +72,18 @@ pub struct LayerMountScopeInfo {
     pub source: String,
 }
 
+/// Sub-kind for `ScheduledAction::SessionEscalate`, distinguishing stuck-session
+/// guidance requests from federation promotion reviews without payload sniffing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationKind {
+    /// Agent is stuck and needs human guidance (default for backwards compatibility).
+    #[default]
+    GuidanceRequest,
+    /// Federation jury verdicts require operator promotion decision.
+    PromotionReview,
+}
+
 /// Actions that can be stored in reevaluation state and executed by the background scheduler,
 /// or used as the *subject* of an approval request (ApprovalRequest/ApprovalDecision).
 ///
@@ -242,6 +254,10 @@ pub enum ScheduledAction {
         suggested_actions: Vec<String>,
         #[serde(default)]
         payload: Option<serde_json::Value>,
+        /// Distinguishes stuck-session guidance requests from promotion reviews
+        /// so the promotion gate and resolution paths do not rely on payload sniffing.
+        #[serde(default)]
+        kind: EscalationKind,
     },
     /// Approval subject only: sandbox.exec is about to mount layers whose build-time
     /// network scope is not covered by the current session's approval grants.
