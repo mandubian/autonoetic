@@ -2622,9 +2622,10 @@ impl NativeTool for AgentRevisionPromoteTool {
             priority: 9,
             prose: "**Promotion resumes automatically — don't loop.** If `agent_revision_promote` \
 returns `approval_required: true` (e.g. `capability_delta_requires_approval`), return the exact \
-`request_id`/`approval_ref` to your caller and end your turn. The gateway wakes you when the operator \
-decides and re-runs the promotion for you with the real result — do **not** re-spawn the builder, \
-re-run the gates, or re-issue the promote. A locked session capability envelope (PromoteWith) \
+`request_id`/`approval_ref` to your caller and end your turn. When the operator approves, the gateway \
+**re-executes the approved promote for you** and resumes your session with the real result already in \
+hand (#719) — do **not** re-spawn the builder, re-run the gates, or re-issue the promote. A locked \
+session capability envelope (PromoteWith) \
 pre-authorizes the capability acknowledgement, so a covered promotion needs no new approval at all. \
 On success the response is terminal: `status:\"promoted\"`, `installed:true`. That means the agent is \
 now the **active installed revision** — use it by calling `agent_spawn` with its `agent_id`; do not \

@@ -36,6 +36,26 @@ use tokio::sync::{Mutex, Semaphore};
 /// then append a user message confirming the approval.  This fixes the
 /// LLM-dependent relay bug where the model ignores the text-only hint and
 /// retries without `approval_ref`, causing redundant approval requests.
+/// Insert `approval_ref` into a tool call's JSON arguments string (#719). Used
+/// when the gateway re-issues an approved call mechanically on resume, so the
+/// promote/gate tool sees the granted approval exactly as if the agent had
+/// passed it. Leaves non-object / non-JSON arguments untouched.
+fn inject_approval_ref_into_args(arguments: &str, approval_ref: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "approval_ref".to_string(),
+                    serde_json::Value::String(approval_ref.to_string()),
+                );
+                return serde_json::to_string(&v).unwrap_or_else(|_| arguments.to_string());
+            }
+            arguments.to_string()
+        }
+        Err(_) => arguments.to_string(),
+    }
+}
+
 fn inject_approval_ref_into_history(
     history: &mut Vec<Message>,
     approval_ref: &str,
@@ -2074,58 +2094,108 @@ impl GatewayExecutionService {
                         .pending_tool_state
                         .as_ref()
                         .map(|pts| pts.pending_tool_call.call_id.as_str());
-                    // For enriched checkpoints the assistant message was saved
-                    // separately; push it back so inject_approval_ref can find
-                    // the tool calls and mark them with approval_ref.
-                    if let Some(ref am) = checkpoint.assistant_message {
-                        // Build the set of call_ids that have results, so we can
-                        // filter out remaining_tool_calls from the assistant
-                        // message.  Remaining calls were never executed — they
-                        // were blocked mid-batch by an approval gate — so they
-                        // have no matching tool result.  If we leave them in the
-                        // assistant message's tool_calls list, the next LLM
-                        // request will violate:
-                        //   "an assistant message with 'tool_calls' must be
-                        //    followed by tool messages responding to each
-                        //    'tool_call_id'"
-                        let mut call_ids_with_results: std::collections::HashSet<&str> =
-                            std::collections::HashSet::new();
-                        if let Some(ref pts) = checkpoint.pending_tool_state {
-                            for (call_id, _, _) in &pts.completed_tool_results {
-                                call_ids_with_results.insert(call_id.as_str());
-                            }
-                            // Only keep the pending tool call if we actually
-                            // have its approval_response to inject as a matching
-                            // tool result. Otherwise it would be orphaned.
-                            if pts.pending_tool_call.approval_response.is_some() {
-                                call_ids_with_results
-                                    .insert(&pts.pending_tool_call.call_id);
+
+                    // #719: a `RevisionPromote` approval checkpoint is re-executed
+                    // *mechanically* on resume — the gateway issues the approved
+                    // promote itself instead of asking the LLM to re-issue it. The
+                    // legacy inject-and-re-issue path is kept for other tools (e.g.
+                    // sandbox.exec) whose checkpoint already carries the
+                    // `approval_required` response as the tool result.
+                    //
+                    // Key selection off the approved `req.action` (already loaded
+                    // and TOCTOU-checked above) so older checkpoints without
+                    // `pending_action` still work, and guard on `pending_tool_state`
+                    // so a missing tool state degrades to the legacy path instead of
+                    // panicking.
+                    let mechanical = matches!(
+                        &req.action,
+                        ScheduledAction::RevisionPromote { .. }
+                    ) && checkpoint.pending_tool_state.is_some();
+
+                    if mechanical {
+                        let pts = checkpoint
+                            .pending_tool_state
+                            .as_ref()
+                            .expect("mechanical implies pending_tool_state is Some");
+                        // Rebuild the original assistant message with only the
+                        // completed calls (drop the pending + never-run remaining
+                        // calls; the approved pending call is re-issued via the
+                        // synthetic seed message below). Push it only if it still
+                        // carries content or a completed call — an assistant
+                        // message with neither is a degenerate turn.
+                        if let Some(ref am) = checkpoint.assistant_message {
+                            let completed_ids: std::collections::HashSet<&str> = pts
+                                .completed_tool_results
+                                .iter()
+                                .map(|(id, _, _)| id.as_str())
+                                .collect();
+                            let mut m = am.clone();
+                            m.tool_calls
+                                .retain(|tc| completed_ids.contains(tc.id.as_str()));
+                            if !m.tool_calls.is_empty() || !m.content.trim().is_empty() {
+                                history.push(m);
                             }
                         }
-
-                        let mut filtered_am = am.clone();
-                        filtered_am.tool_calls.retain(|tc| {
-                            call_ids_with_results.contains(tc.id.as_str())
-                                || call_ids_with_results.is_empty()
-                        });
-                        history.push(filtered_am);
-
-                        if let Some(ref pts) = checkpoint.pending_tool_state {
-                            for (call_id, tool_name, result) in &pts.completed_tool_results {
-                                history.push(Message::tool_result(
-                                    call_id, tool_name, result,
-                                ));
+                        // Always replay completed tool results, even if the
+                        // assistant message was degenerate/absent — they are
+                        // logically independent of the assistant prefix.
+                        for (call_id, tool_name, result) in &pts.completed_tool_results {
+                            history.push(Message::tool_result(call_id, tool_name, result));
+                        }
+                        // Seed the approved call (with approval_ref injected into
+                        // its arguments) for execution at the top of
+                        // execute_with_history's loop.
+                        let arguments =
+                            inject_approval_ref_into_args(&pts.pending_tool_call.arguments, rid);
+                        let call = crate::llm::ToolCall {
+                            id: pts.pending_tool_call.call_id.clone(),
+                            name: pts.pending_tool_call.tool_name.clone(),
+                            arguments,
+                        };
+                        let mut synth = crate::llm::Message::assistant(String::new());
+                        synth.tool_calls = vec![call.clone()];
+                        runtime.resume_pending_batch = Some((synth, vec![call]));
+                    } else {
+                        // Legacy / precomputed-result path: replay the assistant
+                        // message + any results and nudge the LLM to re-issue.
+                        if let Some(ref am) = checkpoint.assistant_message {
+                            let mut call_ids_with_results: std::collections::HashSet<&str> =
+                                std::collections::HashSet::new();
+                            if let Some(ref pts) = checkpoint.pending_tool_state {
+                                for (call_id, _, _) in &pts.completed_tool_results {
+                                    call_ids_with_results.insert(call_id.as_str());
+                                }
+                                if pts.pending_tool_call.approval_response.is_some() {
+                                    call_ids_with_results
+                                        .insert(&pts.pending_tool_call.call_id);
+                                }
                             }
-                            if let Some(ref resp) = pts.pending_tool_call.approval_response {
-                                history.push(Message::tool_result(
-                                    &pts.pending_tool_call.call_id,
-                                    &pts.pending_tool_call.tool_name,
-                                    resp,
-                                ));
+
+                            let mut filtered_am = am.clone();
+                            filtered_am.tool_calls.retain(|tc| {
+                                call_ids_with_results.contains(tc.id.as_str())
+                                    || call_ids_with_results.is_empty()
+                            });
+                            history.push(filtered_am);
+
+                            if let Some(ref pts) = checkpoint.pending_tool_state {
+                                for (call_id, tool_name, result) in &pts.completed_tool_results {
+                                    history.push(Message::tool_result(
+                                        call_id, tool_name, result,
+                                    ));
+                                }
+                                if let Some(ref resp) = pts.pending_tool_call.approval_response {
+                                    history.push(Message::tool_result(
+                                        &pts.pending_tool_call.call_id,
+                                        &pts.pending_tool_call.tool_name,
+                                        resp,
+                                    ));
+                                }
                             }
                         }
+                        inject_approval_ref_into_history(&mut history, rid, target_call_id);
                     }
-                    inject_approval_ref_into_history(&mut history, rid, target_call_id);
+
                     let initial_msg = checkpoint.initial_user_message();
                     let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
                     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))

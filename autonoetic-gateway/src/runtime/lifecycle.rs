@@ -197,6 +197,14 @@ pub struct AgentExecutor {
     pub extended_instructions: Option<String>,
     pub blocked_state_event_emitted: bool,
 
+    /// Transient resume seed (#719): a single operator-approved tool call to
+    /// execute mechanically at the start of the next `execute_with_history`,
+    /// instead of asking the LLM to re-issue it. Set by
+    /// `resume_from_checkpoint` for an approval-gated call that has no
+    /// precomputed result (the promote / capability-delta case); taken and
+    /// cleared on the first loop iteration. Never serialized into a checkpoint.
+    pub(crate) resume_pending_batch: Option<(Message, Vec<crate::llm::ToolCall>)>,
+
     /// Parsed once from SKILL.md; used instead of re-reading the file every turn.
     pub loop_guard_declaration: Option<autonoetic_types::agent::LoopGuardDeclaration>,
 
@@ -338,6 +346,7 @@ impl AgentExecutor {
             overflow_recovery: false,
             extended_instructions: None,
             blocked_state_event_emitted: false,
+            resume_pending_batch: None,
             loop_guard_declaration,
             trajectory_monitor: TrajectoryMonitor::new(Default::default()),
             last_context_utilization: None,
@@ -1481,6 +1490,44 @@ impl AgentExecutor {
         });
 
         loop {
+            // #719: mechanical re-execution of an operator-approved call on
+            // resume. This MUST run before pre_turn_checks: the promote was
+            // already operator-approved, so budget / loop-guard checks (designed
+            // for LLM reasoning loops, not for executing already-authorized
+            // actions) must not prevent it. Budget is still enforced inside
+            // handle_tool_batch via reserve_tool_invocations, and a successful
+            // promote calls register_progress so the guard won't trip. If the
+            // promote suspends again (second gate), handle_tool_batch saves a
+            // fresh checkpoint with the new pending state.
+            //
+            // Before this ordering, pre_turn_checks could save_and_yield with
+            // pending_tool_state=None on a budget/guard trip, clobbering the
+            // approval checkpoint and silently losing the approved promote.
+            if let Some((assistant_msg, pending_calls)) = self.resume_pending_batch.take() {
+                if !digest_turn_active {
+                    tracer.start_digest_turn()?;
+                    digest_turn_active = true;
+                }
+                if let Some(outcome) = self
+                    .handle_tool_batch(
+                        pending_calls,
+                        history,
+                        &turn_id,
+                        &mut tracer,
+                        &mut mcp_runtime,
+                        &mut disclosure_state,
+                        secret_store.as_mut(),
+                        &active_agent_dir,
+                        assistant_msg,
+                        &mut digest_turn_active,
+                    )
+                    .await?
+                {
+                    return Ok(outcome);
+                }
+                continue;
+            }
+
             if let Some(outcome) = self.pre_turn_checks(history, &turn_id).await? {
                 return Ok(outcome);
             }
