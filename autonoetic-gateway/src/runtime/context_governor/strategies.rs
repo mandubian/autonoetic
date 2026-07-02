@@ -43,6 +43,7 @@ impl GovernorContext {
         compression_config: Option<ContextCompressionConfig>,
         agent_compression: Option<CompressionConfig>,
         plan_anchor: Option<PlanFrameSummary>,
+        initial_capsule: Option<StateCapsule>,
     ) -> Self {
         Self {
             history,
@@ -55,7 +56,10 @@ impl GovernorContext {
             budget_config,
             compression_config,
             agent_compression,
-            capsule_state: None,
+            // Seed from the prior run's capsule (if any) so CapsuleStrategy
+            // evolves it incrementally instead of re-bootstrapping from an
+            // empty shell every over-budget turn. See `seed_capsule`.
+            capsule_state: initial_capsule,
             plan_anchor,
         }
     }
