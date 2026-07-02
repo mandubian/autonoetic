@@ -671,6 +671,10 @@ pub struct ApprovalRequest {
     /// Risk summary derived from RemoteAccessAnalyzer + auditor promotion record.
     #[serde(default)]
     pub risk_summary: Option<RiskSummary>,
+    /// Optional expiry timestamp for standalone (non-workflow) approvals.
+    /// Workflow-bound approvals rely on task-level timeout instead.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -751,6 +755,7 @@ pub enum ApprovalStatus {
     Approved,
     Rejected,
     Cancelled,
+    Stale,
 }
 
 impl ApprovalStatus {
@@ -759,6 +764,7 @@ impl ApprovalStatus {
             ApprovalStatus::Approved => "approved",
             ApprovalStatus::Rejected => "rejected",
             ApprovalStatus::Cancelled => "cancelled",
+            ApprovalStatus::Stale => "stale",
         }
     }
 }

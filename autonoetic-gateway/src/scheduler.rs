@@ -2,7 +2,7 @@
 //!
 //! This module has been split by domain responsibility:
 //! - [`crate::scheduler::decision`] - Wake-decision logic
-//! - [`crate::scheduler::store`] - Persistence helpers  
+//! - [`crate::scheduler::store`] - Persistence helpers
 //! - [`crate::scheduler::approval`] - Approval resolution
 //! - [`crate::scheduler::runner`] - Side-effecting execution
 //!
@@ -16,23 +16,23 @@ use autonoetic_types::causal_chain::CausalEventRecord;
 pub mod agent_outcome;
 pub mod approval;
 pub mod approval_hardening;
+pub mod auto_learning_jobs;
 pub mod cron_parser;
 pub mod decision;
 pub mod eval_runner;
 pub mod fast_scheduler;
 pub mod gateway_store;
 pub mod hooks;
+pub mod overflow_classifier;
+pub mod plan_frame_ops;
 pub mod reclamation;
 pub mod runner;
+pub mod session_envelope_ops;
 pub mod signal;
+pub mod single_flight;
 pub mod store;
 pub mod system_agents;
 pub mod task_notify;
-pub mod auto_learning_jobs;
-pub mod overflow_classifier;
-pub mod plan_frame_ops;
-pub mod session_envelope_ops;
-pub mod single_flight;
 pub mod workflow_causal;
 pub mod workflow_store;
 
@@ -40,8 +40,8 @@ pub use approval::*;
 pub use decision::*;
 pub use gateway_store::*;
 pub use plan_frame_ops::*;
-pub use session_envelope_ops::*;
 pub use runner::*;
+pub use session_envelope_ops::*;
 pub use signal::*;
 pub use single_flight::*;
 pub use store::*;
@@ -115,7 +115,9 @@ async fn run_scheduler_tick_at(
                 }
             }
         }
-        if degrade_threshold > 0 && (emergency_threshold == 0 || degrade_threshold < emergency_threshold) {
+        if degrade_threshold > 0
+            && (emergency_threshold == 0 || degrade_threshold < emergency_threshold)
+        {
             if let Ok(sessions) = store.sessions_exceeding_escape_threshold(degrade_threshold) {
                 for (sid, _root_sid, count) in sessions {
                     if !execution.is_session_degraded(&sid).await {
@@ -260,6 +262,17 @@ async fn run_scheduler_tick_at(
         tracing::warn!(error = %e, "Failed to check approval timeouts");
     }
 
+    // Mark standalone (non-workflow) approvals and user interactions whose TTL
+    // has passed as stale/expired. They remain resolvable for the operator.
+    if let Some(store) = execution.gateway_store() {
+        if let Err(e) = store.flag_expired_standalone_approvals() {
+            tracing::warn!(error = %e, "Failed to flag expired standalone approvals");
+        }
+        if let Err(e) = store.expire_timed_out_interactions() {
+            tracing::warn!(error = %e, "Failed to expire timed-out interactions");
+        }
+    }
+
     // Wiki proposal auto-expiry: cancel proposals older than configured TTL.
     if let Err(e) = check_wiki_proposal_expiry(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to check wiki proposal expiry");
@@ -325,7 +338,10 @@ async fn check_wiki_proposal_expiry(
     let now = chrono::Utc::now();
     let mut expired = 0;
     for req in &pending {
-        if !matches!(req.action, autonoetic_types::background::ScheduledAction::WikiProposal { .. }) {
+        if !matches!(
+            req.action,
+            autonoetic_types::background::ScheduledAction::WikiProposal { .. }
+        ) {
             continue;
         }
         let created = match chrono::DateTime::parse_from_rfc3339(&req.created_at) {
@@ -418,7 +434,9 @@ async fn check_approval_timeouts(
                     .flatten();
                 cp.and_then(|cp| {
                     let ts = cp.suspended_at?;
-                    chrono::DateTime::parse_from_rfc3339(&ts).ok().map(|dt| dt.with_timezone(&chrono::Utc))
+                    chrono::DateTime::parse_from_rfc3339(&ts)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
                 })
             };
 
@@ -435,18 +453,18 @@ async fn check_approval_timeouts(
                     workflow_id = %wf_id,
                     task_id = %task.task_id,
                     timeout_secs = timeout_secs,
-                    "Approval timeout expired; marking task as failed (continuation preserved)"
+                    "Approval timeout expired; marking task as stale (checkpoint preserved for late approval)"
                 );
 
                 let reason = "Approval timed out".to_string();
-                // Mark as Failed but don't crash — the session can still be resumed
-                // if the operator approves later. The continuation file is preserved.
+                // Mark as Stale — the checkpoint is preserved so the operator
+                // can still approve later and resume the task (P-2.11, P-7.11).
                 let _ = workflow_store::update_task_run_status(
                     &config,
                     store,
                     &wf_id,
                     &task.task_id,
-                    autonoetic_types::workflow::TaskRunStatus::Failed,
+                    autonoetic_types::workflow::TaskRunStatus::Stale,
                     Some(reason.clone()),
                     None,
                     None,
@@ -480,23 +498,31 @@ async fn check_approval_timeouts(
                 let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
 
                 // Record timeout in session report so overview stays consistent.
-                if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(&config, &task.session_id) {
+                if let Ok(Some(cp)) =
+                    crate::runtime::checkpoint::load_latest_checkpoint(&config, &task.session_id)
+                {
                     let approval_request_id = match &cp.yield_reason {
-                        crate::runtime::checkpoint::YieldReason::ApprovalRequired { approval_request_id } =>
-                            Some(approval_request_id.clone()),
+                        crate::runtime::checkpoint::YieldReason::ApprovalRequired {
+                            approval_request_id,
+                        } => Some(approval_request_id.clone()),
                         _ => None,
                     };
                     if let Some(ref rid) = approval_request_id {
                         let gateway_dir = config.agents_dir.join(".gateway");
-                        if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
-                            &gateway_dir,
-                            &task.session_id,
-                            &task.agent_id,
-                        ) {
+                        if let Ok(mut report) =
+                            crate::runtime::session_report::SessionReportWriter::open(
+                                &gateway_dir,
+                                &task.session_id,
+                                &task.agent_id,
+                            )
+                        {
                             let _ = report.record_approval_resolved(
                                 rid,
-                                "timed_out",
-                                &format!("Approval timed out after {}s (checkpoint preserved)", timeout_secs),
+                                "stale",
+                                &format!(
+                                    "Approval timed out after {}s (checkpoint preserved)",
+                                    timeout_secs
+                                ),
                             );
                         }
                     }
@@ -556,8 +582,9 @@ async fn check_stuck_running_tasks(
             // Respect heartbeat freshness: a task with a live claim is still
             // active, just slow. Only sweep once the claim heartbeat itself is
             // stale relative to the configured timeout.
-            let claim_opt =
-                workflow_store::load_task_claim(&config, &wf_id, &task.task_id).ok().flatten();
+            let claim_opt = workflow_store::load_task_claim(&config, &wf_id, &task.task_id)
+                .ok()
+                .flatten();
             let claim_fresh = claim_opt.as_ref().map_or(false, |claim| {
                 !workflow_store::claim_is_stale(claim, stale_after_secs)
             });
@@ -683,35 +710,36 @@ async fn check_stuck_running_tasks(
                     },
                 );
 
-                let (status, result_summary, checkpoint_status, event_type) =
-                    if action == autonoetic_types::config::StuckTaskNoEvidenceAction::Fail {
-                        let summary = format!(
+                let (status, result_summary, checkpoint_status, event_type) = if action
+                    == autonoetic_types::config::StuckTaskNoEvidenceAction::Fail
+                {
+                    let summary = format!(
                             "stuck_no_evidence: task running for {}s with no completion evidence; last heartbeat {}",
                             elapsed_secs,
                             heartbeat_age_label
                         );
-                        (
-                            autonoetic_types::workflow::TaskRunStatus::Failed,
-                            summary,
-                            "stuck_failed".to_string(),
-                            "task.stuck".to_string(),
-                        )
-                    } else {
-                        let mut notes = evidence.clone();
-                        notes.push("no evidence found — proceeding based on elapsed time".to_string());
-                        notes.extend(diagnostics.clone());
-                        let summary = format!(
-                            "Auto-resolved stuck task: Succeeded (elapsed: {}s, evidence: {})",
-                            elapsed_secs,
-                            notes.join("; ")
-                        );
-                        (
-                            autonoetic_types::workflow::TaskRunStatus::Succeeded,
-                            summary,
-                            "stuck_auto_resolved".to_string(),
-                            "task.stuck_resolved".to_string(),
-                        )
-                    };
+                    (
+                        autonoetic_types::workflow::TaskRunStatus::Failed,
+                        summary,
+                        "stuck_failed".to_string(),
+                        "task.stuck".to_string(),
+                    )
+                } else {
+                    let mut notes = evidence.clone();
+                    notes.push("no evidence found — proceeding based on elapsed time".to_string());
+                    notes.extend(diagnostics.clone());
+                    let summary = format!(
+                        "Auto-resolved stuck task: Succeeded (elapsed: {}s, evidence: {})",
+                        elapsed_secs,
+                        notes.join("; ")
+                    );
+                    (
+                        autonoetic_types::workflow::TaskRunStatus::Succeeded,
+                        summary,
+                        "stuck_auto_resolved".to_string(),
+                        "task.stuck_resolved".to_string(),
+                    )
+                };
 
                 tracing::warn!(
                     target: "workflow",
@@ -866,17 +894,18 @@ pub async fn reap_orphaned_sessions(
     // versus re-querying per orphan (O(orphans × pending)). If approval state
     // cannot be determined, be conservative and skip this whole reap cycle
     // rather than risk cancelling a parked child; the next cycle retries.
-    let approval_parked_sessions: std::collections::HashSet<String> =
-        match store.get_pending_approvals() {
-            Ok(pending) => pending.into_iter().map(|a| a.session_id).collect(),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Orphan-child reaper (R+12): could not load pending approvals — skipping this reap cycle (conservative)"
-                );
-                return Ok(());
-            }
-        };
+    let approval_parked_sessions: std::collections::HashSet<String> = match store
+        .get_pending_approvals()
+    {
+        Ok(pending) => pending.into_iter().map(|a| a.session_id).collect(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Orphan-child reaper (R+12): could not load pending approvals — skipping this reap cycle (conservative)"
+            );
+            return Ok(());
+        }
+    };
 
     let config = execution.config();
     let now = chrono::Utc::now();
@@ -964,7 +993,8 @@ pub async fn reap_orphaned_sessions(
         // Skip children that are active workflow tasks when the parent is merely
         // `completed` (between turns). A `failed` parent is truly gone — its
         // children must be reaped even if a workflow task lingers.
-        if workflow_active_children.contains(&(child_session_id.clone(), parent_session_id.clone())) {
+        if workflow_active_children.contains(&(child_session_id.clone(), parent_session_id.clone()))
+        {
             let parent_status = store
                 .find_transcript_by_session_id(&parent_session_id)
                 .ok()
@@ -1057,9 +1087,8 @@ pub async fn reap_orphaned_sessions(
                     task.status == autonoetic_types::workflow::TaskRunStatus::AwaitingApproval;
                 task.status = autonoetic_types::workflow::TaskRunStatus::Cancelled;
                 task.updated_at = now_rfc.clone();
-                task.result_summary = Some(
-                    "child_abandoned: parent session terminated (R+12)".to_string(),
-                );
+                task.result_summary =
+                    Some("child_abandoned: parent session terminated (R+12)".to_string());
                 let _ = crate::scheduler::workflow_store::save_task_run(
                     &config,
                     Some(store.as_ref()),
@@ -1318,9 +1347,9 @@ pub async fn process_queued_workflow_tasks(
                 existing.updated_at = chrono::Utc::now().to_rfc3339();
                 existing.message = Some(queued_task.message.clone());
                 existing.metadata = queued_task.metadata.clone();
-                if let Some(retry_policy) = workflow_store::retry_policy_from_metadata(
-                    queued_task.metadata.as_ref(),
-                ) {
+                if let Some(retry_policy) =
+                    workflow_store::retry_policy_from_metadata(queued_task.metadata.as_ref())
+                {
                     existing.retry_policy = Some(retry_policy);
                 }
                 if let Err(e) = workflow_store::save_task_run(&config, store, &existing) {
@@ -1475,7 +1504,17 @@ pub async fn process_queued_workflow_tasks(
                     tid: tid_for_reg,
                 };
                 spawn_task_execution(
-                    exec, cfg, wf_id, t_id, agent_id, message, session_id, source_id, metadata, revision_id, cred_bindings,
+                    exec,
+                    cfg,
+                    wf_id,
+                    t_id,
+                    agent_id,
+                    message,
+                    session_id,
+                    source_id,
+                    metadata,
+                    revision_id,
+                    cred_bindings,
                 )
                 .await;
             }
@@ -1658,38 +1697,36 @@ async fn spawn_task_execution(
     });
 
     let result = if let Some(ref rev_id) = revision_id {
-        exec
-            .spawn_agent_revision_once(
-                &agent_id,
-                Some(rev_id.as_str()),
-                &message,
-                &session_id,
-                Some(&source_id),
-                false,
-                None,
-                metadata.as_ref(),
-                Some(&wf_id),
-                Some(&t_id),
-                None,
-                &credential_bindings,
-            )
-            .await
+        exec.spawn_agent_revision_once(
+            &agent_id,
+            Some(rev_id.as_str()),
+            &message,
+            &session_id,
+            Some(&source_id),
+            false,
+            None,
+            metadata.as_ref(),
+            Some(&wf_id),
+            Some(&t_id),
+            None,
+            &credential_bindings,
+        )
+        .await
     } else {
-        exec
-            .spawn_agent_once(
-                &agent_id,
-                &message,
-                &session_id,
-                Some(&source_id),
-                false,
-                None,
-                metadata.as_ref(),
-                Some(&wf_id),
-                Some(&t_id),
-                None,
-                &credential_bindings,
-            )
-            .await
+        exec.spawn_agent_once(
+            &agent_id,
+            &message,
+            &session_id,
+            Some(&source_id),
+            false,
+            None,
+            metadata.as_ref(),
+            Some(&wf_id),
+            Some(&t_id),
+            None,
+            &credential_bindings,
+        )
+        .await
     };
 
     heartbeat.abort();
@@ -1702,45 +1739,51 @@ async fn spawn_task_execution(
                 let summary = format!("awaiting approval {}", request_id);
 
                 // Load checkpoint to get approval details (tool name, etc.)
-                let approval_metadata = crate::runtime::checkpoint::load_latest_checkpoint(&cfg, &session_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|cp| {
-                        let pending = cp.pending_tool_state?;
-                        let tool_name = pending.pending_tool_call.tool_name.clone();
-                        // Derive approval kind from tool name
-                        let kind = if tool_name.contains("sandbox") {
-                            "sandbox".to_string()
-                        } else if tool_name.contains("install") {
-                            "agent_install".to_string()
-                        } else {
-                            "tool_execution".to_string()
-                        };
-                        // Try to extract reason from approval_response
-                        let reason = pending.pending_tool_call.approval_response.as_ref().and_then(|resp| {
-                            serde_json::from_str::<serde_json::Value>(resp)
-                                .ok()
-                                .and_then(|v| {
-                                    v.get("approval")
-                                        .and_then(|a| a.get("reason"))
-                                        .and_then(|r| r.as_str())
-                                        .map(String::from)
-                                })
+                let approval_metadata =
+                    crate::runtime::checkpoint::load_latest_checkpoint(&cfg, &session_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|cp| {
+                            let pending = cp.pending_tool_state?;
+                            let tool_name = pending.pending_tool_call.tool_name.clone();
+                            // Derive approval kind from tool name
+                            let kind = if tool_name.contains("sandbox") {
+                                "sandbox".to_string()
+                            } else if tool_name.contains("install") {
+                                "agent_install".to_string()
+                            } else {
+                                "tool_execution".to_string()
+                            };
+                            // Try to extract reason from approval_response
+                            let reason = pending
+                                .pending_tool_call
+                                .approval_response
+                                .as_ref()
+                                .and_then(|resp| {
+                                    serde_json::from_str::<serde_json::Value>(resp)
+                                        .ok()
+                                        .and_then(|v| {
+                                            v.get("approval")
+                                                .and_then(|a| a.get("reason"))
+                                                .and_then(|r| r.as_str())
+                                                .map(String::from)
+                                        })
+                                });
+
+                            // Extract request_id from the yield reason
+                            let request_id = match &cp.yield_reason {
+                                crate::runtime::checkpoint::YieldReason::ApprovalRequired {
+                                    approval_request_id,
+                                } => Some(approval_request_id.clone()),
+                                _ => None,
+                            }?;
+
+                            Some(workflow_store::ApprovalMetadata {
+                                request_id,
+                                kind,
+                                reason,
+                            })
                         });
-
-                        // Extract request_id from the yield reason
-                        let request_id = match &cp.yield_reason {
-                            crate::runtime::checkpoint::YieldReason::ApprovalRequired { approval_request_id } =>
-                                Some(approval_request_id.clone()),
-                            _ => None,
-                        }?;
-
-                        Some(workflow_store::ApprovalMetadata {
-                            request_id,
-                            kind,
-                            reason,
-                        })
-                    });
 
                 if let Err(e) = workflow_store::update_task_run_status(
                     &cfg,
@@ -1953,18 +1996,27 @@ async fn spawn_task_execution(
                             status: "SUCCESS".to_string(),
                             enforced_rules: vec![],
                             target: None,
-                            payload: Some(serde_json::json!({
-                                "task_id": t_id,
-                                "workflow_id": wf_id,
-                                "error": error_str,
-                            }).to_string()),
+                            payload: Some(
+                                serde_json::json!({
+                                    "task_id": t_id,
+                                    "workflow_id": wf_id,
+                                    "error": error_str,
+                                })
+                                .to_string(),
+                            ),
                             payload_ref: None,
                             evidence_ref: None,
-                            reason: Some("Context overflow detected, retrying once with aggressive governor".to_string()),
+                            reason: Some(
+                                "Context overflow detected, retrying once with aggressive governor"
+                                    .to_string(),
+                            ),
                         });
                     }
                     let _ = workflow_store::checkpoint_task(
-                        &cfg, store, &wf_id, &t_id,
+                        &cfg,
+                        store,
+                        &wf_id,
+                        &t_id,
                         "failed".to_string(),
                         serde_json::json!({
                             "status": "failed",
@@ -1981,7 +2033,10 @@ async fn spawn_task_execution(
                         .and_then(|t| t.metadata)
                         .unwrap_or(serde_json::json!({}));
                     let merged = if let serde_json::Value::Object(mut m) = existing_meta {
-                        m.insert("overflow_recovery".to_string(), serde_json::Value::Bool(true));
+                        m.insert(
+                            "overflow_recovery".to_string(),
+                            serde_json::Value::Bool(true),
+                        );
                         serde_json::Value::Object(m)
                     } else {
                         serde_json::json!({ "overflow_recovery": true })
@@ -1991,10 +2046,14 @@ async fn spawn_task_execution(
                     );
                     // Set to Runnable so the scheduler re-queues this task
                     let _ = workflow_store::update_task_run_status(
-                        &cfg, store, &wf_id, &t_id,
+                        &cfg,
+                        store,
+                        &wf_id,
+                        &t_id,
                         autonoetic_types::workflow::TaskRunStatus::Runnable,
                         Some("overflow_recovery_retry".to_string()),
-                        None, None,
+                        None,
+                        None,
                     );
                     let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
                     finish_active_row("stopped");
@@ -2020,26 +2079,39 @@ async fn spawn_task_execution(
                         status: "ERROR".to_string(),
                         enforced_rules: vec![],
                         target: None,
-                        payload: Some(serde_json::json!({
-                            "task_id": t_id,
-                            "workflow_id": wf_id,
-                            "error": error_str,
-                        }).to_string()),
+                        payload: Some(
+                            serde_json::json!({
+                                "task_id": t_id,
+                                "workflow_id": wf_id,
+                                "error": error_str,
+                            })
+                            .to_string(),
+                        ),
                         payload_ref: None,
                         evidence_ref: None,
-                        reason: Some("Context overflow retry exhausted — marking terminal".to_string()),
+                        reason: Some(
+                            "Context overflow retry exhausted — marking terminal".to_string(),
+                        ),
                     });
                 }
                 // Fall through to normal failure path with terminal classification
-                let terminal_error = format!("context_overflow_terminal: task={} {}", t_id, error_str);
+                let terminal_error =
+                    format!("context_overflow_terminal: task={} {}", t_id, error_str);
                 let _ = workflow_store::update_task_run_status(
-                    &cfg, store, &wf_id, &t_id,
+                    &cfg,
+                    store,
+                    &wf_id,
+                    &t_id,
                     autonoetic_types::workflow::TaskRunStatus::Failed,
                     Some(terminal_error.clone()),
-                    None, None,
+                    None,
+                    None,
                 );
                 let _ = workflow_store::checkpoint_task(
-                    &cfg, store, &wf_id, &t_id,
+                    &cfg,
+                    store,
+                    &wf_id,
+                    &t_id,
                     "failed".to_string(),
                     serde_json::json!({
                         "status": "failed",
@@ -2614,6 +2686,18 @@ mod stuck_task_tests {
     use std::path::Path;
     use tempfile::tempdir;
 
+    async fn run_approval_timeout_sweeper(config: &GatewayConfig) {
+        let gateway_dir = config.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let exec = Arc::new(crate::execution::GatewayExecutionService::new(
+            config.clone(),
+            Some(store),
+        ));
+        check_approval_timeouts(exec).await.unwrap();
+    }
+
     fn test_config(agents_dir: &Path) -> GatewayConfig {
         GatewayConfig {
             agents_dir: agents_dir.to_path_buf(),
@@ -2661,7 +2745,12 @@ mod stuck_task_tests {
         .unwrap();
     }
 
-    fn make_running_task(wf_id: &str, task_id: &str, session_id: &str, updated_secs_ago: u64) -> TaskRun {
+    fn make_running_task(
+        wf_id: &str,
+        task_id: &str,
+        session_id: &str,
+        updated_secs_ago: u64,
+    ) -> TaskRun {
         TaskRun {
             task_id: task_id.to_string(),
             workflow_id: wf_id.to_string(),
@@ -2687,10 +2776,12 @@ mod stuck_task_tests {
     async fn run_sweeper(config: &GatewayConfig) {
         let gateway_dir = config.agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
-        let store = Arc::new(crate::scheduler::gateway_store::GatewayStore::open(
-            &gateway_dir,
-        ).unwrap());
-        let exec = Arc::new(crate::execution::GatewayExecutionService::new(config.clone(), Some(store)));
+        let store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let exec = Arc::new(crate::execution::GatewayExecutionService::new(
+            config.clone(),
+            Some(store),
+        ));
         check_stuck_running_tasks(exec).await.unwrap();
     }
 
@@ -2702,10 +2793,9 @@ mod stuck_task_tests {
         let mut cfg = test_config(&agents);
         cfg.stuck_task_timeout_secs = Some(10);
 
-        let wf = workflow_store::ensure_workflow_for_root_session(
-            &cfg, None, "stuck-fail-root", None,
-        )
-        .unwrap();
+        let wf =
+            workflow_store::ensure_workflow_for_root_session(&cfg, None, "stuck-fail-root", None)
+                .unwrap();
         let task = make_running_task(&wf.workflow_id, "task-stuck", "stuck-fail-root/child", 30);
         workflow_store::save_task_run(&cfg, None, &task).unwrap();
         stale_claim(&cfg, &wf.workflow_id, "task-stuck", 30);
@@ -2739,10 +2829,9 @@ mod stuck_task_tests {
         let mut cfg = test_config(&agents);
         cfg.stuck_task_timeout_secs = Some(10);
 
-        let wf = workflow_store::ensure_workflow_for_root_session(
-            &cfg, None, "stuck-ok-root", None,
-        )
-        .unwrap();
+        let wf =
+            workflow_store::ensure_workflow_for_root_session(&cfg, None, "stuck-ok-root", None)
+                .unwrap();
         let task = make_running_task(&wf.workflow_id, "task-ok", "stuck-ok-root/child", 15);
         workflow_store::save_task_run(&cfg, None, &task).unwrap();
         stale_claim(&cfg, &wf.workflow_id, "task-ok", 15);
@@ -2775,10 +2864,9 @@ mod stuck_task_tests {
         let mut cfg = test_config(&agents);
         cfg.stuck_task_timeout_secs = Some(10);
 
-        let wf = workflow_store::ensure_workflow_for_root_session(
-            &cfg, None, "stuck-fresh-root", None,
-        )
-        .unwrap();
+        let wf =
+            workflow_store::ensure_workflow_for_root_session(&cfg, None, "stuck-fresh-root", None)
+                .unwrap();
         let task = make_running_task(&wf.workflow_id, "task-fresh", "stuck-fresh-root/child", 15);
         workflow_store::save_task_run(&cfg, None, &task).unwrap();
         fresh_claim(&cfg, &wf.workflow_id, "task-fresh");
@@ -2800,11 +2888,15 @@ mod stuck_task_tests {
         cfg.stuck_task_timeout_secs = Some(10);
         cfg.stuck_task_no_evidence_action = StuckTaskNoEvidenceAction::Succeed;
 
-        let wf = workflow_store::ensure_workflow_for_root_session(
-            &cfg, None, "stuck-legacy-root", None,
-        )
-        .unwrap();
-        let task = make_running_task(&wf.workflow_id, "task-legacy", "stuck-legacy-root/child", 15);
+        let wf =
+            workflow_store::ensure_workflow_for_root_session(&cfg, None, "stuck-legacy-root", None)
+                .unwrap();
+        let task = make_running_task(
+            &wf.workflow_id,
+            "task-legacy",
+            "stuck-legacy-root/child",
+            15,
+        );
         workflow_store::save_task_run(&cfg, None, &task).unwrap();
         stale_claim(&cfg, &wf.workflow_id, "task-legacy", 15);
 
@@ -2826,31 +2918,164 @@ mod stuck_task_tests {
         let mut cfg = test_config(&agents);
         cfg.stuck_task_timeout_secs = Some(10);
 
-        let wf = workflow_store::ensure_workflow_for_root_session(
-            &cfg, None, "stuck-join-root", None,
-        )
-        .unwrap();
+        let wf =
+            workflow_store::ensure_workflow_for_root_session(&cfg, None, "stuck-join-root", None)
+                .unwrap();
         let task = make_running_task(
-            &wf.workflow_id, "task-join-fail", "stuck-join-root/child", 30);
-        workflow_store::save_task_run(
-            &cfg, None, &task).unwrap();
-        stale_claim(
-            &cfg, &wf.workflow_id, "task-join-fail", 30);
+            &wf.workflow_id,
+            "task-join-fail",
+            "stuck-join-root/child",
+            30,
+        );
+        workflow_store::save_task_run(&cfg, None, &task).unwrap();
+        stale_claim(&cfg, &wf.workflow_id, "task-join-fail", 30);
 
-        let mut run = workflow_store::load_workflow_run(
-            &cfg, None, &wf.workflow_id)
+        let mut run = workflow_store::load_workflow_run(&cfg, None, &wf.workflow_id)
             .unwrap()
             .unwrap();
         run.join_task_ids = vec!["task-join-fail".to_string()];
-        workflow_store::save_workflow_run(
-            &cfg, None, &run).unwrap();
+        workflow_store::save_workflow_run(&cfg, None, &run).unwrap();
 
-        assert!(!workflow_store::check_join_condition(
-            &cfg, None, &wf.workflow_id).unwrap());
+        assert!(!workflow_store::check_join_condition(&cfg, None, &wf.workflow_id).unwrap());
 
         run_sweeper(&cfg).await;
 
-        assert!(workflow_store::check_join_condition(
-            &cfg, None, &wf.workflow_id).unwrap());
+        assert!(workflow_store::check_join_condition(&cfg, None, &wf.workflow_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn approval_timeout_marks_task_stale_and_preserves_checkpoint() {
+        use crate::runtime::checkpoint::{save_checkpoint, SessionCheckpoint, YieldReason};
+        use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut cfg = test_config(&agents);
+        cfg.approval_timeout_secs = 60;
+
+        let wf = workflow_store::ensure_workflow_for_root_session(
+            &cfg,
+            None,
+            "approval-timeout-root",
+            None,
+        )
+        .unwrap();
+        let task_id = "task-awaiting";
+        let session_id = format!("approval-timeout-root/child-{task_id}");
+        let task = TaskRun {
+            task_id: task_id.to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: session_id.clone(),
+            parent_session_id: "approval-timeout-root".to_string(),
+            status: TaskRunStatus::AwaitingApproval,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        workflow_store::save_task_run(&cfg, None, &task).unwrap();
+
+        let mut wf_run = workflow_store::load_workflow_run(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        wf_run.status = autonoetic_types::workflow::WorkflowRunStatus::BlockedApproval;
+        wf_run.active_task_ids = vec![task_id.to_string()];
+        workflow_store::save_workflow_run(&cfg, None, &wf_run).unwrap();
+
+        let approval_request_id = "apr-timeout-01";
+        let mut approval = ApprovalRequest {
+            request_id: approval_request_id.to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: session_id.clone(),
+            action: ScheduledAction::SandboxExec {
+                command: "echo hi".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+                detected_hosts: None,
+                intent: None,
+            },
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: None,
+            evidence_ref: None,
+            root_session_id: Some("approval-timeout-root".to_string()),
+            workflow_id: Some(wf.workflow_id.clone()),
+            task_id: Some(task_id.to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            expires_at: None,
+        };
+        let gateway_dir = crate::execution::gateway_root_dir(&cfg);
+        let store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        store.create_approval(&mut approval).unwrap();
+
+        let checkpoint = SessionCheckpoint {
+            history: vec![],
+            turn_counter: 1,
+            loop_guard_state: crate::runtime::guard::LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::default(),
+            tool_tier_escalated: false,
+            discovered_tools: std::collections::HashSet::new(),
+            blocked_state_event_emitted: false,
+            agent_id: "coder.default".to_string(),
+            session_id: session_id.clone(),
+            turn_id: "turn-1".to_string(),
+            workflow_id: Some(wf.workflow_id.clone()),
+            task_id: Some(task_id.to_string()),
+            runtime_lock_hash: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::ApprovalRequired {
+                approval_request_id: approval_request_id.to_string(),
+            },
+            content_store_refs: vec![],
+            created_at: chrono::Utc::now().to_rfc3339(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 0,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 0,
+            estimated_cost_usd: 0.0,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: Some((chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()),
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        save_checkpoint(&cfg, &checkpoint).unwrap();
+
+        run_approval_timeout_sweeper(&cfg).await;
+
+        let updated = workflow_store::load_task_run(&cfg, None, &wf.workflow_id, task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, TaskRunStatus::Stale);
+
+        // Checkpoint should still exist for late-approve resume.
+        let cp = crate::runtime::checkpoint::load_latest_checkpoint(&cfg, &session_id).unwrap();
+        assert!(
+            cp.is_some(),
+            "checkpoint must be preserved for late approval"
+        );
     }
 }

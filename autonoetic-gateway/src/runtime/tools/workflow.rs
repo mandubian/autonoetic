@@ -181,6 +181,12 @@ fn check_task_statuses(
                         | autonoetic_types::workflow::TaskRunStatus::Failed
                         | autonoetic_types::workflow::TaskRunStatus::Cancelled
                         | autonoetic_types::workflow::TaskRunStatus::Aborted
+                        // #722 Stage 2: a Stale task (approval timed out,
+                        // checkpoint preserved) is terminal for waiting purposes,
+                        // matching check_join_condition. Without this, a parent in
+                        // workflow_wait blocks its full budget on a task the join
+                        // already treats as done.
+                        | autonoetic_types::workflow::TaskRunStatus::Stale
                 );
                 if !is_terminal {
                     all_done = false;
@@ -1038,7 +1044,12 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                         );
                     }
                 }
-                autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => {
+                // A Stale task is a timed-out approval whose row is still
+                // pending (#722 Stage 2), so it remains approvable — surface it
+                // alongside AwaitingApproval rather than letting it vanish into
+                // the catch-all below.
+                autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                | autonoetic_types::workflow::TaskRunStatus::Stale => {
                     let mut entry = entry.clone();
                     if let Some(req_id) = pending_approvals_map.get(&task.task_id) {
                         entry.as_object_mut().unwrap().insert(
@@ -1615,5 +1626,90 @@ mod force_complete_gate_tests {
             false,
             "Gate should NOT trigger: succeeded with evidence is fine"
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_terminal_tests {
+    use super::*;
+    use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+    use crate::scheduler::workflow_store::{
+        ensure_workflow_for_root_session, new_task_id, save_task_run,
+    };
+    use tempfile::tempdir;
+
+    fn config_in(agents_dir: &std::path::Path) -> autonoetic_types::config::GatewayConfig {
+        autonoetic_types::config::GatewayConfig {
+            agents_dir: agents_dir.to_path_buf(),
+            ..Default::default()
+        }
+    }
+
+    fn task_with_status(
+        workflow_id: &str,
+        status: TaskRunStatus,
+    ) -> TaskRun {
+        let ts = chrono::Utc::now().to_rfc3339();
+        TaskRun {
+            task_id: new_task_id(),
+            workflow_id: workflow_id.to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "r1/coder-abc".to_string(),
+            parent_session_id: "r1".to_string(),
+            status,
+            created_at: ts.clone(),
+            updated_at: ts,
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        }
+    }
+
+    /// #722 Stage 2: a Stale task (approval timed out, checkpoint preserved)
+    /// must count as terminal in `check_task_statuses`, matching
+    /// `check_join_condition`. Otherwise a parent in `workflow_wait` blocks its
+    /// whole budget on a task the join already treats as done.
+    #[test]
+    fn stale_task_counts_as_done_in_workflow_wait() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = config_in(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "r1", None).unwrap();
+
+        let task = task_with_status(&wf.workflow_id, TaskRunStatus::Stale);
+        save_task_run(&cfg, None, &task).unwrap();
+
+        let (_statuses, all_done, any_failed, _any_not_found, _failed_count, _failures) =
+            check_task_statuses(&cfg, None, &wf.workflow_id, &[task.task_id.clone()], None, None);
+
+        assert!(all_done, "a Stale task must be reported terminal (all_done)");
+        assert!(!any_failed, "Stale is terminal-but-not-failed");
+    }
+
+    /// A still-parked (AwaitingApproval) task is NOT done — the parent should
+    /// keep waiting until the operator decides or the approval times out.
+    #[test]
+    fn awaiting_approval_task_is_not_done() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = config_in(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "r1", None).unwrap();
+
+        let task = task_with_status(&wf.workflow_id, TaskRunStatus::AwaitingApproval);
+        save_task_run(&cfg, None, &task).unwrap();
+
+        let (_s, all_done, _af, _anf, _fc, _f) =
+            check_task_statuses(&cfg, None, &wf.workflow_id, &[task.task_id.clone()], None, None);
+
+        assert!(!all_done, "an AwaitingApproval task is not terminal");
     }
 }

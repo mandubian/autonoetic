@@ -173,11 +173,7 @@ impl GatewayStore {
     }
 }
 
-fn load_envelopes<P>(
-    conn: &Connection,
-    sql: &str,
-    params: P,
-) -> Result<Vec<SessionEnvelopeRecord>>
+fn load_envelopes<P>(conn: &Connection, sql: &str, params: P) -> Result<Vec<SessionEnvelopeRecord>>
 where
     P: rusqlite::Params,
 {
@@ -185,11 +181,7 @@ where
     let rows = stmt.query_map(params, |row| {
         let capability_json: String = row.get(2)?;
         let capability: Capability = serde_json::from_str(&capability_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                2,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
         })?;
         Ok(SessionEnvelopeRecord {
             id: row.get(0)?,
@@ -220,7 +212,10 @@ fn collect_hosts_from_trace(trace: &ExecutionTraceRecord, hosts: &mut BTreeSet<S
         extend_hosts(hosts, hosts_from_text(command));
     }
     if let Some(arguments) = trace.arguments.as_deref() {
-        extend_hosts(hosts, hosts_from_trace_arguments(&trace.tool_name, arguments));
+        extend_hosts(
+            hosts,
+            hosts_from_trace_arguments(&trace.tool_name, arguments),
+        );
     }
 }
 
@@ -234,8 +229,7 @@ fn collect_hosts_from_action(action: &ScheduledAction, hosts: &mut BTreeSet<Stri
         ScheduledAction::SandboxExec { command, .. } => {
             extend_hosts(hosts, hosts_from_text(command));
         }
-        ScheduledAction::WebFetch { url, .. }
-        | ScheduledAction::WebCall { url, .. } => {
+        ScheduledAction::WebFetch { url, .. } | ScheduledAction::WebCall { url, .. } => {
             extend_hosts(hosts, hosts_from_text(url));
         }
         ScheduledAction::WebSearch {
@@ -282,8 +276,7 @@ fn hosts_from_trace_arguments(tool_name: &str, arguments_json: &str) -> Vec<Stri
 }
 
 fn hosts_from_text(text: &str) -> Vec<String> {
-    let analysis =
-        RemoteAccessAnalyzer::analyze_command_and_dependencies(text, None);
+    let analysis = RemoteAccessAnalyzer::analyze_command_and_dependencies(text, None);
     let mut hosts = normalize_targets(&analysis.detected_patterns);
     if hosts.is_empty() {
         hosts = extract_url_hosts_from_text(text);
@@ -406,6 +399,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         let mut approval = approval;
         store.create_approval(&mut approval)?;
@@ -460,6 +455,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval)?;
         store.record_decision(
@@ -509,10 +506,7 @@ mod tests {
         let active = store.get_active_envelopes(root)?;
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].locked_by.as_deref(), Some("operator"));
-        assert_eq!(
-            active[0].locked_at.as_deref(),
-            Some("2026-06-14T12:05:00Z")
-        );
+        assert_eq!(active[0].locked_at.as_deref(), Some("2026-06-14T12:05:00Z"));
         Ok(())
     }
 

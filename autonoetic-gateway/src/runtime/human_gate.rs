@@ -16,15 +16,15 @@ use serde::{Deserialize, Serialize};
 
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{
-    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
-    UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
+    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction, UserInteraction,
+    UserInteractionKind, UserInteractionOption, UserInteractionStatus,
 };
 
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill;
 use crate::runtime::content_store;
-use crate::runtime::tools::{build_approval_details, extract_host};
 use crate::runtime::failure_classification::normalize_tool_result_json;
+use crate::runtime::tools::{build_approval_details, extract_host};
 use crate::scheduler::gateway_store::GatewayStore;
 
 // ---------------------------------------------------------------------------
@@ -142,9 +142,7 @@ impl DecisionContext {
     pub fn is_sufficient(&self) -> bool {
         let bad = |s: &str| {
             let t = s.trim().to_ascii_lowercase();
-            t.is_empty()
-                || t == "user question"
-                || t.ends_with("requires approval")
+            t.is_empty() || t == "user question" || t.ends_with("requires approval")
         };
         !bad(&self.what) && !bad(&self.why_gated)
     }
@@ -436,10 +434,7 @@ impl GateService {
         };
 
         let sid = req.session_id.unwrap_or("");
-        anyhow::ensure!(
-            !sid.is_empty(),
-            "GateKind::UserInput requires a session_id"
-        );
+        anyhow::ensure!(!sid.is_empty(), "GateKind::UserInput requires a session_id");
 
         // Dedup: if a pending interaction already exists for this session, reuse it.
         if let Some(pending_id) = self.find_pending_user_input(sid)? {
@@ -452,6 +447,15 @@ impl GateService {
         let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
         let (root_session_id, workflow_id, task_id) = resolve_execution_context(req);
+
+        let expires_at = req.config.and_then(|c| {
+            let ttl = c.interaction_timeout_secs;
+            if ttl == 0 {
+                None
+            } else {
+                Some((chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+            }
+        });
 
         let interaction = UserInteraction {
             interaction_id: interaction_id.clone(),
@@ -470,7 +474,7 @@ impl GateService {
             answered_by: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             answered_at: None,
-            expires_at: None,
+            expires_at,
             workflow_id,
             task_id,
             checkpoint_turn_id: req.turn_id.map(|t| t.to_string()),
@@ -478,7 +482,11 @@ impl GateService {
 
         self.store.create_user_interaction(&interaction)?;
 
-        let _ = self.add_gate_message(&interaction_id, "system", &format!("Agent asks: {}", question));
+        let _ = self.add_gate_message(
+            &interaction_id,
+            "system",
+            &format!("Agent asks: {}", question),
+        );
 
         let response_json = serde_json::json!({
             "ok": true,
@@ -669,10 +677,7 @@ impl GateService {
                 }
             })
             .collect();
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
         scored
     }
@@ -692,9 +697,11 @@ impl GateService {
         };
 
         // 1. Capability check.
-        let has_cap = req.manifest.capabilities.iter().any(|c| {
-            matches!(c, autonoetic_types::capability::Capability::WikiContribute)
-        });
+        let has_cap = req
+            .manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, autonoetic_types::capability::Capability::WikiContribute));
         if !has_cap {
             anyhow::bail!("Missing capability: WikiContribute");
         }
@@ -740,7 +747,16 @@ impl GateService {
                         cfg.wiki_proposal.min_content_length
                     ));
                 }
-                let heading_count = content.lines().filter(|l| l.trim_start().starts_with('#') && l.trim_start().chars().nth(1).map_or(true, |c| c == ' ' || c == '#')).count();
+                let heading_count = content
+                    .lines()
+                    .filter(|l| {
+                        l.trim_start().starts_with('#')
+                            && l.trim_start()
+                                .chars()
+                                .nth(1)
+                                .map_or(true, |c| c == ' ' || c == '#')
+                    })
+                    .count();
                 if heading_count < cfg.wiki_proposal.min_headings {
                     quality_warnings.push(format!(
                         "Few markdown headings ({} found, recommended minimum: {})",
@@ -809,8 +825,10 @@ impl GateService {
 
         // 6b. Advisory quality warnings for operator.
         if !quality_warnings.is_empty() {
-            let warning_text = format!("⚠ Quality advisory (advisory only, does not block):\n{}",
-                quality_warnings.iter()
+            let warning_text = format!(
+                "⚠ Quality advisory (advisory only, does not block):\n{}",
+                quality_warnings
+                    .iter()
                     .map(|w| format!("  • {w}"))
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -930,11 +948,7 @@ impl GateService {
 
     /// Check if the approved action's detected hosts cover the targets
     /// (sandbox SubstituteCommand strategy).
-    fn substitute_command_covers(
-        &self,
-        approval: &ApprovalRequest,
-        targets: &[String],
-    ) -> bool {
+    fn substitute_command_covers(&self, approval: &ApprovalRequest, targets: &[String]) -> bool {
         let approved_hosts = approval.action.detected_hosts().unwrap_or_default();
         if approved_hosts.is_empty() || targets.is_empty() {
             return false;
@@ -976,7 +990,9 @@ impl GateService {
             if !req_hosts.is_empty() {
                 let overlap = targets.iter().any(|t| {
                     let t_host = extract_host_from_target(t);
-                    req_hosts.iter().any(|h| extract_host_from_target(h) == t_host)
+                    req_hosts
+                        .iter()
+                        .any(|h| extract_host_from_target(h) == t_host)
                 });
                 if overlap {
                     return Ok(Some(req.request_id.clone()));
@@ -1012,7 +1028,9 @@ impl GateService {
 
     /// Find an existing pending user interaction for the same session.
     fn find_pending_user_input(&self, session_id: &str) -> Result<Option<String>> {
-        let pending = self.store.get_pending_interactions_for_session(session_id)?;
+        let pending = self
+            .store
+            .get_pending_interactions_for_session(session_id)?;
         if let Some(first) = pending.first() {
             return Ok(Some(first.interaction_id.clone()));
         }
@@ -1026,11 +1044,7 @@ impl GateService {
     /// Backfill the approved-exec cache when a gate clears without a cache hit.
     /// This is the single place the gate layer triggers cache backfill; the
     /// actual write implementation lives in `approved_exec_cache.rs`.
-    fn maybe_backfill_exec_cache(
-        &self,
-        req: &GateRequest<'_>,
-        result: &GateResult,
-    ) -> Result<()> {
+    fn maybe_backfill_exec_cache(&self, req: &GateRequest<'_>, result: &GateResult) -> Result<()> {
         let source = match result {
             GateResult::Cleared { source, .. } => match source {
                 ClearanceSource::CachedApproval => return Ok(()),
@@ -1105,14 +1119,14 @@ impl GateService {
             decision_reason: None,
             approval_level: req
                 .config
-                .map(|cfg| {
-                    crate::scheduler::approval::resolve_approval_level(cfg, action)
-                })
+                .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, action))
                 .unwrap_or(ApprovalLevel::Operator),
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
 
         self.store.create_approval(&mut approval_req)?;
@@ -1165,8 +1179,10 @@ impl GateService {
                 approval_level: ApprovalLevel::Operator,
                 min_dwell_ms: None,
                 confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
+                code_excerpts: None,
+                risk_summary: None,
+
+                expires_at: None,
             },
             kind_label,
             req.summary.clone(),
@@ -1193,12 +1209,7 @@ impl GateService {
     /// Add a message to a gate's enrichment thread.
     ///
     /// Content is redacted before storage (P-2.19, P-4.13 parity).
-    pub fn add_gate_message(
-        &self,
-        gate_id: &str,
-        sender: &str,
-        content: &str,
-    ) -> Result<i64> {
+    pub fn add_gate_message(&self, gate_id: &str, sender: &str, content: &str) -> Result<i64> {
         let redacted = crate::log_redaction::redact_text_for_logs(content);
         self.store.add_gate_message(gate_id, sender, &redacted)
     }
@@ -1330,7 +1341,9 @@ impl GateService {
 // ---------------------------------------------------------------------------
 
 /// Resolve (root_session_id, workflow_id, task_id) from a GateRequest.
-fn resolve_execution_context(req: &GateRequest<'_>) -> (Option<String>, Option<String>, Option<String>) {
+fn resolve_execution_context(
+    req: &GateRequest<'_>,
+) -> (Option<String>, Option<String>, Option<String>) {
     let sid = req.session_id.unwrap_or("");
     if let Some(rc) = req.run_context {
         let root_session_id = if rc.root_session_id.is_empty() {
@@ -1471,9 +1484,7 @@ pub fn verify_decider_session_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autonoetic_types::agent::{
-        AgentIdentity, AgentManifest, RuntimeDeclaration,
-    };
+    use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
     use autonoetic_types::capability::Capability;
 
     fn test_manifest() -> AgentManifest {
@@ -1491,8 +1502,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test-agent".to_string(),
                 description: "test agent".to_string(),
-            singleton: false,
-        },
+                singleton: false,
+            },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -1517,7 +1528,12 @@ mod tests {
 
     fn make_credential_request_action(url: &str) -> ScheduledAction {
         ScheduledAction::CredentialRequest {
-            credential_id: format!("cred_{}", url::Url::parse(url).map(|u| u.host_str().unwrap_or("x").to_string()).unwrap_or_else(|_| "test".to_string())),
+            credential_id: format!(
+                "cred_{}",
+                url::Url::parse(url)
+                    .map(|u| u.host_str().unwrap_or("x").to_string())
+                    .unwrap_or_else(|_| "test".to_string())
+            ),
             url: url.to_string(),
             method: Some("GET".to_string()),
             headers: None,
@@ -1555,7 +1571,10 @@ mod tests {
     #[test]
     fn extract_host_from_target_bare_host() {
         assert_eq!(extract_host_from_target("localhost"), "localhost");
-        assert_eq!(extract_host_from_target("api.example.com"), "api.example.com");
+        assert_eq!(
+            extract_host_from_target("api.example.com"),
+            "api.example.com"
+        );
     }
 
     #[test]
@@ -1601,6 +1620,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
 
         assert!(svc.host_level_covers(&approval, &["localhost".to_string()]));
@@ -1633,6 +1654,8 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
 
         assert!(svc.exact_payload_covers(&approval, &action));
@@ -1669,7 +1692,10 @@ mod tests {
         let result = svc.check(req)?;
         assert!(result.is_cleared());
         match &result {
-            GateResult::Cleared { source: ClearanceSource::CachedApproval, .. } => {}
+            GateResult::Cleared {
+                source: ClearanceSource::CachedApproval,
+                ..
+            } => {}
             other => panic!("expected CachedApproval, got {:?}", other),
         }
         assert!(result.enforced_rules().contains(&"P-2.6"));
@@ -1710,7 +1736,11 @@ mod tests {
         assert!(result.enforced_rules().contains(&"P-2.2"));
         assert!(result.enforced_rules().contains(&"P-2.18"));
         match result {
-            GateResult::Suspended { gate_id, response_json, .. } => {
+            GateResult::Suspended {
+                gate_id,
+                response_json,
+                ..
+            } => {
                 assert!(gate_id.starts_with("apr-"));
                 let json: serde_json::Value = serde_json::from_str(&response_json)?;
                 assert_eq!(json["ok"], false);
@@ -1821,9 +1851,17 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval)?;
-        store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+        store.record_decision(
+            &ref_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
 
         // Now check with approval_ref -> should clear.
         let req = GateRequest {
@@ -1846,7 +1884,10 @@ mod tests {
         let result = svc.check(req)?;
         assert!(result.enforced_rules().contains(&"P-2.6"));
         match result {
-            GateResult::Cleared { source: ClearanceSource::ApprovalRef(id), .. } => {
+            GateResult::Cleared {
+                source: ClearanceSource::ApprovalRef(id),
+                ..
+            } => {
                 assert_eq!(id, ref_id);
             }
             other => panic!("expected Cleared(ApprovalRef), got {:?}", other),
@@ -1886,9 +1927,17 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval)?;
-        store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+        store.record_decision(
+            &ref_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
 
         let req = GateRequest {
             kind: GateKind::Approval {
@@ -1952,9 +2001,17 @@ mod tests {
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval)?;
-        store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+        store.record_decision(
+            &ref_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
 
         // Retry with a *different* command string but the same concrete target.
         // SubstituteCommand strategy should clear because the approved hosts cover
@@ -1985,9 +2042,15 @@ mod tests {
             turn_id: None,
         };
         let result = svc.check(req)?;
-        assert!(result.is_cleared(), "expected SubstituteCommand approval_ref to clear");
+        assert!(
+            result.is_cleared(),
+            "expected SubstituteCommand approval_ref to clear"
+        );
         match result {
-            GateResult::Cleared { source: ClearanceSource::ApprovalRef(id), .. } => {
+            GateResult::Cleared {
+                source: ClearanceSource::ApprovalRef(id),
+                ..
+            } => {
                 assert_eq!(id, ref_id);
             }
             other => panic!("expected Cleared(ApprovalRef), got {:?}", other),
@@ -2001,8 +2064,16 @@ mod tests {
         let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
         let svc = GateService::new(store.clone());
 
-        let id1 = svc.add_gate_message("apr-test123", "operator", "Why does the agent need localhost?")?;
-        let id2 = svc.add_gate_message("apr-test123", "system", "Agent says: API runs on localhost:9876")?;
+        let id1 = svc.add_gate_message(
+            "apr-test123",
+            "operator",
+            "Why does the agent need localhost?",
+        )?;
+        let id2 = svc.add_gate_message(
+            "apr-test123",
+            "system",
+            "Agent says: API runs on localhost:9876",
+        )?;
 
         let msgs = svc.get_gate_messages("apr-test123")?;
         assert_eq!(msgs.len(), 2);
@@ -2162,7 +2233,9 @@ mod tests {
 
         // The cache should have been backfilled automatically.
         let cache = ApprovedExecCache::new(tmp.path())?;
-        let entry = cache.find(&fingerprint).expect("cache entry was backfilled");
+        let entry = cache
+            .find(&fingerprint)
+            .expect("cache entry was backfilled");
         assert_eq!(entry.remote_targets, targets);
         assert_eq!(entry.code_content, code_content);
         Ok(())
@@ -2206,7 +2279,10 @@ mod tests {
             "fetches remote content from api.example.com; read-only",
             "Approve if the host is expected for this agent's task",
         );
-        assert!(real.is_sufficient(), "a real tier2 context must be sufficient");
+        assert!(
+            real.is_sufficient(),
+            "a real tier2 context must be sufficient"
+        );
     }
 
     #[test]
@@ -2234,7 +2310,9 @@ mod tests {
             turn_id: None,
         };
 
-        let err = svc.check(req).expect_err("check must reject insufficient context");
+        let err = svc
+            .check(req)
+            .expect_err("check must reject insufficient context");
         let msg = err.to_string();
         assert!(
             msg.contains("determinism-E1"),
@@ -2291,10 +2369,19 @@ mod tests {
             .expect("approval row exists")
             .reason
             .expect("reason was persisted from context.render()");
-        assert_eq!(stored, expected_reason, "stored reason must equal context.render()");
+        assert_eq!(
+            stored, expected_reason,
+            "stored reason must equal context.render()"
+        );
 
         // Resolve by an operator.
-        store.record_decision(&gate_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+        store.record_decision(
+            &gate_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
         let after_operator = store
             .get_approval(&gate_id)?
             .expect("approval row exists")

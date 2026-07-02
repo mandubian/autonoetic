@@ -160,7 +160,11 @@ pub fn extract_artifact_source(gw_dir: &Path, artifact_id: &str) -> String {
 }
 
 /// Extract a single named file from an artifact.
-fn extract_artifact_file_source(gw_dir: &Path, artifact_id: &str, filename: &str) -> Option<String> {
+fn extract_artifact_file_source(
+    gw_dir: &Path,
+    artifact_id: &str,
+    filename: &str,
+) -> Option<String> {
     let store = crate::artifact_store::ArtifactStore::new(gw_dir).ok()?;
     let bundle = store.inspect(artifact_id).ok()?;
     let content_store = crate::runtime::content_store::ContentStore::new(gw_dir).ok()?;
@@ -186,7 +190,9 @@ fn extract_test_target_from_command(command: &str) -> Option<String> {
         .map(|s| s.trim())
         .unwrap_or(trimmed);
     for python_cmd in &["python3", "python", "python3.11", "python3.12"] {
-        if !after_prefix.starts_with(python_cmd) && !after_prefix.starts_with(&format!("{} ", python_cmd)) {
+        if !after_prefix.starts_with(python_cmd)
+            && !after_prefix.starts_with(&format!("{} ", python_cmd))
+        {
             continue;
         }
         let after_python = after_prefix[python_cmd.len()..].trim();
@@ -201,7 +207,9 @@ fn extract_test_target_from_command(command: &str) -> Option<String> {
                 .file_name()?
                 .to_string_lossy()
                 .to_string();
-            if (filename.starts_with("test_") || filename.ends_with("_test.py")) && filename.ends_with(".py") {
+            if (filename.starts_with("test_") || filename.ends_with("_test.py"))
+                && filename.ends_with(".py")
+            {
                 return Some(filename);
             }
         }
@@ -1083,7 +1091,10 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 let test_filename = extract_test_target_from_command(&effective_command);
                 if let Some(ref test_file) = test_filename {
                     if let Some(test_code) = extract_artifact_file_source(gw_dir, aid, test_file) {
-                        let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&test_code);
+                        let analysis =
+                            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(
+                                &test_code,
+                            );
                         artifact_analysis_override = Some(analysis);
                         test_code
                     } else {
@@ -1318,8 +1329,11 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
 
             // Pre-check: exec cache for concrete targets (sets pre_validated for GateService bypass)
             let mut pre_validated = false;
-            let mut cache_backfill: Option<crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill> = None;
-            if let crate::runtime::remote_access::NetworkCoverage::Concrete { targets } = &coverage {
+            let mut cache_backfill: Option<
+                crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill,
+            > = None;
+            if let crate::runtime::remote_access::NetworkCoverage::Concrete { targets } = &coverage
+            {
                 if let Some(gw_dir) = gateway_dir {
                     let fingerprint = compute_fingerprint(
                         &manifest.agent.id,
@@ -1342,14 +1356,16 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                         }
                     }
                     if !pre_validated {
-                        cache_backfill = Some(crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill {
-                            gateway_dir: gw_dir.to_path_buf(),
-                            fingerprint,
-                            agent_id: manifest.agent.id.clone(),
-                            remote_targets: normalized_targets.clone(),
-                            code_content: code_to_analyze.clone(),
-                            approval_request_id: String::new(),
-                        });
+                        cache_backfill = Some(
+                            crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill {
+                                gateway_dir: gw_dir.to_path_buf(),
+                                fingerprint,
+                                agent_id: manifest.agent.id.clone(),
+                                remote_targets: normalized_targets.clone(),
+                                code_content: code_to_analyze.clone(),
+                                approval_request_id: String::new(),
+                            },
+                        );
                     }
                 }
             }
@@ -1434,8 +1450,12 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                         crate::runtime::human_gate::GateResult::Cleared { .. } => {
                             approval_validated_for_command = true;
                         }
-                        crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
-                            let (cmd, cmd_deps, pending_action) = match store.get_approval(&gate_id)? {
+                        crate::runtime::human_gate::GateResult::AlreadyPending {
+                            gate_id, ..
+                        } => {
+                            let (cmd, cmd_deps, pending_action) = match store
+                                .get_approval(&gate_id)?
+                            {
                                 Some(pending) => match &pending.action {
                                     ScheduledAction::SandboxExec {
                                         command,
@@ -1446,13 +1466,9 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                         dependencies.clone(),
                                         pending.action.clone(),
                                     ),
-                                    _ => {
-                                        (effective_command.clone(), None, pending.action.clone())
-                                    }
+                                    _ => (effective_command.clone(), None, pending.action.clone()),
                                 },
-                                None => {
-                                    (effective_command.clone(), None, action.clone())
-                                }
+                                None => (effective_command.clone(), None, action.clone()),
                             };
                             let approval = build_approval_details(
                                 &autonoetic_types::background::ApprovalRequest {
@@ -1470,11 +1486,14 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                     reason: Some(reason),
                                     evidence_ref: None,
                                     decision_reason: None,
-                                    approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                    approval_level:
+                                        autonoetic_types::background::ApprovalLevel::Operator,
                                     min_dwell_ms: None,
                                     confirm_phrase: None,
                                     code_excerpts: None,
                                     risk_summary: None,
+
+                                    expires_at: None,
                                 },
                                 "sandbox_exec",
                                 summary.clone(),
@@ -1526,11 +1545,14 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                     reason: Some(reason),
                                     evidence_ref: None,
                                     decision_reason: None,
-                                    approval_level: autonoetic_types::background::ApprovalLevel::Operator,
+                                    approval_level:
+                                        autonoetic_types::background::ApprovalLevel::Operator,
                                     min_dwell_ms: None,
                                     confirm_phrase: None,
                                     code_excerpts: None,
                                     risk_summary: None,
+
+                                    expires_at: None,
                                 },
                                 "sandbox_exec",
                                 summary.clone(),
@@ -1553,9 +1575,14 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             // Populate code excerpts for operator inspection (Phase 1).
                             if let Some(ref art_id) = explicit_mount_artifact_id {
                                 if let Some(gw_dir) = gateway_dir {
-                                    let excerpts = crate::runtime::code_excerpts::build_code_excerpts(art_id, gw_dir);
+                                    let excerpts =
+                                        crate::runtime::code_excerpts::build_code_excerpts(
+                                            art_id, gw_dir,
+                                        );
                                     let _ = store.set_approval_code_excerpts(
-                                        &gate_id, excerpts.as_deref(), None,
+                                        &gate_id,
+                                        excerpts.as_deref(),
+                                        None,
                                     );
                                 }
                             }
@@ -1741,7 +1768,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             );
 
                             if let Some(store) = &gateway_store {
-                                let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                                let gate =
+                                    crate::runtime::human_gate::GateService::new(store.clone());
                                 let gate_result = gate.check(
                                     crate::runtime::human_gate::GateRequest {
                                         kind: crate::runtime::human_gate::GateKind::Approval {
@@ -1780,7 +1808,10 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                 )?;
                                 match gate_result {
                                     crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                                    crate::runtime::human_gate::GateResult::AlreadyPending {
+                                        gate_id,
+                                        ..
+                                    } => {
                                         return serde_json::to_string(&serde_json::json!({
                                             "ok": false,
                                             "exit_code": null,
@@ -1806,7 +1837,10 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                         }))
                                         .map_err(Into::into);
                                     }
-                                    crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                                    crate::runtime::human_gate::GateResult::Suspended {
+                                        gate_id,
+                                        ..
+                                    } => {
                                         let approval = build_approval_details(
                                             &autonoetic_types::background::ApprovalRequest {
                                                 request_id: gate_id.clone(),
@@ -1828,7 +1862,10 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                                 confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
-                                            },
+
+
+    expires_at: None,
+},
                                             "layer_mount",
                                             summary.clone(),
                                             "approval_ref",
@@ -2098,19 +2135,18 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         // as the fixture root when an artifact is mounted; otherwise falls
         // back to the agent dir (no fixtures → all requests get
         // unfixtured_target).
-        let sealed_proxy_fixture_root = artifact_fixture_root
-            .unwrap_or_else(|| std::path::PathBuf::from(agent_dir_str));
-        let sealed_proxy =
-            crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
-                manifest.sandbox_network,
-                sealed_proxy_fixture_root,
-                &mut extra_env,
-                &mut overrides,
-                gateway_dir,
-                session_id,
-                gateway_store.clone(),
-                Some(&manifest.agent.id),
-            )?;
+        let sealed_proxy_fixture_root =
+            artifact_fixture_root.unwrap_or_else(|| std::path::PathBuf::from(agent_dir_str));
+        let sealed_proxy = crate::runtime::sealed_network_proxy::setup_sealed_proxy_for_exec(
+            manifest.sandbox_network,
+            sealed_proxy_fixture_root,
+            &mut extra_env,
+            &mut overrides,
+            gateway_dir,
+            session_id,
+            gateway_store.clone(),
+            Some(&manifest.agent.id),
+        )?;
 
         // Merge runtime.lock mounts into session content mounts
         let mut all_mounts = session_content_mounts;
@@ -2798,8 +2834,8 @@ fn infer_capture_paths_from_command(
 
     // cargo fetch / cargo build (captures registry + target)
     if lower.starts_with("cargo fetch") || lower.starts_with("cargo build") {
-        let cargo_home = std::env::var("CARGO_HOME")
-            .unwrap_or_else(|_| "/tmp/cargo_registry".to_string());
+        let cargo_home =
+            std::env::var("CARGO_HOME").unwrap_or_else(|_| "/tmp/cargo_registry".to_string());
         return Some(vec![crate::runtime::tools::CapturePath {
             path: cargo_home.clone(),
             mount_as: cargo_home,
@@ -2822,7 +2858,10 @@ fn extract_flag_value(command: &str, flag: &str) -> Option<String> {
             }
         }
         if token == flag && i + 1 < tokens.len() {
-            let value = tokens[i + 1].trim_matches('"').trim_matches('\'').to_string();
+            let value = tokens[i + 1]
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
             if !value.is_empty() && !value.starts_with('-') {
                 return Some(value);
             }
@@ -2902,8 +2941,9 @@ mod approval_ref_binding_tests {
     #[test]
     fn approval_ref_rejects_cross_agent_use() {
         let decision = decision("coder.default", "root/coder.default-1", "root");
-        let err = validate_approval_ref_context(&decision, "evaluator.default", Some("root/eval-1"))
-            .expect_err("cross-agent approval_ref should be rejected");
+        let err =
+            validate_approval_ref_context(&decision, "evaluator.default", Some("root/eval-1"))
+                .expect_err("cross-agent approval_ref should be rejected");
         assert!(err.to_string().contains("belongs to agent"));
     }
 

@@ -232,6 +232,7 @@ fn make_sandbox_exec_request(
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     }
 }
 

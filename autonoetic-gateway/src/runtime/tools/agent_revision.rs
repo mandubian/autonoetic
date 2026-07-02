@@ -3177,6 +3177,7 @@ do not re-issue."
                     confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+            expires_at: None,
                 };
 
                 gateway_store.create_approval(&mut req)?;

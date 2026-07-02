@@ -293,9 +293,7 @@ async fn orphan_reaper_does_not_reap_suspended_parent() {
 /// storm). It is left to the operator / gate-timeout (P-2.11).
 #[tokio::test]
 async fn orphan_reaper_skips_child_parked_at_approval() {
-    use autonoetic_types::background::{
-        ApprovalLevel, ApprovalRequest, ScheduledAction,
-    };
+    use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
 
     let ws = TestWorkspace::new().unwrap();
     let gateway_dir = ws.agents_dir.join(".gateway");
@@ -310,7 +308,12 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
 
     // Root alive, immediate parent's turn ended (completed), child still active.
     store
-        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "active",
+        ))
         .unwrap();
     store
         .upsert_session_transcript(&make_transcript(
@@ -357,6 +360,8 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval).unwrap();
     assert!(
@@ -385,7 +390,9 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
     );
 
     // And no parent_terminated reap event was emitted for it.
-    let events = store.search_causal_events(Some(child_id), None, 100).unwrap();
+    let events = store
+        .search_causal_events(Some(child_id), None, 100)
+        .unwrap();
     assert!(
         !events.iter().any(|e| e.action == "parent_terminated"),
         "no reap event should be emitted for an approval-parked child"
@@ -434,9 +441,13 @@ async fn orphan_reaper_skips_workflow_task_when_parent_between_turns() {
     let config = ws.gateway_config();
 
     // Workflow with a Running task bound to the child session.
-    let mut wf =
-        ensure_workflow_for_root_session(&config, Some(store.as_ref()), root_id, Some("planner.collaborative"))
-            .unwrap();
+    let mut wf = ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_id,
+        Some("planner.collaborative"),
+    )
+    .unwrap();
     wf.status = WorkflowRunStatus::WaitingChildren;
     save_workflow_run(&config, Some(store.as_ref()), &wf).unwrap();
     let task = TaskRun {
@@ -476,7 +487,9 @@ async fn orphan_reaper_skips_workflow_task_when_parent_between_turns() {
         "child with active workflow task must NOT be reaped when parent is between turns (completed)"
     );
 
-    let events = store.search_causal_events(Some(child_id), None, 100).unwrap();
+    let events = store
+        .search_causal_events(Some(child_id), None, 100)
+        .unwrap();
     assert!(
         !events.iter().any(|e| e.action == "parent_terminated"),
         "no reap event should be emitted for a workflow-active child with parent between turns"

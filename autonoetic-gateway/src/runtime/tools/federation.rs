@@ -3,9 +3,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
-use autonoetic_types::background::{
-    ApprovalLevel, ApprovalRequest, ScheduledAction,
-};
+use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::escalation::{EscalationMessage, RoleVerdictSummary};
 use serde::Deserialize;
@@ -48,14 +46,13 @@ impl NativeTool for FederationEscalateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description:
-                "Escalate federation jury verdicts to the operator for review. \
+            description: "Escalate federation jury verdicts to the operator for review. \
                  Call this after spawning all federation roles (static_evaluator, \
                  unit_test_runner, auditor) and collecting their verdicts via \
                  promotion_query. Construct an EscalationMessage with all role \
                  verdicts and your synthesis, then the operator will review and \
                  decide. Returns the escalation_id on success."
-                    .to_string(),
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["agent_id", "revision_id", "role_verdicts", "planner_synthesis", "root_session_id"],
@@ -151,26 +148,27 @@ impl NativeTool for FederationEscalateTool {
             args.artifact_id.clone()
         };
 
-        let (canonical_artifact_id, canonical_revision_id) =
-            match store.get_agent_revision(&args.revision_id)? {
-                Some(rev) => {
-                    let art = rev
-                        .artifact_id
-                        .as_deref()
-                        .unwrap_or(&caller_artifact_id)
-                        .to_string();
-                    if art != caller_artifact_id && !caller_artifact_id.is_empty() {
-                        tracing::warn!(
-                            target: "federation",
-                            escalation_artifact_id = %caller_artifact_id,
-                            canonical_artifact_id = %art,
-                            "federation.escalate: correcting artifact id to canonical value from revision record"
-                        );
-                    }
-                    (art, rev.revision_id.clone())
+        let (canonical_artifact_id, canonical_revision_id) = match store
+            .get_agent_revision(&args.revision_id)?
+        {
+            Some(rev) => {
+                let art = rev
+                    .artifact_id
+                    .as_deref()
+                    .unwrap_or(&caller_artifact_id)
+                    .to_string();
+                if art != caller_artifact_id && !caller_artifact_id.is_empty() {
+                    tracing::warn!(
+                        target: "federation",
+                        escalation_artifact_id = %caller_artifact_id,
+                        canonical_artifact_id = %art,
+                        "federation.escalate: correcting artifact id to canonical value from revision record"
+                    );
                 }
-                None => (caller_artifact_id.clone(), args.revision_id.clone()),
-            };
+                (art, rev.revision_id.clone())
+            }
+            None => (caller_artifact_id.clone(), args.revision_id.clone()),
+        };
 
         let escalation_id = args
             .escalation_id
@@ -196,7 +194,8 @@ impl NativeTool for FederationEscalateTool {
 
         store.create_escalation(&mut escalation)?;
 
-        let approval_request_id = format!("apr-esc-{}", &escalation_id[..16.min(escalation_id.len())]);
+        let approval_request_id =
+            format!("apr-esc-{}", &escalation_id[..16.min(escalation_id.len())]);
         let mut approval = ApprovalRequest {
             request_id: approval_request_id.clone(),
             agent_id: args.agent_id.clone(),
@@ -208,7 +207,10 @@ impl NativeTool for FederationEscalateTool {
                 session_id: _session_id.unwrap_or("").to_string(),
                 root_session_id: args.root_session_id.clone(),
                 requested_by_agent_id: args.agent_id.clone(),
-                reason: format!("Promotion review for agent '{}' (escalation {})", args.agent_id, escalation_id),
+                reason: format!(
+                    "Promotion review for agent '{}' (escalation {})",
+                    args.agent_id, escalation_id
+                ),
                 context: args.planner_synthesis.clone(),
                 urgency: "normal".to_string(),
                 suggested_actions: vec!["approve".to_string(), "reject".to_string()],
@@ -234,6 +236,8 @@ impl NativeTool for FederationEscalateTool {
             confirm_phrase: None,
             code_excerpts: escalation.code_excerpts.clone(),
             risk_summary: None,
+
+            expires_at: None,
         };
         if let Err(e) = store.create_approval(&mut approval) {
             tracing::warn!(

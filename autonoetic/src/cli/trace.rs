@@ -1922,6 +1922,7 @@ fn task_status_snake(s: TaskRunStatus) -> &'static str {
         TaskRunStatus::Runnable => "runnable",
         TaskRunStatus::Running => "running",
         TaskRunStatus::AwaitingApproval => "awaiting_approval",
+        TaskRunStatus::Stale => "stale",
         TaskRunStatus::Paused => "paused",
         TaskRunStatus::Aborting => "aborting",
         TaskRunStatus::Aborted => "aborted",

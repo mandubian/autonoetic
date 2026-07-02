@@ -43,7 +43,7 @@ fn no_capability_manifest() -> AgentManifest {
         allowed_tool_tiers: vec![],
         agentskills_import: None,
         compression: None,
-            open_web: false,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -82,6 +82,8 @@ fn r_2_14_user_ask_refused_when_pending_approval_exists() -> anyhow::Result<()> 
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut pending)?;
 

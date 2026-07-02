@@ -581,6 +581,12 @@ impl GatewayExecutionService {
 
         if let Some(ref store) = gateway_store {
             store.set_policy_hook_executor(&hook_executor);
+            // #722 Stage 2: wire the runtime config into the store so
+            // `create_approval()` / interaction creation apply the standalone
+            // approval and interaction TTLs. Without this the store's config
+            // stays `None`, `enrich_request` sets no `expires_at`, and the
+            // expiry sweep never has anything to mark stale/expired.
+            store.set_config(Arc::new(config.clone()));
         }
 
         let svc = Self {
@@ -2037,6 +2043,21 @@ impl GatewayExecutionService {
                         None,
                     ));
                 }
+                Some(autonoetic_types::background::ApprovalStatus::Stale) => {
+                    tracing::info!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        approval_request_id = %rid,
+                        "Approval expired and is stale — re-suspending session until operator resolves"
+                    );
+                    return Ok((
+                        TurnOutcome::Suspended {
+                            approval_request_id: rid.clone(),
+                        },
+                        checkpoint.initial_user_message(),
+                        None,
+                    ));
+                }
                 Some(autonoetic_types::background::ApprovalStatus::Rejected)
                 | Some(autonoetic_types::background::ApprovalStatus::Cancelled) => {
                     anyhow::bail!(
@@ -2314,6 +2335,21 @@ impl GatewayExecutionService {
                         session_id = %session_id,
                         escalation_request_id = %esc_rid,
                         "Checkpoint blocked by pending escalation — re-suspending session"
+                    );
+                    return Ok((
+                        TurnOutcome::Suspended {
+                            approval_request_id: esc_rid.clone(),
+                        },
+                        checkpoint.initial_user_message(),
+                        None,
+                    ));
+                }
+                Some(autonoetic_types::background::ApprovalStatus::Stale) => {
+                    tracing::info!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        escalation_request_id = %esc_rid,
+                        "Escalation expired and is stale — re-suspending session until operator resolves"
                     );
                     return Ok((
                         TurnOutcome::Suspended {

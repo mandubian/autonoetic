@@ -456,7 +456,8 @@ impl NativeTool for CredentialRequestTool {
                                 "summary": format!("Credential request to {}", url_host),
                                 "retry_field": "approval_ref"
                             }
-                        }).to_string());
+                        })
+                        .to_string());
                     }
                     crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
                         return Ok(json!({
@@ -556,7 +557,8 @@ impl NativeTool for CredentialRequestTool {
                             "summary": format!("Credential request to {}", url_host),
                             "retry_field": "approval_ref"
                         }
-                    }).to_string());
+                    })
+                    .to_string());
                 }
                 crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
                     return Ok(json!({
@@ -792,24 +794,20 @@ fn skills_dir(gateway_dir: &Path) -> PathBuf {
     gateway_dir.join("skills")
 }
 
-fn validate_local_skill_path(
-    gateway_dir: &Path,
-    path_hint: &str,
-) -> anyhow::Result<PathBuf> {
+fn validate_local_skill_path(gateway_dir: &Path, path_hint: &str) -> anyhow::Result<PathBuf> {
     let base = skills_dir(gateway_dir);
     let canonical_base = base.canonicalize().unwrap_or_else(|_| base.clone());
     let candidate = if path_hint.starts_with("file://") {
         let url = url::Url::parse(path_hint)
             .map_err(|e| anyhow::anyhow!("invalid file:// skill_url: {}", e))?;
-        url.to_file_path()
-            .map_err(|_| anyhow::anyhow!("file:// skill_url must point to a local filesystem path"))?
+        url.to_file_path().map_err(|_| {
+            anyhow::anyhow!("file:// skill_url must point to a local filesystem path")
+        })?
     } else {
         let normalized = path_hint.trim_start_matches("./");
         let normalized = normalized.strip_prefix("skills/").unwrap_or(normalized);
         if !normalized.ends_with(".md") {
-            anyhow::bail!(
-                "local skill_url must be a .md file in the gateway skills/ directory"
-            );
+            anyhow::bail!("local skill_url must be a .md file in the gateway skills/ directory");
         }
         let path = PathBuf::from(normalized);
         if path.is_absolute() {
@@ -820,9 +818,7 @@ fn validate_local_skill_path(
         base.join(path)
     };
     if candidate.extension().and_then(|ext| ext.to_str()) != Some("md") {
-        anyhow::bail!(
-            "local skill_url must be a .md file in the gateway skills/ directory"
-        );
+        anyhow::bail!("local skill_url must be a .md file in the gateway skills/ directory");
     }
     let canonical_target = match std::fs::canonicalize(&candidate) {
         Ok(p) => p,
@@ -833,9 +829,7 @@ fn validate_local_skill_path(
                 canonical_base.join(&candidate)
             };
             if !resolved.starts_with(&canonical_base) {
-                anyhow::bail!(
-                    "skill_url path escapes the gateway skills/ directory"
-                );
+                anyhow::bail!("skill_url path escapes the gateway skills/ directory");
             }
             anyhow::bail!(
                 "skill file not found in gateway skills/ directory: {}",
@@ -852,7 +846,10 @@ fn validate_local_skill_path(
         let resolved_link = if link_target.is_absolute() {
             link_target
         } else {
-            canonical_target.parent().unwrap_or(&canonical_base).join(link_target)
+            canonical_target
+                .parent()
+                .unwrap_or(&canonical_base)
+                .join(link_target)
         };
         let canonical_link = match std::fs::canonicalize(&resolved_link) {
             Ok(p) => p,
@@ -1376,7 +1373,8 @@ impl SkillStep {
             t => {
                 return Err(autonoetic_types::tool_error::tagged::Tagged::validation(
                     anyhow::anyhow!("Unknown step type in skill.md onboarding: '{}'", t),
-                ).into());
+                )
+                .into());
             }
         }
     }
@@ -1629,24 +1627,30 @@ impl NativeTool for CredentialSetupTool {
                     let url_host = host;
                     let url = url;
 
-                    let skill_url_is_approved = approved_setup_remote_url.as_deref()
+                    let skill_url_is_approved = approved_setup_remote_url
+                        .as_deref()
                         .map(|u| extract_host(u).unwrap_or_default() == url_host)
                         .unwrap_or(false);
                     if !skill_url_is_approved {
-                        let policy_violation = crate::runtime::network_policy::enforce_remote_target_policy(
-                            manifest,
-                            _agent_dir,
-                            &url_host,
-                            Some(&url),
-                            DeclarationRequirement::Required,
-                        ).err().map(|v| v.error_type.to_string())
-                        .or_else(|| {
-                            if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
-                                Some("network_access_denied".to_string())
-                            } else {
-                                None
-                            }
-                        });
+                        let policy_violation =
+                            crate::runtime::network_policy::enforce_remote_target_policy(
+                                manifest,
+                                _agent_dir,
+                                &url_host,
+                                Some(&url),
+                                DeclarationRequirement::Required,
+                            )
+                            .err()
+                            .map(|v| v.error_type.to_string())
+                            .or_else(|| {
+                                if url_host.is_empty()
+                                    || !policy.can_connect_net(&url_host).is_allowed()
+                                {
+                                    Some("network_access_denied".to_string())
+                                } else {
+                                    None
+                                }
+                            });
 
                         if let Some(violation_type) = policy_violation {
                             let action = ScheduledAction::CredentialRequest {
@@ -1698,7 +1702,10 @@ impl NativeTool for CredentialSetupTool {
                             )?;
                             match gate_result {
                                 crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                                crate::runtime::human_gate::GateResult::AlreadyPending {
+                                    gate_id,
+                                    ..
+                                } => {
                                     return Ok(json!({
                                         "ok": false,
                                         "approval_required": true,
@@ -1714,7 +1721,10 @@ impl NativeTool for CredentialSetupTool {
                                         }
                                     }).to_string());
                                 }
-                                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                                crate::runtime::human_gate::GateResult::Suspended {
+                                    gate_id,
+                                    ..
+                                } => {
                                     return Ok(json!({
                                         "ok": false,
                                         "error_type": violation_type,
@@ -1821,8 +1831,7 @@ impl NativeTool for CredentialSetupTool {
                 credential: None,
                 onboarding: None,
             });
-            let resolved_base_url = base_url
-                .or_else(|| autonoetic.base_url.clone());
+            let resolved_base_url = base_url.or_else(|| autonoetic.base_url.clone());
             let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
                 service: None,
                 inject_as: None,
@@ -1836,7 +1845,13 @@ impl NativeTool for CredentialSetupTool {
             let allowed_hosts = cred_spec
                 .allowed_hosts
                 .or_else(|| args.allowed_hosts.clone())
-                .unwrap_or_else(|| if url_host.is_empty() { vec![] } else { vec![url_host.clone()] });
+                .unwrap_or_else(|| {
+                    if url_host.is_empty() {
+                        vec![]
+                    } else {
+                        vec![url_host.clone()]
+                    }
+                });
 
             let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
             let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
@@ -1925,7 +1940,8 @@ impl NativeTool for CredentialSetupTool {
             } = step
             {
                 let host = extract_host(url)?;
-                let step_url_is_approved = approved_setup_remote_url.as_deref()
+                let step_url_is_approved = approved_setup_remote_url
+                    .as_deref()
                     .map(|u| extract_host(u).unwrap_or_default() == host)
                     .unwrap_or(false);
                 if !step_url_is_approved {
@@ -1948,7 +1964,11 @@ impl NativeTool for CredentialSetupTool {
                         });
 
                     if let Some(violation_type) = policy_violation {
-                        let display_host = if host.is_empty() { "<empty host>" } else { &host };
+                        let display_host = if host.is_empty() {
+                            "<empty host>"
+                        } else {
+                            &host
+                        };
                         let action = ScheduledAction::CredentialRequest {
                             credential_id: args.credential_id.clone().unwrap_or_default(),
                             url: url.clone(),
@@ -1998,7 +2018,10 @@ impl NativeTool for CredentialSetupTool {
                         )?;
                         match gate_result {
                             crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                            crate::runtime::human_gate::GateResult::AlreadyPending {
+                                gate_id,
+                                ..
+                            } => {
                                 return Ok(json!({
                                     "ok": false,
                                     "approval_required": true,
@@ -2014,7 +2037,9 @@ impl NativeTool for CredentialSetupTool {
                                     }
                                 }).to_string());
                             }
-                            crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                            crate::runtime::human_gate::GateResult::Suspended {
+                                gate_id, ..
+                            } => {
                                 return Ok(json!({
                                     "ok": false,
                                     "error_type": violation_type,
@@ -2315,8 +2340,10 @@ fn execute_steps(
                         .unwrap_or(ApprovalLevel::Operator),
                     min_dwell_ms: None,
                     confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
+                    code_excerpts: None,
+                    risk_summary: None,
+
+                    expires_at: None,
                 };
                 store.create_approval(&mut approval_req)?;
 

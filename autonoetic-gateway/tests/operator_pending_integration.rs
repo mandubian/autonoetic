@@ -49,6 +49,7 @@ fn seed_approval(store: &GatewayStore, created_at: &str) {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     };
     store.create_approval(&mut app).unwrap();
 }
@@ -150,7 +151,10 @@ fn collects_and_normalizes_all_four_sources() {
 
     // Ages are monotonically decreasing (oldest has the largest age).
     let ages: Vec<i64> = pending.iter().map(|p| p.age_secs.unwrap()).collect();
-    assert!(ages.windows(2).all(|w| w[0] >= w[1]), "oldest-first: {ages:?}");
+    assert!(
+        ages.windows(2).all(|w| w[0] >= w[1]),
+        "oldest-first: {ages:?}"
+    );
     assert_eq!(ages[0], 2 * 3600, "approval waited two hours");
 
     // Each carries the correct answer verb.
@@ -233,10 +237,98 @@ fn resolved_items_drop_out_of_the_queue() {
     let (_dir, store) = store();
     seed_approval(&store, "2026-07-02T10:00:00Z");
     store
-        .record_decision("apr-1", "approved", "operator", "2026-07-02T11:00:00Z", None)
+        .record_decision(
+            "apr-1",
+            "approved",
+            "operator",
+            "2026-07-02T11:00:00Z",
+            None,
+        )
         .unwrap();
 
     let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
     let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
-    assert!(pending.is_empty(), "an approved approval is no longer pending");
+    assert!(
+        pending.is_empty(),
+        "an approved approval is no longer pending"
+    );
+}
+
+#[test]
+fn stale_approvals_and_expired_interactions_are_included_and_flagged() {
+    let (_dir, store) = store();
+
+    // Seed a standalone approval whose TTL already passed.
+    let mut app = ApprovalRequest {
+        request_id: "apr-stale".to_string(),
+        agent_id: "researcher.default".to_string(),
+        session_id: ROOT.to_string(),
+        action: ScheduledAction::WebFetch {
+            url: "https://archive.example.org/data".to_string(),
+            timeout_secs: None,
+            max_chars: None,
+            detected_hosts: Some(vec!["archive.example.org".to_string()]),
+            payload: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        reason: Some("stale approval reason".to_string()),
+        evidence_ref: None,
+        workflow_id: None,
+        task_id: None,
+        root_session_id: Some(ROOT.to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.create_approval(&mut app).unwrap();
+    let flagged = store.flag_expired_standalone_approvals().unwrap();
+    assert_eq!(flagged, vec!["apr-stale"]);
+
+    // Seed a user interaction whose TTL already passed.
+    let interaction = UserInteraction {
+        interaction_id: "ui-expired".to_string(),
+        session_id: ROOT.to_string(),
+        root_session_id: ROOT.to_string(),
+        workflow_id: None,
+        task_id: None,
+        agent_id: "planner.default".to_string(),
+        turn_id: "turn-1".to_string(),
+        kind: UserInteractionKind::Clarification,
+        question: "Expired question?".to_string(),
+        context: None,
+        options: vec![],
+        allow_freeform: true,
+        status: UserInteractionStatus::Pending,
+        answer_option_id: None,
+        answer_text: None,
+        answered_by: None,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        answered_at: None,
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+        checkpoint_turn_id: None,
+    };
+    store.create_user_interaction(&interaction).unwrap();
+    let expired = store.expire_timed_out_interactions().unwrap();
+    assert_eq!(expired, vec!["ui-expired"]);
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 2);
+
+    let approval = pending.iter().find(|p| p.id == "apr-stale").unwrap();
+    assert_eq!(approval.kind, PendingKind::Approval);
+    assert!(approval.is_expired);
+    assert!(approval.summary.contains("stale"));
+
+    let interaction = pending.iter().find(|p| p.id == "ui-expired").unwrap();
+    assert_eq!(interaction.kind, PendingKind::Interaction);
+    assert!(interaction.is_expired);
+    assert!(interaction.summary.contains("expired"));
 }

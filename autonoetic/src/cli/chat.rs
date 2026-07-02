@@ -1498,6 +1498,7 @@ fn refresh_gate_history(
                     ApprovalStatus::Approved => "approved",
                     ApprovalStatus::Rejected => "rejected",
                     ApprovalStatus::Cancelled => "cancelled",
+                    ApprovalStatus::Stale => "stale",
                 };
                 let decision = a.decision_reason.as_deref().unwrap_or(status_label);
                 Some(format!(
@@ -2471,7 +2472,8 @@ fn poll_session_snapshot(
                     autonoetic_types::workflow::TaskRunStatus::Pending => queued += 1,
                     autonoetic_types::workflow::TaskRunStatus::Runnable
                     | autonoetic_types::workflow::TaskRunStatus::Running => running += 1,
-                    autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => awaiting += 1,
+                    autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                    | autonoetic_types::workflow::TaskRunStatus::Stale => awaiting += 1,
                     autonoetic_types::workflow::TaskRunStatus::Succeeded
                     | autonoetic_types::workflow::TaskRunStatus::Failed
                     | autonoetic_types::workflow::TaskRunStatus::Cancelled

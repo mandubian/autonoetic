@@ -93,21 +93,40 @@ async fn orphan_reaper_aborts_in_flight_handle_for_abandoned_child() {
 
     // Root completed, immediate parent terminal, child still active -> orphan.
     store
-        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "completed"))
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "completed",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(parent_id, root_id, "planner.default", "failed"))
+        .upsert_session_transcript(&make_transcript(
+            parent_id,
+            root_id,
+            "planner.default",
+            "failed",
+        ))
         .unwrap();
     store
-        .upsert_session_transcript(&make_transcript(child_id, root_id, "coder.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            child_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
         .unwrap();
 
     let config = ws.gateway_config();
 
     // Create a workflow + a Running task whose session is the orphan child.
-    let mut wf =
-        ensure_workflow_for_root_session(&config, Some(store.as_ref()), root_id, Some("planner.default"))
-            .unwrap();
+    let mut wf = ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_id,
+        Some("planner.default"),
+    )
+    .unwrap();
     wf.status = WorkflowRunStatus::WaitingChildren;
     save_workflow_run(&config, Some(store.as_ref()), &wf).unwrap();
     let task_id = "task-orphan-running";
@@ -123,9 +142,11 @@ async fn orphan_reaper_aborts_in_flight_handle_for_abandoned_child() {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
     });
-    execution
-        .active_executions()
-        .register_workflow_task(&wf.workflow_id, task_id, join.abort_handle());
+    execution.active_executions().register_workflow_task(
+        &wf.workflow_id,
+        task_id,
+        join.abort_handle(),
+    );
 
     reap_orphaned_sessions(execution.clone())
         .await
@@ -177,7 +198,12 @@ async fn orphan_reaper_does_not_abort_handle_for_approval_parked_child() {
 
     // Root alive, immediate parent's turn ended (completed), child still active.
     store
-        .upsert_session_transcript(&make_transcript(root_id, root_id, "planner.default", "active"))
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "active",
+        ))
         .unwrap();
     store
         .upsert_session_transcript(&make_transcript(
@@ -199,9 +225,13 @@ async fn orphan_reaper_does_not_abort_handle_for_approval_parked_child() {
     let config = ws.gateway_config();
 
     // A Running task for the child.
-    let mut wf =
-        ensure_workflow_for_root_session(&config, Some(store.as_ref()), root_id, Some("planner.default"))
-            .unwrap();
+    let mut wf = ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_id,
+        Some("planner.default"),
+    )
+    .unwrap();
     wf.status = WorkflowRunStatus::WaitingChildren;
     save_workflow_run(&config, Some(store.as_ref()), &wf).unwrap();
     let task_id = "task-parked-running";
@@ -236,10 +266,15 @@ async fn orphan_reaper_does_not_abort_handle_for_approval_parked_child() {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval).unwrap();
 
-    let execution = Arc::new(GatewayExecutionService::new(config.clone(), Some(store.clone())));
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
 
     // Register a live handle for the parked child's task.
     let join = tokio::spawn(async {
@@ -247,9 +282,11 @@ async fn orphan_reaper_does_not_abort_handle_for_approval_parked_child() {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
     });
-    execution
-        .active_executions()
-        .register_workflow_task(&wf.workflow_id, task_id, join.abort_handle());
+    execution.active_executions().register_workflow_task(
+        &wf.workflow_id,
+        task_id,
+        join.abort_handle(),
+    );
 
     reap_orphaned_sessions(execution.clone())
         .await

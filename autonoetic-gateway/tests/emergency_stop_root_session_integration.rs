@@ -337,6 +337,8 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     })?;
 
     // Create a pending user interaction

@@ -178,10 +178,10 @@ pub async fn handle_due_wake(
                     decision_reason: None,
                     min_dwell_ms: None,
                     confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
+                    code_excerpts: None,
+                    risk_summary: None,
+                    expires_at: None,
                 };
-                crate::scheduler::approval_hardening::enrich_request(&mut request);
                 if let Some(store) = execution.gateway_store() {
                     store.create_approval(&mut request)?;
                 } else {
@@ -221,7 +221,17 @@ pub async fn handle_due_wake(
         Some(
             execution
                 .spawn_agent_once(
-                    agent_id, &kickoff, session_id, None, false, None, None, None, None, None, &[],
+                    agent_id,
+                    &kickoff,
+                    session_id,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
                 )
                 .await
                 .map(|spawn| spawn.assistant_reply.unwrap_or_default()),

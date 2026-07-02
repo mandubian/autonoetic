@@ -45,6 +45,7 @@ fn make_critical_request(created_at: &str) -> ApprovalRequest {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn make_standard_request() -> ApprovalRequest {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     }
 }
 
@@ -142,7 +144,7 @@ fn r4_enrich_sets_dwell_and_phrase_for_critical() {
     let mut req = make_critical_request(&chrono::Utc::now().to_rfc3339());
     assert!(req.min_dwell_ms.is_none());
     assert!(req.confirm_phrase.is_none());
-    enrich_request(&mut req);
+    enrich_request(&mut req, None);
     assert!(req.min_dwell_ms.unwrap() > 0);
     assert!(req.confirm_phrase.is_some());
     let phrase = req.confirm_phrase.unwrap();
@@ -153,7 +155,7 @@ fn r4_enrich_sets_dwell_and_phrase_for_critical() {
 #[test]
 fn r4_enrich_no_dwell_for_standard() {
     let mut req = make_standard_request();
-    enrich_request(&mut req);
+    enrich_request(&mut req, None);
     assert!(req.min_dwell_ms.is_none());
     assert!(req.confirm_phrase.is_none());
 }
@@ -165,7 +167,7 @@ fn r4_dwell_time_rejects_too_fast() {
 
     let just_now = chrono::Utc::now().to_rfc3339();
     let mut req = make_critical_request(&just_now);
-    enrich_request(&mut req);
+    enrich_request(&mut req, None);
     let min_dwell = req.min_dwell_ms.unwrap();
     assert!(min_dwell > 0);
     store.create_approval(&mut req).unwrap();
@@ -206,7 +208,7 @@ fn r4_confirm_phrase_rejects_wrong_phrase() {
 
     let old_time = chrono::Utc::now() - chrono::Duration::seconds(30);
     let mut req = make_critical_request(&old_time.to_rfc3339());
-    enrich_request(&mut req);
+    enrich_request(&mut req, None);
     store.create_approval(&mut req).unwrap();
 
     let cfg = config();
@@ -245,7 +247,7 @@ fn r4_confirm_phrase_rejects_missing_phrase() {
 
     let old_time = chrono::Utc::now() - chrono::Duration::seconds(30);
     let mut req = make_critical_request(&old_time.to_rfc3339());
-    enrich_request(&mut req);
+    enrich_request(&mut req, None);
     store.create_approval(&mut req).unwrap();
 
     let cfg = config();
@@ -272,7 +274,7 @@ fn r4_approve_succeeds_after_dwell_with_correct_phrase() {
 
     let old_time = chrono::Utc::now() - chrono::Duration::seconds(30);
     let mut req = make_critical_request(&old_time.to_rfc3339());
-    enrich_request(&mut req);
+    enrich_request(&mut req, None);
     let phrase = req.confirm_phrase.clone();
     store.create_approval(&mut req).unwrap();
 
@@ -328,7 +330,7 @@ fn r4_hardening_persisted_in_store() {
     let (_gw_dir, store) = setup_gateway(temp.path());
 
     let mut req = make_critical_request(&chrono::Utc::now().to_rfc3339());
-    enrich_request(&mut req);
+    enrich_request(&mut req, None);
     let expected_dwell = req.min_dwell_ms;
     let expected_phrase = req.confirm_phrase.clone();
     store.create_approval(&mut req).unwrap();
@@ -336,4 +338,61 @@ fn r4_hardening_persisted_in_store() {
     let loaded = store.get_approval("apr-critical-test").unwrap().unwrap();
     assert_eq!(loaded.min_dwell_ms, expected_dwell);
     assert_eq!(loaded.confirm_phrase, expected_phrase);
+}
+
+/// #722 Stage 2 regression: constructing the execution service must wire the
+/// runtime config into the store (`GatewayStore::set_config`), so a standalone
+/// approval receives a TTL (`expires_at`). Guards against the store's config
+/// staying `None` — which silently made standalone approval expiry inert.
+#[tokio::test]
+async fn standalone_approval_gets_ttl_once_service_wires_store_config() {
+    let dir = tempdir().unwrap();
+    let gw_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gw_dir).unwrap();
+    let store = std::sync::Arc::new(GatewayStore::open(&gw_dir).unwrap());
+
+    let mut cfg = autonoetic_types::config::GatewayConfig::default();
+    cfg.standalone_approval_timeout_secs = 3600;
+
+    // Constructing the service is what wires the config into the store.
+    let _svc = autonoetic_gateway::execution::GatewayExecutionService::new(cfg, Some(store.clone()));
+
+    let mut req = ApprovalRequest {
+        request_id: "apr-ttl-1".to_string(),
+        agent_id: "researcher.default".to_string(),
+        session_id: "root-x".to_string(),
+        action: ScheduledAction::WebFetch {
+            url: "https://example.org/x".to_string(),
+            timeout_secs: None,
+            max_chars: None,
+            detected_hosts: Some(vec!["example.org".to_string()]),
+            payload: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        reason: None,
+        evidence_ref: None,
+        workflow_id: None, // standalone
+        task_id: None,     // standalone
+        root_session_id: Some("root-x".to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut req).unwrap();
+
+    let stored = store
+        .get_approval("apr-ttl-1")
+        .unwrap()
+        .expect("approval exists");
+    assert!(
+        stored.expires_at.is_some(),
+        "standalone approval must receive a TTL once the service wires store config"
+    );
 }
