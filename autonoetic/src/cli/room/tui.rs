@@ -604,6 +604,8 @@ fn build_header(
     stats: &SessionStats,
     gate_count: usize,
     follow: bool,
+    floor: Altitude,
+    squash: bool,
     width: u16,
 ) -> String {
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
@@ -613,6 +615,11 @@ fn build_header(
     }
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
+    }
+    let floor_ind = format!("{}{}", render::altitude_glyph(floor), floor.as_str());
+    right_parts.push(floor_ind);
+    if !squash {
+        right_parts.push("unsquashed".to_string());
     }
     if follow {
         right_parts.push("[following]".to_string());
@@ -6368,7 +6375,7 @@ fn draw(
     let footer_idx = if compose_open { 3 } else { 2 };
     let list_idx = 1usize;
 
-    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, chunks[0].width);
+    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, chunks[0].width);
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],

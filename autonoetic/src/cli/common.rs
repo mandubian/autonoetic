@@ -1128,8 +1128,8 @@ pub struct RoomArgs {
     /// agent (e.g. `planner.default`).
     #[arg(long)]
     pub agent: Option<String>,
-    /// Altitude floor: detail | normal | attention | error. Default: normal.
-    #[arg(long, default_value = "normal")]
+    /// Altitude floor: detail | normal | attention | error. Default: detail.
+    #[arg(long, default_value = "detail")]
     pub min_altitude: String,
     /// Follow the timeline live (tail -f style) until Ctrl+C.
     #[arg(long)]
