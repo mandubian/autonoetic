@@ -388,6 +388,35 @@ impl GateService {
                         enforced_rules: vec!["P-2.3"],
                     });
                 }
+
+                // 4b. #723: root-scoped join. A sibling under the same root
+                //     making the *structurally identical* call joins the
+                //     existing pending approval instead of minting a duplicate,
+                //     so one operator decision releases all of them. Restricted
+                //     to identical actions so the resume action-equality TOCTOU
+                //     check (execution.rs) still holds for the joined session.
+                //     The caller is registered as a waiter so resolution fans in.
+                if let Some(pending_id) = self.find_pending_identical_for_root(sid, action)? {
+                    let (_root, workflow_id, task_id) = resolve_execution_context(&req);
+                    if let Err(e) = self.store.add_approval_waiter(
+                        &pending_id,
+                        sid,
+                        workflow_id.as_deref(),
+                        task_id.as_deref(),
+                    ) {
+                        tracing::warn!(
+                            target: "human_gate",
+                            request_id = %pending_id,
+                            session_id = %sid,
+                            error = %e,
+                            "failed to register approval waiter (#723)"
+                        );
+                    }
+                    return Ok(GateResult::AlreadyPending {
+                        gate_id: pending_id,
+                        enforced_rules: vec!["P-2.3"],
+                    });
+                }
             }
         }
 
@@ -997,6 +1026,29 @@ impl GateService {
                 if overlap {
                     return Ok(Some(req.request_id.clone()));
                 }
+            }
+        }
+        Ok(None)
+    }
+
+    /// #723: find a pending approval under the same **root** session (but a
+    /// different session) whose action is **structurally identical** to
+    /// `action`. Identical-only so the joining session's resume passes the
+    /// action-equality TOCTOU check against the shared approval. Same-session
+    /// dedup is handled separately by [`Self::find_pending_for_targets`].
+    fn find_pending_identical_for_root(
+        &self,
+        session_id: &str,
+        action: &ScheduledAction,
+    ) -> Result<Option<String>> {
+        let root = content_store::root_session_id(session_id);
+        let pending = self.store.get_pending_approvals_for_root(root)?;
+        for req in &pending {
+            if req.session_id == session_id {
+                continue; // same-session case is handled by find_pending_for_targets
+            }
+            if &req.action == action {
+                return Ok(Some(req.request_id.clone()));
             }
         }
         Ok(None)
@@ -2396,5 +2448,76 @@ mod tests {
         // function of the context and is independent of decider identity.
         assert_eq!(after_operator, expected_reason);
         Ok(())
+    }
+
+    /// #723: root-scoped join matches a *different* session under the same root
+    /// with a structurally-identical action, skips the same session, and does
+    /// not match a different action.
+    #[test]
+    fn find_pending_identical_for_root_matches_only_identical_cross_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+
+        let write = |path: &str| ScheduledAction::WriteFile {
+            path: path.to_string(),
+            content: "x".to_string(),
+            requires_approval: true,
+            evidence_ref: None,
+        };
+        let mk = |id: &str, session: &str, action: ScheduledAction| ApprovalRequest {
+            request_id: id.to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: session.to_string(),
+            action,
+            approval_level: ApprovalLevel::Operator,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("root-1".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            expires_at: None,
+        };
+
+        // Sibling A (session root-1/a) has a pending WriteFile(/tmp/x).
+        let mut a = mk("apr-a", "root-1/a", write("/tmp/x"));
+        store.create_approval(&mut a).unwrap();
+
+        // Sibling B (same root, different session) making the identical call joins A.
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-1/b", &write("/tmp/x")).unwrap(),
+            Some("apr-a".to_string()),
+            "identical action under the same root joins the sibling's pending approval"
+        );
+
+        // A different action does not join (would break the resume TOCTOU).
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-1/b", &write("/tmp/other")).unwrap(),
+            None,
+            "a non-identical action must not join"
+        );
+
+        // The owning session itself is skipped (same-session dedup handles it).
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-1/a", &write("/tmp/x")).unwrap(),
+            None,
+            "the owning session is skipped"
+        );
+
+        // A different root does not match.
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-2/c", &write("/tmp/x")).unwrap(),
+            None,
+            "a different root must not match"
+        );
     }
 }

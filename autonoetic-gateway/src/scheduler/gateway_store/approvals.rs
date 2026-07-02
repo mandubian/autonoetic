@@ -6,7 +6,112 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::GatewayStore;
 
+/// A session that joined an existing pending approval instead of minting a
+/// duplicate (#723). On resolution the approval fans in to every waiter.
+#[derive(Debug, Clone)]
+pub struct ApprovalWaiter {
+    pub request_id: String,
+    pub session_id: String,
+    pub workflow_id: Option<String>,
+    pub task_id: Option<String>,
+}
+
 impl GatewayStore {
+    /// Register `session_id` as a waiter that joined pending approval
+    /// `request_id` (#723). Idempotent per `(request_id, session_id)`.
+    pub fn add_approval_waiter(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO approval_waiters
+                (request_id, session_id, workflow_id, task_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                request_id,
+                session_id,
+                workflow_id,
+                task_id,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List every session that joined pending approval `request_id`.
+    pub fn list_approval_waiters(&self, request_id: &str) -> Result<Vec<ApprovalWaiter>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id, session_id, workflow_id, task_id
+             FROM approval_waiters WHERE request_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![request_id], |row| {
+            Ok(ApprovalWaiter {
+                request_id: row.get(0)?,
+                session_id: row.get(1)?,
+                workflow_id: row.get(2)?,
+                task_id: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Remove all waiter rows for `request_id` (called once it resolves).
+    pub fn clear_approval_waiters(&self, request_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM approval_waiters WHERE request_id = ?1",
+            params![request_id],
+        )?;
+        Ok(())
+    }
+
+    /// Surface an `approval_flood` cap trip to the operator as an Attention
+    /// timeline event on the root session (#723) so it reads as a triage item
+    /// rather than only as the agent's tool failure.
+    fn emit_approval_flood_alert(&self, root_session_id: &str, pending_count: i64, cap: usize) {
+        if root_session_id.is_empty() {
+            return;
+        }
+        let principal = autonoetic_types::principal::Principal::agent("gateway");
+        let seat = crate::runtime::session_timeline::derive_role("gateway");
+        let event = crate::runtime::session_timeline::build_timeline_event(
+            root_session_id.to_string(),
+            root_session_id.to_string(),
+            None,
+            &principal,
+            &seat,
+            "operator_alert",
+            None, // base altitude ⇒ Attention
+            Some(serde_json::json!({
+                "alert": "approval_flood",
+                "pending_count": pending_count,
+                "cap": cap,
+                "message": format!(
+                    "Approval intake suspended: {} pending approvals at cap {}. \
+                     Resolve some with `autonoetic gateway pending --root-session {}`.",
+                    pending_count, cap, root_session_id
+                ),
+            })),
+            autonoetic_types::session_timeline::TimelineRefs::default(),
+        );
+        if let Err(e) = self.create_live_digest_event(&event) {
+            tracing::debug!(
+                target: "session_timeline",
+                error = %e,
+                "approval_flood alert timeline emit failed"
+            );
+        }
+    }
+
     pub fn create_approval(&self, request: &mut ApprovalRequest) -> Result<()> {
         crate::scheduler::approval_hardening::enrich_request(request, self.config().as_deref());
         let conn = self.conn.lock().unwrap();
@@ -22,9 +127,14 @@ impl GatewayStore {
                     |row| row.get(0),
                 )?;
                 if (pending_count as usize) >= cap {
+                    let root = root_session_id.clone();
+                    // Release the connection before emitting the alert (the
+                    // timeline write re-acquires it) and before bailing.
+                    drop(conn);
+                    self.emit_approval_flood_alert(&root, pending_count, cap);
                     anyhow::bail!(
                         "approval_flood: root session '{}' already has {} pending approvals (cap {})",
-                        root_session_id,
+                        root,
                         pending_count,
                         cap
                     );

@@ -489,7 +489,113 @@ pub fn apply_decision(
     // ── 7. Unblock workflow task ──────────────────────────────────────
     unblock_task_on_approval(config, Some(store), decision);
 
+    // ── 7b. #723 fan-in: resume sibling waiters that joined this approval ──
+    fan_in_approval_waiters(config, store, decision);
+
     Ok(())
+}
+
+/// #723: when an approval resolves, apply the same status transition to every
+/// sibling task that joined it as a waiter (root-scoped, identical-action
+/// dedup), then clear the waiter rows. Runs independently of the primary
+/// approval's own task binding.
+fn fan_in_approval_waiters(
+    config: &GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    decision: &ApprovalDecision,
+) {
+    use autonoetic_types::workflow::TaskRunStatus;
+
+    let new_status = match decision.status {
+        ApprovalStatus::Approved => TaskRunStatus::Runnable,
+        ApprovalStatus::Rejected | ApprovalStatus::Cancelled => TaskRunStatus::Failed,
+        ApprovalStatus::Stale => return,
+    };
+
+    let waiters = match store.list_approval_waiters(&decision.request_id) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                error = %e,
+                "failed to list approval waiters for fan-in (#723)"
+            );
+            return;
+        }
+    };
+    if waiters.is_empty() {
+        return;
+    }
+
+    let continuation_payload = serde_json::json!({
+        "approval_resolved": true,
+        "request_id": decision.request_id,
+        "status": if decision.status == ApprovalStatus::Approved { "approved" } else { "rejected" },
+        "joined_waiter": true,
+    });
+
+    for w in &waiters {
+        let (Some(w_wf), Some(w_task)) = (w.workflow_id.as_deref(), w.task_id.as_deref()) else {
+            continue;
+        };
+        // Idempotency: don't overwrite a waiter task that already reached a
+        // terminal state (e.g. its own timeout marked it Stale/Failed).
+        if let Ok(Some(existing)) =
+            super::workflow_store::load_task_run(config, Some(store), w_wf, w_task)
+        {
+            if matches!(
+                existing.status,
+                TaskRunStatus::Failed
+                    | TaskRunStatus::Cancelled
+                    | TaskRunStatus::Succeeded
+                    | TaskRunStatus::Aborted
+            ) {
+                continue;
+            }
+        }
+        let summary = match (new_status, &decision.reason) {
+            (TaskRunStatus::Failed, Some(r)) => Some(format!("approval_rejected: {}", r)),
+            _ => None,
+        };
+        if let Err(e) = super::workflow_store::update_task_run_status(
+            config,
+            Some(store),
+            w_wf,
+            w_task,
+            new_status,
+            summary,
+            None,
+            None,
+        ) {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                workflow_id = %w_wf,
+                task_id = %w_task,
+                error = %e,
+                "failed to fan-in approval waiter (#723)"
+            );
+            continue;
+        }
+        let _ = super::workflow_store::checkpoint_task(
+            config,
+            Some(store),
+            w_wf,
+            w_task,
+            "approval_resolved".to_string(),
+            continuation_payload.clone(),
+        );
+    }
+
+    if let Err(e) = store.clear_approval_waiters(&decision.request_id) {
+        tracing::debug!(
+            target: "approval",
+            request_id = %decision.request_id,
+            error = %e,
+            "failed to clear approval waiters after fan-in (#723)"
+        );
+    }
 }
 
 /// Write approval resolution signal to the GatewayStore for scheduler delivery.
