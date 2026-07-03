@@ -388,7 +388,12 @@ pub async fn answer_and_orchestrate_resume(
 
     let default_follow = "[operator] User answered the pending question via interaction.answer.";
     let resume_result = execution
-        .resume_from_user_interaction(&params.interaction_id, follow.or(Some(default_follow)))
+        .resume_session(
+            crate::execution::ResumeTrigger::InteractionAnswered {
+                interaction_id: params.interaction_id.clone(),
+            },
+            follow.or(Some(default_follow)),
+        )
         .await;
 
     if let Err(e) = resume_result {

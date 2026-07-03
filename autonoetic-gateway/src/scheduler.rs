@@ -1203,8 +1203,10 @@ async fn resume_answered_standalone_interactions(
         let interaction_id = interaction.interaction_id.clone();
         tokio::spawn(async move {
             let result = exec
-                .resume_from_user_interaction(
-                    &interaction_id,
+                .resume_session(
+                    crate::execution::ResumeTrigger::InteractionAnswered {
+                        interaction_id: interaction_id.clone(),
+                    },
                     Some("[scheduler] User answered the pending question; resuming from gateway tick."),
                 )
                 .await;
