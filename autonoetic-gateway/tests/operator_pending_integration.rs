@@ -98,6 +98,7 @@ fn seed_escalation(store: &GatewayStore, created_at: &str) {
         code_excerpts: None,
         escalation_type: EscalationType::default(),
         approval_request_id: None,
+        expires_at: None,
     };
     store.create_escalation(&esc).unwrap();
 }
@@ -120,6 +121,7 @@ fn seed_plan(store: &GatewayStore, created_at: &str) {
         created_by_agent_id: "planner.default".to_string(),
         reason: None,
         created_at: created_at.to_string(),
+        expires_at: None,
     };
     store.save_plan_frame(&plan).unwrap();
 }
@@ -202,6 +204,7 @@ fn escalation_fallback_uses_type_not_hardcoded_promotion() {
         code_excerpts: None,
         escalation_type: EscalationType::SealedEvalInquiry,
         approval_request_id: None,
+        expires_at: None,
     };
     store.create_escalation(&esc).unwrap();
 
@@ -333,4 +336,246 @@ fn stale_approvals_and_expired_interactions_are_included_and_flagged() {
     assert_eq!(interaction.kind, PendingKind::Interaction);
     assert!(interaction.is_expired);
     assert!(interaction.summary.contains("expired"));
+}
+
+#[test]
+fn stale_escalations_are_included_and_flagged() {
+    let (_dir, store) = store();
+
+    // Seed an escalation whose TTL already passed.
+    let esc = EscalationMessage {
+        escalation_id: "esc_stale".to_string(),
+        artifact_id: "art_stale".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-stale".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Promotion review: needs operator decision.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: None,
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.create_escalation(&esc).unwrap();
+    let expired = store.expire_timed_out_escalations().unwrap();
+    assert_eq!(expired, vec!["esc_stale"]);
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+
+    let escalation = &pending[0];
+    assert_eq!(escalation.kind, PendingKind::Escalation);
+    assert!(escalation.is_expired);
+    assert!(escalation.summary.contains("stale"));
+    assert_eq!(escalation.id, "esc_stale");
+}
+
+#[test]
+fn stale_plan_frames_are_included_and_flagged() {
+    let (_dir, store) = store();
+
+    // Seed a plan frame whose TTL already passed.
+    let plan = PlanFrame {
+        plan_id: "plan-stale".to_string(),
+        version: 1,
+        parent_version: None,
+        workflow_id: "wf-stale".to_string(),
+        root_session_id: ROOT.to_string(),
+        title: "Stale plan".to_string(),
+        objective: "This plan expired".to_string(),
+        status: PlanStatus::AwaitingApproval,
+        steps: vec![],
+        validation_policy: Default::default(),
+        capability_envelope: vec![],
+        approved_by: None,
+        approved_at: None,
+        created_by_agent_id: "planner.default".to_string(),
+        reason: None,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.save_plan_frame(&plan).unwrap();
+    let expired = store.expire_timed_out_plan_frames().unwrap();
+    assert_eq!(expired, vec![("plan-stale".to_string(), 1)]);
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+
+    let plan = &pending[0];
+    assert_eq!(plan.kind, PendingKind::Plan);
+    assert!(plan.is_expired);
+    assert!(plan.summary.contains("stale"));
+    assert_eq!(plan.id, "plan-stale");
+}
+
+#[test]
+fn stale_escalation_is_still_resolvable() {
+    let (_dir, store) = store();
+
+    let esc = EscalationMessage {
+        escalation_id: "esc_resolvable".to_string(),
+        artifact_id: "art_resolvable".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-resolvable".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Needs decision.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: None,
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.create_escalation(&esc).unwrap();
+    store.expire_timed_out_escalations().unwrap();
+
+    // Stale escalation can still be resolved.
+    let result = store.resolve_escalation(
+        "esc_resolvable",
+        EscalationStatus::Approved,
+        "operator",
+        Some("late approval"),
+    );
+    assert!(result.is_ok(), "stale escalation must be resolvable");
+
+    // After resolution, it drops out of the pending queue.
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert!(
+        pending.is_empty(),
+        "resolved escalation should not appear in pending"
+    );
+}
+
+#[test]
+fn projection_escalations_with_approval_request_id_are_deduped() {
+    // #739 Part C item 1: a federation promotion review is a projection of an
+    // approval row (carries `approval_request_id`). It must NOT appear a second
+    // time in operator.pending under the Escalation kind — the approval row
+    // already lists it.
+    let (_dir, store) = store();
+
+    // The approval row (the source of truth).
+    let mut app = ApprovalRequest {
+        request_id: "apr-proj".to_string(),
+        agent_id: "coder.default".to_string(),
+        session_id: ROOT.to_string(),
+        action: ScheduledAction::WebFetch {
+            url: "https://example.org/promo".to_string(),
+            timeout_secs: None,
+            max_chars: None,
+            detected_hosts: Some(vec!["example.org".to_string()]),
+            payload: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        reason: None,
+        evidence_ref: None,
+        workflow_id: None,
+        task_id: None,
+        root_session_id: Some(ROOT.to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut app).unwrap();
+
+    // The escalation projection linked to the same approval.
+    let esc = EscalationMessage {
+        escalation_id: "esc_proj".to_string(),
+        artifact_id: "art_proj".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-proj".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Promotion review projection.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: Some("apr-proj".to_string()),
+        expires_at: None,
+    };
+    store.create_escalation(&esc).unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+
+    // Exactly one entry — the approval. The projection must not duplicate it.
+    assert_eq!(
+        pending.len(),
+        1,
+        "escalation projection must be deduped against its linked approval"
+    );
+    assert_eq!(pending[0].kind, PendingKind::Approval);
+    assert_eq!(pending[0].id, "apr-proj");
+
+    // And no Escalation-kind entry at all.
+    assert!(
+        pending.iter().all(|p| p.kind != PendingKind::Escalation),
+        "projection escalation leaked into the queue"
+    );
+}
+
+#[test]
+fn stale_projection_escalations_are_also_deduped() {
+    // Same dedup must hold for the stale section (3b) — a stale projection
+    // must not resurface as a second entry next to its (possibly stale) approval.
+    let (_dir, store) = store();
+
+    let esc = EscalationMessage {
+        escalation_id: "esc_stale_proj".to_string(),
+        artifact_id: "art_stale_proj".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-stale-proj".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Stale promotion review projection.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: Some("apr-stale-proj".to_string()),
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.create_escalation(&esc).unwrap();
+    store.expire_timed_out_escalations().unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+
+    // No linked approval exists in this fixture (we only seed the projection),
+    // but the projection itself must still be skipped — the operator resolves
+    // via the approval path, not the projection row.
+    assert!(
+        pending.is_empty(),
+        "stale projection escalation must not appear without its linked approval"
+    );
 }

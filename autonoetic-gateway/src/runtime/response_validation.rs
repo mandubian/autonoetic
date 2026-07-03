@@ -2518,6 +2518,7 @@ mod tests {
             created_by_agent_id: "agent".into(),
             reason: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
         };
         store.save_plan_frame(&plan).unwrap();
 

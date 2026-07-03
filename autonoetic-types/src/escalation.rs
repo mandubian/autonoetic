@@ -64,6 +64,8 @@ pub enum EscalationStatus {
     Rejected,
     /// Cancelled by emergency stop or session lifecycle — not reviewed.
     Cancelled,
+    /// TTL expired — still resolvable by the operator, but past the configured window.
+    Stale,
 }
 
 impl EscalationStatus {
@@ -73,6 +75,7 @@ impl EscalationStatus {
             EscalationStatus::Approved => "approved",
             EscalationStatus::Rejected => "rejected",
             EscalationStatus::Cancelled => "cancelled",
+            EscalationStatus::Stale => "stale",
         }
     }
 
@@ -82,6 +85,7 @@ impl EscalationStatus {
             "approved" => Some(EscalationStatus::Approved),
             "rejected" => Some(EscalationStatus::Rejected),
             "cancelled" => Some(EscalationStatus::Cancelled),
+            "stale" => Some(EscalationStatus::Stale),
             _ => None,
         }
     }
@@ -136,6 +140,11 @@ pub struct EscalationMessage {
     /// approval, and vice versa.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_request_id: Option<String>,
+    /// Optional expiry timestamp (ISO 8601). When set and `status` is
+    /// `Pending`, the scheduler marks this escalation `Stale` once the
+    /// timestamp passes. Stale escalations remain resolvable by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 impl EscalationMessage {
@@ -165,6 +174,7 @@ impl EscalationMessage {
             code_excerpts: None,
             escalation_type: EscalationType::default(),
             approval_request_id: None,
+            expires_at: None,
         }
     }
 }

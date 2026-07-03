@@ -179,8 +179,17 @@ pub fn collect_pending_for_root(
     // 3. Escalations (guidance requests + federation promotion reviews). The
     //    store lists them globally; filter to this root in-memory (Stage 1 —
     //    a root-scoped store query is a fast-follow if this proves hot).
+    //
+    //    #739 Part C item 1: skip escalations carrying an
+    //    `approval_request_id` — they are projections of an approval row
+    //    already listed in section 1. Without this filter a federation
+    //    promotion review (post-#735: approval row + escalation projection)
+    //    appears twice in the unified queue.
     for e in store.list_pending_escalations()? {
         if e.root_session_id != root_session_id {
+            continue;
+        }
+        if e.approval_request_id.is_some() {
             continue;
         }
         let summary = if e.planner_synthesis.trim().is_empty() {
@@ -210,6 +219,39 @@ pub fn collect_pending_for_root(
         });
     }
 
+    // 3b. Stale escalations — still resolvable, but the operator missed the TTL window.
+    //     Same projection dedup as section 3 (#739 Part C item 1).
+    for e in store.get_stale_escalations_for_root(root_session_id)? {
+        if e.approval_request_id.is_some() {
+            continue;
+        }
+        let summary = if e.planner_synthesis.trim().is_empty() {
+            format!(
+                "{}: {} rev {} (stale)",
+                e.escalation_type.as_str().replace('_', " "),
+                e.agent_id,
+                e.revision_id
+            )
+        } else {
+            format!("{} (stale)", e.planner_synthesis)
+        };
+        out.push(PendingDecision {
+            kind: PendingKind::Escalation,
+            answer: AnswerHint {
+                method: "admin.escalation_resolve".to_string(),
+                params: serde_json::json!({ "escalation_id": e.escalation_id }),
+            },
+            age_secs: age_secs(&e.created_at, now),
+            is_expired: true,
+            id: e.escalation_id,
+            root_session_id: Some(e.root_session_id),
+            agent_id: e.agent_id,
+            workflow_id: None,
+            created_at: e.created_at,
+            summary,
+        });
+    }
+
     // 4. Plan frames awaiting approval.
     for p in store.list_pending_plan_frames_for_root(root_session_id)? {
         out.push(PendingDecision {
@@ -226,6 +268,25 @@ pub fn collect_pending_for_root(
             workflow_id: Some(p.workflow_id),
             created_at: p.created_at,
             summary: p.title,
+        });
+    }
+
+    // 4b. Stale plan frames — still resolvable, but past the TTL window.
+    for p in store.get_stale_plan_frames_for_root(root_session_id)? {
+        out.push(PendingDecision {
+            kind: PendingKind::Plan,
+            answer: AnswerHint {
+                method: "planframes.approve".to_string(),
+                params: serde_json::json!({ "plan_id": p.plan_id }),
+            },
+            age_secs: age_secs(&p.created_at, now),
+            is_expired: true,
+            id: p.plan_id,
+            root_session_id: Some(p.root_session_id),
+            agent_id: p.created_by_agent_id,
+            workflow_id: Some(p.workflow_id),
+            created_at: p.created_at,
+            summary: format!("{} (stale)", p.title),
         });
     }
 

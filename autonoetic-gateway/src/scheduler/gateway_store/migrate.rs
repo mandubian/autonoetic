@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 62;
+const SCHEMA_VERSION_LATEST: i64 = 63;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -547,6 +547,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_approval_expires_at_v60(conn)?;
     apply_approval_waiters_v61(conn)?;
     apply_escalation_approval_request_id_v62(conn)?;
+    apply_escalation_plan_frame_expiry_v63(conn)?;
 
     Ok(())
 }
@@ -601,6 +602,28 @@ fn apply_escalation_approval_request_id_v62(conn: &mut Connection) -> Result<()>
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![62, "escalation_approval_request_id", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_escalation_plan_frame_expiry_v63(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 63 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE escalations ADD COLUMN expires_at TEXT;
+         ALTER TABLE plan_frames ADD COLUMN expires_at TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![63, "escalation_plan_frame_expiry", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

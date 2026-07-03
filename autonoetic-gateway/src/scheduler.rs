@@ -271,6 +271,12 @@ async fn run_scheduler_tick_at(
         if let Err(e) = store.expire_timed_out_interactions() {
             tracing::warn!(error = %e, "Failed to expire timed-out interactions");
         }
+        if let Err(e) = store.expire_timed_out_escalations() {
+            tracing::warn!(error = %e, "Failed to expire timed-out escalations");
+        }
+        if let Err(e) = store.expire_timed_out_plan_frames() {
+            tracing::warn!(error = %e, "Failed to expire timed-out plan frames");
+        }
     }
 
     // Wiki proposal auto-expiry: cancel proposals older than configured TTL.
