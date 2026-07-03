@@ -459,3 +459,123 @@ fn stale_escalation_is_still_resolvable() {
         "resolved escalation should not appear in pending"
     );
 }
+
+#[test]
+fn projection_escalations_with_approval_request_id_are_deduped() {
+    // #739 Part C item 1: a federation promotion review is a projection of an
+    // approval row (carries `approval_request_id`). It must NOT appear a second
+    // time in operator.pending under the Escalation kind — the approval row
+    // already lists it.
+    let (_dir, store) = store();
+
+    // The approval row (the source of truth).
+    let mut app = ApprovalRequest {
+        request_id: "apr-proj".to_string(),
+        agent_id: "coder.default".to_string(),
+        session_id: ROOT.to_string(),
+        action: ScheduledAction::WebFetch {
+            url: "https://example.org/promo".to_string(),
+            timeout_secs: None,
+            max_chars: None,
+            detected_hosts: Some(vec!["example.org".to_string()]),
+            payload: None,
+        },
+        approval_level: ApprovalLevel::Operator,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        reason: None,
+        evidence_ref: None,
+        workflow_id: None,
+        task_id: None,
+        root_session_id: Some(ROOT.to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut app).unwrap();
+
+    // The escalation projection linked to the same approval.
+    let esc = EscalationMessage {
+        escalation_id: "esc_proj".to_string(),
+        artifact_id: "art_proj".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-proj".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Promotion review projection.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: Some("apr-proj".to_string()),
+        expires_at: None,
+    };
+    store.create_escalation(&esc).unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+
+    // Exactly one entry — the approval. The projection must not duplicate it.
+    assert_eq!(
+        pending.len(),
+        1,
+        "escalation projection must be deduped against its linked approval"
+    );
+    assert_eq!(pending[0].kind, PendingKind::Approval);
+    assert_eq!(pending[0].id, "apr-proj");
+
+    // And no Escalation-kind entry at all.
+    assert!(
+        pending.iter().all(|p| p.kind != PendingKind::Escalation),
+        "projection escalation leaked into the queue"
+    );
+}
+
+#[test]
+fn stale_projection_escalations_are_also_deduped() {
+    // Same dedup must hold for the stale section (3b) — a stale projection
+    // must not resurface as a second entry next to its (possibly stale) approval.
+    let (_dir, store) = store();
+
+    let esc = EscalationMessage {
+        escalation_id: "esc_stale_proj".to_string(),
+        artifact_id: "art_stale_proj".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-stale-proj".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Stale promotion review projection.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: Some("apr-stale-proj".to_string()),
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.create_escalation(&esc).unwrap();
+    store.expire_timed_out_escalations().unwrap();
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+
+    // No linked approval exists in this fixture (we only seed the projection),
+    // but the projection itself must still be skipped — the operator resolves
+    // via the approval path, not the projection row.
+    assert!(
+        pending.is_empty(),
+        "stale projection escalation must not appear without its linked approval"
+    );
+}

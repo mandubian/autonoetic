@@ -179,8 +179,17 @@ pub fn collect_pending_for_root(
     // 3. Escalations (guidance requests + federation promotion reviews). The
     //    store lists them globally; filter to this root in-memory (Stage 1 —
     //    a root-scoped store query is a fast-follow if this proves hot).
+    //
+    //    #739 Part C item 1: skip escalations carrying an
+    //    `approval_request_id` — they are projections of an approval row
+    //    already listed in section 1. Without this filter a federation
+    //    promotion review (post-#735: approval row + escalation projection)
+    //    appears twice in the unified queue.
     for e in store.list_pending_escalations()? {
         if e.root_session_id != root_session_id {
+            continue;
+        }
+        if e.approval_request_id.is_some() {
             continue;
         }
         let summary = if e.planner_synthesis.trim().is_empty() {
@@ -211,7 +220,11 @@ pub fn collect_pending_for_root(
     }
 
     // 3b. Stale escalations — still resolvable, but the operator missed the TTL window.
+    //     Same projection dedup as section 3 (#739 Part C item 1).
     for e in store.get_stale_escalations_for_root(root_session_id)? {
+        if e.approval_request_id.is_some() {
+            continue;
+        }
         let summary = if e.planner_synthesis.trim().is_empty() {
             format!(
                 "{}: {} rev {} (stale)",

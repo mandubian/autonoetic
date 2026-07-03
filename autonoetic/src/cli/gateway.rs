@@ -2898,25 +2898,69 @@ pub async fn handle_gateway_escalations(
             if !approve && !reject {
                 anyhow::bail!("Specify --approve or --reject");
             }
+            let escalation = gateway_store
+                .get_escalation(escalation_id)?
+                .ok_or_else(|| anyhow::anyhow!("Escalation '{}' not found", escalation_id))?;
+
+            // #739 Part C item 2: when an escalation is a *projection* of an
+            // approval row (post-#735 federation promotion reviews carry
+            // `approval_request_id`), resolve the **approval** as the source of
+            // truth — resolving only the escalation row would orphan the
+            // linked approval (the bidirectional hazard #735/#744 removed).
+            // The approval path fans out to the escalation projection itself.
+            // `hook_executor = None`: a CLI invocation has no live gateway to
+            // fire hooks; the running gateway re-derives state on its own ticks.
+            if let Some(request_id) = escalation.approval_request_id.as_deref() {
+                let approved = *approve;
+                let result = if approved {
+                    autonoetic_gateway::scheduler::approval::approve_request(
+                        &config,
+                        Some(&gateway_store),
+                        request_id,
+                        "cli",
+                        reason.clone(),
+                        None,
+                        None,
+                        None,
+                    )
+                } else {
+                    autonoetic_gateway::scheduler::approval::reject_request(
+                        &config,
+                        Some(&gateway_store),
+                        request_id,
+                        "cli",
+                        reason.clone(),
+                        None,
+                    )
+                };
+                result?;
+                println!(
+                    "Escalation {} resolved as {} via linked approval {} \
+                     (escalation projection resolved by the approval path)",
+                    escalation_id,
+                    if approved { "approved" } else { "rejected" },
+                    request_id,
+                );
+                return Ok(());
+            }
+
+            // Standalone escalation (e.g. guidance request without an approval
+            // link): resolve the escalation row directly.
             let status = if *approve {
                 autonoetic_types::escalation::EscalationStatus::Approved
             } else {
                 autonoetic_types::escalation::EscalationStatus::Rejected
             };
-            let approval_request_id = gateway_store.resolve_escalation(
+            gateway_store.resolve_escalation(
                 escalation_id,
                 status,
                 "cli",
                 reason.as_deref(),
             )?;
             println!(
-                "Escalation {} resolved as {}{}",
+                "Escalation {} resolved as {}",
                 escalation_id,
                 status.as_str(),
-                approval_request_id
-                    .as_deref()
-                    .map(|id| format!(" (linked approval: {})", id))
-                    .unwrap_or_default(),
             );
         }
     }
