@@ -437,6 +437,7 @@ impl NativeTool for CredentialRequestTool {
                         approval_ref: None,
                         pre_validated: false,
                         cache_backfill: None,
+                        request_id: None,
                         turn_id: None,
                     },
                 )?;
@@ -538,6 +539,7 @@ impl NativeTool for CredentialRequestTool {
                     approval_ref: None,
                     pre_validated: false,
                     cache_backfill: None,
+                    request_id: None,
                     turn_id: None,
                 },
             )?;
@@ -1697,6 +1699,7 @@ impl NativeTool for CredentialSetupTool {
                                     approval_ref: None,
                                     pre_validated: false,
                                     cache_backfill: None,
+                        request_id: None,
                         turn_id: None,
                                 },
                             )?;
@@ -2013,6 +2016,7 @@ impl NativeTool for CredentialSetupTool {
                                 approval_ref: None,
                                 pre_validated: false,
                                 cache_backfill: None,
+                        request_id: None,
                         turn_id: None,
                             },
                         )?;

@@ -344,6 +344,7 @@ impl NativeTool for WikiProposeTool {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 

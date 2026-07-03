@@ -3134,6 +3134,7 @@ do not re-issue."
                     )),
                     summary: approval_message.clone(),
                     approval_ref: args.approval_ref.as_deref(),
+                    request_id: None,
                     pre_validated: false,
                     cache_backfill: None,
                     turn_id,

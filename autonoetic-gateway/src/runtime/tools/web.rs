@@ -924,6 +924,7 @@ impl NativeTool for WebSearchTool {
                     approval_ref: None,
                     pre_validated: false,
                     cache_backfill: None,
+                    request_id: None,
                     turn_id: None,
                 },
             )?;
@@ -1328,6 +1329,7 @@ fn gate_web_fetch_host(
         approval_ref: None,
         pre_validated: false,
         cache_backfill: None,
+        request_id: None,
         turn_id: None,
     })?;
     match gate_result {
@@ -1961,6 +1963,7 @@ impl NativeTool for WebCallTool {
                     approval_ref: None,
                     pre_validated: false,
                     cache_backfill: None,
+                    request_id: None,
                     turn_id: None,
                 },
             )?;

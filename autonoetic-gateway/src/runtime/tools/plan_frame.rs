@@ -253,51 +253,83 @@ fn supersede_pending_plan_revision(
     }
 }
 
-/// Create the canonical `ApprovalRequest` for a plan revision.
+/// Outcome of gating a plan revision through `GateService`.
+#[derive(Debug)]
+enum PlanGateOutcome {
+    /// Approval row exists or was created; the plan stays awaiting approval.
+    Pending,
+    /// The gate cleared immediately (existing approval, session grant, or policy);
+    /// the caller should mark the plan approved.
+    Approved,
+}
+
+/// Create the canonical `ApprovalRequest` for a plan revision via `GateService`.
 /// The approval row lives in the standard `approvals` table; the plan content
 /// remains in `plan_frames`.
 fn create_plan_approval_request(
-    store: &crate::scheduler::gateway_store::GatewayStore,
+    store: std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
     plan: &PlanFrame,
     manifest: &AgentManifest,
     session_id: &str,
-) -> anyhow::Result<String> {
-    use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
-    let request_id = plan_approval_request_id(&plan.plan_id, plan.version);
-    let root_session_id = session_id
-        .split('/')
-        .next()
-        .unwrap_or(session_id)
-        .to_string();
-    let mut req = ApprovalRequest {
-        request_id: request_id.clone(),
-        agent_id: manifest.agent.id.clone(),
-        session_id: session_id.to_string(),
-        action: ScheduledAction::PlanFrame {
-            plan_id: plan.plan_id.clone(),
-            version: plan.version,
-            envelope: plan.capability_envelope.clone(),
-        },
-        created_at: now_rfc3339(),
-        reason: plan.reason.clone(),
-        evidence_ref: None,
-        root_session_id: Some(root_session_id),
-        workflow_id: Some(plan.workflow_id.clone()),
-        task_id: None,
-        status: None,
-        decided_at: None,
-        decided_by: None,
-        decision_reason: None,
-        approval_level: ApprovalLevel::Operator,
-        min_dwell_ms: None,
-        confirm_phrase: None,
-        code_excerpts: None,
-        risk_summary: None,
-
-        expires_at: None,
+    config: &GatewayConfig,
+    turn_id: Option<&str>,
+) -> anyhow::Result<PlanGateOutcome> {
+    use crate::runtime::human_gate::{
+        DecisionContext, GateKind, GateRequest, GateResult, GateService, MatchStrategy,
     };
-    store.create_approval(&mut req)?;
-    Ok(request_id)
+    use autonoetic_types::background::ScheduledAction;
+
+    let request_id = plan_approval_request_id(&plan.plan_id, plan.version);
+    let action = ScheduledAction::PlanFrame {
+        plan_id: plan.plan_id.clone(),
+        version: plan.version,
+        envelope: plan.capability_envelope.clone(),
+    };
+
+    let gate_service = GateService::new(store);
+    let gate_req = GateRequest {
+        kind: GateKind::Approval {
+            action: action.clone(),
+            targets: Vec::new(),
+            match_strategy: MatchStrategy::ExactPayload,
+        },
+        manifest,
+        session_id: Some(session_id),
+        run_context: None,
+        config: Some(config),
+        context: DecisionContext::tier2(
+            format!("Plan '{}' version {}", plan.plan_id, plan.version),
+            "Plan frame proposed or amended",
+            format!(
+                "Capability envelope with {} item(s). Approving materializes grants.",
+                plan.capability_envelope.len()
+            ),
+            "Approve if the plan steps and capability envelope are acceptable; reject if not",
+        ),
+        summary: format!("Plan {} v{} approval", plan.plan_id, plan.version),
+        approval_ref: None,
+        request_id: Some(&request_id),
+        pre_validated: false,
+        cache_backfill: None,
+        turn_id,
+    };
+
+    match gate_service.check(gate_req)? {
+        GateResult::AlreadyPending { .. } | GateResult::Suspended { .. } => {
+            Ok(PlanGateOutcome::Pending)
+        }
+        GateResult::Cleared { source, .. } => {
+            tracing::info!(
+                target: "plan_frame",
+                plan_id = %plan.plan_id,
+                version = plan.version,
+                source = ?source,
+                "Plan approval gate cleared via GateService"
+            );
+            Ok(PlanGateOutcome::Approved)
+        }
+        GateResult::PolicyAllowed => Ok(PlanGateOutcome::Approved),
+    }
 }
 
 pub struct PlanFrameProposeTool;
@@ -525,7 +557,7 @@ impl NativeTool for PlanFrameProposeTool {
             .to_error_response());
         }
 
-        let plan = PlanFrame {
+        let mut plan = PlanFrame {
             plan_id: plan_id.clone(),
             version: 1,
             parent_version: None,
@@ -548,13 +580,36 @@ impl NativeTool for PlanFrameProposeTool {
 
         // Unify plan approval with the standard ApprovalRequest system (#565).
         // The plan content stays in `plan_frames`; the gate lives in `approvals`.
-        if let Err(e) = create_plan_approval_request(&store, &plan, manifest, session_id) {
-            tracing::warn!(
-                target: "plan_frame",
-                error = %e,
-                plan_id = %plan.plan_id,
-                "failed to create plan approval request"
-            );
+        match create_plan_approval_request(
+            store.clone(),
+            &plan,
+            manifest,
+            session_id,
+            config,
+            _turn_id,
+        ) {
+            Ok(PlanGateOutcome::Approved) => {
+                plan.status = PlanStatus::Approved;
+                plan.approved_by = Some("gate_service".to_string());
+                plan.approved_at = Some(now_rfc3339());
+                if let Err(e) = store.save_plan_frame(&plan) {
+                    tracing::warn!(
+                        target: "plan_frame",
+                        error = %e,
+                        plan_id = %plan.plan_id,
+                        "failed to mark gate-cleared plan as approved"
+                    );
+                }
+            }
+            Ok(PlanGateOutcome::Pending) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "plan_frame",
+                    error = %e,
+                    plan_id = %plan.plan_id,
+                    "failed to create plan approval request"
+                );
+            }
         }
 
         // Canonical timeline: a plan proposal is an `attention` gate (#363 P1).
@@ -1214,6 +1269,15 @@ impl NativeTool for PlanFrameAmendTool {
             .to_error_response());
         };
 
+        let Some(config) = config else {
+            return Ok(ToolError::execution(
+                "Gateway config not available",
+                Some("Ensure the gateway configuration is loaded and valid."),
+            )
+            .with_code("gateway_config_unavailable")
+            .to_error_response());
+        };
+
         let Some(current) = store.load_plan_frame(&args.plan_id)? else {
             return Ok(ToolError::not_found(
                 "Plan",
@@ -1435,16 +1499,39 @@ impl NativeTool for PlanFrameAmendTool {
                     &manifest.agent.id,
                 );
             }
-            if let Err(e) =
-                create_plan_approval_request(&store, &new_revision, manifest, session_id)
-            {
-                tracing::warn!(
-                    target: "plan_frame",
-                    error = %e,
-                    plan_id = %new_revision.plan_id,
-                    version = %new_revision.version,
-                    "failed to create plan approval request after amend"
-                );
+            let mut new_revision = new_revision.clone();
+            match create_plan_approval_request(
+                store.clone(),
+                &new_revision,
+                manifest,
+                session_id,
+                config,
+                _turn_id,
+            ) {
+                Ok(PlanGateOutcome::Approved) => {
+                    new_revision.status = PlanStatus::Approved;
+                    new_revision.approved_by = Some("gate_service".to_string());
+                    new_revision.approved_at = Some(now_rfc3339());
+                    if let Err(e) = store.save_plan_frame(&new_revision) {
+                        tracing::warn!(
+                            target: "plan_frame",
+                            error = %e,
+                            plan_id = %new_revision.plan_id,
+                            version = %new_revision.version,
+                            "failed to mark gate-cleared amended plan as approved"
+                        );
+                    }
+                }
+                Ok(PlanGateOutcome::Pending) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "plan_frame",
+                        error = %e,
+                        plan_id = %new_revision.plan_id,
+                        version = %new_revision.version,
+                        "failed to create plan approval request after amend"
+                    );
+                }
             }
         }
 
@@ -1543,46 +1630,44 @@ impl NativeTool for PlanFrameAmendTool {
             }
         }
 
-        if let Some(config) = config {
-            let wf = crate::scheduler::workflow_store::load_workflow_run(
-                config,
-                Some(&store),
-                &current.workflow_id,
-            )?;
-            if let Some(mut wf) = wf {
-                wf.active_plan_ref = Some(PlanRef {
-                    plan_id: current.plan_id.clone(),
-                    version: new_version,
-                });
-                wf.updated_at = now_rfc3339();
-                crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &wf)?;
-            }
-
-            crate::scheduler::workflow_store::append_workflow_event(
-                config,
-                Some(&store),
-                &autonoetic_types::workflow::WorkflowEventRecord {
-                    event_id: {
-                        let bytes = uuid::Uuid::new_v4();
-                        format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
-                    },
-                    workflow_id: current.workflow_id.clone(),
-                    task_id: None,
-                    event_type: "planframe.amended".to_string(),
-                    agent_id: Some(manifest.agent.id.clone()),
-                    payload: serde_json::json!({
-                        "plan_id": current.plan_id,
-                        "old_version": old_version,
-                        "new_version": new_version,
-                        "title": new_revision.title,
-                        "step_count": new_revision.steps.len(),
-                        "step_titles": new_revision.steps.iter().map(|s| s.title.clone()).collect::<Vec<_>>(),
-                        "reason": new_revision.reason,
-                    }),
-                    occurred_at: now_rfc3339(),
-                },
-            )?;
+        let wf = crate::scheduler::workflow_store::load_workflow_run(
+            config,
+            Some(&store),
+            &current.workflow_id,
+        )?;
+        if let Some(mut wf) = wf {
+            wf.active_plan_ref = Some(PlanRef {
+                plan_id: current.plan_id.clone(),
+                version: new_version,
+            });
+            wf.updated_at = now_rfc3339();
+            crate::scheduler::workflow_store::save_workflow_run(config, Some(&store), &wf)?;
         }
+
+        crate::scheduler::workflow_store::append_workflow_event(
+            config,
+            Some(&store),
+            &autonoetic_types::workflow::WorkflowEventRecord {
+                event_id: {
+                    let bytes = uuid::Uuid::new_v4();
+                    format!("evt-{}", hex::encode(&bytes.as_bytes()[..8]))
+                },
+                workflow_id: current.workflow_id.clone(),
+                task_id: None,
+                event_type: "planframe.amended".to_string(),
+                agent_id: Some(manifest.agent.id.clone()),
+                payload: serde_json::json!({
+                    "plan_id": current.plan_id,
+                    "old_version": old_version,
+                    "new_version": new_version,
+                    "title": new_revision.title,
+                    "step_count": new_revision.steps.len(),
+                    "step_titles": new_revision.steps.iter().map(|s| s.title.clone()).collect::<Vec<_>>(),
+                    "reason": new_revision.reason,
+                }),
+                occurred_at: now_rfc3339(),
+            },
+        )?;
 
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,

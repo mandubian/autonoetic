@@ -1836,6 +1836,7 @@ impl JsonRpcRouter {
                     ),
                     summary: format!("Wiki proposal: {}", params.title),
                     approval_ref: None,
+                    request_id: None,
                     pre_validated: false,
                     cache_backfill: None,
                     turn_id: params.turn_id.as_deref(),

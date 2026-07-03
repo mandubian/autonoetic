@@ -325,6 +325,7 @@ impl NativeTool for ArtifactPrepareTool {
                 approval_ref: None,
                 pre_validated,
                 cache_backfill: None,
+                request_id: None,
                 turn_id: None,
             },
         )?;

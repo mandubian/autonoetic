@@ -615,6 +615,7 @@ impl AgentExecutor {
             ),
             summary: format!("Session {} turn limit (turn {})", session_id, blocked_turn),
             approval_ref: None,
+            request_id: None,
             pre_validated: false,
             cache_backfill: None,
             turn_id: Some(turn_id),
