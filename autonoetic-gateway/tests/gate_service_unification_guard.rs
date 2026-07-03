@@ -24,7 +24,6 @@ const ALLOWLIST: &[&str] = &[
     // Pending migrations tracked by #724.
     "runtime/tools/federation.rs",       // promotion-review escalation projection (approval row routed via GateService)
     // Additional direct callers not yet classified as approval subjects.
-    "post_promotion_review.rs",
     "runtime/tools/session.rs",
     "runtime/tools/user_profile.rs",
     "scheduler/gateway_store/session_envelopes.rs",

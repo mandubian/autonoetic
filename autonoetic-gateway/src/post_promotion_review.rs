@@ -3,14 +3,20 @@
 //! For every promoted agent, periodically reviews:
 //! - Causal event trends (tool failures, authorization denials, suspensions)
 //! - Sentinel findings accumulated since the last review
-//! - Emits findings or escalations when thresholds are exceeded
+//! - Emits findings or `operator_alert` timeline events when thresholds are exceeded
+//!
+//! #739 Part C: post-promotion anomalies are **alerts** (timeline events), not
+//! actionable operator decisions. They no longer create an `escalations` row
+//! that could masquerade as a resolvable decision in `operator.pending`. If a
+//! future actionable "review rollback?" decision is needed, it should be an
+//! explicit approval, not an anomaly escalation.
 
 use std::sync::Arc;
 
 use serde::Serialize;
 
 use crate::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::escalation::{EscalationMessage, EscalationType, RoleVerdictSummary};
+use autonoetic_types::escalation::RoleVerdictSummary;
 
 /// Result of a single agent's post-promotion review.
 #[derive(Debug, Clone, Serialize)]
@@ -156,17 +162,19 @@ pub fn run_post_promotion_review(
                 .filter(|s| !s.is_empty())
                 .unwrap_or_default();
 
-            let mut escalation = EscalationMessage::new(
-                format!("ppr_{:x}", uuid::Uuid::new_v4().as_u128()),
-                artifact_id,
-                agent_id.to_string(),
-                revision_id.to_string(),
-                verdicts,
-                synthesis,
-                "system".to_string(),
+            // #739 Part C: emit an `operator_alert` timeline event instead of
+            // an actionable escalation row. The alert surfaces in the timeline
+            // (read model) without masquerading as a resolvable decision in
+            // `operator.pending`. No `escalations` row is created at all —
+            // the timeline event is the only record of the anomaly.
+            emit_post_promotion_anomaly_alert(
+                store.as_ref(),
+                agent_id,
+                revision_id,
+                &artifact_id,
+                &synthesis,
+                critical_findings.len(),
             );
-            escalation.escalation_type = EscalationType::PostPromotionAnomaly;
-            let _ = store.create_escalation(&mut escalation);
             escalated = true;
         }
 
@@ -229,5 +237,55 @@ fn get_last_review_timestamp(store: &Arc<GatewayStore>) -> anyhow::Result<String
         Ok(last)
     } else {
         Ok((chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339())
+    }
+}
+
+/// #739 Part C: emit a post-promotion anomaly as an `operator_alert` timeline
+/// event (the same shape as the #723 approval-flood alert). Anomalies are
+/// alerts — they surface in the timeline read model without masquerading as
+/// resolvable operator decisions in `operator.pending`. The `agent_id` is used
+/// as the synthetic root so the alert is attributable and discoverable.
+fn emit_post_promotion_anomaly_alert(
+    store: &GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+    artifact_id: &str,
+    synthesis: &str,
+    critical_count: usize,
+) {
+    // Attribute the alert to the agent so it is discoverable in the timeline
+    // under a stable key. Use the agent_id as the synthetic root/session.
+    let root = if agent_id.is_empty() {
+        "system".to_string()
+    } else {
+        format!("ppr:{agent_id}")
+    };
+    let principal = autonoetic_types::principal::Principal::agent("gateway");
+    let seat = crate::runtime::session_timeline::derive_role("gateway");
+    let event = crate::runtime::session_timeline::build_timeline_event(
+        root.clone(),
+        root,
+        None,
+        &principal,
+        &seat,
+        "operator_alert",
+        None, // base altitude ⇒ Attention
+        Some(serde_json::json!({
+            "alert": "post_promotion_anomaly",
+            "agent_id": agent_id,
+            "revision_id": revision_id,
+            "artifact_id": artifact_id,
+            "critical_findings": critical_count,
+            "message": synthesis,
+        })),
+        autonoetic_types::session_timeline::TimelineRefs::default(),
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(
+            target: "session_timeline",
+            error = %e,
+            agent_id,
+            "post_promotion_anomaly alert timeline emit failed"
+        );
     }
 }
