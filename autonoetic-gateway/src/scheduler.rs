@@ -969,13 +969,9 @@ pub async fn reap_orphaned_sessions(
             }
         };
         for task in tasks {
-            let is_terminal = matches!(
-                task.status,
-                autonoetic_types::workflow::TaskRunStatus::Succeeded
-                    | autonoetic_types::workflow::TaskRunStatus::Failed
-                    | autonoetic_types::workflow::TaskRunStatus::Cancelled
-                    | autonoetic_types::workflow::TaskRunStatus::Aborted
-            );
+            // The orphan reaper protects `Stale` (resumable per #722 Stage 2) by
+            // treating it as active. Use `is_terminal()` which excludes `Stale`.
+            let is_terminal = task.status.is_terminal();
             if !is_terminal && !task.session_id.is_empty() && !task.parent_session_id.is_empty() {
                 workflow_active_children.insert((task.session_id, task.parent_session_id));
             }
@@ -1079,14 +1075,7 @@ pub async fn reap_orphaned_sessions(
                 if task.session_id != child_session_id {
                     continue;
                 }
-                let is_terminal = matches!(
-                    task.status,
-                    autonoetic_types::workflow::TaskRunStatus::Succeeded
-                        | autonoetic_types::workflow::TaskRunStatus::Failed
-                        | autonoetic_types::workflow::TaskRunStatus::Cancelled
-                        | autonoetic_types::workflow::TaskRunStatus::Aborted
-                );
-                if is_terminal {
+                if task.status.is_terminal() {
                     continue;
                 }
                 let was_awaiting_approval =

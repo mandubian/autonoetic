@@ -1050,8 +1050,14 @@ impl GateService {
         targets: &[String],
         match_strategy: MatchStrategy,
     ) -> Result<Option<String>> {
+        // Use the store's held config when available (issue #740); fall back
+        // to a default for bare-store tests where no config is set.
+        let config = self
+            .store
+            .config()
+            .unwrap_or_else(|| Arc::new(autonoetic_types::config::GatewayConfig::default()));
         let pending = crate::scheduler::approval::pending_approval_requests_for_session(
-            &autonoetic_types::config::GatewayConfig::default(),
+            &config,
             Some(&self.store),
             session_id,
         )?;
@@ -1141,8 +1147,12 @@ impl GateService {
         session_id: &str,
         page_id: &str,
     ) -> Result<Option<String>> {
+        let config = self
+            .store
+            .config()
+            .unwrap_or_else(|| Arc::new(autonoetic_types::config::GatewayConfig::default()));
         let pending = crate::scheduler::approval::pending_approval_requests_for_session(
-            &autonoetic_types::config::GatewayConfig::default(),
+            &config,
             Some(&self.store),
             session_id,
         )?;

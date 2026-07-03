@@ -955,6 +955,23 @@ pub fn update_task_run_status(
 
     let previous_status = task.status;
 
+    // Issue #740: enforce transition legality at the single mutation choke
+    // point. If the transition is illegal (e.g. Succeeded -> Runnable), log
+    // with full context and refuse the mutation (return Ok-noop). This lets
+    // us delete the scattered ad-hoc guards at call sites — the store now
+    // refuses nonsense for everyone, including future callers.
+    if !previous_status.try_transition(status) {
+        tracing::warn!(
+            target: "workflow",
+            workflow_id = %workflow_id,
+            task_id = %task_id,
+            previous_status = %previous_status.as_str(),
+            attempted_status = %status.as_str(),
+            "Illegal task status transition refused; leaving task in its current state"
+        );
+        return Ok(());
+    }
+
     // Store previous status for implicit artifact creation
     let was_succeeded = task.status == TaskRunStatus::Succeeded;
     let is_now_succeeded = status == TaskRunStatus::Succeeded;
@@ -985,20 +1002,8 @@ pub fn update_task_run_status(
     // In external paths (stuck sweeper, approval timeout, cancel, force-
     // complete) this is the ONLY place the session gets finalized.
     {
-        let is_terminal = matches!(
-            status,
-            TaskRunStatus::Succeeded
-                | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled
-                | TaskRunStatus::Aborted
-        );
-        let was_non_terminal = !matches!(
-            previous_status,
-            TaskRunStatus::Succeeded
-                | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled
-                | TaskRunStatus::Aborted
-        );
+        let is_terminal = status.is_terminal();
+        let was_non_terminal = !previous_status.is_terminal();
         if is_terminal && was_non_terminal && !task.session_id.is_empty() {
             if let Some(store) = store {
                 let session_status = match status {
@@ -1245,15 +1250,10 @@ pub fn update_task_run_status(
             }
         }
 
-        // Check join condition after terminal task updates
-        let is_terminal = matches!(
-            status,
-            TaskRunStatus::Succeeded
-                | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled
-                | TaskRunStatus::Aborted
-                | TaskRunStatus::Stale
-        );
+        // Check join condition after terminal task updates.
+        // `Stale` counts as terminal-for-join (unblocks joins) but not as a
+        // session-terminal status (see #722 Stage 2 / P-2.11).
+        let is_terminal = status.is_terminal_for_join();
         let wf_not_emergency_stopped = !matches!(
             wf.status,
             WorkflowRunStatus::EmergencyStopping | WorkflowRunStatus::EmergencyStopped
@@ -1770,14 +1770,10 @@ pub fn fail_workflow_for_root_session(
     let mut failed = 0usize;
     let now = now_rfc3339();
     for mut task in tasks {
-        let is_terminal = matches!(
-            task.status,
-            TaskRunStatus::Succeeded
-                | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled
-                | TaskRunStatus::Aborted
-                | TaskRunStatus::Stale
-        );
+        // The orphan reaper protects `Stale` (resumable per #722 Stage 2) by
+        // treating it as active-and-protected. Use `is_terminal()` which
+        // excludes `Stale`.
+        let is_terminal = task.status.is_terminal();
         if is_terminal {
             continue;
         }
@@ -2370,24 +2366,20 @@ pub fn check_join_condition(
         groups.entry(group).or_default().push(task_id.clone());
     }
 
-    // Check each group: if ALL tasks in ANY group are terminal, join is satisfied
+    // Check each group: if ALL tasks in ANY group are terminal, join is satisfied.
+    // `Stale` counts as terminal for joins (unblocks the join) but not for
+    // session finalization (see #722 Stage 2 / P-2.11).
     for (_group, task_ids) in &groups {
         let mut all_terminal = true;
         for task_id in task_ids {
             match load_task_run(config, store, workflow_id, task_id)? {
-                Some(task) => match task.status {
-                    TaskRunStatus::Succeeded
-                    | TaskRunStatus::Failed
-                    | TaskRunStatus::Cancelled
-                    | TaskRunStatus::Aborted
-                    | TaskRunStatus::Stale => {
+                Some(task) => {
+                    if task.status.is_terminal_for_join() {
                         continue;
                     }
-                    _ => {
-                        all_terminal = false;
-                        break;
-                    }
-                },
+                    all_terminal = false;
+                    break;
+                }
                 None => {
                     all_terminal = false;
                     break;
@@ -2448,14 +2440,10 @@ pub fn apply_emergency_stop_to_workflow(
     let tasks = list_task_runs_for_workflow(config, store, workflow_id)?;
     let mut tasks_aborted = 0u32;
     for mut task in tasks {
-        let terminal = matches!(
-            task.status,
-            TaskRunStatus::Succeeded
-                | TaskRunStatus::Failed
-                | TaskRunStatus::Cancelled
-                | TaskRunStatus::Aborted
-        );
-        if terminal {
+        // Emergency stop aborts every non-fully-terminal task, including
+        // `Stale` (which is resumable per #722 Stage 2 but should not survive
+        // an emergency stop).
+        if task.status.is_terminal() {
             continue;
         }
         let _ = release_task_claim(config, store, workflow_id, &task.task_id);
@@ -2747,14 +2735,7 @@ pub struct ChatIngestWorkflowReroute {
 }
 
 fn workflow_run_is_active_for_user_chat_routing(run: &WorkflowRun) -> bool {
-    !matches!(
-        run.status,
-        WorkflowRunStatus::Completed
-            | WorkflowRunStatus::Failed
-            | WorkflowRunStatus::Cancelled
-            | WorkflowRunStatus::EmergencyStopping
-            | WorkflowRunStatus::EmergencyStopped
-    )
+    !run.status.is_terminal()
 }
 
 fn session_matches_child_task_or_queue(
@@ -3079,6 +3060,119 @@ mod tests {
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
         }
+    }
+
+    /// Issue #740: `update_task_run_status` refuses illegal transitions at the
+    /// single mutation choke point, returning Ok-noop and leaving the task in
+    /// its current state.
+    #[test]
+    fn update_task_run_status_refuses_illegal_transition() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "illegal-tx-root", None).unwrap();
+        let task = TaskRun {
+            task_id: "task-illegal".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "a".to_string(),
+            session_id: "illegal-tx-root/x".to_string(),
+            parent_session_id: "illegal-tx-root".to_string(),
+            status: TaskRunStatus::Succeeded,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        // Succeeded -> Runnable is illegal; the call should be a no-op.
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-illegal",
+            TaskRunStatus::Runnable,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Task should still be Succeeded.
+        let after = load_task_run(&cfg, Some(&store), &wf.workflow_id, "task-illegal")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.status,
+            TaskRunStatus::Succeeded,
+            "illegal transition must leave the task in its current state"
+        );
+    }
+
+    /// Issue #740: legal transitions (e.g. Stale -> Runnable for late approval)
+    /// are still allowed.
+    #[test]
+    fn update_task_run_status_allows_stale_to_runnable() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "stale-resume-root", None).unwrap();
+        let task = TaskRun {
+            task_id: "task-stale".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "a".to_string(),
+            session_id: "stale-resume-root/x".to_string(),
+            parent_session_id: "stale-resume-root".to_string(),
+            status: TaskRunStatus::Stale,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-stale",
+            TaskRunStatus::Runnable,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let after = load_task_run(&cfg, Some(&store), &wf.workflow_id, "task-stale")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, TaskRunStatus::Runnable);
     }
 
     #[test]

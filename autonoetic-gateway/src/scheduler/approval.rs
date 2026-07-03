@@ -560,17 +560,13 @@ fn fan_in_approval_waiters(
                 continue;
             };
             // Idempotency: don't overwrite a waiter task that already reached a
-            // terminal state (e.g. its own timeout marked it Stale/Failed).
+            // terminal state (e.g. its own timeout marked it Failed).
+            // `Stale` is intentionally NOT terminal here — it is resumable
+            // via late approval (see #722 Stage 2 / P-2.11).
             if let Ok(Some(existing)) =
                 super::workflow_store::load_task_run(config, Some(store), w_wf, w_task)
             {
-                if matches!(
-                    existing.status,
-                    TaskRunStatus::Failed
-                        | TaskRunStatus::Cancelled
-                        | TaskRunStatus::Succeeded
-                        | TaskRunStatus::Aborted
-                ) {
+                if existing.status.is_terminal() {
                     continue;
                 }
             }
@@ -1334,10 +1330,7 @@ fn unblock_task_on_approval(
         super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
     {
         use autonoetic_types::workflow::TaskRunStatus;
-        if matches!(
-            existing.status,
-            TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Succeeded
-        ) {
+        if existing.status.is_terminal() {
             tracing::debug!(
                 target: "approval",
                 workflow_id = %wf_id,

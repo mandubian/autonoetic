@@ -314,13 +314,7 @@ fn reservation_is_active(
 
     if let Some(task_id) = reservation.task_id.as_deref() {
         if let Some(task) = load_task_run(config, store, &reservation.workflow_id, task_id)? {
-            return Ok(!matches!(
-                task.status,
-                TaskRunStatus::Succeeded
-                    | TaskRunStatus::Failed
-                    | TaskRunStatus::Cancelled
-                    | TaskRunStatus::Aborted
-            ));
+            return Ok(!task.status.is_terminal());
         }
     }
 

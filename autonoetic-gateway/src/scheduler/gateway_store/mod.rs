@@ -207,7 +207,7 @@ impl GatewayStore {
         *g = Some(config);
     }
 
-    fn config(&self) -> Option<Arc<GatewayConfig>> {
+    pub fn config(&self) -> Option<Arc<GatewayConfig>> {
         self.config.lock().expect("config mutex poisoned").clone()
     }
 
