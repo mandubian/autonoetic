@@ -119,7 +119,13 @@ impl GatewayStore {
         // directly (not via the gate service), so no `approval.pending` fires —
         // the escalation was invisible in the room. Attributed to the agent under
         // review; Attention altitude (an operator decision is pending).
-        if !escalation.root_session_id.is_empty() {
+        //
+        // Only emit for a genuinely pending escalation: a projection created
+        // already-resolved (e.g. a promotion review cleared via approval_ref or
+        // policy, #724 Part B) must not record a misleading "pending" event.
+        if !escalation.root_session_id.is_empty()
+            && escalation.status == autonoetic_types::escalation::EscalationStatus::Pending
+        {
             let principal = autonoetic_types::principal::Principal::agent(&escalation.agent_id);
             let seat = crate::runtime::session_timeline::derive_role(&escalation.agent_id);
             let event = crate::runtime::session_timeline::build_timeline_event(

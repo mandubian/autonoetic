@@ -3954,6 +3954,21 @@ impl JsonRpcRouter {
                                     error = %e,
                                     "Resolved escalation but failed to resolve linked approval"
                                 );
+                                // Surface the partial resolution instead of
+                                // reporting success — otherwise the escalation
+                                // reads as resolved while the linked approval
+                                // stays pending, the exact orphaned-row state
+                                // #724 removes (Part B review).
+                                return JsonRpcResponse::error(
+                                    req.id,
+                                    -32000,
+                                    format!(
+                                        "Escalation '{}' was resolved, but resolving the linked \
+                                         approval '{}' failed: {}. The approval may still be \
+                                         pending — retry resolution.",
+                                        params.escalation_id, request_id, e
+                                    ),
+                                );
                             }
                         }
                         JsonRpcResponse::success(

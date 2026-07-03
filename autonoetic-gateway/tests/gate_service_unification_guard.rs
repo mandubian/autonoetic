@@ -3,7 +3,7 @@
 //! Approval-shaped decisions must flow through `GateService::check`, not call
 //! `GatewayStore::create_approval` or `GatewayStore::create_escalation` directly.
 //! Direct callers bypass typed `DecisionContext` enforcement, dedup, enrichment,
-//! and the root-scoped identical-action join introduced in #733.
+//! and the root-scoped identical-action join introduced in #723 (merged via PR #733).
 //!
 //! The allowlist below contains files that still have pending migrations.
 //! When you migrate a caller to `GateService`, remove it from the allowlist.
@@ -45,7 +45,10 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// True if the line is inside a `#[cfg(test)]` module or a `mod tests {` block.
 /// This is a best-effort textual check: it tracks open/close braces once either
-/// marker is seen.
+/// marker is seen. The `mod tests {` opening brace on the marker line itself is
+/// counted so that a bare `mod tests {` block (no preceding `#[cfg(test)]`) is
+/// tracked correctly — without it, depth stays 0 and the first inner `}` would
+/// prematurely end the module (review on #734).
 fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
     let mut depth: i32 = 0;
     let mut in_test = false;
@@ -54,9 +57,16 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
             break;
         }
         let trimmed = line.trim();
+        // Markers must be evaluated before brace counting so the opening `{`
+        // on a `mod tests {` line is included in the depth tally.
         if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("# [cfg(test)]") {
+            // A new test attribute starts a fresh module scope. Reset depth so
+            // any braces accumulated before the attribute don't bleed in.
             in_test = true;
             depth = 0;
+        }
+        if trimmed == "mod tests {" || trimmed.starts_with("mod tests {") {
+            in_test = true;
         }
         if in_test {
             for ch in line.chars() {
@@ -71,9 +81,6 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
                     _ => {}
                 }
             }
-        }
-        if trimmed == "mod tests {" || trimmed.starts_with("mod tests {") {
-            in_test = true;
         }
     }
     in_test

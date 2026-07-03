@@ -398,7 +398,19 @@ pub fn apply_decision(
         ApprovalStatus::Approved | ApprovalStatus::Rejected
     ) {
         if let ScheduledAction::SessionEscalate { kind, payload, .. } = &decision.action {
-            if *kind == autonoetic_types::background::EscalationKind::PromotionReview {
+            // Backward-compat: approvals created before EscalationKind existed
+            // deserialize with the default kind (GuidanceRequest) but carry the
+            // legacy `payload.type == "promotion_review"` marker. Honor that too
+            // so in-flight approvals still resolve their linked escalation and
+            // don't reintroduce the orphaned-row hazard (#724 Part B review).
+            let is_promotion_review = *kind
+                == autonoetic_types::background::EscalationKind::PromotionReview
+                || payload
+                    .as_ref()
+                    .and_then(|p| p.get("type"))
+                    .and_then(|v| v.as_str())
+                    == Some("promotion_review");
+            if is_promotion_review {
                 if let Some(esc_id) = payload.as_ref().and_then(|p| p.get("escalation_id")).and_then(|v| v.as_str()) {
                     let esc_status = if decision.status == ApprovalStatus::Approved {
                         autonoetic_types::escalation::EscalationStatus::Approved
