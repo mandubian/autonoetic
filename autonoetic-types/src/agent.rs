@@ -447,6 +447,71 @@ pub enum SessionState {
     Clarification,
 }
 
+/// Explicit session lifecycle state (issue #742).
+///
+/// Replaces the overloaded transcript `status = "completed"` which conflated
+/// "session terminated normally" with "session hibernated between turns".
+/// The orphan reaper (R+12) and `try_complete_workflow` read this single field
+/// instead of inferring lifecycle position from transcript status plus auxiliary
+/// heuristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleState {
+    /// Session is actively executing a turn.
+    Active,
+    /// Session completed its turn and is hibernated (between turns, will resume).
+    Hibernated,
+    /// Session is suspended awaiting a gate (approval, user input, escalation).
+    AwaitingGate,
+    /// Session has terminated (completed / failed / suspended terminal).
+    Terminated(TerminatedReason),
+}
+
+impl SessionLifecycleState {
+    pub fn is_terminated(&self) -> bool {
+        matches!(self, Self::Terminated(_))
+    }
+}
+
+impl std::fmt::Display for SessionLifecycleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Hibernated => write!(f, "hibernated"),
+            Self::AwaitingGate => write!(f, "awaiting_gate"),
+            Self::Terminated(reason) => match reason {
+                TerminatedReason::Completed => write!(f, "terminated:completed"),
+                TerminatedReason::Failed => write!(f, "terminated:failed"),
+                TerminatedReason::Suspended => write!(f, "terminated:suspended"),
+            },
+        }
+    }
+}
+
+impl std::str::FromStr for SessionLifecycleState {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "hibernated" => Ok(Self::Hibernated),
+            "awaiting_gate" => Ok(Self::AwaitingGate),
+            "terminated:completed" => Ok(Self::Terminated(TerminatedReason::Completed)),
+            "terminated:failed" => Ok(Self::Terminated(TerminatedReason::Failed)),
+            "terminated:suspended" => Ok(Self::Terminated(TerminatedReason::Suspended)),
+            _ => Err(format!("invalid SessionLifecycleState: {s}")),
+        }
+    }
+}
+
+/// The reason a terminated session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminatedReason {
+    Completed,
+    Failed,
+    Suspended,
+}
+
 /// A stored credential record for agent-to-service authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialRecord {
@@ -780,4 +845,42 @@ pub struct AgentSkillsImportMetadata {
     pub allowed_tools: Vec<String>,
     /// Whether tool name bridging should be injected into the system prompt.
     pub needs_tool_bridging: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_state_display_and_parse() {
+        let cases = vec![
+            (SessionLifecycleState::Active, "active"),
+            (SessionLifecycleState::Hibernated, "hibernated"),
+            (SessionLifecycleState::AwaitingGate, "awaiting_gate"),
+            (SessionLifecycleState::Terminated(TerminatedReason::Completed), "terminated:completed"),
+            (SessionLifecycleState::Terminated(TerminatedReason::Failed), "terminated:failed"),
+            (SessionLifecycleState::Terminated(TerminatedReason::Suspended), "terminated:suspended"),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(state.to_string(), expected);
+            let parsed: SessionLifecycleState = expected.parse().unwrap();
+            assert_eq!(parsed, state);
+        }
+    }
+
+    #[test]
+    fn lifecycle_state_is_terminated() {
+        assert!(!SessionLifecycleState::Active.is_terminated());
+        assert!(!SessionLifecycleState::Hibernated.is_terminated());
+        assert!(!SessionLifecycleState::AwaitingGate.is_terminated());
+        assert!(SessionLifecycleState::Terminated(TerminatedReason::Completed).is_terminated());
+        assert!(SessionLifecycleState::Terminated(TerminatedReason::Failed).is_terminated());
+        assert!(SessionLifecycleState::Terminated(TerminatedReason::Suspended).is_terminated());
+    }
+
+    #[test]
+    fn lifecycle_state_invalid_parse_fails() {
+        let result: Result<SessionLifecycleState, String> = "bogus".parse();
+        assert!(result.is_err());
+    }
 }

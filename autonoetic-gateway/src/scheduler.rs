@@ -888,30 +888,14 @@ pub async fn reap_orphaned_sessions(
         return Ok(());
     }
 
-    // A child parked at an approval gate is NOT an orphan. The async-spawn
-    // pattern legitimately ends the immediate parent's turn (transcript status
-    // `completed`) while the child stays suspended awaiting an operator
-    // decision — coordinated by the still-alive root. Reaping it would discard
-    // committed work (e.g. a just-created revision) and drive the parent to
-    // retry, producing a cancel→retry→collision storm. Leave such children to
-    // the operator and the gate-timeout lifecycle (P-2.11).
-    //
-    // Load pending approvals ONCE into a set of parked session ids — cheap
-    // versus re-querying per orphan (O(orphans × pending)). If approval state
-    // cannot be determined, be conservative and skip this whole reap cycle
-    // rather than risk cancelling a parked child; the next cycle retries.
-    let approval_parked_sessions: std::collections::HashSet<String> = match store
-        .get_pending_approvals()
-    {
-        Ok(pending) => pending.into_iter().map(|a| a.session_id).collect(),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "Orphan-child reaper (R+12): could not load pending approvals — skipping this reap cycle (conservative)"
-            );
-            return Ok(());
-        }
-    };
+    // #742: The orphan reaper no longer carries compensating exemptions for
+    // children parked at approval gates or in-flight workflow tasks. The
+    // lifecycle-state query (`find_orphaned_sessions`) only returns children
+    // whose parent is `terminated:*`. Parents in `hibernated`, `awaiting_gate`,
+    // or `active` protect their children by design — no transcript-status
+    // heuristics or auxiliary lookups required. Stale children survive because
+    // their parent is `hibernated`/`awaiting_gate`, not via a pending-approval
+    // row coincidence (#722 Stage 2).
 
     let config = execution.config();
     let now = chrono::Utc::now();
@@ -929,89 +913,9 @@ pub async fn reap_orphaned_sessions(
         }
     }
 
-    // Collect child session ids that are bound to non-terminal workflow tasks,
-    // paired with their parent session id. The orphan reaper treats parent
-    // transcript status `completed` as "terminated", but `completed` is also the
-    // normal between-turns state (reopened to `active` at the start of the next
-    // turn). A child that is an in-flight workflow task (Running, Pending,
-    // AwaitingApproval) must survive the parent's between-turn window — the
-    // workflow system will wake the parent when the task completes. Without this
-    // exemption, every async agent_spawn → parent hibernate → background tick
-    // kills the child.
-    //
-    // Only applies when the parent is `completed` (between turns). A `failed`
-    // parent is truly terminated and its children must be reaped even if a
-    // stale workflow task lingers.
-    let mut workflow_active_children: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
-    for wf_dir in &workflow_dirs {
-        let tasks_dir = wf_dir.join("tasks");
-        if !tasks_dir.is_dir() {
-            continue;
-        }
-        let wf_id = match wf_dir.file_name().and_then(|n| n.to_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-        let tasks = match crate::scheduler::workflow_store::list_task_runs_for_workflow(
-            &config,
-            Some(store.as_ref()),
-            &wf_id,
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(
-                    workflow_id = %wf_id,
-                    error = %e,
-                    "Orphan-child reaper (R+12): could not load workflow tasks — skipping this reap cycle (conservative)"
-                );
-                return Ok(());
-            }
-        };
-        for task in tasks {
-            // The orphan reaper protects `Stale` (resumable per #722 Stage 2) by
-            // treating it as active. Use `is_terminal()` which excludes `Stale`.
-            let is_terminal = task.status.is_terminal();
-            if !is_terminal && !task.session_id.is_empty() && !task.parent_session_id.is_empty() {
-                workflow_active_children.insert((task.session_id, task.parent_session_id));
-            }
-        }
-    }
-
     for (idx, (child_session_id, parent_session_id, root_session_id, agent_id)) in
         orphans.into_iter().enumerate()
     {
-        // Skip children parked at an approval gate (see note above the
-        // `approval_parked_sessions` set).
-        if approval_parked_sessions.contains(&child_session_id) {
-            tracing::info!(
-                child_session_id = %child_session_id,
-                parent_session_id = %parent_session_id,
-                "Orphan-child reaper (R+12): skipping child parked at an approval gate"
-            );
-            continue;
-        }
-
-        // Skip children that are active workflow tasks when the parent is merely
-        // `completed` (between turns). A `failed` parent is truly gone — its
-        // children must be reaped even if a workflow task lingers.
-        if workflow_active_children.contains(&(child_session_id.clone(), parent_session_id.clone()))
-        {
-            let parent_status = store
-                .find_transcript_by_session_id(&parent_session_id)
-                .ok()
-                .flatten()
-                .map(|t| t.status);
-            if parent_status.as_deref() == Some("completed") {
-                tracing::info!(
-                    child_session_id = %child_session_id,
-                    parent_session_id = %parent_session_id,
-                    "Orphan-child reaper (R+12): skipping child with active workflow task (parent between turns)"
-                );
-                continue;
-            }
-        }
-
         tracing::info!(
             child_session_id = %child_session_id,
             parent_session_id = %parent_session_id,

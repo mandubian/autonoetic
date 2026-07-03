@@ -883,6 +883,16 @@ impl AgentExecutor {
                 );
             }
         }
+        // #742: set the session lifecycle state based on the yield reason.
+        if let Some(gs) = self.gateway_store.as_ref() {
+            let lifecycle = match &cp.yield_reason {
+                YieldReason::ApprovalRequired { .. }
+                | YieldReason::UserInputRequired { .. }
+                | YieldReason::HumanEscalation { .. } => "awaiting_gate",
+                _ => "hibernated", // Hibernation, WaitingForChild, Error, BudgetExhausted, etc.
+            };
+            let _ = gs.set_session_lifecycle_state(&cp.session_id, lifecycle);
+        }
         cp
     }
     /// Save a yield checkpoint and return the original error.

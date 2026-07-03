@@ -285,12 +285,12 @@ async fn orphan_reaper_does_not_reap_suspended_parent() {
     );
 }
 
-/// A child parked at an approval gate must NOT be reaped even when its
-/// immediate parent transcript is terminal: in the async-spawn pattern the
-/// parent legitimately ends its turn while the child stays suspended awaiting
-/// an operator decision (coordinated by the still-alive root). Reaping it would
-/// discard committed work and drive the parent to retry (cancel→retry→collision
-/// storm). It is left to the operator / gate-timeout (P-2.11).
+/// A child parked at an approval gate must NOT be reaped when its immediate
+/// parent is hibernated (between turns). In the async-spawn pattern the parent
+/// legitimately ends its turn while the child stays suspended awaiting an
+/// operator decision. The hibernated parent will resume when the gate resolves.
+/// #742: the parent is `hibernated`, not `terminated`; children of hibernated
+/// parents are protected by design.
 #[tokio::test]
 async fn orphan_reaper_skips_child_parked_at_approval() {
     use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
@@ -320,8 +320,12 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
             parent_id,
             root_id,
             "agent-factory.default",
-            "completed",
+            "active",
         ))
+        .unwrap();
+    // #742: parent between turns → hibernated (not terminated).
+    store
+        .set_session_lifecycle_state(parent_id, "hibernated")
         .unwrap();
     store
         .upsert_session_transcript(&make_transcript(
@@ -400,9 +404,9 @@ async fn orphan_reaper_skips_child_parked_at_approval() {
 }
 
 /// A child bound to a non-terminal workflow task must NOT be reaped when the
-/// parent is merely `completed` (between turns). The workflow system will wake
-/// the parent when the task finishes. Without this exemption, every async
-/// agent_spawn → parent hibernate → background tick kills the child.
+/// parent is hibernated (between turns). The workflow system will wake the
+/// parent when the task finishes. #742: a hibernated parent is alive, not
+/// terminated — children are protected by design.
 #[tokio::test]
 async fn orphan_reaper_skips_workflow_task_when_parent_between_turns() {
     use autonoetic_gateway::scheduler::workflow_store::{
@@ -426,8 +430,12 @@ async fn orphan_reaper_skips_workflow_task_when_parent_between_turns() {
             root_id,
             root_id,
             "planner.collaborative",
-            "completed",
+            "active",
         ))
+        .unwrap();
+    // #742: root between turns → hibernated (not terminated).
+    store
+        .set_session_lifecycle_state(root_id, "hibernated")
         .unwrap();
     store
         .upsert_session_transcript(&make_transcript(
