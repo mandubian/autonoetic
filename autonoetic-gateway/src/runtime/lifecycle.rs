@@ -883,6 +883,24 @@ impl AgentExecutor {
                 );
             }
         }
+        // #742: set the session lifecycle state based on the yield reason.
+        if let Some(gs) = self.gateway_store.as_ref() {
+            let lifecycle = match &cp.yield_reason {
+                YieldReason::ApprovalRequired { .. }
+                | YieldReason::UserInputRequired { .. }
+                | YieldReason::HumanEscalation { .. } => "awaiting_gate",
+                _ => "hibernated", // Hibernation, WaitingForChild, Error, BudgetExhausted, etc.
+            };
+            if let Err(e) = gs.set_session_lifecycle_state(&cp.session_id, lifecycle) {
+                tracing::warn!(
+                    target: "lifecycle",
+                    session_id = %cp.session_id,
+                    lifecycle_state = %lifecycle,
+                    error = %e,
+                    "Failed to persist lifecycle state on yield"
+                );
+            }
+        }
         cp
     }
     /// Save a yield checkpoint and return the original error.

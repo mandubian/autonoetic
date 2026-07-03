@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 63;
+const SCHEMA_VERSION_LATEST: i64 = 64;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -548,7 +548,35 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_approval_waiters_v61(conn)?;
     apply_escalation_approval_request_id_v62(conn)?;
     apply_escalation_plan_frame_expiry_v63(conn)?;
+    apply_session_lifecycle_state_v64(conn)?;
 
+    Ok(())
+}
+
+fn apply_session_lifecycle_state_v64(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 64 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "ALTER TABLE session_transcripts ADD COLUMN lifecycle_state TEXT;
+         UPDATE session_transcripts SET lifecycle_state = 'active'
+           WHERE lifecycle_state IS NULL AND status = 'active';
+         UPDATE session_transcripts SET lifecycle_state = 'terminated:completed'
+           WHERE lifecycle_state IS NULL AND status IN ('completed', 'closed');
+         UPDATE session_transcripts SET lifecycle_state = 'terminated:failed'
+           WHERE lifecycle_state IS NULL AND status = 'failed';
+         UPDATE session_transcripts SET lifecycle_state = 'awaiting_gate'
+           WHERE lifecycle_state IS NULL AND status = 'suspended';",
+    )?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![64_i64, "session_lifecycle_state", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 

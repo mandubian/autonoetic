@@ -658,8 +658,18 @@ impl GatewayStore {
             "INSERT INTO session_transcripts (
                 transcript_id, session_id, root_session_id, agent_id,
                 revision_id, user_id, started_at, ended_at, status,
-                turn_count, transcript_handle, excerpt, origin_node_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                turn_count, transcript_handle, excerpt, origin_node_id,
+                lifecycle_state
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                CASE ?9
+                    WHEN 'active' THEN 'active'
+                    WHEN 'completed' THEN 'terminated:completed'
+                    WHEN 'closed' THEN 'terminated:completed'
+                    WHEN 'failed' THEN 'terminated:failed'
+                    WHEN 'suspended' THEN 'awaiting_gate'
+                    ELSE 'active'
+                END
+            )
             ON CONFLICT(session_id) DO UPDATE SET
                 transcript_id = excluded.transcript_id,
                 ended_at = CASE
@@ -676,7 +686,13 @@ impl GatewayStore {
                 END,
                 turn_count = excluded.turn_count,
                 transcript_handle = excluded.transcript_handle,
-                excerpt = excluded.excerpt",
+                excerpt = excluded.excerpt,
+                lifecycle_state = CASE
+                    WHEN excluded.status = 'active'
+                     AND session_transcripts.status IN ('completed', 'failed', 'suspended', 'closed')
+                    THEN session_transcripts.lifecycle_state
+                    ELSE excluded.lifecycle_state
+                END",
             params![
                 record.transcript_id,
                 record.session_id,
@@ -737,23 +753,81 @@ impl GatewayStore {
             "UPDATE session_transcripts SET ended_at = ?1, status = ?2 WHERE session_id = ?3",
             params![ended_at, status, session_id],
         )?;
+        // #742: set lifecycle state to match the terminal status.
+        // Only "completed" and "failed" are truly terminal; "suspended" is
+        // resumable (its lifecycle was already set by save_yield_checkpoint).
+        // For "completed", avoid overwriting "hibernated" (between-turn yield)
+        // — only set "terminated:completed" when the current state is not
+        // already a resumable lifecycle state.
+        let lifecycle = match status {
+            "completed" => Some("terminated:completed"),
+            "failed" => Some("terminated:failed"),
+            _ => None,
+        };
+        if let Some(lifecycle) = lifecycle {
+            // Only overwrite if the current lifecycle is not a resumable state.
+            // This preserves "hibernated" between turns and "awaiting_gate"
+            // for gate-suspended sessions. Truly terminal sessions (headless
+            // complete, error, etc.) will have "active" or NULL lifecycle.
+            conn.execute(
+                "UPDATE session_transcripts
+                 SET lifecycle_state = ?1
+                 WHERE session_id = ?2
+                   AND (lifecycle_state IS NULL
+                        OR lifecycle_state NOT IN ('hibernated', 'awaiting_gate'))",
+                params![lifecycle, session_id],
+            )?;
+        }
         Ok(())
     }
 
     /// Re-open a previously finalized session for a new turn.
     ///
-    /// Between turns the session is `completed` (from `close_session`), but the
-    /// orphan-child reaper (R+12) treats any completed/failed parent as "terminated"
-    /// and will cancel its children.  Call this at the start of each turn to restore
-    /// `active` so that child agents spawned during execution are not immediately
-    /// orphaned.
+    /// Between turns the session's transcript status is `completed` (from
+    /// `close_session`) and lifecycle_state is `hibernated` (from the yield
+    /// checkpoint). Call this at the start of each turn to restore `active`
+    /// in both fields so child agents spawned during execution are not
+    /// immediately orphaned (siblings of a `hibernated` parent are protected
+    /// by the lifecycle-state-based orphan reaper, but we still need a clean
+    /// slate for the new turn).
     pub fn reopen_session_transcript(&self, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE session_transcripts SET status = 'active', ended_at = NULL WHERE session_id = ?1",
+            "UPDATE session_transcripts SET status = 'active', ended_at = NULL, lifecycle_state = 'active' WHERE session_id = ?1",
             params![session_id],
         )?;
         Ok(())
+    }
+
+    /// #742: set the session lifecycle state explicitly.
+    pub fn set_session_lifecycle_state(
+        &self,
+        session_id: &str,
+        state: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session_transcripts SET lifecycle_state = ?1 WHERE session_id = ?2",
+            params![state, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// #742: read the session lifecycle state.
+    pub fn get_session_lifecycle_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT lifecycle_state FROM session_transcripts WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(state)
     }
 
     pub fn find_transcript_by_handle(
@@ -1168,20 +1242,22 @@ impl GatewayStore {
     /// Find active or suspended sessions whose parent session has ended (orphan detection for R+12).
     ///
     /// Returns (child_session_id, parent_session_id, root_session_id, agent_id) tuples
-    /// for each orphaned child. A child is orphaned if its transcript status is
-    /// 'active' or 'suspended' and its parent (derived from session_id path) has
-    /// a terminal transcript (`completed` or `failed`). `suspended` parents are
-    /// NOT terminal (resumable). GAP-3C: include suspended children so approval-
-    /// rejected or timed-out sessions get reaped when their parent dies.
+    /// for each orphaned child. A child is orphaned if its parent's `lifecycle_state`
+    /// is `terminated:*`. Children of `active`, `hibernated`, or `awaiting_gate`
+    /// parents are protected — the parent is expected to resume and coordinate them.
+    /// Children that are themselves already terminated are excluded.
     pub fn find_orphaned_sessions(&self) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.conn.lock().unwrap();
+        // Select non-terminated child sessions (session_id contains '/').
+        // Pre-migration rows (lifecycle_state IS NULL) use status as fallback.
         let mut stmt = conn.prepare(
             "SELECT session_id, root_session_id, agent_id
              FROM session_transcripts
-             WHERE status IN ('active', 'suspended')
-               AND session_id LIKE '%/%'",
+             WHERE session_id LIKE '%/%'
+               AND (lifecycle_state IS NULL AND status IN ('active', 'suspended')
+                    OR lifecycle_state IS NOT NULL AND lifecycle_state NOT LIKE 'terminated:%')",
         )?;
-        let active_children: Vec<(String, String, String, String)> = stmt
+        let children: Vec<(String, String, String, String)> = stmt
             .query_map([], |row| {
                 let sid: String = row.get(0)?;
                 let root: String = row.get(1)?;
@@ -1196,16 +1272,26 @@ impl GatewayStore {
         drop(stmt);
 
         let mut orphans = Vec::new();
-        for (child_session_id, parent_session_id, root_session_id, agent_id) in active_children {
-            let parent_status: Option<String> = conn
+        for (child_session_id, parent_session_id, root_session_id, agent_id) in children {
+            let parent_lifecycle: Option<String> = conn
                 .query_row(
-                    "SELECT status FROM session_transcripts WHERE session_id = ?1",
+                    "SELECT COALESCE(lifecycle_state,
+                        CASE status
+                            WHEN 'completed' THEN 'terminated:completed'
+                            WHEN 'closed' THEN 'terminated:completed'
+                            WHEN 'failed' THEN 'terminated:failed'
+                            ELSE 'active'
+                        END
+                     ) FROM session_transcripts WHERE session_id = ?1",
                     params![parent_session_id],
                     |row| row.get(0),
                 )
                 .ok();
-            match parent_status.as_deref() {
-                Some("completed") | Some("failed") => {
+            // #742: parent is terminated → child is orphaned, full stop.
+            // Lifecycle states active, hibernated, awaiting_gate protect children.
+            // Falls back to status-based inference for pre-migration data.
+            match parent_lifecycle.as_deref() {
+                Some(s) if s.starts_with("terminated:") => {
                     orphans.push((
                         child_session_id,
                         parent_session_id,
