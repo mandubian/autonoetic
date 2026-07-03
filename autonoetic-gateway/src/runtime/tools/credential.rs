@@ -2391,7 +2391,11 @@ fn execute_steps(
                             "ok": false,
                             "error_type": "permission",
                             "message": "credential.setup suspended: equivalent prompt was already cleared but the secret is still missing",
-                            "repair_hint": "Provide the requested secret fields directly (e.g. via credential.set), then resume credential.setup.",
+                            "repair_hint": format!(
+                                "Ask the operator for the requested secret field(s) ({}), then call \
+                                 credential.setup with credential_id + resume_vars to provide them.",
+                                field_names.join(", ")
+                            ),
                             "suspended": true,
                             "approval_required": false,
                             "request_id": serde_json::Value::Null,
