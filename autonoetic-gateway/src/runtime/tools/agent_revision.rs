@@ -1,6 +1,7 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::human_gate::{DecisionContext, GateKind, GateRequest, GateResult, GateService};
 use crate::runtime::remote_access::{extract_host_from_url_literal, RemoteAccessAnalyzer};
 use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{
@@ -3090,60 +3091,11 @@ do not re-issue."
                     )
                 };
 
-                // Cross-workflow dedupe: if an identical RevisionPromote approval
-                // already exists (pending or approved) for this agent/revision/delta,
-                // reuse it instead of minting a new request ID. This prevents
-                // retries across fork/resume workflows from flooding the operator
-                // with duplicate capability-ack gates.
-                if let Some(root) = run_context
-                    .and_then(|rc| Some(rc.root_session_id.clone()).filter(|s| !s.is_empty()))
-                    .or_else(|| {
-                        session_id
-                            .map(|s| crate::runtime::content_store::root_session_id(s).to_string())
-                    })
-                {
-                    if let Some(existing) = gateway_store
-                        .find_matching_revision_promote_approval_for_root(
-                            &root,
-                            &args.agent_id,
-                            &args.revision_id,
-                            &added_capabilities,
-                            &broadened_capabilities,
-                            &outgoing_revision_id,
-                        )?
-                    {
-                        if let Some(guard) = single_flight_guard.as_mut() {
-                            guard.disarm();
-                        }
-                        record_attempt(
-                            "approval_required",
-                            Some("capability_delta"),
-                            Some("capability_delta_requires_approval"),
-                        );
-                        let request_id = existing.request_id.clone();
-                        return Ok(serde_json::json!({
-                            "ok": existing.status
-                                == Some(autonoetic_types::background::ApprovalStatus::Approved),
-                            "error_type": "permission",
-                            "error": "capability_delta_requires_approval",
-                            "message": approval_message,
-                            "approval_required": existing.status
-                                != Some(autonoetic_types::background::ApprovalStatus::Approved),
-                            "request_id": request_id,
-                            "approval_ref": request_id,
-                            "added_capabilities": added_capabilities,
-                            "broadened_capabilities": broadened_capabilities,
-                            "delta": payload,
-                            "repair_hint": "Operator must approve the request and acknowledge each added/broadened capability by name. Then retry agent_revision_promote with `approval_ref`.",
-                        })
-                        .to_string());
-                    }
-                }
-
-                let request_id = format!(
-                    "apr-{}",
-                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
-                );
+                // Route the R++2 capability/reassignment ack through the unified
+                // GateService. It provides the same cross-root dedup that
+                // find_matching_revision_promote_approval_for_root used to do
+                // (#723's identical-action join now handles cross-session joins),
+                // plus a typed DecisionContext and the standard approval pipeline.
                 let action = autonoetic_types::background::ScheduledAction::RevisionPromote {
                     agent_id: args.agent_id.clone(),
                     revision_id: args.revision_id.clone(),
@@ -3152,67 +3104,91 @@ do not re-issue."
                     broadened_capabilities: broadened_capabilities.clone(),
                     payload: Some(payload.clone()),
                 };
-                let approval_level = config
-                    .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
-                    .unwrap_or(autonoetic_types::background::ApprovalLevel::Operator);
-                let (root_session_id, workflow_id, task_id) =
-                    approval_execution_context(run_context, session_id);
-                let mut req = autonoetic_types::background::ApprovalRequest {
-                    request_id: request_id.clone(),
-                    agent_id: manifest.agent.id.clone(),
-                    session_id: session_id.unwrap_or("").to_string(),
-                    root_session_id,
-                    workflow_id,
-                    task_id,
-                    action,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    status: None,
-                    decided_at: None,
-                    decided_by: None,
-                    reason: args.reason.clone().or_else(|| Some(approval_message.clone())),
-                    evidence_ref: None,
-                    decision_reason: None,
-                    approval_level: approval_level.clone(),
-                    min_dwell_ms: None,
-                    confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-            expires_at: None,
+
+                let gate_service = GateService::new(gateway_store.clone());
+                let gate_req = GateRequest {
+                    kind: GateKind::Approval {
+                        action: action.clone(),
+                        targets: Vec::new(),
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id,
+                    run_context,
+                    config,
+                    context: DecisionContext::tier2(
+                        format!(
+                            "Promote revision {} of agent {} to active alias",
+                            args.revision_id, args.agent_id
+                        ),
+                        "R++2 capability/reassignment acknowledgement required before promotion",
+                        format!(
+                            "Capabilities being added: {:?}; broadened: {:?}; outgoing baseline: {}",
+                            added_capabilities, broadened_capabilities, outgoing_revision_id
+                        ),
+                        "Approve only if you acknowledge every added/broadened capability by name and accept the reassignment (if any)",
+                    )
+                    .with_analysis(format!(
+                        "Reassignment details: {}",
+                        reassignment_payload.to_string()
+                    )),
+                    summary: approval_message.clone(),
+                    approval_ref: args.approval_ref.as_deref(),
+                    pre_validated: false,
+                    cache_backfill: None,
+                    turn_id,
                 };
 
-                gateway_store.create_approval(&mut req)?;
-                if let (Some(config), Some((workflow_id, spec))) = (config, single_flight_scope.as_ref()) {
-                    crate::scheduler::single_flight::attach_approval_request(
-                        config,
-                        workflow_id,
-                        &spec.dedupe_key,
-                        &request_id,
-                    )?;
+                match gate_service.check(gate_req)? {
+                    GateResult::Cleared { source, .. } => {
+                        // Approved via approval_ref or session grant; proceed.
+                        tracing::info!(
+                            target: "promotion",
+                            agent_id = %args.agent_id,
+                            revision_id = %args.revision_id,
+                            source = ?source,
+                            "R++2 capability gate cleared via GateService"
+                        );
+                    }
+                    GateResult::AlreadyPending { gate_id, .. }
+                    | GateResult::Suspended { gate_id, .. } => {
+                        if let Some(guard) = single_flight_guard.as_mut() {
+                            guard.disarm();
+                        }
+                        record_attempt(
+                            "approval_required",
+                            Some("capability_delta"),
+                            Some("capability_delta_requires_approval"),
+                        );
+                        if let (Some(config), Some((workflow_id, spec))) =
+                            (config, single_flight_scope.as_ref())
+                        {
+                            crate::scheduler::single_flight::attach_approval_request(
+                                config,
+                                workflow_id,
+                                &spec.dedupe_key,
+                                &gate_id,
+                            )?;
+                        }
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "error": "capability_delta_requires_approval",
+                            "message": approval_message,
+                            "approval_required": true,
+                            "request_id": gate_id,
+                            "approval_ref": gate_id,
+                            "added_capabilities": added_capabilities,
+                            "broadened_capabilities": broadened_capabilities,
+                            "delta": payload,
+                            "repair_hint": "Operator must approve the request and acknowledge each added/broadened capability by name. Then retry agent_revision_promote with `approval_ref`.",
+                        })
+                        .to_string());
+                    }
+                    GateResult::PolicyAllowed => {
+                        // No approval required by policy; proceed.
+                    }
                 }
-                if let Some(guard) = single_flight_guard.as_mut() {
-                    guard.disarm();
-                }
-
-                record_attempt(
-                    "approval_required",
-                    Some("capability_delta"),
-                    Some("capability_delta_requires_approval"),
-                );
-
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "permission",
-                    "error": "capability_delta_requires_approval",
-                    "message": approval_message,
-                    "approval_required": true,
-                    "request_id": request_id,
-                    "approval_ref": request_id,
-                    "added_capabilities": added_capabilities,
-                    "broadened_capabilities": broadened_capabilities,
-                    "delta": payload,
-                    "repair_hint": "Operator must approve the request and acknowledge each added/broadened capability by name. Then retry agent_revision_promote with `approval_ref`.",
-                })
-                .to_string());
             }
         }
 

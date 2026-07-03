@@ -382,7 +382,9 @@ impl GateService {
         //    same session + action kind + targets.
         if let Some(sid) = req.session_id {
             if !sid.is_empty() {
-                if let Some(pending_id) = self.find_pending_for_targets(sid, action, targets)? {
+                if let Some(pending_id) =
+                    self.find_pending_for_targets(sid, action, targets, match_strategy)?
+                {
                     return Ok(GateResult::AlreadyPending {
                         gate_id: pending_id,
                         enforced_rules: vec!["P-2.3"],
@@ -585,7 +587,16 @@ impl GateService {
                     })
                 }),
             };
-            if let Some(pending_id) = self.find_pending_for_targets(sid, &escalate_action, &[])? {
+            if let Some(pending_id) = self.find_pending_for_targets(
+                sid,
+                &escalate_action,
+                &[],
+                // Preserve the previous "any pending of the same kind counts"
+                // semantics for escalation dedup (empty targets). Escalation
+                // dedup is intentionally kind-level here; do not tighten to
+                // ExactPayload without a separate review of fan-out behaviour.
+                MatchStrategy::HostLevel,
+            )? {
                 return Ok(GateResult::AlreadyPending {
                     gate_id: pending_id,
                     enforced_rules: if *agent_decider {
@@ -1014,11 +1025,23 @@ impl GateService {
 
     /// Find an existing pending approval for the same session + action kind
     /// whose detected hosts overlap with the requested targets.
+    ///
+    /// The dedup strength follows `match_strategy`:
+    /// - [`MatchStrategy::ExactPayload`] requires the full `ScheduledAction`
+    ///   payloads to be equal (not just the kind), so non-host actions like
+    ///   `RevisionPromote` only dedup onto a genuinely identical pending gate.
+    ///   Without this, two distinct same-kind actions in one session would
+    ///   collapse onto the first gate's id (review on #734).
+    /// - [`MatchStrategy::HostLevel`] / [`MatchStrategy::SubstituteCommand`]
+    ///   keep the host-overlap semantics: an empty `targets` means "any
+    ///   pending of the same kind counts" (host-targeted actions populate
+    ///   `targets` from `detected_hosts()` at the call site).
     fn find_pending_for_targets(
         &self,
         session_id: &str,
         action: &ScheduledAction,
         targets: &[String],
+        match_strategy: MatchStrategy,
     ) -> Result<Option<String>> {
         let pending = crate::scheduler::approval::pending_approval_requests_for_session(
             &autonoetic_types::config::GatewayConfig::default(),
@@ -1030,7 +1053,17 @@ impl GateService {
             if req.action.kind() != action.kind() {
                 continue;
             }
-            // If no targets specified, any pending of the same kind counts.
+            // ExactPayload: full structural equality of the action. Two
+            // distinct RevisionPromote deltas (different agent/revision/caps)
+            // must NOT collapse onto each other.
+            if matches!(match_strategy, MatchStrategy::ExactPayload) {
+                if self.exact_payload_covers(req, action) {
+                    return Ok(Some(req.request_id.clone()));
+                }
+                continue;
+            }
+            // If no targets specified, any pending of the same kind counts
+            // (host-targeted actions populate targets from detected_hosts()).
             if targets.is_empty() {
                 return Ok(Some(req.request_id.clone()));
             }
@@ -1887,6 +1920,130 @@ mod tests {
                 assert_eq!(gate_id, gate_id_1);
             }
             other => panic!("expected AlreadyPending, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    /// Regression for the review on #734: a `GateRequest` with
+    /// `targets: Vec::new()` + `MatchStrategy::ExactPayload` (as
+    /// `agent_revision_promote` now builds) must NOT collapse two distinct
+    /// same-kind actions onto the first pending gate's id. Previously the
+    /// pending dedup treated empty targets as "any pending of the same kind
+    /// counts", so a second RevisionPromote for a different agent/revision
+    /// would suspend on the wrong gate. ExactPayload now requires full
+    /// serialized-action equality in the dedup step.
+    #[test]
+    fn exact_payload_dedup_keeps_distinct_actions_separate() -> Result<()> {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = GateService::new(Arc::new(GatewayStore::open(tmp.path()).unwrap()));
+        let manifest = test_manifest();
+        let sid = "ses-revpromote-734";
+
+        fn rev_promote(agent: &str, rev: &str) -> ScheduledAction {
+            ScheduledAction::RevisionPromote {
+                agent_id: agent.to_string(),
+                revision_id: rev.to_string(),
+                outgoing_revision_id: format!("{}-old", rev),
+                added_capabilities: vec!["NetworkAccess".to_string()],
+                broadened_capabilities: vec![],
+                payload: None,
+            }
+        }
+
+        // First promote -> Suspended (mints a new gate).
+        let action1 = rev_promote("agent-a", "rev-1");
+        let req1 = GateRequest {
+            kind: GateKind::Approval {
+                action: action1.clone(),
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier2(
+                "Promote rev-1 of agent-a to active alias",
+                "R++2 capability delta ack needed before promotion",
+                "NetworkAccess added vs rev-1-old baseline",
+                "Acknowledge each added capability by name before approving",
+            ),
+            summary: "promote a/r1".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+        let gate_id_1 = match svc.check(req1)? {
+            GateResult::Suspended { gate_id, .. } => gate_id,
+            other => panic!("first promote: expected Suspended, got {:?}", other),
+        };
+
+        // Second promote — same kind, different agent/revision. Must NOT be
+        // dedup'd onto gate_id_1; it must mint its own gate.
+        let action2 = rev_promote("agent-b", "rev-2");
+        let req2 = GateRequest {
+            kind: GateKind::Approval {
+                action: action2.clone(),
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier2(
+                "Promote rev-2 of agent-b to active alias",
+                "R++2 capability delta ack needed before promotion",
+                "NetworkAccess added vs rev-2-old baseline",
+                "Acknowledge each added capability by name before approving",
+            ),
+            summary: "promote a/r2".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+        let gate_id_2 = match svc.check(req2)? {
+            GateResult::Suspended { gate_id, .. } => gate_id,
+            other => panic!(
+                "second distinct promote: expected Suspended (own gate), got {:?}",
+                other
+            ),
+        };
+        assert_ne!(
+            gate_id_2, gate_id_1,
+            "distinct RevisionPromote actions must not collapse onto the same gate"
+        );
+
+        // An identical re-issue of action1 must still dedup onto gate_id_1.
+        let req1b = GateRequest {
+            kind: GateKind::Approval {
+                action: action1,
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier2(
+                "Promote rev-1 of agent-a to active alias (retry)",
+                "R++2 capability delta ack needed before promotion",
+                "NetworkAccess added vs rev-1-old baseline",
+                "Acknowledge each added capability by name before approving",
+            ),
+            summary: "promote a/r1 retry".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+        match svc.check(req1b)? {
+            GateResult::AlreadyPending { gate_id, .. } => {
+                assert_eq!(gate_id, gate_id_1, "identical re-issue must dedup");
+            }
+            other => panic!("identical re-issue: expected AlreadyPending, got {:?}", other),
         }
         Ok(())
     }
