@@ -190,6 +190,11 @@ pub struct GateRequest<'a> {
     pub context: DecisionContext,
     pub summary: String,
     pub approval_ref: Option<&'a str>,
+    /// Optional explicit approval request ID. When set, the gate uses this
+    /// value as the primary key for the newly created approval row instead of
+    /// minting a random UUID. Useful for approval subjects that have a stable
+    /// canonical ID (e.g. plan frames: `apr-plan-{plan_id}-v{version}`).
+    pub request_id: Option<&'a str>,
     /// Tool-specific cache hit (e.g. `ApprovedExecCache`).  When `true` the
     /// gate short-circuits to `GateResult::Cleared`.
     pub pre_validated: bool,
@@ -1213,7 +1218,10 @@ impl GateService {
         let sid = req.session_id.unwrap_or("");
         let (root_session_id, workflow_id, task_id) = resolve_execution_context(req);
 
-        let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let request_id = req
+            .request_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]));
         let mut approval_req = ApprovalRequest {
             request_id: request_id.clone(),
             agent_id: req.manifest.agent.id.clone(),
@@ -1410,6 +1418,7 @@ impl GateService {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
@@ -1808,6 +1817,7 @@ mod tests {
             approval_ref: None,
             pre_validated: true,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
@@ -1850,6 +1860,7 @@ mod tests {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
@@ -1904,6 +1915,7 @@ mod tests {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result1 = svc.check(req1)?;
@@ -1928,6 +1940,7 @@ mod tests {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result2 = svc.check(req2)?;
@@ -2125,6 +2138,7 @@ mod tests {
             approval_ref: Some(&ref_id),
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result = svc.check(req)?;
@@ -2200,6 +2214,7 @@ mod tests {
             approval_ref: Some(&ref_id),
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result = svc.check(req)?;
@@ -2285,6 +2300,7 @@ mod tests {
             approval_ref: Some(&ref_id),
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result = svc.check(req)?;
@@ -2361,6 +2377,7 @@ mod tests {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
@@ -2461,6 +2478,7 @@ mod tests {
                 code_content: code_content.to_string(),
                 approval_request_id: String::new(),
             }),
+            request_id: None,
             turn_id: None,
         };
 
@@ -2553,6 +2571,7 @@ mod tests {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
@@ -2597,6 +2616,7 @@ mod tests {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 

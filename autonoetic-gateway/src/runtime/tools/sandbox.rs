@@ -1443,6 +1443,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             approval_ref: None,
                             pre_validated,
                             cache_backfill,
+                            request_id: None,
                             turn_id: None,
                         },
                     )?;
@@ -1803,6 +1804,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                         approval_ref: None,
                                         pre_validated: false,
                                         cache_backfill: None,
+                                request_id: None,
                                 turn_id: None,
                                     },
                                 )?;

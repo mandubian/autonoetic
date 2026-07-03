@@ -826,6 +826,41 @@ impl GatewayStore {
         Ok(deleted)
     }
 
+    /// Transactional variant of `record_promotion_attempt`. The caller must
+    /// commit `tx` for the row to persist.
+    pub fn record_promotion_attempt_in_tx(
+        tx: &rusqlite::Transaction,
+        attempt_id: &str,
+        alias_id: &str,
+        revision_id: &str,
+        content_digest: &str,
+        outcome: &str,
+        gate: Option<&str>,
+        error_code: Option<&str>,
+        session_id: Option<&str>,
+        workflow_id: Option<&str>,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT INTO promotion_attempts (
+                attempt_id, alias_id, revision_id, content_digest, outcome,
+                gate, error_code, session_id, workflow_id, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                attempt_id,
+                alias_id,
+                revision_id,
+                content_digest,
+                outcome,
+                gate,
+                error_code,
+                session_id,
+                workflow_id,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Transactional variant used when the caller already holds a rusqlite
     /// transaction and wants the count read serialized with other writes.
     pub fn count_promotion_attempt_rejections_in_tx(
@@ -840,6 +875,62 @@ impl GatewayStore {
             |row| row.get(0),
         )?;
         Ok(count.max(0) as usize)
+    }
+
+    /// Record a rejected promotion attempt transactionally, serializing the
+    /// rejection-count read with the insert to close the concurrent-promote
+    /// TOCTOU window (issue #720). Returns the current rejection count if the
+    /// cap is already reached (the insert is not performed), otherwise `None`.
+    pub fn record_rejected_promotion_attempt(
+        &self,
+        alias_id: &str,
+        revision_id: &str,
+        content_digest: &str,
+        gate: Option<&str>,
+        error_code: Option<&str>,
+        session_id: Option<&str>,
+        workflow_id: Option<&str>,
+        max_attempts: usize,
+    ) -> Result<Option<usize>> {
+        if max_attempts == 0 {
+            // Cap disabled: record without checking.
+            let attempt_id = format!("patt-{}", uuid::Uuid::new_v4());
+            self.record_promotion_attempt(
+                &attempt_id,
+                alias_id,
+                revision_id,
+                content_digest,
+                "rejected",
+                gate,
+                error_code,
+                session_id,
+                workflow_id,
+            )?;
+            return Ok(None);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let count = Self::count_promotion_attempt_rejections_in_tx(&tx, alias_id, content_digest)?;
+        if count >= max_attempts {
+            tx.rollback()?;
+            return Ok(Some(count));
+        }
+        let attempt_id = format!("patt-{}", uuid::Uuid::new_v4());
+        Self::record_promotion_attempt_in_tx(
+            &tx,
+            &attempt_id,
+            alias_id,
+            revision_id,
+            content_digest,
+            "rejected",
+            gate,
+            error_code,
+            session_id,
+            workflow_id,
+        )?;
+        tx.commit()?;
+        Ok(None)
     }
 
     /// Find agent IDs that were promoted under a given session envelope

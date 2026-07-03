@@ -248,6 +248,7 @@ impl NativeTool for FederationEscalateTool {
             approval_ref: None,
             pre_validated: false,
             cache_backfill: None,
+            request_id: None,
             turn_id: _turn_id,
         };
 

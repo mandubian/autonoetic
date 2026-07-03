@@ -20,13 +20,16 @@ use crate::runtime::history_persist::persist_history_to_content_store;
 use crate::runtime::mcp::McpToolRuntime;
 use crate::runtime::openrouter_catalog::OpenRouterCatalog;
 use crate::runtime::local_model_context::LocalModelContextCache;
+use crate::runtime::human_gate::{
+    DecisionContext, GateKind, GateRequest, GateResult, GateService, MatchStrategy,
+};
 use crate::runtime::reevaluation_state::persist_reevaluation_state;
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_tracer::{EvidenceMode, SessionTracer};
 use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
 use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware};
-use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
+use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::config::{GatewayConfig, TrajectoryConfig};
 use autonoetic_types::disclosure::DisclosurePolicy;
 use autonoetic_types::session_outcome::SessionCloseOutcome;
@@ -566,38 +569,19 @@ impl AgentExecutor {
         .unwrap_or(false)
     }
 
-    fn pending_session_continue_request_id(
-        &self,
-        cfg: &GatewayConfig,
-        session_id: &str,
-    ) -> anyhow::Result<Option<String>> {
-        let pending = crate::scheduler::approval::pending_approval_requests_for_session(
-            cfg,
-            self.gateway_store.as_deref(),
-            session_id,
-        )?;
-        Ok(pending.into_iter().find_map(|r| {
-            if matches!(r.action, ScheduledAction::SessionContinue { .. }) {
-                Some(r.request_id)
-            } else {
-                None
-            }
-        }))
-    }
-
-    fn create_session_continue_approval(
+    fn check_session_continue_gate(
         &self,
         cfg: &GatewayConfig,
         session_id: &str,
         max_turns: u32,
         blocked_turn: u64,
-    ) -> anyhow::Result<String> {
+        turn_id: &str,
+    ) -> anyhow::Result<Option<String>> {
         let Some(store) = self.gateway_store.as_ref() else {
             anyhow::bail!("GatewayStore is required for max-session-turn approval gating");
         };
         let root_session_id =
             crate::runtime::content_store::root_session_id(session_id).to_string();
-        let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let action = ScheduledAction::SessionContinue {
             session_id: session_id.to_string(),
             root_session_id: root_session_id.clone(),
@@ -608,45 +592,50 @@ impl AgentExecutor {
                 "reason": "max_session_turns_reached",
             })),
         };
-        let workflow_id = self.workflow_id.clone().or_else(|| {
-            crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_session_id)
-                .ok()
-                .flatten()
-        });
-        let task_id = self.task_id.clone().or_else(|| {
-            workflow_id.as_ref().and_then(|wf_id| {
-                crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, session_id)
-                    .ok()
-                    .flatten()
-            })
-        });
-        let mut request = ApprovalRequest {
-            request_id: request_id.clone(),
-            agent_id: self.manifest.agent.id.clone(),
-            session_id: session_id.to_string(),
-            action: action.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            reason: Some(format!(
-                "Session '{}' reached max_session_turns={} at turn {}. Approve to continue for another window of {} turns.",
-                session_id, max_turns, blocked_turn, max_turns
-            )),
-            evidence_ref: None,
-            root_session_id: Some(root_session_id),
-            workflow_id,
-            task_id,
-            status: None,
-            decided_at: None,
-            decided_by: None,
-            decision_reason: None,
-            approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-            expires_at: None,
+
+        let gate_service = GateService::new(store.clone());
+        let gate_req = GateRequest {
+            kind: GateKind::Approval {
+                action: action.clone(),
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
+            },
+            manifest: &self.manifest,
+            session_id: Some(session_id),
+            run_context: None,
+            config: Some(cfg),
+            context: DecisionContext::tier2(
+                format!(
+                    "Session {} reached max_session_turns={} at turn {}",
+                    session_id, max_turns, blocked_turn
+                ),
+                "Hard session-level turn limit reached",
+                format!("Approving grants one additional window of {} turns", max_turns),
+                "Approve if the session should continue; reject to end it",
+            ),
+            summary: format!("Session {} turn limit (turn {})", session_id, blocked_turn),
+            approval_ref: None,
+            request_id: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: Some(turn_id),
         };
-        store.create_approval(&mut request)?;
-        Ok(request_id)
+
+        match gate_service.check(gate_req)? {
+            GateResult::AlreadyPending { gate_id, .. }
+            | GateResult::Suspended { gate_id, .. } => Ok(Some(gate_id)),
+            GateResult::Cleared { source, .. } => {
+                tracing::info!(
+                    target: "lifecycle",
+                    agent_id = %self.manifest.agent.id,
+                    session_id = %session_id,
+                    source = ?source,
+                    "Session continue gate cleared via GateService"
+                );
+                Ok(None)
+            }
+            GateResult::PolicyAllowed => Ok(None),
+        }
     }
 
     pub fn close_session(&mut self, outcome: SessionCloseOutcome) -> anyhow::Result<()> {
@@ -1181,40 +1170,50 @@ impl AgentExecutor {
                 // so we trip only when attempting turn N+1 for an allowance of N.
                 if self.turn_counter > allowed_turns {
                     let blocked_turn = self.turn_counter;
-                    // Do not consume a turn when execution is blocked at the approval gate.
-                    self.turn_counter = self.turn_counter.saturating_sub(1);
-                    let request_id = if let Some(existing) =
-                        self.pending_session_continue_request_id(cfg, &session_id)?
-                    {
-                        existing
-                    } else {
-                        self.create_session_continue_approval(
-                            cfg,
-                            &session_id,
-                            effective_turns,
-                            blocked_turn,
-                        )?
-                    };
-                    tracing::warn!(
-                        agent_id = %self.manifest.agent.id,
-                        session_id = %session_id,
-                        turn_counter = blocked_turn,
-                        max_turns = cfg.max_session_turns,
-                        approved_windows = approved_windows,
-                        approval_request_id = %request_id,
-                        "Session reached max turns limit; approval required to continue"
-                    );
-                    let _ = self.save_yield_checkpoint(
-                        history,
+                    match self.check_session_continue_gate(
+                        cfg,
+                        &session_id,
+                        effective_turns,
+                        blocked_turn,
                         &turn_id,
-                        YieldReason::ApprovalRequired {
-                            approval_request_id: request_id.clone(),
-                        },
-                        None,
-                    );
-                    return Ok(TurnOutcome::Suspended {
-                        approval_request_id: request_id,
-                    });
+                    )? {
+                        Some(request_id) => {
+                            // Do not consume a turn when execution is blocked at the approval gate.
+                            self.turn_counter = self.turn_counter.saturating_sub(1);
+                            tracing::warn!(
+                                agent_id = %self.manifest.agent.id,
+                                session_id = %session_id,
+                                turn_counter = blocked_turn,
+                                max_turns = cfg.max_session_turns,
+                                approved_windows = approved_windows,
+                                approval_request_id = %request_id,
+                                "Session reached max turns limit; approval required to continue"
+                            );
+                            let _ = self.save_yield_checkpoint(
+                                history,
+                                &turn_id,
+                                YieldReason::ApprovalRequired {
+                                    approval_request_id: request_id.clone(),
+                                },
+                                None,
+                            );
+                            return Ok(TurnOutcome::Suspended {
+                                approval_request_id: request_id,
+                            });
+                        }
+                        None => {
+                            // Gate cleared via existing approval, session grant, or policy;
+                            // continue this turn without suspending.
+                            tracing::info!(
+                                agent_id = %self.manifest.agent.id,
+                                session_id = %session_id,
+                                turn_counter = blocked_turn,
+                                max_turns = cfg.max_session_turns,
+                                approved_windows = approved_windows,
+                                "Session continue gate cleared; continuing without suspension"
+                            );
+                        }
+                    }
                 }
             }
         }
