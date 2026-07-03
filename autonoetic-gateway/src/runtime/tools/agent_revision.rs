@@ -334,7 +334,7 @@ where
         .collect()
 }
 
-fn parse_frontmatter_capabilities(
+pub(crate) fn parse_frontmatter_capabilities(
     frontmatter: &serde_yaml::Value,
 ) -> anyhow::Result<Vec<Capability>> {
     let frontmatter_json = serde_json::to_value(frontmatter).map_err(|e| {
@@ -2972,7 +2972,24 @@ do not re-issue."
                 },
                 Some(_) => false,
             };
+        // #738: a federation-minted merged `RevisionPromote` (carrying
+        // `federation_context`) is the single operator decision for this
+        // promotion. If one is already approved, it covers the R++2 capability
+        // gate for both new AND existing agents — no second approval needed.
+        let merged_federation_promote_approved = match rev.artifact_id.as_deref() {
+            Some(aid) => {
+                find_merged_federation_promote_approval(
+                    &gateway_store,
+                    &args.agent_id,
+                    &args.revision_id,
+                    aid,
+                )?
+                .is_some()
+            }
+            None => false,
+        };
         let gate_bypassed_by_approval = new_agent_approved_via_escalation
+            || merged_federation_promote_approved
             || if let Some(ref approval_ref) = args.approval_ref {
                 check_revision_promote_approval(
                     &gateway_store,
@@ -3138,6 +3155,7 @@ do not re-issue."
                     added_capabilities: added_capabilities.clone(),
                     broadened_capabilities: broadened_capabilities.clone(),
                     payload: Some(payload.clone()),
+                    federation_context: None,
                 };
 
                 let gate_service = GateService::new(gateway_store.clone());
@@ -3745,16 +3763,85 @@ do not re-issue."
                     }
                 }
 
-                let escalation = gateway_store.find_escalation(
-                    artifact_id,
+                // #738: the single-decision path. A federation-minted merged
+                // `RevisionPromote` (carrying `federation_context`) authorizes
+                // both the capability delta AND this jury review. Bind by
+                // artifact_id + content_digest so an approval for different
+                // content never satisfies the gate (closes the #653 pattern
+                // structurally — `find_approved_escalation_for_artifact` was
+                // artifact-scoped only, so a re-promotion of different content
+                // under the same artifact_id could reuse a stale approval).
+                let merged_approval_id = find_merged_federation_promote_approval(
+                    &gateway_store,
+                    &args.agent_id,
                     &args.revision_id,
-                    autonoetic_types::escalation::EscalationStatus::Approved,
+                    artifact_id,
                 )?;
-                let escalation = match escalation {
-                    Some(e) => Some(e),
-                    None => gateway_store.find_approved_escalation_for_artifact(artifact_id)?,
+                let merged_satisfies_jury = match merged_approval_id.as_deref() {
+                    Some(approval_id) => match gateway_store.get_approval(approval_id)? {
+                        Some(approval) => {
+                            if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+                                federation_context: Some(ctx),
+                                ..
+                            } = &approval.action
+                            {
+                                // Digest binding (#653 structural fix): when the
+                                // approval carries a content_digest, require the
+                                // escalation projection for this artifact+revision
+                                // to carry the same digest. This prevents an
+                                // approval for different content (re-promotion
+                                // under the same artifact_id) from satisfying the
+                                // gate. Missing digest on either side is tolerated
+                                // for backward-compat (pre-digest approvals).
+                                // Fail closed (#746 review): both projection
+                                // lookups must propagate DB errors. Swallowing
+                                // them would leave current_digest = None and the
+                                // match below would treat the digest binding as
+                                // satisfied on a lookup *failure*.
+                                let approved_esc = gateway_store.find_escalation(
+                                    artifact_id,
+                                    &args.revision_id,
+                                    autonoetic_types::escalation::EscalationStatus::Approved,
+                                )?;
+                                let esc = match approved_esc {
+                                    Some(e) => Some(e),
+                                    None => gateway_store.find_escalation(
+                                        artifact_id,
+                                        &args.revision_id,
+                                        autonoetic_types::escalation::EscalationStatus::Pending,
+                                    )?,
+                                };
+                                let current_digest = esc.and_then(|e| e.artifact_digest);
+                                match (ctx.content_digest.as_deref(), current_digest.as_deref()) {
+                                    (Some(approved), Some(current)) => approved == current,
+                                    _ => true,
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        None => false,
+                    },
+                    None => false,
                 };
-                if escalation.is_none() {
+
+                // Legacy path: an approved SessionEscalate{PromotionReview}
+                // projection (pre-#738 in-flight approvals, or the no-delta
+                // jury-only review path).
+                let escalation = if merged_satisfies_jury {
+                    None // already satisfied; skip the legacy lookup
+                } else {
+                    let esc = gateway_store.find_escalation(
+                        artifact_id,
+                        &args.revision_id,
+                        autonoetic_types::escalation::EscalationStatus::Approved,
+                    )?;
+                    match esc {
+                        Some(e) => Some(e),
+                        None => gateway_store.find_approved_escalation_for_artifact(artifact_id)?,
+                    }
+                };
+                if !merged_satisfies_jury && escalation.is_none() {
                     if let Some(rejection) = record_attempt(
                         "rejected",
                         Some("full_jury"),
@@ -4756,7 +4843,83 @@ fn check_revision_promote_approval(
     Ok(current_outgoing == approved_outgoing.as_str())
 }
 
-fn check_capability_delta(
+/// #738: discover an approved merged `RevisionPromote` (one carrying
+/// `federation_context`) linked to an escalation projection for this
+/// `(artifact_id, revision_id)`. Returns the approval id when found, so
+/// `agent_revision_promote` can treat the single federation-minted decision as
+/// covering both the R++2 capability gate and the FullJury review gate —
+/// avoiding a second operator approval for the same promotion.
+///
+/// The lookup chain is: escalation projection (by artifact+revision) → its
+/// `approval_request_id` → the approval row → verify it is an approved
+/// `RevisionPromote` for the same agent+revision with a matching
+/// `federation_context.artifact_id`. The `content_digest` match is enforced
+/// separately by the FullJury gate (digest binding — closes #653).
+fn find_merged_federation_promote_approval(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+    artifact_id: &str,
+) -> anyhow::Result<Option<String>> {
+    // Look for an escalation projection (approved or pending) for this
+    // artifact+revision whose linked approval is the merged RevisionPromote.
+    for status in [
+        autonoetic_types::escalation::EscalationStatus::Approved,
+        autonoetic_types::escalation::EscalationStatus::Pending,
+    ] {
+        let Some(esc) = gateway_store.find_escalation(artifact_id, revision_id, status)? else {
+            continue;
+        };
+        let Some(approval_id) = esc.approval_request_id.as_deref() else {
+            continue;
+        };
+        let Some(req) = gateway_store.get_approval(approval_id)? else {
+            continue;
+        };
+        if !matches!(
+            req.status,
+            Some(autonoetic_types::background::ApprovalStatus::Approved)
+        ) {
+            continue;
+        }
+        if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+            agent_id: a_id,
+            revision_id: r_id,
+            outgoing_revision_id: approved_outgoing,
+            federation_context: Some(ctx),
+            ..
+        } = &req.action
+        {
+            if a_id == agent_id && r_id == revision_id && ctx.artifact_id == artifact_id {
+                // Baseline TOCTOU (#746 review): the alias must still point to
+                // the revision the operator acknowledged against when they
+                // approved — same rule as check_revision_promote_approval. If
+                // the baseline moved (another promote landed in between), the
+                // merged approval is stale and must not satisfy either gate;
+                // the promote re-gates for a fresh decision.
+                let current_outgoing = gateway_store
+                    .resolve_alias(agent_id)?
+                    .map(|a| a.revision_id)
+                    .unwrap_or_default();
+                if current_outgoing != *approved_outgoing {
+                    tracing::info!(
+                        target: "promotion",
+                        agent_id = %agent_id,
+                        revision_id = %revision_id,
+                        approved_outgoing = %approved_outgoing,
+                        current_outgoing = %current_outgoing,
+                        "merged federation approval baseline drifted; re-gating"
+                    );
+                    continue;
+                }
+                return Ok(Some(approval_id.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn check_capability_delta(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     gateway_dir: &Path,
     agent_id: &str,
@@ -4837,6 +5000,52 @@ fn check_capability_delta(
     }
 
     Ok(Some(delta))
+}
+
+/// Load the declared capabilities from a revision's `SKILL.md` frontmatter.
+/// Used by the promotion flow and, since #738, by `federation_escalate` to
+/// compute the capability delta at escalate time so a single merged
+/// `RevisionPromote` approval can carry both the jury context and the delta.
+pub(crate) fn load_revision_capabilities(
+    gateway_dir: &Path,
+    agent_id: &str,
+    revision_id: &str,
+) -> anyhow::Result<Vec<Capability>> {
+    let revision_dir = gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(revision_id);
+    let skill_path = revision_dir.join("SKILL.md");
+    let skill_bytes = std::fs::read(&skill_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot read SKILL.md for revision '{}': {}",
+            revision_id,
+            e
+        )
+    })?;
+    let skill_text = String::from_utf8_lossy(&skill_bytes);
+    let frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot parse SKILL.md frontmatter for revision '{}': {}",
+                revision_id,
+                e
+            )
+        })?;
+    parse_frontmatter_capabilities(&frontmatter)
+}
+
+/// Resolve the currently-active outgoing revision id for an agent (the baseline
+/// a promotion would replace), or `None` for a brand-new agent. Shared between
+/// the promote flow and `federation_escalate` (#738) so both compute the delta
+/// against the same baseline.
+pub(crate) fn outgoing_revision_id(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(gateway_store
+        .resolve_alias(agent_id)?
+        .map(|alias| alias.revision_id))
 }
 
 fn scope_change_within_existing_envelope(previous_scope: &[String], new_scope: &[String]) -> bool {

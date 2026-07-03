@@ -287,7 +287,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id,
+             expires_at
              FROM escalations
              WHERE artifact_id = ?1 AND revision_id = ?2 AND status = ?3
              ORDER BY created_at DESC LIMIT 1",
@@ -307,7 +308,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id,
+             expires_at
              FROM escalations
              WHERE artifact_id = ?1 AND status = 'approved'
              ORDER BY created_at DESC LIMIT 1",

@@ -84,6 +84,27 @@ pub enum EscalationKind {
     PromotionReview,
 }
 
+/// Federation jury context embedded in a merged `RevisionPromote` approval
+/// (#738). When present, the single approval authorizes both the capability
+/// delta and the federation jury review, replacing the separate FullJury
+/// escalation gate for existing-agent promotions that broaden capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevisionPromoteFederationContext {
+    /// Artifact the federation roles reviewed.
+    pub artifact_id: String,
+    /// Canonical content digest of the reviewed artifact. The FullJury gate
+    /// requires this to match the artifact being promoted, so an approval for
+    /// different content (re-promotion under the same artifact_id) cannot
+    /// satisfy the gate. Closes the #653 pattern structurally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+    /// Short human-readable summary of the federation role verdicts (e.g.
+    /// "static_evaluator: pass, unit_test_runner: pass").
+    pub role_verdicts_summary: String,
+    /// Planner's synthesis / recommendation distilled from the verdicts.
+    pub planner_synthesis: String,
+}
+
 /// Actions that can be stored in reevaluation state and executed by the background scheduler,
 /// or used as the *subject* of an approval request (ApprovalRequest/ApprovalDecision).
 ///
@@ -293,6 +314,15 @@ pub enum ScheduledAction {
         /// broadened: [{ capability_type, previous_scope, new_scope }, ...] }`.
         #[serde(default)]
         payload: Option<serde_json::Value>,
+        /// Federation jury context embedded when this promotion also carries
+        /// federation role verdicts (#738). When `Some`, this single approval
+        /// replaces the separate FullJury escalation gate — the operator's one
+        /// decision authorizes both the capability delta and the jury review.
+        /// `content_digest` binds the approval to specific artifact content so
+        /// an approval for different content never satisfies the FullJury gate
+        /// (closes the #653 pattern structurally).
+        #[serde(default)]
+        federation_context: Option<RevisionPromoteFederationContext>,
     },
     /// Wiki page contribution proposal. Approval subject only — not executed
     /// by the scheduler. On operator approval, the gateway materializes the

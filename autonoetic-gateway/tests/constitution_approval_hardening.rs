@@ -29,6 +29,7 @@ fn make_critical_request(created_at: &str) -> ApprovalRequest {
             added_capabilities: vec!["NetworkAccess".to_string()],
             broadened_capabilities: vec![],
             payload: None,
+            federation_context: None,
         },
         created_at: created_at.to_string(),
         reason: None,
@@ -99,6 +100,7 @@ fn r4_risk_classification_revision_promote_is_critical() {
         added_capabilities: vec![],
         broadened_capabilities: vec![],
         payload: None,
+        federation_context: None,
     };
     assert_eq!(classify_approval_risk(&action), ApprovalRisk::Critical);
 }

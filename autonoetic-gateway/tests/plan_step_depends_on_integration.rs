@@ -387,6 +387,7 @@ fn mk_plan(steps: &[((&str, &[&str]), StepStatus)]) -> PlanFrame {
         created_by_agent_id: "planner".into(),
         reason: None,
         created_at: "now".into(),
+        expires_at: None,
     }
 }
 
