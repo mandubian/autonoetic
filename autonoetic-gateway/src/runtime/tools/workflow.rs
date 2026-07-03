@@ -173,21 +173,13 @@ fn check_task_statuses(
         let task = crate::scheduler::load_task_run(config, store, workflow_id, task_id)
             .ok()
             .flatten();
-        match task {
+            match task {
             Some(t) => {
-                let is_terminal = matches!(
-                    t.status,
-                    autonoetic_types::workflow::TaskRunStatus::Succeeded
-                        | autonoetic_types::workflow::TaskRunStatus::Failed
-                        | autonoetic_types::workflow::TaskRunStatus::Cancelled
-                        | autonoetic_types::workflow::TaskRunStatus::Aborted
-                        // #722 Stage 2: a Stale task (approval timed out,
-                        // checkpoint preserved) is terminal for waiting purposes,
-                        // matching check_join_condition. Without this, a parent in
-                        // workflow_wait blocks its full budget on a task the join
-                        // already treats as done.
-                        | autonoetic_types::workflow::TaskRunStatus::Stale
-                );
+                // #722 Stage 2: a Stale task (approval timed out, checkpoint
+                // preserved) is terminal for waiting purposes, matching
+                // check_join_condition. Without this, a parent in workflow_wait
+                // blocks its full budget on a task the join already treats as done.
+                let is_terminal = t.status.is_terminal_for_join();
                 if !is_terminal {
                     all_done = false;
                 }

@@ -43,6 +43,16 @@ impl WorkflowRunStatus {
         }
     }
 
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            WorkflowRunStatus::Completed
+                | WorkflowRunStatus::Failed
+                | WorkflowRunStatus::Cancelled
+                | WorkflowRunStatus::EmergencyStopped
+        )
+    }
+
     pub fn try_transition(self, next: WorkflowRunStatus) -> bool {
         use WorkflowRunStatus::*;
         if self == next {
@@ -102,6 +112,36 @@ impl TaskRunStatus {
         }
     }
 
+    /// Fully terminal — the task will never run again. `Stale` is **excluded**
+    /// because it is a soft-timeout state: the operator can still approve the
+    /// underlying request and resume the task (see #722 Stage 2 / P-2.11).
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskRunStatus::Succeeded
+                | TaskRunStatus::Failed
+                | TaskRunStatus::Cancelled
+                | TaskRunStatus::Aborted
+        )
+    }
+
+    /// Terminal for join / wait purposes. Includes `Stale` so that a join
+    /// observing a stale task unblocks (the task is either resolved or
+    /// indefinitely abandoned — both unblock the join).
+    pub fn is_terminal_for_join(self) -> bool {
+        self.is_terminal() || self == TaskRunStatus::Stale
+    }
+
+    /// Resumable — the task can transition back to `Runnable`. Distinct from
+    /// `is_terminal_for_join` because the orphan-reaper treats `Stale` as
+    /// active-and-protected even though it unblocks joins.
+    pub fn is_resumable(self) -> bool {
+        matches!(
+            self,
+            TaskRunStatus::AwaitingApproval | TaskRunStatus::Paused | TaskRunStatus::Stale
+        )
+    }
+
     pub fn try_transition(self, next: TaskRunStatus) -> bool {
         use TaskRunStatus::*;
         if self == next {
@@ -113,13 +153,26 @@ impl TaskRunStatus {
             (Pending, _) => false,
             (Runnable, Running | Cancelled | Failed) => true,
             (Runnable, _) => false,
-            (Running, AwaitingApproval | Paused | Aborting | Succeeded | Failed) => true,
+            // Cancelled from any live state: operator/agent-driven
+            // cancellation (workflow task_cancel, gate cancellation) is legal
+            // while the task is Running/parked (#747 review).
+            (Running, AwaitingApproval | Paused | Aborting | Succeeded | Failed | Cancelled) => {
+                true
+            }
             (Running, _) => false,
-            (AwaitingApproval, Runnable | Aborting | Failed | Stale) => true,
+            // AwaitingApproval can be resolved by an approval (→ Succeeded),
+            // rejected (→ Failed), aborted (→ Aborting → Aborted), timed out
+            // (→ Stale), or cancelled. Amend (→ Runnable) resumes for re-gating.
+            (AwaitingApproval, Runnable | Aborting | Failed | Stale | Succeeded | Cancelled) => {
+                true
+            }
             (AwaitingApproval, _) => false,
-            (Stale, Runnable) => true,
+            // Stale is resumable: a late approval revives it (→ Runnable), a
+            // late rejection fails it (→ Failed, via unblock/fan-in), and an
+            // operator can still cancel it.
+            (Stale, Runnable | Failed | Cancelled) => true,
             (Stale, _) => false,
-            (Paused, Runnable | Aborting | Failed) => true,
+            (Paused, Runnable | Aborting | Failed | Cancelled) => true,
             (Paused, _) => false,
             (Aborting, Aborted) => true,
             (Aborting, _) => false,
@@ -341,4 +394,151 @@ pub struct TaskCheckpoint {
     #[serde(default)]
     pub state: serde_json::Value,
     pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskRunStatus;
+
+    #[test]
+    fn is_terminal_includes_succeeded_failed_cancelled_aborted() {
+        assert!(TaskRunStatus::Succeeded.is_terminal());
+        assert!(TaskRunStatus::Failed.is_terminal());
+        assert!(TaskRunStatus::Cancelled.is_terminal());
+        assert!(TaskRunStatus::Aborted.is_terminal());
+    }
+
+    #[test]
+    fn is_terminal_excludes_stale_and_active_states() {
+        // `Stale` is resumable per #722 Stage 2 / P-2.11.
+        assert!(!TaskRunStatus::Stale.is_terminal());
+        // Active states.
+        assert!(!TaskRunStatus::Pending.is_terminal());
+        assert!(!TaskRunStatus::Runnable.is_terminal());
+        assert!(!TaskRunStatus::Running.is_terminal());
+        assert!(!TaskRunStatus::AwaitingApproval.is_terminal());
+        assert!(!TaskRunStatus::Paused.is_terminal());
+        assert!(!TaskRunStatus::Aborting.is_terminal());
+    }
+
+    #[test]
+    fn is_terminal_for_join_includes_stale() {
+        assert!(TaskRunStatus::Succeeded.is_terminal_for_join());
+        assert!(TaskRunStatus::Failed.is_terminal_for_join());
+        assert!(TaskRunStatus::Cancelled.is_terminal_for_join());
+        assert!(TaskRunStatus::Aborted.is_terminal_for_join());
+        assert!(TaskRunStatus::Stale.is_terminal_for_join());
+    }
+
+    #[test]
+    fn is_terminal_for_join_excludes_active_states() {
+        assert!(!TaskRunStatus::Pending.is_terminal_for_join());
+        assert!(!TaskRunStatus::Runnable.is_terminal_for_join());
+        assert!(!TaskRunStatus::Running.is_terminal_for_join());
+        assert!(!TaskRunStatus::AwaitingApproval.is_terminal_for_join());
+        assert!(!TaskRunStatus::Paused.is_terminal_for_join());
+        assert!(!TaskRunStatus::Aborting.is_terminal_for_join());
+    }
+
+    #[test]
+    fn is_resumable_includes_awaiting_paused_stale() {
+        assert!(TaskRunStatus::AwaitingApproval.is_resumable());
+        assert!(TaskRunStatus::Paused.is_resumable());
+        assert!(TaskRunStatus::Stale.is_resumable());
+    }
+
+    #[test]
+    fn is_resumable_excludes_terminal_and_active_states() {
+        assert!(!TaskRunStatus::Succeeded.is_resumable());
+        assert!(!TaskRunStatus::Failed.is_resumable());
+        assert!(!TaskRunStatus::Cancelled.is_resumable());
+        assert!(!TaskRunStatus::Aborted.is_resumable());
+        assert!(!TaskRunStatus::Pending.is_resumable());
+        assert!(!TaskRunStatus::Runnable.is_resumable());
+        assert!(!TaskRunStatus::Running.is_resumable());
+        assert!(!TaskRunStatus::Aborting.is_resumable());
+    }
+
+    #[test]
+    fn try_transition_refuses_illegal_terminus_to_active() {
+        // No transition out of a terminal state.
+        for terminal in [
+            TaskRunStatus::Succeeded,
+            TaskRunStatus::Failed,
+            TaskRunStatus::Aborted,
+            TaskRunStatus::Cancelled,
+        ] {
+            for target in [
+                TaskRunStatus::Pending,
+                TaskRunStatus::Runnable,
+                TaskRunStatus::Running,
+                TaskRunStatus::AwaitingApproval,
+                TaskRunStatus::Paused,
+                TaskRunStatus::Stale,
+            ] {
+                assert!(
+                    !terminal.try_transition(target),
+                    "terminal {:?} should not transition to {:?}",
+                    terminal,
+                    target
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn try_transition_allows_stale_to_runnable() {
+        assert!(TaskRunStatus::Stale.try_transition(TaskRunStatus::Runnable));
+    }
+
+    /// #747 review: operator/agent-driven cancellation (workflow task_cancel,
+    /// gate cancellation) must be legal from every live state — otherwise the
+    /// enforcement in update_task_run_status turns a cancel into a silent
+    /// no-op and the task is stuck live forever.
+    #[test]
+    fn try_transition_allows_cancel_from_every_live_state() {
+        for live in [
+            TaskRunStatus::Pending,
+            TaskRunStatus::Runnable,
+            TaskRunStatus::Running,
+            TaskRunStatus::AwaitingApproval,
+            TaskRunStatus::Paused,
+            TaskRunStatus::Stale,
+        ] {
+            assert!(
+                live.try_transition(TaskRunStatus::Cancelled),
+                "cancellation from live state {:?} must be legal",
+                live
+            );
+        }
+    }
+
+    /// #747 review: a Stale task's approval can still be *rejected* late —
+    /// unblock/fan-in then drive Stale → Failed, which must be legal.
+    #[test]
+    fn try_transition_allows_stale_to_failed_on_late_rejection() {
+        assert!(TaskRunStatus::Stale.try_transition(TaskRunStatus::Failed));
+        // But a Stale task never jumps straight to Succeeded or Running.
+        assert!(!TaskRunStatus::Stale.try_transition(TaskRunStatus::Succeeded));
+        assert!(!TaskRunStatus::Stale.try_transition(TaskRunStatus::Running));
+    }
+
+    #[test]
+    fn try_transition_allows_same_to_same() {
+        for s in [
+            TaskRunStatus::Pending,
+            TaskRunStatus::Runnable,
+            TaskRunStatus::Running,
+            TaskRunStatus::AwaitingApproval,
+            TaskRunStatus::Paused,
+            TaskRunStatus::Stale,
+            TaskRunStatus::Aborting,
+            TaskRunStatus::Aborted,
+            TaskRunStatus::Succeeded,
+            TaskRunStatus::Failed,
+            TaskRunStatus::Cancelled,
+        ] {
+            assert!(s.try_transition(s));
+        }
+    }
 }
