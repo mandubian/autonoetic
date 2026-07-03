@@ -567,7 +567,7 @@ fn apply_session_lifecycle_state_v64(conn: &mut Connection) -> Result<()> {
          UPDATE session_transcripts SET lifecycle_state = 'active'
            WHERE lifecycle_state IS NULL AND status = 'active';
          UPDATE session_transcripts SET lifecycle_state = 'terminated:completed'
-           WHERE lifecycle_state IS NULL AND status = 'completed';
+           WHERE lifecycle_state IS NULL AND status IN ('completed', 'closed');
          UPDATE session_transcripts SET lifecycle_state = 'terminated:failed'
            WHERE lifecycle_state IS NULL AND status = 'failed';
          UPDATE session_transcripts SET lifecycle_state = 'awaiting_gate'

@@ -1551,30 +1551,42 @@ pub fn try_complete_workflow(
         return Ok(false);
     }
 
-    // #742: don't complete the workflow unless the root session has terminated.
-    // Lifecycle states hibernated and awaiting_gate mean the session will
-    // resume when the gate resolves — the plan may have more steps to run.
+    // #742: don't complete the workflow unless the root session lifecycle
+    // indicates the session will not resume for new work. "terminated:*" means
+    // the session ended; "hibernated" means between turns (close_session ran
+    // but the session will resume on the next operator message — completing
+    // the workflow is fine since all join/active conditions are checked below).
+    // "awaiting_gate" means an operator decision is pending — the workflow
+    // must not complete because the plan may have more steps to run.
+    // Pre-migration rows with no lifecycle_state fall through to the legacy
+    // transcript-status + pending-escalation check below.
     if let Some(gw_store) = store {
         match gw_store.get_session_lifecycle_state(root_session_id)? {
-            Some(state) if state.starts_with("terminated:") => { /* proceed */ }
-            Some(state) => {
+            Some(ref state) if state == "hibernated" || state.starts_with("terminated:") => {
+                /* proceed */
+            }
+            Some(ref state) => {
                 tracing::debug!(
                     target: "workflow",
                     workflow_id = %wf_id,
                     root_session_id = %root_session_id,
                     lifecycle_state = %state,
-                    "Workflow not completing: root session lifecycle state is not terminated"
+                    "Workflow not completing: root session lifecycle is {}",
+                    state
                 );
                 return Ok(false);
             }
+            // Pre-migration fallback: no lifecycle_state — use legacy checks.
             None => {
-                tracing::warn!(
-                    target: "workflow",
-                    workflow_id = %wf_id,
-                    root_session_id = %root_session_id,
-                    "Workflow not completing: root session has no lifecycle state (not yet migrated?)"
-                );
-                return Ok(false);
+                if gw_store.has_pending_escalations_for_session(root_session_id)? {
+                    tracing::debug!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        root_session_id = %root_session_id,
+                        "Workflow not completing: pending escalation(s) for root session (pre-migration fallback)"
+                    );
+                    return Ok(false);
+                }
             }
         }
     }

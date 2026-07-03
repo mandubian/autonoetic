@@ -664,6 +664,7 @@ impl GatewayStore {
                 CASE ?9
                     WHEN 'active' THEN 'active'
                     WHEN 'completed' THEN 'terminated:completed'
+                    WHEN 'closed' THEN 'terminated:completed'
                     WHEN 'failed' THEN 'terminated:failed'
                     WHEN 'suspended' THEN 'awaiting_gate'
                     ELSE 'active'
@@ -755,14 +756,25 @@ impl GatewayStore {
         // #742: set lifecycle state to match the terminal status.
         // Only "completed" and "failed" are truly terminal; "suspended" is
         // resumable (its lifecycle was already set by save_yield_checkpoint).
+        // For "completed", avoid overwriting "hibernated" (between-turn yield)
+        // — only set "terminated:completed" when the current state is not
+        // already a resumable lifecycle state.
         let lifecycle = match status {
             "completed" => Some("terminated:completed"),
             "failed" => Some("terminated:failed"),
             _ => None,
         };
         if let Some(lifecycle) = lifecycle {
+            // Only overwrite if the current lifecycle is not a resumable state.
+            // This preserves "hibernated" between turns and "awaiting_gate"
+            // for gate-suspended sessions. Truly terminal sessions (headless
+            // complete, error, etc.) will have "active" or NULL lifecycle.
             conn.execute(
-                "UPDATE session_transcripts SET lifecycle_state = ?1 WHERE session_id = ?2 AND lifecycle_state IS NULL",
+                "UPDATE session_transcripts
+                 SET lifecycle_state = ?1
+                 WHERE session_id = ?2
+                   AND (lifecycle_state IS NULL
+                        OR lifecycle_state NOT IN ('hibernated', 'awaiting_gate'))",
                 params![lifecycle, session_id],
             )?;
         }
@@ -771,11 +783,13 @@ impl GatewayStore {
 
     /// Re-open a previously finalized session for a new turn.
     ///
-    /// Between turns the session is `completed` (from `close_session`), but the
-    /// orphan-child reaper (R+12) treats any completed/failed parent as "terminated"
-    /// and will cancel its children.  Call this at the start of each turn to restore
-    /// `active` so that child agents spawned during execution are not immediately
-    /// orphaned.
+    /// Between turns the session's transcript status is `completed` (from
+    /// `close_session`) and lifecycle_state is `hibernated` (from the yield
+    /// checkpoint). Call this at the start of each turn to restore `active`
+    /// in both fields so child agents spawned during execution are not
+    /// immediately orphaned (siblings of a `hibernated` parent are protected
+    /// by the lifecycle-state-based orphan reaper, but we still need a clean
+    /// slate for the new turn).
     pub fn reopen_session_transcript(&self, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1264,6 +1278,7 @@ impl GatewayStore {
                     "SELECT COALESCE(lifecycle_state,
                         CASE status
                             WHEN 'completed' THEN 'terminated:completed'
+                            WHEN 'closed' THEN 'terminated:completed'
                             WHEN 'failed' THEN 'terminated:failed'
                             ELSE 'active'
                         END
