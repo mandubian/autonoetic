@@ -234,7 +234,11 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&e.created_at, now),
             is_expired: false,
-            decision: false,
+            // Rows in the `escalations` table are resolved exclusively via
+            // `admin.escalation_resolve(status: approved|rejected)` — a binary
+            // authorization. (Guidance requests are approval rows, not
+            // escalations-table rows, so they never reach this loop.)
+            decision: true,
             id: e.escalation_id,
             root_session_id: Some(e.root_session_id),
             agent_id: e.agent_id,
@@ -268,7 +272,8 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&e.created_at, now),
             is_expired: true,
-            decision: false,
+            // Binary-resolved via admin.escalation_resolve (see above).
+            decision: true,
             id: e.escalation_id,
             root_session_id: Some(e.root_session_id),
             agent_id: e.agent_id,

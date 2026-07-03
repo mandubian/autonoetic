@@ -701,9 +701,12 @@ fn approvals_are_always_decisions() {
 }
 
 #[test]
-fn standalone_guidance_escalation_is_not_a_decision() {
-    // A guidance-request escalation (no approval_request_id) is an answer, not
-    // a binary decision.
+fn escalation_table_rows_are_decisions() {
+    // Rows in the `escalations` table (legacy promotion reviews and similar)
+    // are resolved exclusively via `admin.escalation_resolve(status:
+    // approved|rejected)` — a binary authorization — so they carry
+    // `decision: true`. Genuine guidance requests are approval rows created by
+    // GateService::check_escalation and never land in this table.
     let (_dir, store) = store();
     seed_escalation(&store, "2026-07-02T10:00:00Z");
 
@@ -713,7 +716,7 @@ fn standalone_guidance_escalation_is_not_a_decision() {
     let esc = pending.iter().find(|p| p.kind == PendingKind::Escalation);
     assert!(esc.is_some(), "escalation should appear");
     assert!(
-        !esc.unwrap().decision,
-        "standalone guidance escalation must not be flagged as a decision"
+        esc.unwrap().decision,
+        "escalations-table rows are binary-resolved and must be flagged as decisions"
     );
 }

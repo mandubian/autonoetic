@@ -165,9 +165,8 @@ pub fn run_post_promotion_review(
             // #739 Part C: emit an `operator_alert` timeline event instead of
             // an actionable escalation row. The alert surfaces in the timeline
             // (read model) without masquerading as a resolvable decision in
-            // `operator.pending`. The historical escalation row is kept as a
-            // non-actionable record flagged `Resolved` so it never appears in
-            // the pending queue.
+            // `operator.pending`. No `escalations` row is created at all —
+            // the timeline event is the only record of the anomaly.
             emit_post_promotion_anomaly_alert(
                 store.as_ref(),
                 agent_id,
