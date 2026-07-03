@@ -3138,6 +3138,7 @@ do not re-issue."
                     added_capabilities: added_capabilities.clone(),
                     broadened_capabilities: broadened_capabilities.clone(),
                     payload: Some(payload.clone()),
+                    federation_context: None,
                 };
 
                 let gate_service = GateService::new(gateway_store.clone());

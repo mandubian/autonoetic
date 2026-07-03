@@ -128,6 +128,7 @@ mod tests {
             added_capabilities: vec!["NetworkAccess".to_string()],
             broadened_capabilities: vec![],
             payload: None,
+            federation_context: None,
         };
         assert_eq!(classify_approval_risk(&action), ApprovalRisk::Critical);
         let h = hardening_for_action(&action);

@@ -111,6 +111,7 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
         created_by_agent_id: "planner.collaborative".to_string(),
         reason: Some("initial draft".to_string()),
         created_at: "2026-06-01T00:00:00Z".to_string(),
+        expires_at: None,
     }
 }
 

@@ -1983,6 +1983,7 @@ mod tests {
                 added_capabilities: vec!["NetworkAccess".to_string()],
                 broadened_capabilities: vec![],
                 payload: None,
+                federation_context: None,
             }
         }
 

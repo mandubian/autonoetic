@@ -254,6 +254,7 @@ fn store_revision_promote_approval(
             added_capabilities: added.into_iter().map(String::from).collect(),
             broadened_capabilities: broadened.into_iter().map(String::from).collect(),
             payload: None,
+            federation_context: None,
         },
         created_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
         status: None,
