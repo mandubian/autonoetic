@@ -2361,8 +2361,11 @@ fn execute_steps(
                     crate::runtime::human_gate::GateResult::Cleared { .. }
                     | crate::runtime::human_gate::GateResult::PolicyAllowed => {
                         // An identical prompt was already approved. If the credential
-                        // now exists we can resume immediately; otherwise we still
-                        // suspend so the operator can provide the secrets.
+                        // now exists we can resume immediately; otherwise the
+                        // operator must provide the secrets directly — there is no
+                        // pending approval row to attach them to, so synthesizing a
+                        // fake request_id and reporting `approval_required: true`
+                        // would dead-end the workflow (#724 Part B review).
                         if let Some(cred) = store.get_credential(credential_id)? {
                             return Ok(json!({
                                 "ok": true,
@@ -2373,8 +2376,31 @@ fn execute_steps(
                             })
                             .to_string());
                         }
-                        // No new approval row was minted; use a stable fallback id.
-                        format!("cred-prompt-{}", credential_id)
+                        // No approval row exists and none will be minted. Suspend
+                        // for direct secret input rather than approval — do NOT
+                        // report a request_id or approval_required here.
+                        step_results.push(json!({
+                            "step": i,
+                            "step_type": "user_prompt",
+                            "message": message,
+                            "secret_fields": secret_fields,
+                            "status": "awaiting_secret_input",
+                        }));
+                        vault.persist_to_file(vault_path)?;
+                        return Ok(json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "message": "credential.setup suspended: equivalent prompt was already cleared but the secret is still missing",
+                            "repair_hint": "Provide the requested secret fields directly (e.g. via credential.set), then resume credential.setup.",
+                            "suspended": true,
+                            "approval_required": false,
+                            "request_id": serde_json::Value::Null,
+                            "credential_id": credential_id,
+                            "service": service,
+                            "steps": step_results,
+                            "reason": "UserPrompt step cleared by GateService but secret fields are still empty",
+                        })
+                        .to_string());
                     }
                 };
 
