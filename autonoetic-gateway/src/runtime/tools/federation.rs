@@ -2,7 +2,7 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::human_gate::{DecisionContext, GateKind, GateRequest, GateResult, GateService};
-use crate::runtime::tools::{NativeTool, NativeToolRegistry};
+use crate::runtime::tools::{capability_type_name, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{EscalationKind, ScheduledAction};
 use autonoetic_types::capability::Capability;
@@ -203,76 +203,211 @@ impl NativeTool for FederationEscalateTool {
             }
         }
 
-        // Build the promotion review as a single approval row, then project the
-        // escalation row from it. This collapses the previous double-write and
-        // gives #653 a typed discriminator (`EscalationKind::PromotionReview`)
-        // instead of payload sniffing.
-        let action = ScheduledAction::SessionEscalate {
-            session_id: _session_id.unwrap_or("").to_string(),
-            root_session_id: args.root_session_id.clone(),
-            requested_by_agent_id: args.agent_id.clone(),
-            reason: format!(
-                "Promotion review for agent '{}' (escalation {})",
-                args.agent_id, escalation_id
-            ),
-            context: args.planner_synthesis.clone(),
-            urgency: "normal".to_string(),
-            suggested_actions: vec!["approve".to_string(), "reject".to_string()],
-            payload: Some(serde_json::json!({
-                "escalation_id": escalation_id,
-                "artifact_id": canonical_artifact_id,
-                "revision_id": canonical_revision_id,
-            })),
-            kind: EscalationKind::PromotionReview,
+        // #738: when the promotion also broadens capabilities (or is a new
+        // cap-bearing agent), mint ONE merged `RevisionPromote` approval that
+        // carries both the federation jury context and the capability delta,
+        // under Critical hardening (5s dwell + confirm phrase + capability ack).
+        // The operator decides once; `agent_revision_promote` then accepts this
+        // single approval as covering BOTH the R++2 capability gate and the
+        // FullJury review gate. When there is no capability delta (e.g. a new
+        // zero-cap agent, or no broadening), there is nothing to ack — the
+        // federation review stands alone as a `SessionEscalate{PromotionReview}`
+        // and the operator only approves the jury verdicts.
+        let capability_delta = if let (Some(gw_dir), Some(cfg)) = (gateway_dir, _config) {
+            match super::agent_revision::load_revision_capabilities(
+                gw_dir,
+                &args.agent_id,
+                &canonical_revision_id,
+            ) {
+                Ok(current_caps) => {
+                    match super::agent_revision::check_capability_delta(
+                        &store,
+                        gw_dir,
+                        &args.agent_id,
+                        &canonical_revision_id,
+                        &current_caps,
+                        cfg.capability_delta_gate_mode,
+                        cfg.require_operator_approval_for_new_agents,
+                    ) {
+                        Ok(delta) => delta,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "federation",
+                                agent_id = %args.agent_id,
+                                revision_id = %canonical_revision_id,
+                                error = %e,
+                                "capability delta computation failed at federation escalate; \
+                                 falling back to jury-only review"
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "federation",
+                        agent_id = %args.agent_id,
+                        revision_id = %canonical_revision_id,
+                        error = %e,
+                        "could not load revision capabilities at federation escalate; \
+                         falling back to jury-only review"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
         };
 
+        // The federation jury context embedded in the merged action so the
+        // operator's single decision surfaces both the delta and the verdicts,
+        // and the FullJury gate can bind by content digest (#653 structural fix).
+        let federation_context = Some(autonoetic_types::background::RevisionPromoteFederationContext {
+            artifact_id: canonical_artifact_id.clone(),
+            content_digest: escalation.artifact_digest.clone(),
+            role_verdicts_summary: summarize_role_verdicts(&escalation.role_verdicts),
+            planner_synthesis: args.planner_synthesis.clone(),
+        });
+
         let gate_service = GateService::new(store.clone());
-        let gate_req = GateRequest {
-            kind: GateKind::Approval {
-                action: action.clone(),
-                // `targets` is intentionally empty: SessionEscalate carries no
-                // host targets. Dedup safety relies on two layered guards in
-                // find_pending_for_targets: (1) MatchStrategy::ExactPayload
-                // short-circuits via exact_payload_covers (full structural
-                // equality, including the escalation_id/artifact_id/revision_id
-                // in the payload) *before* the "empty targets → any pending of
-                // same kind" fallback; and (2) the SessionEscalate sub-type guard
-                // rejects cross-EscalationKind collisions (guidance-request vs
-                // promotion-review). Do NOT loosen the strategy or change the
-                // payload without preserving both guards, or an unrelated
-                // pending session_escalate approval could be reused and the
-                // escalation projection linked to the wrong approval row
-                // (#724 Part B review).
-                targets: Vec::new(),
-                match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
-            },
-            manifest: _manifest,
-            session_id: _session_id,
-            run_context: _run_context,
-            config: _config,
-            context: DecisionContext::tier2(
-                format!(
-                    "Federation promotion review for agent {} revision {}",
+
+        // Branch on whether this promotion carries a capability delta. The
+        // merged `RevisionPromote` path is the #738 single-decision flow; the
+        // `SessionEscalate` path is the legacy jury-only review (no caps to ack).
+        let gate_req = if let Some(delta) = capability_delta.as_ref() {
+            // Merged single-decision path — RevisionPromote with federation context.
+            let outgoing_revision_id = super::agent_revision::outgoing_revision_id(
+                &store,
+                &args.agent_id,
+            )?
+            .unwrap_or_default();
+            let added_capabilities: Vec<String> = delta.added.clone();
+            let broadened_capabilities: Vec<String> = delta
+                .broadened
+                .iter()
+                .map(|b| b.capability_type.clone())
+                .collect();
+            let action = ScheduledAction::RevisionPromote {
+                agent_id: args.agent_id.clone(),
+                revision_id: canonical_revision_id.clone(),
+                outgoing_revision_id: outgoing_revision_id.clone(),
+                added_capabilities: added_capabilities.clone(),
+                broadened_capabilities: broadened_capabilities.clone(),
+                payload: Some(serde_json::json!({
+                    "escalation_id": escalation_id,
+                    "artifact_id": canonical_artifact_id,
+                    "revision_id": canonical_revision_id,
+                    "federation_review": true,
+                })),
+                federation_context: federation_context.clone(),
+            };
+            GateRequest {
+                kind: GateKind::Approval {
+                    action: action.clone(),
+                    // ExactPayload: the merged action carries the delta + jury
+                    // context, so retries dedup onto the genuinely identical
+                    // pending gate. Critical hardening (dwell + confirm phrase)
+                    // is auto-applied by classify_approval_risk for RevisionPromote.
+                    targets: Vec::new(),
+                    match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                },
+                manifest: _manifest,
+                session_id: _session_id,
+                run_context: _run_context,
+                config: _config,
+                context: DecisionContext::tier2(
+                    format!(
+                        "Federated promotion of agent {} revision {} (jury + capability delta)",
+                        args.agent_id, canonical_revision_id
+                    ),
+                    "R++2 capability acknowledgement + federation jury review (#738 single decision)",
+                    format!(
+                        "Added capabilities: {:?}; broadened: {:?}; artifact {} with {} role verdict(s). \
+                         Approve only if you acknowledge each capability AND accept the jury verdicts.",
+                        added_capabilities, broadened_capabilities, canonical_artifact_id,
+                        escalation.role_verdicts.len()
+                    ),
+                    "Acknowledge every added/broadened capability by name and approve only if all \
+                     federation role verdicts support promotion; reject if any critical role failed.",
+                )
+                .with_analysis(args.planner_synthesis.clone()),
+                summary: format!(
+                    "Federated promotion: agent '{}' revision '{}' (jury review + capability delta)",
                     args.agent_id, canonical_revision_id
                 ),
-                "Federation roles have recorded verdicts and the operator must approve promotion",
-                format!(
-                    "Artifact {} with {} role verdict(s). Promotion proceeds if approved; blocked if rejected.",
-                    canonical_artifact_id,
-                    escalation.role_verdicts.len()
+                approval_ref: None,
+                pre_validated: false,
+                cache_backfill: None,
+                request_id: None,
+                turn_id: _turn_id,
+            }
+        } else {
+            // Legacy jury-only review — no capability delta to acknowledge.
+            let action = ScheduledAction::SessionEscalate {
+                session_id: _session_id.unwrap_or("").to_string(),
+                root_session_id: args.root_session_id.clone(),
+                requested_by_agent_id: args.agent_id.clone(),
+                reason: format!(
+                    "Promotion review for agent '{}' (escalation {})",
+                    args.agent_id, escalation_id
                 ),
-                "Approve if all federation role verdicts support promotion; reject if any critical role failed or the synthesis is unconvincing",
-            )
-            .with_analysis(args.planner_synthesis.clone()),
-            summary: format!(
-                "Federation promotion review: agent '{}' artifact '{}' requires operator approval",
-                args.agent_id, canonical_artifact_id
-            ),
-            approval_ref: None,
-            pre_validated: false,
-            cache_backfill: None,
-            request_id: None,
-            turn_id: _turn_id,
+                context: args.planner_synthesis.clone(),
+                urgency: "normal".to_string(),
+                suggested_actions: vec!["approve".to_string(), "reject".to_string()],
+                payload: Some(serde_json::json!({
+                    "escalation_id": escalation_id,
+                    "artifact_id": canonical_artifact_id,
+                    "revision_id": canonical_revision_id,
+                })),
+                kind: EscalationKind::PromotionReview,
+            };
+            GateRequest {
+                kind: GateKind::Approval {
+                    action: action.clone(),
+                    // `targets` is intentionally empty: SessionEscalate carries no
+                    // host targets. Dedup safety relies on two layered guards in
+                    // find_pending_for_targets: (1) MatchStrategy::ExactPayload
+                    // short-circuits via exact_payload_covers (full structural
+                    // equality, including the escalation_id/artifact_id/revision_id
+                    // in the payload) *before* the "empty targets → any pending of
+                    // same kind" fallback; and (2) the SessionEscalate sub-type guard
+                    // rejects cross-EscalationKind collisions (guidance-request vs
+                    // promotion-review). Do NOT loosen the strategy or change the
+                    // payload without preserving both guards, or an unrelated
+                    // pending session_escalate approval could be reused and the
+                    // escalation projection linked to the wrong approval row
+                    // (#724 Part B review).
+                    targets: Vec::new(),
+                    match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                },
+                manifest: _manifest,
+                session_id: _session_id,
+                run_context: _run_context,
+                config: _config,
+                context: DecisionContext::tier2(
+                    format!(
+                        "Federation promotion review for agent {} revision {}",
+                        args.agent_id, canonical_revision_id
+                    ),
+                    "Federation roles have recorded verdicts and the operator must approve promotion",
+                    format!(
+                        "Artifact {} with {} role verdict(s). Promotion proceeds if approved; blocked if rejected.",
+                        canonical_artifact_id,
+                        escalation.role_verdicts.len()
+                    ),
+                    "Approve if all federation role verdicts support promotion; reject if any critical role failed or the synthesis is unconvincing",
+                )
+                .with_analysis(args.planner_synthesis.clone()),
+                summary: format!(
+                    "Federation promotion review: agent '{}' artifact '{}' requires operator approval",
+                    args.agent_id, canonical_artifact_id
+                ),
+                approval_ref: None,
+                pre_validated: false,
+                cache_backfill: None,
+                request_id: None,
+                turn_id: _turn_id,
+            }
         };
 
         match gate_service.check(gate_req)? {
@@ -323,4 +458,21 @@ impl NativeTool for FederationEscalateTool {
             }
         }
     }
+}
+
+/// One-line summary of the federation role verdicts, embedded in the merged
+/// `RevisionPromote` approval so the operator sees the jury outcome alongside
+/// the capability delta (#738).
+fn summarize_role_verdicts(verdicts: &[RoleVerdictSummary]) -> String {
+    verdicts
+        .iter()
+        .map(|v| {
+            let role = serde_json::to_value(&v.role)
+                .ok()
+                .and_then(|val| val.as_str().map(String::from))
+                .unwrap_or_else(|| "unknown_role".to_string());
+            format!("{}: {}", role, if v.passed { "pass" } else { "fail" })
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
