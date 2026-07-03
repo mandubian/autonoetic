@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use autonoetic_gateway::runtime::promotion_governor::{
-    check_attempt_exhaustion, run_governor_checks,
+    check_attempt_exhaustion, record_rejected_attempt, run_governor_checks,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::config::PromotionGovernorConfig;
@@ -78,9 +78,28 @@ fn same_digest_rejected_n_times_blocks_next_attempt() {
     assert_eq!(rejection.payload["rejected_attempts"], 3);
     assert_eq!(rejection.payload["rule_id"], "P-2.29");
 
-    // run_governor_checks should short-circuit on exhaustion and not evaluate
-    // later gates (velocity/flapping/eval-regression are disabled by config).
-    let rejection = run_governor_checks(
+    // A further rejection is blocked transactionally by record_rejected_attempt
+    // (the count read and insert are serialized on the same SQLite connection).
+    let rejection = record_rejected_attempt(
+        &cfg,
+        &store,
+        alias_id,
+        "rev-next",
+        digest,
+        Some("governor"),
+        Some("promotion_velocity_exceeded"),
+        Some("root-session-4"),
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(rejection.error, "promotion_attempts_exhausted");
+    assert_eq!(rejection.payload["rejected_attempts"], 3);
+
+    // run_governor_checks no longer performs a separate non-transactional
+    // exhaustion read; with velocity/flapping/eval-regression disabled it
+    // returns None.
+    let result = run_governor_checks(
         &cfg,
         &store,
         &gateway_dir,
@@ -88,9 +107,8 @@ fn same_digest_rejected_n_times_blocks_next_attempt() {
         "rev-next",
         Some(digest),
     )
-    .unwrap()
     .unwrap();
-    assert_eq!(rejection.error, "promotion_attempts_exhausted");
+    assert!(result.is_none());
 }
 
 #[test]
