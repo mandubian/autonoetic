@@ -290,6 +290,15 @@ fn create_plan_approval_request(
     let gate_req = GateRequest {
         kind: GateKind::Approval {
             action: action.clone(),
+            // `targets` is intentionally empty: PlanFrame carries no host
+            // targets. Dedup safety relies on MatchStrategy::ExactPayload, which
+            // short-circuits in find_pending_for_targets via exact_payload_covers
+            // (full structural equality of the action, including plan_id +
+            // version) *before* the "empty targets → any pending of same kind"
+            // fallback runs. Do NOT switch this to a looser strategy without also
+            // giving PlanFrame real targets, or unrelated pending plan approvals
+            // (different plan_id/version) would collapse onto each other and the
+            // explicit request_id below would be bypassed (#724 Part B review).
             targets: Vec::new(),
             match_strategy: MatchStrategy::ExactPayload,
         },

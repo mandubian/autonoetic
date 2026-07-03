@@ -1084,8 +1084,14 @@ impl GateService {
                 }
                 continue;
             }
-            // If no targets specified, any pending of the same kind counts
-            // (host-targeted actions populate targets from detected_hosts()).
+            // If no targets specified, any pending of the same kind counts.
+            // This is only reachable for HostLevel/SubstituteCommand strategies
+            // (ExactPayload short-circuits above), where host-targeted actions
+            // populate `targets` from detected_hosts() at the call site. A
+            // non-host action that reaches here with empty targets would dedup
+            // onto an unrelated same-kind pending row — so non-host callers
+            // MUST use MatchStrategy::ExactPayload (see plan_frame.rs and
+            // federation.rs gate construction).
             if targets.is_empty() {
                 return Ok(Some(req.request_id.clone()));
             }

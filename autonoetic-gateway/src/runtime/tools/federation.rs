@@ -220,6 +220,19 @@ impl NativeTool for FederationEscalateTool {
         let gate_req = GateRequest {
             kind: GateKind::Approval {
                 action: action.clone(),
+                // `targets` is intentionally empty: SessionEscalate carries no
+                // host targets. Dedup safety relies on two layered guards in
+                // find_pending_for_targets: (1) MatchStrategy::ExactPayload
+                // short-circuits via exact_payload_covers (full structural
+                // equality, including the escalation_id/artifact_id/revision_id
+                // in the payload) *before* the "empty targets → any pending of
+                // same kind" fallback; and (2) the SessionEscalate sub-type guard
+                // rejects cross-EscalationKind collisions (guidance-request vs
+                // promotion-review). Do NOT loosen the strategy or change the
+                // payload without preserving both guards, or an unrelated
+                // pending session_escalate approval could be reused and the
+                // escalation projection linked to the wrong approval row
+                // (#724 Part B review).
                 targets: Vec::new(),
                 match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
             },
