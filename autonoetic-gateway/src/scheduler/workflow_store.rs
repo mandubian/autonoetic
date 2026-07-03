@@ -2735,7 +2735,12 @@ pub struct ChatIngestWorkflowReroute {
 }
 
 fn workflow_run_is_active_for_user_chat_routing(run: &WorkflowRun) -> bool {
+    // EmergencyStopping is not terminal (the stop is still converging) but it
+    // must not attract user chat either — routing a message into a workflow
+    // that is actively being torn down was the pre-#740 behavior and must be
+    // preserved (#747 review).
     !run.status.is_terminal()
+        && !matches!(run.status, WorkflowRunStatus::EmergencyStopping)
 }
 
 fn session_matches_child_task_or_queue(

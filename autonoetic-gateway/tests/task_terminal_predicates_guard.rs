@@ -34,8 +34,22 @@ const ALLOWLIST: &[&str] = &[
 /// between the four variants is mandatory (we only care about the AND-of-OR
 /// shape; an `Succeeded | ...` inside a *different* match still trips the
 /// guard, which is what we want — those should also be routed through
-/// predicates).
+/// predicates). Matched against a *normalized* form of the file (qualified
+/// `TaskRunStatus::` / module paths stripped, all whitespace collapsed) so
+/// multiline `matches!` formatting and fully-qualified variants cannot slip
+/// past the guard (#747 review).
 const PATTERN: &str = "Succeeded | Failed | Cancelled | Aborted";
+
+/// Normalize source so the guard matches regardless of formatting or
+/// qualification: drop `TaskRunStatus::` and its module-path prefixes, then
+/// collapse every whitespace run (including newlines) to a single space.
+fn normalize_for_match(content: &str) -> String {
+    let no_paths = content
+        .replace("autonoetic_types::workflow::TaskRunStatus::", "")
+        .replace("autonoetic_types::workflow::", "")
+        .replace("TaskRunStatus::", "");
+    no_paths.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -113,7 +127,7 @@ fn no_handwritten_terminal_matches_outside_workflow() {
             Err(_) => continue,
         };
         let stripped = strip_test_and_cfg_items(&raw);
-        if stripped.contains(PATTERN) {
+        if normalize_for_match(&stripped).contains(PATTERN) {
             violations.push(rel);
         }
     }

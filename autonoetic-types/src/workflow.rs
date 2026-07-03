@@ -153,16 +153,26 @@ impl TaskRunStatus {
             (Pending, _) => false,
             (Runnable, Running | Cancelled | Failed) => true,
             (Runnable, _) => false,
-            (Running, AwaitingApproval | Paused | Aborting | Succeeded | Failed) => true,
+            // Cancelled from any live state: operator/agent-driven
+            // cancellation (workflow task_cancel, gate cancellation) is legal
+            // while the task is Running/parked (#747 review).
+            (Running, AwaitingApproval | Paused | Aborting | Succeeded | Failed | Cancelled) => {
+                true
+            }
             (Running, _) => false,
             // AwaitingApproval can be resolved by an approval (→ Succeeded),
-            // rejected (→ Failed), aborted (→ Aborting → Aborted), or
-            // timed out (→ Stale). Amend (→ Runnable) resumes for re-gating.
-            (AwaitingApproval, Runnable | Aborting | Failed | Stale | Succeeded) => true,
+            // rejected (→ Failed), aborted (→ Aborting → Aborted), timed out
+            // (→ Stale), or cancelled. Amend (→ Runnable) resumes for re-gating.
+            (AwaitingApproval, Runnable | Aborting | Failed | Stale | Succeeded | Cancelled) => {
+                true
+            }
             (AwaitingApproval, _) => false,
-            (Stale, Runnable) => true,
+            // Stale is resumable: a late approval revives it (→ Runnable), a
+            // late rejection fails it (→ Failed, via unblock/fan-in), and an
+            // operator can still cancel it.
+            (Stale, Runnable | Failed | Cancelled) => true,
             (Stale, _) => false,
-            (Paused, Runnable | Aborting | Failed) => true,
+            (Paused, Runnable | Aborting | Failed | Cancelled) => true,
             (Paused, _) => false,
             (Aborting, Aborted) => true,
             (Aborting, _) => false,
@@ -479,6 +489,38 @@ mod tests {
     #[test]
     fn try_transition_allows_stale_to_runnable() {
         assert!(TaskRunStatus::Stale.try_transition(TaskRunStatus::Runnable));
+    }
+
+    /// #747 review: operator/agent-driven cancellation (workflow task_cancel,
+    /// gate cancellation) must be legal from every live state — otherwise the
+    /// enforcement in update_task_run_status turns a cancel into a silent
+    /// no-op and the task is stuck live forever.
+    #[test]
+    fn try_transition_allows_cancel_from_every_live_state() {
+        for live in [
+            TaskRunStatus::Pending,
+            TaskRunStatus::Runnable,
+            TaskRunStatus::Running,
+            TaskRunStatus::AwaitingApproval,
+            TaskRunStatus::Paused,
+            TaskRunStatus::Stale,
+        ] {
+            assert!(
+                live.try_transition(TaskRunStatus::Cancelled),
+                "cancellation from live state {:?} must be legal",
+                live
+            );
+        }
+    }
+
+    /// #747 review: a Stale task's approval can still be *rejected* late —
+    /// unblock/fan-in then drive Stale → Failed, which must be legal.
+    #[test]
+    fn try_transition_allows_stale_to_failed_on_late_rejection() {
+        assert!(TaskRunStatus::Stale.try_transition(TaskRunStatus::Failed));
+        // But a Stale task never jumps straight to Succeeded or Running.
+        assert!(!TaskRunStatus::Stale.try_transition(TaskRunStatus::Succeeded));
+        assert!(!TaskRunStatus::Stale.try_transition(TaskRunStatus::Running));
     }
 
     #[test]
