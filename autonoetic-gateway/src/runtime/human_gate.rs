@@ -586,6 +586,7 @@ impl GateService {
                         "agent_decider": agent_decider,
                     })
                 }),
+                kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
             };
             if let Some(pending_id) = self.find_pending_for_targets(
                 sid,
@@ -627,6 +628,7 @@ impl GateService {
                     "agent_decider": agent_decider,
                 })
             }),
+            kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
         };
 
         let gate_id = self.create_approval_row(req, &action)?;
@@ -1052,6 +1054,21 @@ impl GateService {
         for req in &pending {
             if req.action.kind() != action.kind() {
                 continue;
+            }
+            // SessionEscalate is a single ScheduledAction kind but carries
+            // distinct EscalationKind sub-types (guidance-request vs
+            // promotion-review). They must NEVER dedup across sub-types — even
+            // under the "any pending of the same kind" path below — or a
+            // guidance escalate could collide with a promotion-review approval
+            // (and vice versa), reusing the wrong gate id (#724 Part B review).
+            if let (
+                ScheduledAction::SessionEscalate { kind: a_kind, .. },
+                ScheduledAction::SessionEscalate { kind: b_kind, .. },
+            ) = (action, &req.action)
+            {
+                if a_kind != b_kind {
+                    continue;
+                }
             }
             // ExactPayload: full structural equality of the action. Two
             // distinct RevisionPromote deltas (different agent/revision/caps)
@@ -2695,6 +2712,86 @@ mod tests {
             svc.find_pending_identical_for_root("root-2/c", &write("/tmp/x")).unwrap(),
             None,
             "a different root must not match"
+        );
+    }
+
+    /// #724 Part B: a guidance-request SessionEscalate and a promotion-review
+    /// SessionEscalate share the `session_escalate` ScheduledAction kind, but
+    /// must NOT dedup onto each other in `find_pending_for_targets` — even under
+    /// the HostLevel "any pending of the same kind" path — or a guidance
+    /// escalate would collide with a promotion-review approval and reuse the
+    /// wrong gate id.
+    #[test]
+    fn session_escalate_dedup_discriminates_by_escalation_kind() {
+        use autonoetic_types::background::EscalationKind;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let sid = "root-esc/a";
+
+        let escalate = |kind: EscalationKind| ScheduledAction::SessionEscalate {
+            session_id: sid.to_string(),
+            root_session_id: "root-esc".to_string(),
+            requested_by_agent_id: "coder.default".to_string(),
+            reason: "r".to_string(),
+            context: "c".to_string(),
+            urgency: "normal".to_string(),
+            suggested_actions: vec![],
+            payload: None,
+            kind,
+        };
+
+        // Seed a pending GUIDANCE escalation approval.
+        let mut req = ApprovalRequest {
+            request_id: "apr-guid".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: sid.to_string(),
+            action: escalate(EscalationKind::GuidanceRequest),
+            approval_level: ApprovalLevel::Operator,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("root-esc".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            expires_at: None,
+        };
+        store.create_approval(&mut req).unwrap();
+
+        // A promotion-review escalate under the same session must NOT match the
+        // pending guidance approval (even under HostLevel/empty-targets).
+        assert_eq!(
+            svc.find_pending_for_targets(
+                sid,
+                &escalate(EscalationKind::PromotionReview),
+                &[],
+                MatchStrategy::HostLevel,
+            )
+            .unwrap(),
+            None,
+            "promotion-review must not dedup onto a guidance-request approval"
+        );
+
+        // A guidance escalate DOES still dedup onto the pending guidance approval.
+        assert_eq!(
+            svc.find_pending_for_targets(
+                sid,
+                &escalate(EscalationKind::GuidanceRequest),
+                &[],
+                MatchStrategy::HostLevel,
+            )
+            .unwrap(),
+            Some("apr-guid".to_string()),
+            "same-kind guidance escalate still dedups"
         );
     }
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 61;
+const SCHEMA_VERSION_LATEST: i64 = 62;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -546,6 +546,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_promotion_attempt_ledger_v59(conn)?;
     apply_approval_expires_at_v60(conn)?;
     apply_approval_waiters_v61(conn)?;
+    apply_escalation_approval_request_id_v62(conn)?;
 
     Ok(())
 }
@@ -579,6 +580,27 @@ fn apply_approval_waiters_v61(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![61, "approval_waiters", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_escalation_approval_request_id_v62(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 62 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE escalations ADD COLUMN approval_request_id TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![62, "escalation_approval_request_id", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
