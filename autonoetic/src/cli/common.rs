@@ -462,6 +462,11 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayWikiCommands,
     },
+    /// Inspect or resolve pending escalations.
+    Escalations {
+        #[command(subcommand)]
+        command: GatewayEscalationCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -566,6 +571,35 @@ pub enum GatewayWikiCommands {
         /// Approval request ID (e.g. apr-xxxx).
         request_id: String,
         /// Optional reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayEscalationCommands {
+    /// List pending escalations.
+    List {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show details of a specific escalation.
+    Show {
+        /// Escalation ID (e.g. esc_xxxxxxxx).
+        escalation_id: String,
+    },
+    /// Resolve a pending escalation (approve or reject).
+    Resolve {
+        /// Escalation ID (e.g. esc_xxxxxxxx).
+        escalation_id: String,
+        /// Approve the escalation.
+        #[arg(long, conflicts_with = "reject")]
+        approve: bool,
+        /// Reject the escalation.
+        #[arg(long, conflicts_with = "approve")]
+        reject: bool,
+        /// Optional reason for the decision.
         #[arg(long)]
         reason: Option<String>,
     },

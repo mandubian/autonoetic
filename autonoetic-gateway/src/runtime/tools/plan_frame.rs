@@ -574,6 +574,14 @@ impl NativeTool for PlanFrameProposeTool {
             created_by_agent_id: manifest.agent.id.clone(),
             reason: None,
             created_at: now,
+            expires_at: {
+                let ttl = config.plan_frame_timeout_secs;
+                if ttl == 0 {
+                    None
+                } else {
+                    Some((chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+                }
+            },
         };
 
         store.save_plan_frame(&plan)?;
@@ -1477,6 +1485,14 @@ impl NativeTool for PlanFrameAmendTool {
             created_by_agent_id: manifest.agent.id.clone(),
             reason: args.reason,
             created_at: now,
+            expires_at: {
+                let ttl = config.plan_frame_timeout_secs;
+                if ttl == 0 {
+                    None
+                } else {
+                    Some((chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+                }
+            },
         };
 
         store.save_plan_frame(&new_revision)?;

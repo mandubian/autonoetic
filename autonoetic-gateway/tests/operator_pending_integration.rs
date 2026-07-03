@@ -98,6 +98,7 @@ fn seed_escalation(store: &GatewayStore, created_at: &str) {
         code_excerpts: None,
         escalation_type: EscalationType::default(),
         approval_request_id: None,
+        expires_at: None,
     };
     store.create_escalation(&esc).unwrap();
 }
@@ -120,6 +121,7 @@ fn seed_plan(store: &GatewayStore, created_at: &str) {
         created_by_agent_id: "planner.default".to_string(),
         reason: None,
         created_at: created_at.to_string(),
+        expires_at: None,
     };
     store.save_plan_frame(&plan).unwrap();
 }
@@ -202,6 +204,7 @@ fn escalation_fallback_uses_type_not_hardcoded_promotion() {
         code_excerpts: None,
         escalation_type: EscalationType::SealedEvalInquiry,
         approval_request_id: None,
+        expires_at: None,
     };
     store.create_escalation(&esc).unwrap();
 
@@ -333,4 +336,126 @@ fn stale_approvals_and_expired_interactions_are_included_and_flagged() {
     assert_eq!(interaction.kind, PendingKind::Interaction);
     assert!(interaction.is_expired);
     assert!(interaction.summary.contains("expired"));
+}
+
+#[test]
+fn stale_escalations_are_included_and_flagged() {
+    let (_dir, store) = store();
+
+    // Seed an escalation whose TTL already passed.
+    let esc = EscalationMessage {
+        escalation_id: "esc_stale".to_string(),
+        artifact_id: "art_stale".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-stale".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Promotion review: needs operator decision.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: None,
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.create_escalation(&esc).unwrap();
+    let expired = store.expire_timed_out_escalations().unwrap();
+    assert_eq!(expired, vec!["esc_stale"]);
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+
+    let escalation = &pending[0];
+    assert_eq!(escalation.kind, PendingKind::Escalation);
+    assert!(escalation.is_expired);
+    assert!(escalation.summary.contains("stale"));
+    assert_eq!(escalation.id, "esc_stale");
+}
+
+#[test]
+fn stale_plan_frames_are_included_and_flagged() {
+    let (_dir, store) = store();
+
+    // Seed a plan frame whose TTL already passed.
+    let plan = PlanFrame {
+        plan_id: "plan-stale".to_string(),
+        version: 1,
+        parent_version: None,
+        workflow_id: "wf-stale".to_string(),
+        root_session_id: ROOT.to_string(),
+        title: "Stale plan".to_string(),
+        objective: "This plan expired".to_string(),
+        status: PlanStatus::AwaitingApproval,
+        steps: vec![],
+        validation_policy: Default::default(),
+        capability_envelope: vec![],
+        approved_by: None,
+        approved_at: None,
+        created_by_agent_id: "planner.default".to_string(),
+        reason: None,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.save_plan_frame(&plan).unwrap();
+    let expired = store.expire_timed_out_plan_frames().unwrap();
+    assert_eq!(expired, vec![("plan-stale".to_string(), 1)]);
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+
+    let plan = &pending[0];
+    assert_eq!(plan.kind, PendingKind::Plan);
+    assert!(plan.is_expired);
+    assert!(plan.summary.contains("stale"));
+    assert_eq!(plan.id, "plan-stale");
+}
+
+#[test]
+fn stale_escalation_is_still_resolvable() {
+    let (_dir, store) = store();
+
+    let esc = EscalationMessage {
+        escalation_id: "esc_resolvable".to_string(),
+        artifact_id: "art_resolvable".to_string(),
+        artifact_digest: None,
+        agent_id: "coder.default".to_string(),
+        revision_id: "rev-resolvable".to_string(),
+        role_verdicts: vec![],
+        planner_synthesis: "Needs decision.".to_string(),
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        resolved_at: None,
+        root_session_id: ROOT.to_string(),
+        status: EscalationStatus::Pending,
+        decided_by: None,
+        decision_reason: None,
+        code_excerpts: None,
+        escalation_type: EscalationType::default(),
+        approval_request_id: None,
+        expires_at: Some("2026-07-02T10:01:00Z".to_string()),
+    };
+    store.create_escalation(&esc).unwrap();
+    store.expire_timed_out_escalations().unwrap();
+
+    // Stale escalation can still be resolved.
+    let result = store.resolve_escalation(
+        "esc_resolvable",
+        EscalationStatus::Approved,
+        "operator",
+        Some("late approval"),
+    );
+    assert!(result.is_ok(), "stale escalation must be resolvable");
+
+    // After resolution, it drops out of the pending queue.
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert!(
+        pending.is_empty(),
+        "resolved escalation should not appear in pending"
+    );
 }

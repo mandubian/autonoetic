@@ -2806,3 +2806,119 @@ pub async fn handle_gateway_wiki(
     }
     Ok(())
 }
+
+pub async fn handle_gateway_escalations(
+    config_path: &Path,
+    command: &super::common::GatewayEscalationCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        super::common::GatewayEscalationCommands::List { json } => {
+            let pending = gateway_store.list_pending_escalations()?;
+            let stale = {
+                let mut all_stale = Vec::new();
+                let root_ids: std::collections::HashSet<String> = pending
+                    .iter()
+                    .map(|e| e.root_session_id.clone())
+                    .collect();
+                for rid in &root_ids {
+                    all_stale.extend(gateway_store.get_stale_escalations_for_root(rid)?);
+                }
+                all_stale
+            };
+            let mut all = pending;
+            all.extend(stale);
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+                return Ok(());
+            }
+
+            if all.is_empty() {
+                println!("No pending escalations.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<12} {:<20} {:<15} {:<10} {}",
+                "ID", "TYPE", "AGENT", "AGE", "SYNTHESIS"
+            );
+            let now = chrono::Utc::now();
+            for e in &all {
+                let age = chrono::DateTime::parse_from_rfc3339(&e.created_at)
+                    .ok()
+                    .map(|t| {
+                        let secs = (now - t.with_timezone(&chrono::Utc)).num_seconds();
+                        if secs >= 3600 {
+                            format!("{}h", secs / 3600)
+                        } else if secs >= 60 {
+                            format!("{}m", secs / 60)
+                        } else {
+                            format!("{}s", secs)
+                        }
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                let status_tag = match e.status {
+                    autonoetic_types::escalation::EscalationStatus::Stale => " (stale)",
+                    _ => "",
+                };
+                let synthesis = if e.planner_synthesis.len() > 40 {
+                    format!("{}…", &e.planner_synthesis[..39])
+                } else {
+                    e.planner_synthesis.clone()
+                };
+                println!(
+                    "{:<12} {:<20} {:<15} {:<10} {}{}",
+                    e.escalation_id,
+                    e.escalation_type.as_str(),
+                    e.agent_id,
+                    age,
+                    synthesis,
+                    status_tag,
+                );
+            }
+            println!("\n{} escalation(s)", all.len());
+        }
+        super::common::GatewayEscalationCommands::Show { escalation_id } => {
+            let escalation = gateway_store
+                .get_escalation(escalation_id)?
+                .ok_or_else(|| anyhow::anyhow!("Escalation '{}' not found", escalation_id))?;
+            println!("{}", serde_json::to_string_pretty(&escalation)?);
+        }
+        super::common::GatewayEscalationCommands::Resolve {
+            escalation_id,
+            approve,
+            reject,
+            reason,
+        } => {
+            if !approve && !reject {
+                anyhow::bail!("Specify --approve or --reject");
+            }
+            let status = if *approve {
+                autonoetic_types::escalation::EscalationStatus::Approved
+            } else {
+                autonoetic_types::escalation::EscalationStatus::Rejected
+            };
+            let approval_request_id = gateway_store.resolve_escalation(
+                escalation_id,
+                status,
+                "cli",
+                reason.as_deref(),
+            )?;
+            println!(
+                "Escalation {} resolved as {}{}",
+                escalation_id,
+                status.as_str(),
+                approval_request_id
+                    .as_deref()
+                    .map(|id| format!(" (linked approval: {})", id))
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    Ok(())
+}

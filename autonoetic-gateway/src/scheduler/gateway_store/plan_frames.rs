@@ -10,7 +10,8 @@ use autonoetic_types::plan_frame::{
 const SELECT_COLS: &str = "\
     plan_id, version, parent_version, workflow_id, root_session_id, \
     title, objective, status, steps_json, validation_policy_json, \
-    capability_envelope_json, approved_by, approved_at, created_by_agent_id, reason, created_at";
+    capability_envelope_json, approved_by, approved_at, created_by_agent_id, reason, created_at, \
+    expires_at";
 
 pub(crate) fn save_plan_frame(conn: &Connection, plan: &PlanFrame) -> Result<()> {
     let steps_json = serde_json::to_string(&plan.steps)?;
@@ -21,8 +22,9 @@ pub(crate) fn save_plan_frame(conn: &Connection, plan: &PlanFrame) -> Result<()>
         "INSERT INTO plan_frames
             (plan_id, version, parent_version, workflow_id, root_session_id,
              title, objective, status, steps_json, validation_policy_json,
-             capability_envelope_json, approved_by, approved_at, created_by_agent_id, reason, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             capability_envelope_json, approved_by, approved_at, created_by_agent_id, reason,
+             created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             plan.plan_id,
             plan.version as i64,
@@ -40,6 +42,7 @@ pub(crate) fn save_plan_frame(conn: &Connection, plan: &PlanFrame) -> Result<()>
             plan.created_by_agent_id,
             plan.reason,
             plan.created_at,
+            plan.expires_at,
         ],
     )?;
     Ok(())
@@ -171,6 +174,58 @@ pub(crate) fn list_pending_plan_frames_for_root(
     Ok(plans)
 }
 
+/// Mark plan frames in `awaiting_approval` whose `expires_at` timestamp has
+/// passed as `stale`. Returns the `(plan_id, version)` pairs transitioned.
+pub(crate) fn expire_timed_out_plan_frames(conn: &Connection) -> Result<Vec<(String, u32)>> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT plan_id, version FROM plan_frames
+         WHERE status = 'awaiting_approval' AND expires_at IS NOT NULL AND expires_at < ?1",
+    )?;
+    let rows = stmt.query_map(params![now], |row| {
+        let plan_id: String = row.get(0)?;
+        let version: i64 = row.get(1)?;
+        Ok((plan_id, version as u32))
+    })?;
+
+    let mut expired = Vec::new();
+    for row in rows {
+        let (plan_id, version) = row?;
+        conn.execute(
+            "UPDATE plan_frames SET status = 'stale' WHERE plan_id = ?1 AND version = ?2",
+            params![plan_id, version as i64],
+        )?;
+        expired.push((plan_id, version));
+    }
+    Ok(expired)
+}
+
+/// List the latest **stale** revision of each plan for a root session.
+/// Stale plan frames are still resolvable — they just exceeded the TTL.
+pub(crate) fn get_stale_plan_frames_for_root(
+    conn: &Connection,
+    root_session_id: &str,
+) -> Result<Vec<PlanFrame>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM plan_frames p
+         WHERE p.root_session_id = ?1 AND p.status = 'stale'
+           AND p.version = (
+             SELECT MAX(p2.version) FROM plan_frames p2 WHERE p2.plan_id = p.plan_id
+           )
+         ORDER BY p.created_at ASC"
+    ))?;
+
+    let rows = stmt.query_map(params![root_session_id], |row| {
+        Ok(row_to_plan_frame(row))
+    })?;
+
+    let mut plans = Vec::new();
+    for row in rows {
+        plans.push(row??);
+    }
+    Ok(plans)
+}
+
 /// List the latest **approved** revision of each plan for a root session.
 /// Used by the agent_spawn depends_on enforcement to find the active plan.
 /// If a plan was amended into `awaiting_approval`, the last approved version
@@ -251,6 +306,7 @@ fn row_to_plan_frame(row: &rusqlite::Row<'_>) -> Result<PlanFrame, rusqlite::Err
         created_by_agent_id: row.get(13)?,
         reason: row.get(14)?,
         created_at: row.get(15)?,
+        expires_at: row.get(16)?,
     })
 }
 
@@ -260,6 +316,7 @@ fn parse_plan_status(s: &str) -> PlanStatus {
         "approved" => PlanStatus::Approved,
         "completed" => PlanStatus::Completed,
         "cancelled" => PlanStatus::Cancelled,
+        "stale" => PlanStatus::Stale,
         _ => PlanStatus::AwaitingApproval,
     }
 }

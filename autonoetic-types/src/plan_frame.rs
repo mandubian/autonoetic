@@ -15,6 +15,8 @@ pub enum PlanStatus {
     Approved,
     Completed,
     Cancelled,
+    /// TTL expired — still resolvable by the operator, but past the configured window.
+    Stale,
 }
 
 impl PlanStatus {
@@ -24,6 +26,7 @@ impl PlanStatus {
             PlanStatus::Approved => "approved",
             PlanStatus::Completed => "completed",
             PlanStatus::Cancelled => "cancelled",
+            PlanStatus::Stale => "stale",
         }
     }
 }
@@ -207,6 +210,11 @@ pub struct PlanFrame {
     pub created_by_agent_id: String,
     pub reason: Option<String>,
     pub created_at: String,
+    /// Optional expiry timestamp (ISO 8601). When set and `status` is
+    /// `AwaitingApproval`, the scheduler marks this plan frame `Stale` once
+    /// the timestamp passes. Stale plan frames remain resolvable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// Suggest a foundational `agent_id` from step title when the plan omits one.

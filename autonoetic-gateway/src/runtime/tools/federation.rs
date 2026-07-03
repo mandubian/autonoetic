@@ -186,6 +186,16 @@ impl NativeTool for FederationEscalateTool {
         );
         escalation.artifact_digest = args.artifact_digest;
 
+        // Compute TTL from config.
+        escalation.expires_at = _config.and_then(|c| {
+            let ttl = c.escalation_timeout_secs;
+            if ttl == 0 {
+                None
+            } else {
+                Some((chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+            }
+        });
+
         if let (Some(gw_dir), artifact_id) = (gateway_dir, &canonical_artifact_id) {
             if !artifact_id.is_empty() {
                 escalation.code_excerpts =
