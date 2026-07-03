@@ -16,7 +16,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::network_policy::DeclarationRequirement;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
-use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::capability::Capability;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -1609,11 +1609,13 @@ impl NativeTool for CredentialSetupTool {
                 cred_id,
                 manifest,
                 policy,
-                &store,
+                store.clone(),
                 &mut vault,
                 &vault_path,
                 _session_id,
+                _turn_id,
                 _config,
+                _run_context,
                 None,
             );
         }
@@ -2108,11 +2110,13 @@ impl NativeTool for CredentialSetupTool {
             &credential_id,
             manifest,
             policy,
-            &store,
+            store.clone(),
             &mut vault,
             &vault_path,
             _session_id,
+            _turn_id,
             _config,
+            _run_context,
             setup_label.as_deref(),
         )
     }
@@ -2136,11 +2140,13 @@ fn execute_steps(
     credential_id: &str,
     manifest: &AgentManifest,
     _policy: &PolicyEngine,
-    store: &crate::scheduler::gateway_store::GatewayStore,
+    store: std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
     vault: &mut crate::vault::Vault,
     vault_path: &Path,
     session_id: Option<&str>,
+    turn_id: Option<&str>,
     config: Option<&autonoetic_types::config::GatewayConfig>,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     label: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut secret_names: Vec<String> = Vec::new();
@@ -2302,12 +2308,9 @@ fn execute_steps(
                 message,
                 secret_fields,
             } => {
-                // Create an approval request (existing behavior unchanged).
-                let request_id = format!(
-                    "cred_setup_{}_{}",
-                    credential_id,
-                    uuid::Uuid::new_v4().to_string().replace('-', "")
-                );
+                // Route the credential prompt through GateService so it participates
+                // in typed DecisionContext enforcement, dedup, and the root-scoped
+                // identical-action join (#724).
                 let approval_action = ScheduledAction::CredentialPrompt {
                     service: service.to_string(),
                     credential_id: credential_id.to_string(),
@@ -2319,37 +2322,61 @@ fn execute_steps(
                         "expires_at": expires_at,
                     })),
                 };
-                let mut approval_req = ApprovalRequest {
-                    request_id: request_id.clone(),
-                    agent_id: manifest.agent.id.clone(),
-                    session_id: session_id.unwrap_or("").to_string(),
-                    action: approval_action.clone(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    reason: Some(format!(
-                        "Credential setup for '{}' requires human input for secret fields",
-                        service
-                    )),
-                    evidence_ref: None,
-                    root_session_id: None,
-                    workflow_id: None,
-                    task_id: None,
-                    status: None,
-                    decided_at: None,
-                    decided_by: None,
-                    decision_reason: None,
-                    approval_level: config
-                        .map(|c| {
-                            crate::scheduler::approval::resolve_approval_level(c, &approval_action)
-                        })
-                        .unwrap_or(ApprovalLevel::Operator),
-                    min_dwell_ms: None,
-                    confirm_phrase: None,
-                    code_excerpts: None,
-                    risk_summary: None,
 
-                    expires_at: None,
+                let field_names: Vec<&str> = secret_fields
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .collect();
+
+                let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                let gate_result = gate.check(crate::runtime::human_gate::GateRequest {
+                    kind: crate::runtime::human_gate::GateKind::Approval {
+                        action: approval_action.clone(),
+                        targets: Vec::new(),
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id,
+                    run_context,
+                    config,
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!("Credential setup for '{}'", service),
+                        "Human input required for secret fields",
+                        format!("Prompt asks for: {}", field_names.join(", ")),
+                        "Approve to allow the credential setup prompt; the operator must still provide the requested secret fields",
+                    ),
+                    summary: format!("Credential setup prompt for '{}'", service),
+                    approval_ref: None,
+                    request_id: None,
+                    pre_validated: false,
+                    cache_backfill: None,
+                    turn_id,
+                })?;
+
+                let request_id = match &gate_result {
+                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. }
+                    | crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                        gate_id.clone()
+                    }
+                    crate::runtime::human_gate::GateResult::Cleared { .. }
+                    | crate::runtime::human_gate::GateResult::PolicyAllowed => {
+                        // An identical prompt was already approved. If the credential
+                        // now exists we can resume immediately; otherwise we still
+                        // suspend so the operator can provide the secrets.
+                        if let Some(cred) = store.get_credential(credential_id)? {
+                            return Ok(json!({
+                                "ok": true,
+                                "credential_id": cred.credential_id,
+                                "service": cred.service,
+                                "secrets_stored": 1,
+                                "resumed_from_approval": true,
+                            })
+                            .to_string());
+                        }
+                        // No new approval row was minted; use a stable fallback id.
+                        format!("cred-prompt-{}", credential_id)
+                    }
                 };
-                store.create_approval(&mut approval_req)?;
 
                 step_results.push(json!({
                     "step": i,
