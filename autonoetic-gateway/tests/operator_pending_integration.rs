@@ -579,3 +579,141 @@ fn stale_projection_escalations_are_also_deduped() {
         "stale projection escalation must not appear without its linked approval"
     );
 }
+
+// ===========================================================================
+// #739 Part C item 4 — decision flag for Confirmation/Proposal interactions
+// ====================================================================================
+
+fn seed_interaction_kind(
+    store: &GatewayStore,
+    id: &str,
+    kind: UserInteractionKind,
+    allow_freeform: bool,
+    question: &str,
+) {
+    let interaction = UserInteraction {
+        interaction_id: id.to_string(),
+        session_id: ROOT.to_string(),
+        root_session_id: ROOT.to_string(),
+        workflow_id: None,
+        task_id: None,
+        agent_id: "planner.default".to_string(),
+        turn_id: "turn-1".to_string(),
+        kind,
+        question: question.to_string(),
+        context: None,
+        options: vec![],
+        allow_freeform,
+        status: UserInteractionStatus::Pending,
+        answer_option_id: None,
+        answer_text: None,
+        answered_by: None,
+        created_at: "2026-07-02T10:00:00Z".to_string(),
+        answered_at: None,
+        expires_at: None,
+        checkpoint_turn_id: None,
+    };
+    store.create_user_interaction(&interaction).unwrap();
+}
+
+#[test]
+fn confirmation_interaction_without_freeform_is_flagged_as_decision() {
+    // #739 Part C item 4: a Confirmation ("do you want to proceed?") with no
+    // freeform option is a yes/no decision — `decision: true`.
+    let (_dir, store) = store();
+    seed_interaction_kind(
+        &store,
+        "ui-confirm",
+        UserInteractionKind::Confirmation,
+        false,
+        "Proceed with deployment?",
+    );
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].decision, "Confirmation without freeform must be flagged as a decision");
+}
+
+#[test]
+fn proposal_interaction_without_freeform_is_flagged_as_decision() {
+    let (_dir, store) = store();
+    seed_interaction_kind(
+        &store,
+        "ui-propose",
+        UserInteractionKind::Proposal,
+        false,
+        "Approve this plan revision?",
+    );
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].decision, "Proposal without freeform must be flagged as a decision");
+}
+
+#[test]
+fn clarification_interaction_is_not_a_decision() {
+    // A Clarification is always an answer, never a decision.
+    let (_dir, store) = store();
+    seed_interaction_kind(
+        &store,
+        "ui-clarify",
+        UserInteractionKind::Clarification,
+        false,
+        "Which region should I target?",
+    );
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(!pending[0].decision, "Clarification must not be flagged as a decision");
+}
+
+#[test]
+fn confirmation_with_freeform_is_not_a_decision() {
+    // When freeform is allowed, the operator can type anything — it's an
+    // answer, not a binary decision.
+    let (_dir, store) = store();
+    seed_interaction_kind(
+        &store,
+        "ui-confirm-free",
+        UserInteractionKind::Confirmation,
+        true,
+        "Proceed?",
+    );
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(!pending[0].decision, "Confirmation with freeform is an answer, not a decision");
+}
+
+#[test]
+fn approvals_are_always_decisions() {
+    let (_dir, store) = store();
+    seed_approval(&store, "2026-07-02T10:00:00Z");
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].decision, "Approvals must always be flagged as decisions");
+}
+
+#[test]
+fn standalone_guidance_escalation_is_not_a_decision() {
+    // A guidance-request escalation (no approval_request_id) is an answer, not
+    // a binary decision.
+    let (_dir, store) = store();
+    seed_escalation(&store, "2026-07-02T10:00:00Z");
+
+    let now = Utc.with_ymd_and_hms(2026, 7, 2, 12, 0, 0).unwrap();
+    let pending = collect_pending_for_root(&store, ROOT, now).unwrap();
+    // seed_escalation creates an escalation with approval_request_id: None
+    let esc = pending.iter().find(|p| p.kind == PendingKind::Escalation);
+    assert!(esc.is_some(), "escalation should appear");
+    assert!(
+        !esc.unwrap().decision,
+        "standalone guidance escalation must not be flagged as a decision"
+    );
+}

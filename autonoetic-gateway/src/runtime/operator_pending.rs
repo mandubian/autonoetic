@@ -59,6 +59,11 @@ pub struct PendingDecision {
     pub age_secs: Option<i64>,
     /// True when the decision's own TTL has passed (approval -> stale, interaction -> expired).
     pub is_expired: bool,
+    /// #739 Part C item 4: true when the item is a yes/no authorization (an
+    /// approval, a plan, or a Confirmation/Proposal interaction). Surfaces can
+    /// use this to render approve/reject affordances uniformly. Clarifications
+    /// and guidance requests are answers, not decisions.
+    pub decision: bool,
     /// One-line human summary for a queue row.
     pub summary: String,
     /// How to resolve this item.
@@ -69,6 +74,19 @@ fn age_secs(created_at: &str, now: DateTime<Utc>) -> Option<i64> {
     DateTime::parse_from_rfc3339(created_at)
         .ok()
         .map(|t| (now - t.with_timezone(&Utc)).num_seconds())
+}
+
+/// #739 Part C item 4: a user interaction is a yes/no **decision** (vs a free
+/// answer) when it is a `Confirmation` ("do you want to proceed?") or a
+/// `Proposal` ("approve or suggest changes?") AND the operator cannot supply
+/// freeform text (`allow_freeform == false`). Such items render with
+/// approve/reject affordances; clarifications stay answer-style.
+fn interaction_is_decision(
+    kind: &autonoetic_types::background::UserInteractionKind,
+    allow_freeform: bool,
+) -> bool {
+    use autonoetic_types::background::UserInteractionKind::*;
+    matches!(kind, Confirmation | Proposal) && !allow_freeform
 }
 
 /// Short label for an approval's action, taken from the `ScheduledAction`
@@ -105,6 +123,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&app.created_at, now),
             is_expired: false,
+            decision: true,
             id: app.request_id,
             root_session_id: app.root_session_id,
             agent_id: app.agent_id,
@@ -129,6 +148,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&app.created_at, now),
             is_expired: true,
+            decision: true,
             id: app.request_id,
             root_session_id: app.root_session_id,
             agent_id: app.agent_id,
@@ -140,6 +160,7 @@ pub fn collect_pending_for_root(
 
     // 2. User interactions (agent questions, divergence-stop prompts).
     for i in store.get_pending_interactions_for_root_session(root_session_id)? {
+        let is_decision = interaction_is_decision(&i.kind, i.allow_freeform);
         out.push(PendingDecision {
             kind: PendingKind::Interaction,
             answer: AnswerHint {
@@ -148,6 +169,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&i.created_at, now),
             is_expired: false,
+            decision: is_decision,
             id: i.interaction_id,
             root_session_id: Some(i.root_session_id),
             agent_id: i.agent_id,
@@ -159,6 +181,7 @@ pub fn collect_pending_for_root(
 
     // 2b. Expired interactions — still answerable, but past the original TTL.
     for i in store.get_expired_interactions_for_root_session(root_session_id)? {
+        let is_decision = interaction_is_decision(&i.kind, i.allow_freeform);
         out.push(PendingDecision {
             kind: PendingKind::Interaction,
             answer: AnswerHint {
@@ -167,6 +190,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&i.created_at, now),
             is_expired: true,
+            decision: is_decision,
             id: i.interaction_id,
             root_session_id: Some(i.root_session_id),
             agent_id: i.agent_id,
@@ -210,6 +234,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&e.created_at, now),
             is_expired: false,
+            decision: false,
             id: e.escalation_id,
             root_session_id: Some(e.root_session_id),
             agent_id: e.agent_id,
@@ -243,6 +268,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&e.created_at, now),
             is_expired: true,
+            decision: false,
             id: e.escalation_id,
             root_session_id: Some(e.root_session_id),
             agent_id: e.agent_id,
@@ -262,6 +288,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&p.created_at, now),
             is_expired: false,
+            decision: true,
             id: p.plan_id,
             root_session_id: Some(p.root_session_id),
             agent_id: p.created_by_agent_id,
@@ -281,6 +308,7 @@ pub fn collect_pending_for_root(
             },
             age_secs: age_secs(&p.created_at, now),
             is_expired: true,
+            decision: true,
             id: p.plan_id,
             root_session_id: Some(p.root_session_id),
             agent_id: p.created_by_agent_id,
