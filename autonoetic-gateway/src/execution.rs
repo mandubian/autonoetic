@@ -16,8 +16,9 @@ use crate::runtime::script_execute::{execute_script_in_sandbox, script_causal_ev
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
 use crate::runtime::session_resume::{
-    should_auto_resume_checkpoint_yield_reason,
+    should_auto_resume_checkpoint_yield_reason, verify_trigger_coherence, TriggerIncoherence,
 };
+pub use crate::runtime::session_resume::ResumeTrigger;
 use crate::runtime::session_report::SessionReportWriter;
 use crate::scheduler::gateway_store::default_gateway_host_id;
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
@@ -53,6 +54,27 @@ fn inject_approval_ref_into_args(arguments: &str, approval_ref: &str) -> String 
             arguments.to_string()
         }
         Err(_) => arguments.to_string(),
+    }
+}
+
+/// Human-readable rendering of a trigger/YieldReason incoherence (#741).
+fn render_trigger_incoherence(inc: &TriggerIncoherence) -> String {
+    match inc {
+        TriggerIncoherence::InteractionMismatch { expected, got } => {
+            format!("checkpoint waits on interaction '{expected}', not '{got}'")
+        }
+        TriggerIncoherence::ApprovalMismatch { expected, got } => {
+            format!("checkpoint waits on approval '{expected}', not '{got}'")
+        }
+        TriggerIncoherence::WaitingForApproval { request_id } => {
+            format!("session is waiting for approval '{request_id}'")
+        }
+        TriggerIncoherence::WrongYieldReason { got } => {
+            format!("checkpoint yield reason {got} does not match the trigger")
+        }
+        TriggerIncoherence::EmergencyStop => {
+            "emergency-stopped sessions are never auto-resumed (R-6.14)".to_string()
+        }
     }
 }
 
@@ -3380,7 +3402,134 @@ impl GatewayExecutionService {
     /// Returns a structured error `session_waiting_for_approval:{session}:{id}` when
     /// the latest checkpoint has shifted to `ApprovalRequired` — the scheduler uses
     /// this to defer the resume to the approval path.
+    /// #741: the single resume entrypoint. Verifies the trigger is coherent
+    /// with the session's latest checkpoint (`verify_trigger_coherence`) and
+    /// dispatches to the one reconstruction path (`spawn_agent_once` →
+    /// `resume_from_checkpoint`). Callers stop re-deriving "load checkpoint →
+    /// branch on YieldReason → rebuild" per trigger kind.
+    ///
+    /// Validation-repair respawns stay on [`Self::respawn_from_checkpoint`]
+    /// deliberately: they *replay a completed turn* (Hibernation checkpoint)
+    /// rather than resume a suspended one, with their own repair-budget
+    /// accounting.
+    pub async fn resume_session(
+        &self,
+        trigger: ResumeTrigger,
+        follow_up_message: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        // Match by reference so `trigger` stays borrowable for the coherence
+        // checks inside the arms (the `ref`-binding equivalent, made explicit
+        // after a review misread — #749).
+        match &trigger {
+            ResumeTrigger::InteractionAnswered { interaction_id } => {
+                self.resume_interaction_inner(interaction_id, follow_up_message)
+                    .await
+            }
+            ResumeTrigger::ApprovalResolved { request_id } => {
+                let store = self.gateway_store.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("GatewayStore is required to resume approval-gated sessions")
+                })?;
+                let req = store.get_approval(request_id)?.ok_or_else(|| {
+                    anyhow::anyhow!("Unknown approval request '{}'", request_id)
+                })?;
+                let session_id = req.session_id.clone();
+
+                // Trigger/YieldReason coherence: the latest checkpoint must be
+                // parked on exactly this approval.
+                if let Some(cp) = crate::runtime::checkpoint::load_latest_checkpoint(
+                    self.config.as_ref(),
+                    &session_id,
+                )? {
+                    if let Err(inc) = verify_trigger_coherence(&trigger, &cp.yield_reason) {
+                        anyhow::bail!(
+                            "Cannot resume session '{}' for approval '{}': {}",
+                            session_id,
+                            request_id,
+                            render_trigger_incoherence(&inc)
+                        );
+                    }
+                }
+
+                let binding = store.get_session_agent_binding(&session_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No session binding found for approval resume of session '{}'",
+                        session_id
+                    )
+                })?;
+                self.spawn_agent_once(
+                    &binding.agent_id,
+                    follow_up_message.unwrap_or(
+                        "[gateway] The pending approval was resolved by the operator.",
+                    ),
+                    &session_id,
+                    None,
+                    false,
+                    None,
+                    None,
+                    req.workflow_id.as_deref(),
+                    req.task_id.as_deref(),
+                    None,
+                    &[],
+                )
+                .await
+            }
+            ResumeTrigger::Manual { session_id } => {
+                let store = self.gateway_store.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("GatewayStore is required to resume sessions")
+                })?;
+                if let Some(cp) = crate::runtime::checkpoint::load_latest_checkpoint(
+                    self.config.as_ref(),
+                    session_id,
+                )? {
+                    if let Err(inc) = verify_trigger_coherence(&trigger, &cp.yield_reason) {
+                        anyhow::bail!(
+                            "Cannot resume session '{}': {}",
+                            session_id,
+                            render_trigger_incoherence(&inc)
+                        );
+                    }
+                }
+                let binding = store.get_session_agent_binding(session_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No session binding found for manual resume of session '{}'",
+                        session_id
+                    )
+                })?;
+                self.spawn_agent_once(
+                    &binding.agent_id,
+                    follow_up_message.unwrap_or("[operator] Resume the session."),
+                    session_id,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                )
+                .await
+            }
+        }
+    }
+
+    /// Compatibility wrapper — the typed path is
+    /// [`Self::resume_session`] with [`ResumeTrigger::InteractionAnswered`].
     pub async fn resume_from_user_interaction(
+        &self,
+        interaction_id: &str,
+        follow_up_user_message: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        self.resume_session(
+            ResumeTrigger::InteractionAnswered {
+                interaction_id: interaction_id.to_string(),
+            },
+            follow_up_user_message,
+        )
+        .await
+    }
+
+    async fn resume_interaction_inner(
         &self,
         interaction_id: &str,
         follow_up_user_message: Option<&str>,
@@ -3429,38 +3578,48 @@ impl GatewayExecutionService {
             );
         }
 
-        // Pre-check: if the latest checkpoint shifted away from UserInputRequired,
-        // return early so the scheduler can defer or report appropriately.
-        use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
+        // Pre-check (#741): trigger/YieldReason coherence via the shared
+        // helper. Error strings are preserved verbatim — the scheduler's
+        // standalone-interaction sweep machine-matches the
+        // `session_waiting_for_approval:<session>:<rid>` prefix.
+        use crate::runtime::checkpoint::load_latest_checkpoint;
         if let Some(cp) = load_latest_checkpoint(self.config.as_ref(), &interaction.session_id)? {
-            match &cp.yield_reason {
-                YieldReason::UserInputRequired { interaction_id: cid } => {
-                    anyhow::ensure!(
-                        cid == &interaction.interaction_id,
-                        "Checkpoint is for interaction '{}', not '{}'",
-                        cid,
-                        interaction.interaction_id
-                    );
+            let trigger = ResumeTrigger::InteractionAnswered {
+                interaction_id: interaction.interaction_id.clone(),
+            };
+            match verify_trigger_coherence(&trigger, &cp.yield_reason) {
+                Ok(()) => {}
+                Err(TriggerIncoherence::InteractionMismatch { expected, got }) => {
+                    anyhow::bail!("Checkpoint is for interaction '{}', not '{}'", expected, got);
                 }
-                YieldReason::ApprovalRequired { approval_request_id } => {
+                Err(TriggerIncoherence::WaitingForApproval { request_id }) => {
                     tracing::debug!(
                         target: "scheduler",
                         interaction_id = %interaction.interaction_id,
                         session_id = %interaction.session_id,
-                        approval_request_id = %approval_request_id,
+                        approval_request_id = %request_id,
                         "Skipping user-interaction resume: session is now waiting for approval"
                     );
                     return Err(anyhow::anyhow!(
                         "session_waiting_for_approval:{}:{}",
                         interaction.session_id,
-                        approval_request_id
+                        request_id
                     ));
                 }
-                other => {
+                Err(TriggerIncoherence::WrongYieldReason { got }) => {
                     anyhow::bail!(
-                        "Latest checkpoint for session '{}' is not UserInputRequired (got {:?})",
+                        "Latest checkpoint for session '{}' is not UserInputRequired (got {})",
                         interaction.session_id,
-                        other
+                        got
+                    );
+                }
+                Err(inc @ (TriggerIncoherence::EmergencyStop
+                | TriggerIncoherence::ApprovalMismatch { .. })) => {
+                    anyhow::bail!(
+                        "Cannot resume session '{}' from interaction '{}': {}",
+                        interaction.session_id,
+                        interaction.interaction_id,
+                        render_trigger_incoherence(&inc)
                     );
                 }
             }

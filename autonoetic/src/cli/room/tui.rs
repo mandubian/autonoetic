@@ -8535,6 +8535,7 @@ mod tests {
             created_by_agent_id: "planner.default".into(),
             reason: None,
             created_at: "t".into(),
+            expires_at: None,
         };
         let wake = plan_execution_wake_message(&plan);
         assert!(wake.contains("coder.default"));
@@ -8599,6 +8600,7 @@ mod tests {
             created_by_agent_id: "planner.default".into(),
             reason: Some("Tighten scope".into()),
             created_at: "t".into(),
+            expires_at: None,
         };
         let list = format_plan_frame_lines(&plan, false);
         let joined = list.join("\n");
