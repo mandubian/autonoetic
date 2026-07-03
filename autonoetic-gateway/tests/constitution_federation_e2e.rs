@@ -1532,9 +1532,9 @@ fn merged_approval_digest_mismatch_does_not_satisfy_jury() {
         root_session_id: Some("test-root-session".to_string()),
         workflow_id: None,
         task_id: None,
-        status: Some(ApprovalStatus::Approved),
-        decided_at: Some(chrono::Utc::now().to_rfc3339()),
-        decided_by: Some("test-operator".to_string()),
+        status: None,
+        decided_at: None,
+        decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
         min_dwell_ms: None,
@@ -1544,6 +1544,26 @@ fn merged_approval_digest_mismatch_does_not_satisfy_jury() {
         expires_at: None,
     };
     store.create_approval(&mut approval).unwrap();
+    // Approve through the real decision path so the R++2 invariants (Critical
+    // dwell via backdated created_at, confirm phrase, capability
+    // acknowledgements) are exercised rather than bypassed (#746 review).
+    let rev_prefix = &revision_id[..revision_id.len().min(16)];
+    approve_request_with_options(
+        &GatewayConfig::default(),
+        Some(store.as_ref()),
+        &approval_id,
+        "test-operator",
+        None,
+        None,
+        None,
+        None,
+        ApproveOptions {
+            acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+            confirm_phrase: Some(format!("promote {} {}", agent_id, rev_prefix)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // Escalation projection with a DIFFERENT digest.
     let mut escalation = EscalationMessage::new(
@@ -1579,6 +1599,107 @@ fn merged_approval_digest_mismatch_does_not_satisfy_jury() {
         outcome.is_err(),
         "promote should be blocked when the merged approval's digest does not \
          match the escalation projection's digest (#653): {:?}",
+        outcome.ok()
+    );
+}
+
+#[test]
+fn merged_approval_baseline_drift_regates() {
+    // #746 review (TOCTOU): a merged approval acknowledged against outgoing
+    // revision A must NOT satisfy the gates after the alias moved to B — the
+    // promote must re-gate for a fresh operator decision, exactly like
+    // check_revision_promote_approval's baseline rule.
+    let agent_id = "fed.merged.drift";
+    let (s, artifact_id, revision_id, outgoing_rev, store) =
+        setup_existing_agent_with_broadened_caps_and_federation(agent_id);
+
+    let verdicts = vec![
+        make_verdict(PromotionRole::StaticEvaluator, "static_evaluator.default", true),
+        make_verdict(PromotionRole::UnitTestRunner, "unit_test_runner.default", true),
+    ];
+    // A valid merged approval (approved via the real decision path, acked caps,
+    // confirm phrase) against the CURRENT baseline.
+    let _approval_id = create_merged_federation_approval(
+        &store,
+        &artifact_id,
+        &revision_id,
+        agent_id,
+        &outgoing_rev,
+        vec!["NetworkAccess".to_string()],
+        None,
+        verdicts,
+    );
+
+    // Baseline drift: another promotion lands in between — the alias now points
+    // to a different (zero-cap) revision. Clone the outgoing revision's on-disk
+    // SKILL.md + record under a new id so delta computation still works.
+    let drifted_rev = format!("rev_sha256:drifted_{}", uuid::Uuid::new_v4().as_simple());
+    let outgoing_dir = s
+        .gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(&outgoing_rev);
+    let drifted_dir = s
+        .gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(&drifted_rev);
+    std::fs::create_dir_all(&drifted_dir).unwrap();
+    std::fs::copy(outgoing_dir.join("SKILL.md"), drifted_dir.join("SKILL.md")).unwrap();
+    let drifted_record = AgentRevisionRecord {
+        revision_id: drifted_rev.clone(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: None,
+        artifact_id: Some(artifact_id.clone()),
+        content_digest: format!("sha256:drifted-{}", &drifted_rev[..20]),
+        runtime_lock_hash: "sha256:test_lock".to_string(),
+        manifest_hash: "sha256:test_manifest".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
+        created_by_id: "specialized_builder.default".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Ready,
+        metadata_json: serde_json::json!({}),
+        short_id: String::new(),
+        detected_network_hosts: None,
+        signature: None,
+        signer_id: None,
+    };
+    store.insert_agent_revision(&drifted_record).unwrap();
+    let drifted_alias = AgentAliasRecord {
+        alias_id: agent_id.to_string(),
+        agent_id: agent_id.to_string(),
+        revision_id: drifted_rev.clone(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        updated_by_type: PrincipalKind::Human.tag().to_string(),
+        updated_by_id: "test-drift".to_string(),
+        reason: None,
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
+    };
+    store.upsert_agent_alias(&drifted_alias).unwrap();
+
+    let result = try_promote(
+        &s.registry,
+        &s.b_manifest,
+        &s.b_policy,
+        &s.builder_dir,
+        &s.gateway_dir,
+        &s.config,
+        store,
+        agent_id,
+        &revision_id,
+    );
+
+    let outcome = as_outcome(result);
+    assert!(
+        outcome.is_err(),
+        "a merged approval acknowledged against a moved baseline must not \
+         satisfy the gates — the promote must re-gate (#746 TOCTOU): {:?}",
         outcome.ok()
     );
 }

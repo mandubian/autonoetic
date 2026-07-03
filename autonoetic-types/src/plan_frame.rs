@@ -759,6 +759,7 @@ mod tests {
             created_by_agent_id: "planner".into(),
             reason: None,
             created_at: "now".into(),
+            expires_at: None,
         };
         assert!(plan.execution_wake_hint().is_none());
         plan.status = PlanStatus::Approved;
@@ -786,6 +787,7 @@ mod tests {
             created_by_agent_id: "planner".into(),
             reason: None,
             created_at: "now".into(),
+            expires_at: None,
         }
     }
 

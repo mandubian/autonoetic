@@ -3793,23 +3793,25 @@ do not re-issue."
                                 // under the same artifact_id) from satisfying the
                                 // gate. Missing digest on either side is tolerated
                                 // for backward-compat (pre-digest approvals).
-                                let current_digest = gateway_store
-                                    .find_escalation(
+                                // Fail closed (#746 review): both projection
+                                // lookups must propagate DB errors. Swallowing
+                                // them would leave current_digest = None and the
+                                // match below would treat the digest binding as
+                                // satisfied on a lookup *failure*.
+                                let approved_esc = gateway_store.find_escalation(
+                                    artifact_id,
+                                    &args.revision_id,
+                                    autonoetic_types::escalation::EscalationStatus::Approved,
+                                )?;
+                                let esc = match approved_esc {
+                                    Some(e) => Some(e),
+                                    None => gateway_store.find_escalation(
                                         artifact_id,
                                         &args.revision_id,
-                                        autonoetic_types::escalation::EscalationStatus::Approved,
-                                    )?
-                                    .or_else(|| {
-                                        gateway_store
-                                            .find_escalation(
-                                                artifact_id,
-                                                &args.revision_id,
-                                                autonoetic_types::escalation::EscalationStatus::Pending,
-                                            )
-                                            .ok()
-                                            .flatten()
-                                    })
-                                    .and_then(|e| e.artifact_digest);
+                                        autonoetic_types::escalation::EscalationStatus::Pending,
+                                    )?,
+                                };
+                                let current_digest = esc.and_then(|e| e.artifact_digest);
                                 match (ctx.content_digest.as_deref(), current_digest.as_deref()) {
                                     (Some(approved), Some(current)) => approved == current,
                                     _ => true,
@@ -4883,11 +4885,33 @@ fn find_merged_federation_promote_approval(
         if let autonoetic_types::background::ScheduledAction::RevisionPromote {
             agent_id: a_id,
             revision_id: r_id,
+            outgoing_revision_id: approved_outgoing,
             federation_context: Some(ctx),
             ..
         } = &req.action
         {
             if a_id == agent_id && r_id == revision_id && ctx.artifact_id == artifact_id {
+                // Baseline TOCTOU (#746 review): the alias must still point to
+                // the revision the operator acknowledged against when they
+                // approved — same rule as check_revision_promote_approval. If
+                // the baseline moved (another promote landed in between), the
+                // merged approval is stale and must not satisfy either gate;
+                // the promote re-gates for a fresh decision.
+                let current_outgoing = gateway_store
+                    .resolve_alias(agent_id)?
+                    .map(|a| a.revision_id)
+                    .unwrap_or_default();
+                if current_outgoing != *approved_outgoing {
+                    tracing::info!(
+                        target: "promotion",
+                        agent_id = %agent_id,
+                        revision_id = %revision_id,
+                        approved_outgoing = %approved_outgoing,
+                        current_outgoing = %current_outgoing,
+                        "merged federation approval baseline drifted; re-gating"
+                    );
+                    continue;
+                }
                 return Ok(Some(approval_id.to_string()));
             }
         }

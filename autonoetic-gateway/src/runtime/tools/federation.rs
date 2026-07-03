@@ -2,7 +2,7 @@ use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::human_gate::{DecisionContext, GateKind, GateRequest, GateResult, GateService};
-use crate::runtime::tools::{capability_type_name, NativeTool, NativeToolRegistry};
+use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{EscalationKind, ScheduledAction};
 use autonoetic_types::capability::Capability;
@@ -231,28 +231,39 @@ impl NativeTool for FederationEscalateTool {
                     ) {
                         Ok(delta) => delta,
                         Err(e) => {
-                            tracing::warn!(
-                                target: "federation",
-                                agent_id = %args.agent_id,
-                                revision_id = %canonical_revision_id,
-                                error = %e,
-                                "capability delta computation failed at federation escalate; \
-                                 falling back to jury-only review"
-                            );
-                            None
+                            // Fail closed (#746 review): a delta-computation
+                            // failure must not downgrade the review to jury-only
+                            // — that would let a cap-bearing new agent bypass
+                            // R++2 via new_agent_approved_via_escalation, and
+                            // reintroduce the double decision for existing
+                            // agents. Surface the error; escalate again once
+                            // the underlying issue is fixed.
+                            return Ok(autonoetic_types::tool_error::ToolError::execution(
+                                format!(
+                                    "capability delta computation failed for '{}' rev '{}': {}. \
+                                     Refusing to downgrade the promotion review to jury-only \
+                                     (R++2 fail-closed); fix the underlying error and re-escalate.",
+                                    args.agent_id, canonical_revision_id, e
+                                ),
+                                None::<String>,
+                            )
+                            .to_error_response());
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        target: "federation",
-                        agent_id = %args.agent_id,
-                        revision_id = %canonical_revision_id,
-                        error = %e,
-                        "could not load revision capabilities at federation escalate; \
-                         falling back to jury-only review"
-                    );
-                    None
+                    // Fail closed (#746 review): same rationale as above — an
+                    // unreadable capability set must not weaken the gate.
+                    return Ok(autonoetic_types::tool_error::ToolError::execution(
+                        format!(
+                            "could not load declared capabilities for '{}' rev '{}': {}. \
+                             Refusing to downgrade the promotion review to jury-only \
+                             (R++2 fail-closed); fix the underlying error and re-escalate.",
+                            args.agent_id, canonical_revision_id, e
+                        ),
+                        None::<String>,
+                    )
+                    .to_error_response());
                 }
             }
         } else {
