@@ -1165,6 +1165,7 @@ fn gateway_pending_lists_unified_queue() {
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     };
     store.create_approval(&mut approval).expect("seed approval");
 

@@ -3417,12 +3417,15 @@ impl GatewayExecutionService {
         trigger: ResumeTrigger,
         follow_up_message: Option<&str>,
     ) -> anyhow::Result<SpawnResult> {
-        match trigger {
+        // Match by reference so `trigger` stays borrowable for the coherence
+        // checks inside the arms (the `ref`-binding equivalent, made explicit
+        // after a review misread — #749).
+        match &trigger {
             ResumeTrigger::InteractionAnswered { interaction_id } => {
-                self.resume_interaction_inner(&interaction_id, follow_up_message)
+                self.resume_interaction_inner(interaction_id, follow_up_message)
                     .await
             }
-            ResumeTrigger::ApprovalResolved { ref request_id } => {
+            ResumeTrigger::ApprovalResolved { request_id } => {
                 let store = self.gateway_store.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("GatewayStore is required to resume approval-gated sessions")
                 })?;
@@ -3470,7 +3473,7 @@ impl GatewayExecutionService {
                 )
                 .await
             }
-            ResumeTrigger::Manual { ref session_id } => {
+            ResumeTrigger::Manual { session_id } => {
                 let store = self.gateway_store.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("GatewayStore is required to resume sessions")
                 })?;
