@@ -238,7 +238,7 @@ pub fn patch_context_window_tokens_in_yaml(content: &str, tokens: u32) -> String
     if let Ok(re) = regex::Regex::new(r#"(?m)(^\s*base_url:\s*"[^"]*"\s*\n)"#) {
         if re.is_match(content) {
             return re
-                .replace(content, |caps: &regex::Captures<'_>| {
+                .replace_all(content, |caps: &regex::Captures<'_>| {
                     format!("{}    {line}\n", &caps[1])
                 })
                 .to_string();
@@ -247,7 +247,7 @@ pub fn patch_context_window_tokens_in_yaml(content: &str, tokens: u32) -> String
     if let Ok(re) = regex::Regex::new(r#"(?m)(^\s*model:\s*"[^"]*"\s*\n)"#) {
         if re.is_match(content) {
             return re
-                .replace(content, |caps: &regex::Captures<'_>| {
+                .replace_all(content, |caps: &regex::Captures<'_>| {
                     format!("{}    {line}\n", &caps[1])
                 })
                 .to_string();
