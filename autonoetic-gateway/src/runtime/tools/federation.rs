@@ -81,12 +81,16 @@ impl NativeTool for FederationEscalateTool {
                     },
                     "revision_id": {
                         "type": "string",
-                        "description": "The seeded revision being proposed for promotion — \
-                            full (rev_sha256:...) or short (rev_...) id from \
-                            agent_revision_create. OMIT for a NEW agent whose artifact has \
-                            not been seeded into a revision yet: the review then binds to \
-                            the artifact (pass artifact_ref) and capabilities are read from \
-                            the artifact's SKILL.md. Do not invent placeholder ids."
+                        "description": "The seeded revision being proposed for promotion. \
+                            Accepted forms: the FULL id 'rev_sha256:<hex>' OR the SHORT id \
+                            'rev_<short>' / bare '<short>' (the short form from \
+                            agent_revision_create's short_ref, e.g. \
+                            'planner.default@rev_abc12345' → pass 'rev_abc12345'). \
+                            OMIT this field entirely for a NEW agent whose artifact has not \
+                            been seeded into a revision yet: the review then binds to the \
+                            artifact (pass artifact_ref) and capabilities are read from the \
+                            artifact's SKILL.md. Do not invent placeholder ids like \
+                            'rev-initial'."
                     },
                     "role_verdicts": {
                         "type": "array",
@@ -163,32 +167,47 @@ impl NativeTool for FederationEscalateTool {
 
         // Resolve the proposed revision when one was given: accept the full id
         // (rev_sha256:...) or a short id via the short_id_index.
+        //
+        // Short ids are presented to LLMs as `agent@rev_<short>` (see
+        // agent_revision_create / revision_list responses), so callers
+        // naturally pass back either the bare short token (`abc12345`) or the
+        // prefixed form (`rev_abc12345`). The short_id_index stores the BARE
+        // token only, so strip a leading `rev_` before lookup — same rule as
+        // AgentRepository::resolve_agent (`repository.rs`). Without this, an
+        // LLM passing back the very `rev_` form we showed it would be rejected
+        // as an unknown revision.
         let resolved_revision = match args.revision_id.as_deref() {
             Some(rid) => match store.get_agent_revision(rid)? {
                 Some(rev) => Some(rev),
-                None => match store.lookup_short_id(rid)? {
-                    Some(full_id) => store.get_agent_revision(&full_id)?,
-                    None => {
-                        // A revision id that resolves to nothing is a caller
-                        // error (typo, stale id, or an invented placeholder) —
-                        // reviewing artifact contents while the approval names
-                        // a phantom revision would let the two diverge.
-                        return Ok(autonoetic_types::tool_error::ToolError::validation(
-                            format!(
-                                "revision '{}' does not exist for agent '{}' (not a known \
-                                 full 'rev_sha256:...' or short revision id). For an \
-                                 existing agent, create the revision first \
-                                 (agent_revision_create with the artifact_ref) and \
-                                 re-escalate with the returned id. For a NEW agent whose \
-                                 artifact is not seeded yet, OMIT revision_id and pass \
-                                 artifact_ref — the review binds to the artifact.",
-                                rid, args.agent_id
-                            ),
-                            None::<String>,
-                        )
-                        .to_error_response());
+                None => {
+                    let short_lookup = rid
+                        .strip_prefix("rev_")
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(rid);
+                    match store.lookup_short_id(short_lookup)? {
+                        Some(full_id) => store.get_agent_revision(&full_id)?,
+                        None => {
+                            // A revision id that resolves to nothing is a caller
+                            // error (typo, stale id, or an invented placeholder) —
+                            // reviewing artifact contents while the approval names
+                            // a phantom revision would let the two diverge.
+                            return Ok(autonoetic_types::tool_error::ToolError::validation(
+                                format!(
+                                    "revision '{}' does not exist for agent '{}' (not a known \
+                                     full 'rev_sha256:...' or short revision id 'rev_...'). For \
+                                     an existing agent, create the revision first \
+                                     (agent_revision_create with the artifact_ref) and \
+                                     re-escalate with the returned id. For a NEW agent whose \
+                                     artifact is not seeded yet, OMIT revision_id and pass \
+                                     artifact_ref — the review binds to the artifact.",
+                                    rid, args.agent_id
+                                ),
+                                None::<String>,
+                            )
+                            .to_error_response());
+                        }
                     }
-                },
+                }
             },
             None => None,
         };

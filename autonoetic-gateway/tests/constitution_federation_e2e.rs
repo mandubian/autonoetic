@@ -1903,7 +1903,12 @@ fn escalate_existing_agent_requires_seeded_revision() {
     );
 
     // The short revision id must also resolve (short_id_index), not just the
-    // full rev_sha256 form.
+    // full rev_sha256 form. Two accepted forms, both regression-checked:
+    //   (a) the BARE short token as stored in short_id_index
+    //   (b) the `rev_`-prefixed form presented to LLMs as `agent@rev_<short>`
+    //       (the form the planner is shown and will pass back). Without the
+    //       prefix-strip in federation.escalate this second form was rejected
+    //       as an unknown revision id.
     let short = store
         .list_short_ids_for_agent(agent_id)
         .unwrap()
@@ -1911,6 +1916,8 @@ fn escalate_existing_agent_requires_seeded_revision() {
         .find(|(_, full)| full == &revision_id)
         .map(|(short, _)| short)
         .expect("seeded revision should have a short id");
+
+    // (a) bare short token
     let parsed = escalate(
         &s,
         &store,
@@ -1926,7 +1933,36 @@ fn escalate_existing_agent_requires_seeded_revision() {
     assert_eq!(
         parsed.get("ok").and_then(|v| v.as_bool()),
         Some(true),
-        "short revision id should resolve via short_id_index: {parsed}"
+        "bare short revision id should resolve via short_id_index: {parsed}"
+    );
+    // Clear the pending escalation so the (artifact, revision) dedup key is
+    // free for the prefixed-form retry below.
+    let esc_id = parsed
+        .get("escalation_id")
+        .and_then(|v| v.as_str())
+        .expect("escalate returns an escalation_id");
+    store
+        .resolve_escalation(esc_id, EscalationStatus::Rejected, "test", None)
+        .unwrap();
+
+    // (b) rev_-prefixed short id (the form shown in `agent@rev_<short>`)
+    let prefixed = format!("rev_{}", short);
+    let parsed = escalate(
+        &s,
+        &store,
+        serde_json::json!({
+            "agent_id": agent_id,
+            "artifact_id": artifact_id,
+            "revision_id": prefixed,
+            "role_verdicts": passing_verdicts(),
+            "planner_synthesis": "All roles passed.",
+            "root_session_id": "root-existing-short-prefixed",
+        }),
+    );
+    assert_eq!(
+        parsed.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "rev_-prefixed short id (the form shown to LLMs) must resolve: {parsed}"
     );
 }
 
