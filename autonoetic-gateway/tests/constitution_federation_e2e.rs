@@ -1929,3 +1929,231 @@ fn escalate_existing_agent_requires_seeded_revision() {
         "short revision id should resolve via short_id_index: {parsed}"
     );
 }
+
+/// End-to-end escalate-before-install lifecycle:
+///
+/// 1. `federation.escalate` runs against a NEW agent with no seeded revision
+///    (revision_id omitted) — the escalation is recorded under the derived
+///    `unseeded:<artifact>` key and the merged `RevisionPromote` approval is
+///    created in Pending.
+/// 2. The operator approves that merged approval (capability ack + confirm
+///    phrase) — both the R++2 capability gate AND the FullJury jury gate are
+///    satisfied by this single operator decision.
+/// 3. agent-factory seeds the real revision (`rev_sha256:...`) into the store
+///    and onto disk.
+/// 4. `agent_revision_promote` runs against the real revision id. The
+///    `unseeded:`-keyed escalation must still satisfy the gates via the
+///    artifact-scoped fallbacks (`find_approved_escalation_for_artifact` in
+///    both the new-agent capability gate and the legacy FullJury fallback) so
+///    the promote succeeds without a second operator approval.
+///
+/// This is the transition the unit escalate-side tests do not cover, and the
+/// one place where an `unseeded:` → `rev_sha256:` key mismatch could
+/// silently break the binding.
+#[test]
+fn escalate_unseeded_approval_honored_after_revision_seeded() {
+    let agent_id = "unseeded-lifecycle-agent";
+    let (mut s, artifact_id, store) = setup_test_unseeded(&high_risk_skill_md(agent_id));
+
+    // Zero the dwell multiplier so the operator approval can complete in the
+    // same test tick — the merged approval created by federation.escalate would
+    // otherwise require a 5s Critical dwell before the confirm phrase is
+    // accepted. The new-agent gate stays ON (set by setup_test_unseeded) so the
+    // capability delta is still computed and load_artifact_capabilities is
+    // exercised.
+    s.config.approval_dwell_multiplier = 0.0;
+
+    // (1) Escalate before install: omit revision_id. The capability delta is
+    // computed from the artifact's SKILL.md (NetworkAccess) and a merged
+    // RevisionPromote approval is created in Pending.
+    let parsed = escalate(
+        &s,
+        &store,
+        serde_json::json!({
+            "agent_id": agent_id,
+            "artifact_id": artifact_id,
+            "role_verdicts": passing_verdicts(),
+            "planner_synthesis": "All roles passed; recommend promotion.",
+            "root_session_id": "root-unseeded-lifecycle",
+        }),
+    );
+    assert_eq!(
+        parsed.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "unseeded escalation should succeed: {parsed}"
+    );
+    assert_eq!(
+        parsed.get("status").and_then(|v| v.as_str()),
+        Some("pending"),
+        "escalation should start pending: {parsed}"
+    );
+    let approval_id = parsed
+        .get("approval_request_id")
+        .and_then(|v| v.as_str())
+        .expect("pending escalation returns an approval_request_id")
+        .to_string();
+
+    // (2) Operator approves the merged approval with the capability ack and
+    // confirm phrase. The confirm phrase format is `promote <agent> <rev[..16]>`;
+    // here the recorded revision_id is the derived `unseeded:` key.
+    let derived_revision_id = format!("unseeded:{}", artifact_id);
+    let rev_prefix = &derived_revision_id[..derived_revision_id.len().min(16)];
+    let confirm = format!("promote {} {}", agent_id, rev_prefix);
+    approve_request_with_options(
+        &s.config,
+        Some(store.as_ref()),
+        &approval_id,
+        "test-operator",
+        None,
+        None,
+        None,
+        None,
+        ApproveOptions {
+            acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+            confirm_phrase: Some(confirm),
+            ..Default::default()
+        },
+    )
+    .expect("operator approval should succeed");
+
+    // The merged approval is now Approved; the escalation projection remains
+    // keyed under `unseeded:<artifact>` (the federation.escalate path recorded
+    // it before the real revision existed). The promote-side artifact-scoped
+    // lookups must find it.
+    let approved_unseeded = store
+        .find_escalation(
+            &artifact_id,
+            &derived_revision_id,
+            EscalationStatus::Approved,
+        )
+        .unwrap();
+    assert!(
+        approved_unseeded.is_some(),
+        "unseeded escalation should be approved after operator decision"
+    );
+
+    // (3) agent-factory seeds the real revision: insert a Candidate record and
+    // write the SKILL.md into the revisions/agents/<id>/<rev> directory so the
+    // promote path can load capabilities from the revision dir.
+    let real_revision_id =
+        format!("rev_sha256:lifecycle_{}", uuid::Uuid::new_v4().as_simple());
+    let revision_dir = s
+        .gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(&real_revision_id);
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    std::fs::write(
+        revision_dir.join("SKILL.md"),
+        high_risk_skill_md(agent_id),
+    )
+    .unwrap();
+    let rev = AgentRevisionRecord {
+        revision_id: real_revision_id.clone(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: None,
+        artifact_id: Some(artifact_id.clone()),
+        content_digest: format!("sha256:lifecycle-{}", &real_revision_id[..20]),
+        runtime_lock_hash: "sha256:test_lock".to_string(),
+        manifest_hash: "sha256:test_manifest".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        created_by_type: PrincipalKind::Human.tag().to_string(),
+        created_by_id: "agent-factory.default".to_string(),
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Candidate,
+        metadata_json: serde_json::json!({}),
+        short_id: String::new(),
+        detected_network_hosts: None,
+        signature: None,
+        signer_id: None,
+    };
+    store.insert_agent_revision(&rev).unwrap();
+
+    // Record the evaluator + auditor promotion records the legacy gate
+    // requires for any code-bearing NetworkAccess agent.
+    let eval_manifest = evaluator_manifest();
+    let eval_policy = PolicyEngine::new(eval_manifest.clone());
+    record_promotion(
+        &s.registry,
+        &eval_manifest,
+        &eval_policy,
+        &s.builder_dir,
+        &s.gateway_dir,
+        &s.config,
+        &store,
+        &artifact_id,
+        "static_evaluator",
+        true,
+        "session-static_evaluator",
+    );
+    let audit_manifest = auditor_manifest();
+    let audit_policy = PolicyEngine::new(audit_manifest.clone());
+    record_promotion(
+        &s.registry,
+        &audit_manifest,
+        &audit_policy,
+        &s.builder_dir,
+        &s.gateway_dir,
+        &s.config,
+        &store,
+        &artifact_id,
+        "auditor",
+        true,
+        "session-auditor",
+    );
+
+    // Sanity: still a new agent (no alias) — the new-agent capability gate
+    // path is the one in play, not the existing-agent broadening path.
+    assert!(
+        store.resolve_alias(agent_id).unwrap().is_none(),
+        "fixture: agent should still be new (no alias) at promote time"
+    );
+
+    // (4) Promote under the REAL revision id. The merged approval's stored
+    // revision_id is the unseeded key, but the gates fall back to
+    // artifact-scoped lookups (`find_approved_escalation_for_artifact`) and
+    // so the previously-approved escalation must satisfy both gates.
+    let result = try_promote(
+        &s.registry,
+        &s.b_manifest,
+        &s.b_policy,
+        &s.builder_dir,
+        &s.gateway_dir,
+        &s.config,
+        store.clone(),
+        agent_id,
+        &real_revision_id,
+    );
+
+    let outcome = as_outcome(result.clone());
+    assert!(
+        outcome.is_ok(),
+        "promote should succeed: the approved unseeded escalation must bind to \
+         the real revision via the artifact-scoped lookups — got: {:?}",
+        outcome.err()
+    );
+    let json = result.unwrap();
+    assert_eq!(
+        json.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "promote should return ok=true: {json}"
+    );
+    assert_eq!(
+        json.get("status").and_then(|v| v.as_str()),
+        Some("promoted"),
+        "promote should report status=promoted: {json}"
+    );
+
+    // The promote landed: the alias now points at the real revision.
+    let alias = store
+        .resolve_alias(agent_id)
+        .unwrap()
+        .expect("alias should exist after a successful promote");
+    assert_eq!(
+        alias.revision_id, real_revision_id,
+        "alias should point at the real revision after promote"
+    );
+}
