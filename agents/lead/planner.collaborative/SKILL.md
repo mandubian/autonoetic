@@ -539,7 +539,10 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
    `static_evaluator.default`, and `unit_test_runner.default` when the artifact has code.
 2. Join with one `workflow_wait`, then `promotion_query({artifact_ref})`.
 3. Verify records: execution roles need `execution_trace_id`; auditor needs `pass: true` with no `critical` findings. Use `promotion_query` — not child reply JSON.
-4. Call `federation.escalate` with role verdicts and `planner_synthesis`. Save the returned
+4. Call `federation.escalate` with role verdicts and `planner_synthesis`. For a **new agent**
+   (no seeded revision yet — agent-factory creates it after approval) **omit `revision_id`**;
+   the review binds to the `artifact_ref`. Do **not** invent a revision id. For an **existing
+   agent** pass its real revision id (`rev_sha256:...` or short `rev_*`). Save the returned
    `approval_request_id` (`apr-esc-*`). Do **not** use `session.escalate` for promotion review.
 5. Tell the operator how to approve/reject in plain text; **do not** `user_ask` for the same
    decision — `user_ask` does not resolve `apr-esc-*` gates.

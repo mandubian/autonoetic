@@ -5002,6 +5002,38 @@ pub(crate) fn check_capability_delta(
     Ok(Some(delta))
 }
 
+/// Load the declared capabilities from an artifact bundle's `SKILL.md`.
+/// Used by `federation_escalate` when the proposed revision has not been
+/// seeded yet (new-agent escalate-before-install flow): the promote gate
+/// binds the approved escalation by artifact, so the capability delta shown
+/// to the operator must come from the same artifact the approval covers.
+pub(crate) fn load_artifact_capabilities(
+    gateway_dir: &Path,
+    artifact_id: &str,
+) -> anyhow::Result<Vec<Capability>> {
+    let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
+    let files = artifact_store.resolve_files(artifact_id).map_err(|e| {
+        anyhow::anyhow!("Cannot resolve files for artifact '{}': {}", artifact_id, e)
+    })?;
+    let skill_bytes = files
+        .iter()
+        .find(|(name, _)| name == &"SKILL.md" || name.ends_with("/SKILL.md"))
+        .map(|(_, content)| content)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Artifact '{}' contains no SKILL.md", artifact_id)
+        })?;
+    let skill_text = String::from_utf8_lossy(skill_bytes);
+    let frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot parse SKILL.md frontmatter in artifact '{}': {}",
+                artifact_id,
+                e
+            )
+        })?;
+    parse_frontmatter_capabilities(&frontmatter)
+}
+
 /// Load the declared capabilities from a revision's `SKILL.md` frontmatter.
 /// Used by the promotion flow and, since #738, by `federation_escalate` to
 /// compute the capability delta at escalate time so a single merged
