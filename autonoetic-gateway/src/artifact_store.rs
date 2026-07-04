@@ -24,6 +24,36 @@ use std::path::{Path, PathBuf};
 /// Short artifact ID prefix.
 const ARTIFACT_ID_PREFIX: &str = "art_";
 
+/// Returns true if the input string looks like a content alias (`cnt_*`, bare 8-char hex)
+/// rather than a human-readable name. Aliases should be mapped back to registered names
+/// when building artifacts so the manifest filename is stable.
+fn looks_like_content_alias(input: &str) -> bool {
+    let input = input.trim();
+    if let Some(rest) = input.strip_prefix("cnt_") {
+        return rest.len() == crate::runtime::content_store::SHORT_ALIAS_LEN
+            && rest.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    if let Some(rest) = input.strip_prefix("cnt:") {
+        return rest.len() == crate::runtime::content_store::SHORT_ALIAS_LEN
+            && rest.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    input.len() == crate::runtime::content_store::SHORT_ALIAS_LEN
+        && input.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Given a list of registered names for the same content handle, return the most
+/// canonical filename for an artifact manifest, if present.
+fn prefer_canonical_name(names: &[String]) -> Option<&str> {
+    // Order matters: SKILL.md is the most semantically important, then code entrypoints,
+    // then tests. This keeps artifact manifests stable when multiple names exist.
+    for canonical in ["SKILL.md", "main.py", "test_main.py", "main.rs", "lib.rs"] {
+        if names.iter().any(|n| n == canonical) {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
 /// Index mapping artifact_id → artifact directory name.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct ArtifactIndex {
@@ -283,6 +313,27 @@ impl ArtifactStore {
 
             let alias = ContentStore::get_short_alias(&handle);
 
+            // If the input was an alias (cnt_* or bare 8-char hex), try to map it
+            // back to a registered human-readable name so the artifact manifest is
+            // stable across calls. Otherwise identical content ends up with the
+            // same artifact_id but a different filename, causing an identity mismatch.
+            let display_name = if looks_like_content_alias(input_name) {
+                let names = self
+                    .content_store
+                    .find_names_for_handle(builder_session_id, &handle)?;
+                if names.is_empty() {
+                    input_name.clone()
+                } else {
+                    // Prefer canonical file names if one exists; otherwise pick the
+                    // first registered name deterministically.
+                    prefer_canonical_name(&names)
+                        .map(String::from)
+                        .unwrap_or_else(|| names.into_iter().next().unwrap())
+                }
+            } else {
+                input_name.clone()
+            };
+
             anyhow::ensure!(
                 !content.is_empty(),
                 "artifact input '{}' resolved to empty content",
@@ -291,7 +342,7 @@ impl ArtifactStore {
 
             file_handles.push(handle.clone());
             files.push(ArtifactFileEntry {
-                name: input_name.clone(),
+                name: display_name,
                 handle,
                 alias,
             });
@@ -419,9 +470,38 @@ impl ArtifactStore {
                 || want_eps != got_eps
                 || want_layers != got_layers
             {
+                let differing: Vec<String> = {
+                    let mut d = Vec::new();
+                    if want_kind != got_kind {
+                        d.push(format!("kind: want {} vs got {}", want_kind, got_kind));
+                    }
+                    if want_pairs != got_pairs {
+                        d.push(format!(
+                            "files: want {:?} vs got {:?}",
+                            want_pairs, got_pairs
+                        ));
+                    }
+                    if want_eps != got_eps {
+                        d.push(format!(
+                            "entrypoints: want {:?} vs got {:?}",
+                            want_eps, got_eps
+                        ));
+                    }
+                    if want_layers != got_layers {
+                        d.push(format!(
+                            "layers: want {:?} vs got {:?}",
+                            want_layers, got_layers
+                        ));
+                    }
+                    d
+                };
                 anyhow::bail!(
-                    "artifact id '{}' already exists but its manifest does not match the requested inputs (identity mismatch). Refusing reuse; remove or repair the on-disk artifact if it is corrupted.",
-                    artifact_id
+                    "artifact id '{}' already exists but its manifest does not match the requested inputs (identity mismatch: {}). \
+                     This is not a hash collision — it means an artifact with the same content-derived ID was previously built with different metadata (file names, entrypoints, kind, or layers). \
+                     Reuse is refused because artifact bundles are immutable. \
+                     To proceed, either inspect and reuse the existing artifact_ref, or change the inputs (e.g. different file names or content) so a new artifact ID is produced.",
+                    artifact_id,
+                    differing.join("; ")
                 );
             }
             tracing::info!(
@@ -830,6 +910,68 @@ mod tests {
         let ids = store.list().unwrap();
         assert_eq!(ids.len(), 1);
         assert!(ids.contains(&b1.artifact_id));
+    }
+
+    #[test]
+    fn test_artifact_build_resolves_content_alias_to_registered_name() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h = content_store.write(b"# my-summarizer\n\nYou are a summarizer.").unwrap();
+        content_store
+            .register_name("session-1", "SKILL.md", &h)
+            .unwrap();
+
+        let alias = ContentStore::get_short_alias(&h);
+        let alias_input = format!("cnt_{}", alias);
+
+        // Build with the alias should record the registered name, not the alias.
+        let bundle = store
+            .build(&[alias_input.clone()], None, None, "session-1")
+            .unwrap();
+
+        assert_eq!(bundle.files.len(), 1);
+        assert_eq!(
+            bundle.files[0].name, "SKILL.md",
+            "alias input should resolve to the registered human-readable name"
+        );
+        assert_eq!(bundle.files[0].handle, h);
+
+        // Re-building with the canonical name should reuse the same artifact.
+        let bundle2 = store
+            .build(&["SKILL.md".into()], None, None, "session-1")
+            .unwrap();
+        assert!(bundle2.reused, "same content + same canonical name should reuse");
+        assert_eq!(bundle.artifact_id, bundle2.artifact_id);
+    }
+
+    #[test]
+    fn test_artifact_build_canonical_name_preferred_when_multiple_names() {
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let store = ArtifactStore::new(&gw).unwrap();
+        let content_store = ContentStore::new(&gw).unwrap();
+
+        let h = content_store.write(b"skill body").unwrap();
+        content_store
+            .register_name("session-1", "my-summarizer.skill.md", &h)
+            .unwrap();
+        content_store
+            .register_name("session-1", "SKILL.md", &h)
+            .unwrap();
+
+        let alias = ContentStore::get_short_alias(&h);
+        let bundle = store
+            .build(&[format!("cnt_{}", alias)], None, None, "session-1")
+            .unwrap();
+
+        assert_eq!(bundle.files[0].name, "SKILL.md");
     }
 
     #[test]

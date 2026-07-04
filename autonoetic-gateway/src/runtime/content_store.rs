@@ -475,6 +475,51 @@ impl ContentStore {
         })
     }
 
+    /// Finds the registered name(s) for a given content handle, searched across
+    /// the session, its root session, and the global manifest. Used to map
+    /// alias-style inputs (e.g. `cnt_3fc9d2bb`) back to human-readable names
+    /// like `SKILL.md` when building artifacts.
+    ///
+    /// Results are sorted for deterministic ordering.
+    pub fn find_names_for_handle(
+        &self,
+        session_id: &str,
+        handle: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let manifest = self.load_manifest(session_id)?;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut names: Vec<String> = Vec::new();
+
+        for (n, h) in &manifest.names {
+            if h == handle && seen.insert(n.clone()) {
+                names.push(n.clone());
+            }
+        }
+
+        if let Some(root_id) = manifest.root_session_id {
+            if root_id != session_id {
+                let root_manifest = self.load_manifest(&root_id)?;
+                for (n, h) in &root_manifest.names {
+                    if h == handle && seen.insert(n.clone()) {
+                        names.push(n.clone());
+                    }
+                }
+            }
+        }
+
+        if session_id != GLOBAL_SESSION_ID {
+            let global_manifest = self.load_manifest(GLOBAL_SESSION_ID)?;
+            for (n, h) in &global_manifest.names {
+                if h == handle && seen.insert(n.clone()) {
+                    names.push(n.clone());
+                }
+            }
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
     /// Reads content by name within a session.
     pub fn read_by_name(&self, session_id: &str, name: &str) -> anyhow::Result<Vec<u8>> {
         let handle = self.resolve_name(session_id, name)?;

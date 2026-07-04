@@ -138,7 +138,7 @@ impl NativeTool for ArtifactBuildTool {
                     "inputs": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. Pass whole artifacts only — to pull in a single file, read it with resolve(ref, include=\"content\", file=…) and write it to content first."
+                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. IMPORTANT: the filename recorded in the artifact is exactly the input string you provide. Two builds with the same file contents but different input names (e.g. 'SKILL.md' vs 'cnt_3fc9d2bb') will collide and be rejected as an identity mismatch. Prefer stable, human-readable names like 'main.py', 'SKILL.md', and 'test_main.py'. Pass whole artifacts only — to pull in a single file, read it with resolve(ref, include=\"content\", file=…) and write it to content first."
                     },
                     "entrypoints": {
                         "type": "array",
@@ -384,7 +384,10 @@ impl NativeTool for ArtifactBuildTool {
                          agent_revision_create_from_intent (pass this artifact_ref), then \
                          agent_revision_promote that revision_id. Do not rebuild the bundle. \
                          (If agent-factory is driving this pipeline, it performs these steps — \
-                         do not duplicate them.)"
+                         do not duplicate them.) \
+                         If you see an 'identity mismatch' error, do not try to bypass by seeding \
+                         revisions manually; inspect the existing artifact_ref and reuse it, or \
+                         change the input filenames/content to produce a new artifact_id."
                             .to_string(),
                     ),
                 );

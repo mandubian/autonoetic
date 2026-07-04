@@ -30,7 +30,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 | `artifact_inspect` | `ReadAccess` | Inspect artifact files and metadata |
 | `resolve` | `ReadAccess` | One front door: resolve any artifact/content handle |
 | `artifact_prepare` | `CodeExecution` | Preflight for artifact execution (approval + credentials) |
-| `artifact_exec` | `CodeExecution` | Execute artifact entrypoint with artifact-bound approval reuse |
+| `artifact_exec` | `CodeExecution` **or** explicit `SandboxFunctions: ["artifact_exec"]` | Execute artifact entrypoint with artifact-bound approval reuse. `Evaluation` alone does **not** grant this tool; it must be listed explicitly in `SandboxFunctions.allowed` (used by promotion-gate roles such as `unit_test_runner.default`). |
 
 ### Agent Tools
 | Tool | Requires Capability | Notes |

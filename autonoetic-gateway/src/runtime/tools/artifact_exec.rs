@@ -12,6 +12,7 @@ use crate::runtime::tools::{
     build_approval_details, load_session_content_mounts,
     promotion::{
         manifest_may_exec_artifact_in_promotion_gate, manifest_may_record_promotion_verdicts,
+        manifest_sandbox_allows_tool,
     },
     CredentialEnvMapping, NativeTool, NativeToolRegistry,
 };
@@ -151,10 +152,28 @@ impl NativeTool for ArtifactExecTool {
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest.capabilities.iter().any(|cap| {
-            matches!(cap, Capability::CodeExecution { .. })
-                || matches!(cap, Capability::Evaluation { .. })
-        }) || manifest_may_exec_artifact_in_promotion_gate(manifest)
+        let has_code_exec = manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::CodeExecution { .. }));
+        if has_code_exec {
+            return true;
+        }
+
+        let has_eval = manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::Evaluation { .. }));
+        if has_eval {
+            // Evaluation alone is too broad (auditor/static_evaluator use it for
+            // promotion_record). Require explicit SandboxFunctions listing of
+            // artifact_exec. Note: manifest_may_exec_artifact_in_promotion_gate
+            // always returns false here because it checks !has_broad_cap, and
+            // Evaluation IS a broad cap — so we only need the sandbox check.
+            return manifest_sandbox_allows_tool(manifest, "artifact_exec");
+        }
+
+        manifest_may_exec_artifact_in_promotion_gate(manifest)
     }
 
     fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
@@ -1601,6 +1620,126 @@ mod tests {
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         assert!(tool.is_available(&manifest));
+    }
+
+    #[test]
+    fn artifact_exec_not_available_for_auditor_with_evaluation_but_no_sandbox_allow() {
+        use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+        let tool = ArtifactExecTool;
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "auditor.default".to_string(),
+                name: "Auditor".to_string(),
+                description: "test".to_string(),
+                singleton: false,
+            },
+            capabilities: vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::Evaluation {
+                    patterns: vec!["*".to_string()],
+                },
+            ],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        };
+        assert!(
+            !tool.is_available(&manifest),
+            "auditor has Evaluation for promotion_record but should not see artifact_exec \
+             unless SandboxFunctions explicitly allows it"
+        );
+    }
+
+    #[test]
+    fn artifact_exec_available_for_evaluator_with_explicit_sandbox_allow() {
+        use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+        let tool = ArtifactExecTool;
+        let manifest = AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "sealed_evaluator.default".to_string(),
+                name: "Sealed Evaluator".to_string(),
+                description: "test".to_string(),
+                singleton: false,
+            },
+            capabilities: vec![
+                Capability::SandboxFunctions {
+                    allowed: vec![
+                        "knowledge_".to_string(),
+                        "artifact_exec".to_string(),
+                        "promotion_".to_string(),
+                    ],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::Evaluation {
+                    patterns: vec!["*".to_string()],
+                },
+            ],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        };
+        assert!(
+            tool.is_available(&manifest),
+            "Evaluation agents that explicitly allow artifact_exec in SandboxFunctions should see it"
+        );
     }
 
     #[test]
