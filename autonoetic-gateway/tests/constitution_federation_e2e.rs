@@ -2193,3 +2193,89 @@ fn escalate_unseeded_approval_honored_after_revision_seeded() {
         "alias should point at the real revision after promote"
     );
 }
+
+/// An unresolved `ar.*` artifact_ref must be refused explicitly. Silently
+/// falling back to the literal ref string as artifact_id would bind the
+/// escalation under a non-canonical key like `unseeded:ar.deadbeef` and break
+/// every promote-side artifact lookup (Copilot #2 on PR #751).
+#[test]
+fn escalate_unresolvable_artifact_ref_is_refused() {
+    let agent_id = "unresolved-ref-agent";
+    let (s, _artifact_id, store) = setup_test_unseeded(&high_risk_skill_md(agent_id));
+
+    let parsed = escalate(
+        &s,
+        &store,
+        serde_json::json!({
+            "agent_id": agent_id,
+            "artifact_ref": "ar.deadbeef_deadbeef_deadbeef_deadbeef_deadbeef_deadbeef_deadbeef",
+            "role_verdicts": passing_verdicts(),
+            "planner_synthesis": "All roles passed.",
+            "root_session_id": "root-unresolved-ref",
+        }),
+    );
+
+    assert_eq!(
+        parsed.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "an unresolvable artifact_ref must be refused, not silently used as \
+         the artifact_id: {parsed}"
+    );
+    let msg = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg.contains("could not be resolved"),
+        "error must explain the ref did not resolve: {msg}"
+    );
+}
+
+/// A short id whose short_id_index entry points at a full revision id that no
+/// longer exists (stale/orphaned index row) must be a hard validation error.
+/// Treating it as the unseeded new-agent path would silently re-bind the
+/// approval under `unseeded:<artifact>` for what the caller meant as an
+/// existing revision (Copilot #3 on PR #751).
+#[test]
+fn escalate_orphaned_short_id_is_refused() {
+    let agent_id = "orphaned-short-id-agent";
+    let (s, _artifact_id, store) = setup_test_unseeded(&high_risk_skill_md(agent_id));
+
+    // Plant an orphaned short_id_index entry: the short id resolves, but the
+    // full revision record it points at was never written (or was deleted).
+    let phantom_full_id =
+        format!("rev_sha256:phantom_{}", uuid::Uuid::new_v4().as_simple());
+    store
+        .register_short_id(&phantom_full_id, "phantom00")
+        .unwrap();
+    // Sanity: the short id resolves but the full revision does not.
+    assert_eq!(
+        store.lookup_short_id("phantom00").unwrap().as_deref(),
+        Some(phantom_full_id.as_str())
+    );
+    assert!(store
+        .get_agent_revision(&phantom_full_id)
+        .unwrap()
+        .is_none());
+
+    let parsed = escalate(
+        &s,
+        &store,
+        serde_json::json!({
+            "agent_id": agent_id,
+            "revision_id": "rev_phantom00",
+            "role_verdicts": passing_verdicts(),
+            "planner_synthesis": "All roles passed.",
+            "root_session_id": "root-orphaned-short",
+        }),
+    );
+
+    assert_eq!(
+        parsed.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "an orphaned short_id_index entry must be refused, not silently \
+         re-bound under the unseeded path: {parsed}"
+    );
+    let msg = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        msg.contains("stale") && msg.contains("short_id_index"),
+        "error must explain the short_id_index is stale: {msg}"
+    );
+}

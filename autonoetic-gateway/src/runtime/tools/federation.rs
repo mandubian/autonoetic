@@ -150,17 +150,73 @@ impl NativeTool for FederationEscalateTool {
 
         // Resolve artifact_ref if provided, falling back to artifact_id if not.
         // Callers also put `ar.*` refs in artifact_id — resolve those the same way.
+        //
+        // Fail CLOSED on unresolved refs: a caller who passed an `ar.*` ref
+        // (or `artifact_ref`) clearly meant a real artifact, and silently
+        // falling back to the bare ref string as the artifact_id would bind
+        // the escalation under a non-canonical key like `unseeded:ar.deadbeef`
+        // and break every promote-side artifact lookup. Require a non-empty
+        // session when a ref is provided, since `resolve_artifact_ref_any_scope`
+        // can only resolve global (not session-scoped) refs without one.
         let sid = _session_id.unwrap_or("");
         let caller_artifact_id = if let Some(ref ref_id) = args.artifact_ref {
-            store
-                .resolve_artifact_ref_any_scope(ref_id, sid)?
-                .map(|r| r.artifact_id)
-                .unwrap_or_else(|| args.artifact_id.clone())
+            if sid.is_empty() {
+                return Ok(autonoetic_types::tool_error::ToolError::validation(
+                    format!(
+                        "artifact_ref '{}' was passed but no session_id is available to \
+                         resolve it. Pass the canonical artifact_id directly, or invoke \
+                         federation.escalate from within a session.",
+                        ref_id
+                    ),
+                    None::<String>,
+                )
+                .to_error_response());
+            }
+            match store.resolve_artifact_ref_any_scope(ref_id, sid)? {
+                Some(r) => r.artifact_id,
+                None => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        format!(
+                            "artifact_ref '{}' could not be resolved in this session. Pass the \
+                             canonical artifact_id returned by artifact_build, or omit \
+                             artifact_ref to use artifact_id.",
+                            ref_id
+                        ),
+                        None::<String>,
+                    )
+                    .to_error_response());
+                }
+            }
         } else if args.artifact_id.starts_with("ar.") {
-            store
-                .resolve_artifact_ref_any_scope(&args.artifact_id, sid)?
-                .map(|r| r.artifact_id)
-                .unwrap_or_else(|| args.artifact_id.clone())
+            // Same rule for callers that put the `ar.*` ref straight into
+            // artifact_id (a common shape — agent_revision_create accepts it
+            // there too). Don't silently fall back to the literal string.
+            if sid.is_empty() {
+                return Ok(autonoetic_types::tool_error::ToolError::validation(
+                    format!(
+                        "artifact_id '{}' looks like an artifact ref but no session_id is \
+                         available to resolve it. Pass the canonical artifact_id instead.",
+                        args.artifact_id
+                    ),
+                    None::<String>,
+                )
+                .to_error_response());
+            }
+            match store.resolve_artifact_ref_any_scope(&args.artifact_id, sid)? {
+                Some(r) => r.artifact_id,
+                None => {
+                    return Ok(autonoetic_types::tool_error::ToolError::validation(
+                        format!(
+                            "artifact_id '{}' looks like an artifact ref but could not be \
+                             resolved in this session. Pass the canonical artifact_id returned \
+                             by artifact_build.",
+                            args.artifact_id
+                        ),
+                        None::<String>,
+                    )
+                    .to_error_response());
+                }
+            }
         } else {
             args.artifact_id.clone()
         };
@@ -176,6 +232,13 @@ impl NativeTool for FederationEscalateTool {
         // AgentRepository::resolve_agent (`repository.rs`). Without this, an
         // LLM passing back the very `rev_` form we showed it would be rejected
         // as an unknown revision.
+        //
+        // Fail CLOSED on the orphaned-index edge case: if `lookup_short_id`
+        // returns a full id that `get_agent_revision` then can't find, the
+        // index is stale (revision was deleted, or the row was never written).
+        // Treating that as "unseeded new agent" would silently re-bind the
+        // approval under `unseeded:<artifact>` for what the caller meant as an
+        // existing revision — refuse it explicitly.
         let resolved_revision = match args.revision_id.as_deref() {
             Some(rid) => match store.get_agent_revision(rid)? {
                 Some(rev) => Some(rev),
@@ -185,7 +248,23 @@ impl NativeTool for FederationEscalateTool {
                         .filter(|s| !s.is_empty())
                         .unwrap_or(rid);
                     match store.lookup_short_id(short_lookup)? {
-                        Some(full_id) => store.get_agent_revision(&full_id)?,
+                        Some(full_id) => match store.get_agent_revision(&full_id)? {
+                            Some(rev) => Some(rev),
+                            None => {
+                                return Ok(autonoetic_types::tool_error::ToolError::validation(
+                                    format!(
+                                        "short revision id '{}' resolved to '{}' but no such \
+                                         revision record exists (the short_id_index is stale: \
+                                         the revision was deleted or its row was never written). \
+                                         Re-create the revision (agent_revision_create) and \
+                                         re-escalate with the returned id.",
+                                        rid, full_id
+                                    ),
+                                    None::<String>,
+                                )
+                                .to_error_response());
+                            }
+                        },
                         None => {
                             // A revision id that resolves to nothing is a caller
                             // error (typo, stale id, or an invented placeholder) —
