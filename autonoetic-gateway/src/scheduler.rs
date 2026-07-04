@@ -1597,13 +1597,26 @@ async fn spawn_task_execution(
         }
     });
 
+    // Cron rows injected from `auto_learning` config carry the synthetic owner
+    // `gateway.auto-learning`, which is not an installed agent — resolving it
+    // as a spawn source would fail every trigger. These jobs are
+    // gateway-initiated, so they carry no source agent for the AgentSpawn
+    // policy check. The `gateway.` id namespace is reserved (validate_agent_id),
+    // so no installed agent can claim this owner id.
+    let source_agent: Option<&str> =
+        if source_id == crate::scheduler::auto_learning_jobs::AUTO_LEARNING_OWNER_ID {
+            None
+        } else {
+            Some(&source_id)
+        };
+
     let result = if let Some(ref rev_id) = revision_id {
         exec.spawn_agent_revision_once(
             &agent_id,
             Some(rev_id.as_str()),
             &message,
             &session_id,
-            Some(&source_id),
+            source_agent,
             false,
             None,
             metadata.as_ref(),
@@ -1618,7 +1631,7 @@ async fn spawn_task_execution(
             &agent_id,
             &message,
             &session_id,
-            Some(&source_id),
+            source_agent,
             false,
             None,
             metadata.as_ref(),

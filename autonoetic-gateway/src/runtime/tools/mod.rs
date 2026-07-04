@@ -423,6 +423,13 @@ pub(crate) fn validate_agent_id(agent_id: &str) -> anyhow::Result<()> {
         !agent_id.starts_with('.') && !agent_id.ends_with('.') && !agent_id.contains(".."),
         "agent_id must not start or end with '.', or contain '..'"
     );
+    // Reserved for synthetic gateway identities (e.g. the scheduler's
+    // `gateway.auto-learning` cron owner, which is treated as gateway-initiated
+    // at spawn time). An installed agent with this prefix could impersonate them.
+    anyhow::ensure!(
+        !agent_id.starts_with("gateway."),
+        "the 'gateway.' agent_id namespace is reserved for the gateway itself"
+    );
     anyhow::ensure!(
         agent_id
             .chars()

@@ -425,11 +425,17 @@ Use `promotion_query` records — not child reply JSON — as the source of trut
 
 Bundle all evaluation reports and escalate to the operator using `federation.escalate`:
 
+For `revision_id`: a **new agent** has no seeded revision at this point (agent-factory
+creates it after approval) — **omit `revision_id` entirely**; the gateway binds the review
+to the artifact and reads capabilities from the artifact's SKILL.md. Do **not** invent a
+revision id. For an **existing agent**, pass the real revision id returned by
+`agent_revision_create` (full `rev_sha256:...` or its short `rev_*` form).
+
 ```json
 federation.escalate({
   "artifact_id": "<artifact_ref>",
   "agent_id": "<agent_id>",
-  "revision_id": "<revision_id>",
+  "revision_id": "<rev_sha256:... — existing agents only; OMIT for a new agent>",
   "root_session_id": "<root_session_id>",
   "role_verdicts": [
     {"role": "auditor", "agent_id": "auditor.default", "passed": true, "findings_summary": "...", "recorded_at": "..."},

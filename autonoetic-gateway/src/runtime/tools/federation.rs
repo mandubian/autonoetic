@@ -24,7 +24,8 @@ struct FederationEscalateArgs {
     artifact_ref: Option<String>,
     artifact_digest: Option<String>,
     agent_id: String,
-    revision_id: String,
+    #[serde(default)]
+    revision_id: Option<String>,
     role_verdicts: Vec<RoleVerdictSummary>,
     planner_synthesis: String,
     root_session_id: String,
@@ -56,7 +57,7 @@ impl NativeTool for FederationEscalateTool {
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "required": ["agent_id", "revision_id", "role_verdicts", "planner_synthesis", "root_session_id"],
+                "required": ["agent_id", "role_verdicts", "planner_synthesis", "root_session_id"],
                 "properties": {
                     "escalation_id": {
                         "type": "string",
@@ -80,7 +81,12 @@ impl NativeTool for FederationEscalateTool {
                     },
                     "revision_id": {
                         "type": "string",
-                        "description": "The revision being proposed for promotion."
+                        "description": "The seeded revision being proposed for promotion — \
+                            full (rev_sha256:...) or short (rev_...) id from \
+                            agent_revision_create. OMIT for a NEW agent whose artifact has \
+                            not been seeded into a revision yet: the review then binds to \
+                            the artifact (pass artifact_ref) and capabilities are read from \
+                            the artifact's SKILL.md. Do not invent placeholder ids."
                     },
                     "role_verdicts": {
                         "type": "array",
@@ -139,37 +145,107 @@ impl NativeTool for FederationEscalateTool {
         };
 
         // Resolve artifact_ref if provided, falling back to artifact_id if not.
+        // Callers also put `ar.*` refs in artifact_id — resolve those the same way.
+        let sid = _session_id.unwrap_or("");
         let caller_artifact_id = if let Some(ref ref_id) = args.artifact_ref {
-            let sid = _session_id.unwrap_or("");
             store
                 .resolve_artifact_ref_any_scope(ref_id, sid)?
+                .map(|r| r.artifact_id)
+                .unwrap_or_else(|| args.artifact_id.clone())
+        } else if args.artifact_id.starts_with("ar.") {
+            store
+                .resolve_artifact_ref_any_scope(&args.artifact_id, sid)?
                 .map(|r| r.artifact_id)
                 .unwrap_or_else(|| args.artifact_id.clone())
         } else {
             args.artifact_id.clone()
         };
 
-        let (canonical_artifact_id, canonical_revision_id) = match store
-            .get_agent_revision(&args.revision_id)?
-        {
-            Some(rev) => {
-                let art = rev
-                    .artifact_id
-                    .as_deref()
-                    .unwrap_or(&caller_artifact_id)
-                    .to_string();
-                if art != caller_artifact_id && !caller_artifact_id.is_empty() {
-                    tracing::warn!(
-                        target: "federation",
-                        escalation_artifact_id = %caller_artifact_id,
-                        canonical_artifact_id = %art,
-                        "federation.escalate: correcting artifact id to canonical value from revision record"
-                    );
-                }
-                (art, rev.revision_id.clone())
-            }
-            None => (caller_artifact_id.clone(), args.revision_id.clone()),
+        // Resolve the proposed revision when one was given: accept the full id
+        // (rev_sha256:...) or a short id via the short_id_index.
+        let resolved_revision = match args.revision_id.as_deref() {
+            Some(rid) => match store.get_agent_revision(rid)? {
+                Some(rev) => Some(rev),
+                None => match store.lookup_short_id(rid)? {
+                    Some(full_id) => store.get_agent_revision(&full_id)?,
+                    None => {
+                        // A revision id that resolves to nothing is a caller
+                        // error (typo, stale id, or an invented placeholder) —
+                        // reviewing artifact contents while the approval names
+                        // a phantom revision would let the two diverge.
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            format!(
+                                "revision '{}' does not exist for agent '{}' (not a known \
+                                 full 'rev_sha256:...' or short revision id). For an \
+                                 existing agent, create the revision first \
+                                 (agent_revision_create with the artifact_ref) and \
+                                 re-escalate with the returned id. For a NEW agent whose \
+                                 artifact is not seeded yet, OMIT revision_id and pass \
+                                 artifact_ref — the review binds to the artifact.",
+                                rid, args.agent_id
+                            ),
+                            None::<String>,
+                        )
+                        .to_error_response());
+                    }
+                },
+            },
+            None => None,
         };
+
+        let (canonical_artifact_id, canonical_revision_id, revision_seeded) =
+            match resolved_revision {
+                Some(rev) => {
+                    let art = rev
+                        .artifact_id
+                        .as_deref()
+                        .unwrap_or(&caller_artifact_id)
+                        .to_string();
+                    if art != caller_artifact_id && !caller_artifact_id.is_empty() {
+                        tracing::warn!(
+                            target: "federation",
+                            escalation_artifact_id = %caller_artifact_id,
+                            canonical_artifact_id = %art,
+                            "federation.escalate: correcting artifact id to canonical value from revision record"
+                        );
+                    }
+                    (art, rev.revision_id.clone(), true)
+                }
+                None => {
+                    // No revision: new-agent escalate-before-install. The promote
+                    // gate binds the approved escalation by artifact, so the
+                    // review proceeds from the artifact alone under a derived
+                    // internal key (never a caller-invented placeholder).
+                    if store.resolve_alias(&args.agent_id)?.is_some() {
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            format!(
+                                "agent '{}' is already installed — escalation requires the \
+                                 seeded revision being promoted. Create it first \
+                                 (agent_revision_create with the artifact_ref), then \
+                                 re-escalate with the returned 'rev_sha256:...' id.",
+                                args.agent_id
+                            ),
+                            None::<String>,
+                        )
+                        .to_error_response());
+                    }
+                    if caller_artifact_id.is_empty() {
+                        return Ok(autonoetic_types::tool_error::ToolError::validation(
+                            format!(
+                                "no revision_id and no artifact for agent '{}' — the review \
+                                 has nothing to bind to. Pass the artifact_ref (ar.*) \
+                                 returned by artifact_build, or seed the revision first \
+                                 (agent_revision_create) and escalate its 'rev_sha256:...' id.",
+                                args.agent_id
+                            ),
+                            None::<String>,
+                        )
+                        .to_error_response());
+                    }
+                    let derived = format!("unseeded:{}", caller_artifact_id);
+                    (caller_artifact_id.clone(), derived, false)
+                }
+            };
 
         let escalation_id = args
             .escalation_id
@@ -214,11 +290,41 @@ impl NativeTool for FederationEscalateTool {
         // federation review stands alone as a `SessionEscalate{PromotionReview}`
         // and the operator only approves the jury verdicts.
         let capability_delta = if let (Some(gw_dir), Some(cfg)) = (gateway_dir, _config) {
-            match super::agent_revision::load_revision_capabilities(
-                gw_dir,
-                &args.agent_id,
-                &canonical_revision_id,
-            ) {
+            // Seeded revision: read the declared capabilities from the revision
+            // directory. Unseeded (new-agent escalate-before-install): read them
+            // from the artifact's SKILL.md — the same artifact the approved
+            // escalation will bind to at promote time.
+            let loaded_caps = if revision_seeded {
+                super::agent_revision::load_revision_capabilities(
+                    gw_dir,
+                    &args.agent_id,
+                    &canonical_revision_id,
+                )
+            } else {
+                tracing::info!(
+                    target: "federation",
+                    agent_id = %args.agent_id,
+                    revision_id = %canonical_revision_id,
+                    artifact_id = %canonical_artifact_id,
+                    "federation.escalate: revision not seeded yet (new agent) — \
+                     reading declared capabilities from the artifact SKILL.md"
+                );
+                super::agent_revision::load_artifact_capabilities(
+                    gw_dir,
+                    &canonical_artifact_id,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "revision '{}' is not seeded and the artifact's SKILL.md is unreadable: {}. \
+                         The escalation for a new agent binds to the artifact, so its SKILL.md \
+                         must be readable — pass the artifact_ref (ar.*) from artifact_build, \
+                         or seed the revision first (agent_revision_create) and re-escalate \
+                         with its 'rev_sha256:...' id",
+                        canonical_revision_id, e
+                    )
+                })
+            };
+            match loaded_caps {
                 Ok(current_caps) => {
                     match super::agent_revision::check_capability_delta(
                         &store,
