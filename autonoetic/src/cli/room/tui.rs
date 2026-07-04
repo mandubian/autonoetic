@@ -1470,7 +1470,7 @@ struct PendingGateResolve {
 }
 
 /// Blocking popup for operator gates — auto-opens when a new approval, question,
-/// or escalation appears so the operator does not have to hunt the timeline.
+/// plan, or escalation appears so the operator does not have to hunt the timeline.
 struct GateModal {
     gate: GateRef,
     scroll: u16,
@@ -1487,12 +1487,16 @@ struct ApprovalsPopup {
 fn gate_modal_kind(gate: &GateRef) -> bool {
     matches!(
         gate.kind,
-        GateKind::Approval | GateKind::WikiProposal | GateKind::Escalation | GateKind::Interaction
+        GateKind::Approval
+            | GateKind::WikiProposal
+            | GateKind::Escalation
+            | GateKind::Interaction
+            | GateKind::Plan
     )
 }
 
-/// Newest unresolved operator gate that should block the session (plans use the
-/// plan-review pane instead).
+/// Newest unresolved operator gate that should block the session (plans now use
+/// the same blocking GateModal as other critical gates).
 fn newest_blocking_gate_event(
     entries: &[SessionTimelineEntry],
     resolved: &HashSet<String>,
@@ -1589,6 +1593,42 @@ fn fetch_gate_inspect_detail(client: &RoomClient, request_id: &str) -> Vec<Strin
     .unwrap_or_default()
 }
 
+/// Fetch human-readable detail lines for a plan gate. Used by the blocking
+/// GateModal when a plan.pending event appears.
+fn fetch_plan_detail(client: &RoomClient, root_session_id: &str, plan_id: &str) -> Vec<String> {
+    let params = serde_json::json!({ "root_session_id": root_session_id });
+    match rpc(client, "planframes.list_pending", params) {
+        Ok(value) => match serde_json::from_value::<
+            autonoetic_types::plan_frame::PlanFramesListPendingResult,
+        >(value)
+        {
+            Ok(parsed) => parsed
+                .plans
+                .into_iter()
+                .find(|p| p.plan_id == plan_id)
+                .map(|p| format_plan_frame_lines(&p, true))
+                .unwrap_or_else(|| {
+                    vec![format!(
+                        "(plan {plan_id} is no longer pending — it may have been approved or withdrawn)"
+                    )]
+                }),
+            Err(e) => vec![format!("✗ malformed planframes.list_pending response: {e}")],
+        },
+        Err(e) => vec![format!("✗ planframes.list_pending failed: {e}")],
+    }
+}
+
+fn gate_detail_for_modal(
+    client: &RoomClient,
+    root_session_id: &str,
+    gate: &GateRef,
+) -> Vec<String> {
+    match gate.kind {
+        GateKind::Plan => fetch_plan_detail(client, root_session_id, &gate.id),
+        _ => fetch_gate_inspect_detail(client, &gate.id),
+    }
+}
+
 fn gate_entry_for_ref<'a>(
     entries: &'a [SessionTimelineEntry],
     gate: &GateRef,
@@ -1608,7 +1648,10 @@ fn gate_entry_for_ref<'a>(
             e.event_type == "user.ask.pending"
                 && interaction_id_for(e).as_deref() == Some(gate.id.as_str())
         }
-        GateKind::Plan => false,
+        GateKind::Plan => {
+            plan_id_for(e).as_deref() == Some(gate.id.as_str())
+                || render::extract_plan_proposal_id(e).as_deref() == Some(gate.id.as_str())
+        }
     })
 }
 
@@ -2790,25 +2833,61 @@ pub fn run(
                                             GateKind::Approval
                                                 | GateKind::WikiProposal
                                                 | GateKind::Escalation
+                                                | GateKind::Plan
                                         ) =>
                                 {
                                     let gate_id = modal.gate.id.clone();
+                                    let kind = modal.gate.kind;
                                     let approve = key.code == KeyCode::Char('y');
                                     if let Some(m) = gate_modal.as_mut() {
                                         m.peek_timeline = false;
                                     }
-                                    input = Some(approval_gate_input(
-                                        client,
+                                    if kind == GateKind::Plan {
                                         if approve {
-                                            GateAction::Approve
+                                            match approve_plan_and_wake(
+                                                client,
+                                                root_session_id,
+                                                &gate_id,
+                                                target_agent_id.as_deref(),
+                                            ) {
+                                                Ok(msg) => {
+                                                    mark_plan_version_resolved(
+                                                        &entries,
+                                                        &gate_id,
+                                                        &mut resolved,
+                                                        &mut acted,
+                                                    );
+                                                    gate_modal = None;
+                                                    status = Some(msg);
+                                                    follow = true;
+                                                    force_timeline_refresh = true;
+                                                }
+                                                Err(e) => status = Some(e),
+                                            }
                                         } else {
-                                            GateAction::Reject
-                                        },
-                                        gate_id,
-                                        &entries,
-                                        !approve,
-                                    ));
-                                    status = None;
+                                            gate_modal = None;
+                                            compose = Some(ComposeInput::with_prefill(
+                                                &format!("Please revise plan {gate_id}: "),
+                                            ));
+                                            status = Some(
+                                                "revision request — edit and Enter to send to planner"
+                                                    .to_string(),
+                                            );
+                                        }
+                                    } else {
+                                        input = Some(approval_gate_input(
+                                            client,
+                                            if approve {
+                                                GateAction::Approve
+                                            } else {
+                                                GateAction::Reject
+                                            },
+                                            gate_id,
+                                            &entries,
+                                            !approve,
+                                        ));
+                                        status = None;
+                                    }
                                     continue;
                                 }
                                 _ => {}
@@ -2832,18 +2911,56 @@ pub fn run(
                                         GateKind::Approval
                                             | GateKind::WikiProposal
                                             | GateKind::Escalation
+                                            | GateKind::Plan
                                     ) =>
                                 {
+                                    let gate_id = modal.gate.id.clone();
+                                    let kind = modal.gate.kind;
+                                    let approve = key.code == KeyCode::Char('y');
+                                    if kind == GateKind::Plan {
+                                        if approve {
+                                            match approve_plan_and_wake(
+                                                client,
+                                                root_session_id,
+                                                &gate_id,
+                                                target_agent_id.as_deref(),
+                                            ) {
+                                                Ok(msg) => {
+                                                    mark_plan_version_resolved(
+                                                        &entries,
+                                                        &gate_id,
+                                                        &mut resolved,
+                                                        &mut acted,
+                                                    );
+                                                    gate_modal = None;
+                                                    status = Some(msg);
+                                                    follow = true;
+                                                    force_timeline_refresh = true;
+                                                }
+                                                Err(e) => status = Some(e),
+                                            }
+                                        } else {
+                                            gate_modal = None;
+                                            compose = Some(ComposeInput::with_prefill(
+                                                &format!("Please revise plan {gate_id}: "),
+                                            ));
+                                            status = Some(
+                                                "revision request — edit and Enter to send to planner"
+                                                    .to_string(),
+                                            );
+                                        }
+                                        continue;
+                                    }
                                     input = Some(approval_gate_input(
                                         client,
-                                        if key.code == KeyCode::Char('y') {
+                                        if approve {
                                             GateAction::Approve
                                         } else {
                                             GateAction::Reject
                                         },
-                                        modal.gate.id.clone(),
+                                        gate_id,
                                         &entries,
-                                        key.code == KeyCode::Char('n'),
+                                        !approve,
                                     ));
                                     status = None;
                                     continue;
@@ -2950,11 +3067,46 @@ pub fn run(
                                         let row = &popup.rows[idx];
                                         if !row.is_pending {
                                             status = Some(format!("already resolved: {}", row.id));
-                                        } else if row.kind == "PLAN" || row.kind == "ASK" {
-                                            status = Some(format!(
-                                                "{}: Esc to close, then resolve from timeline",
-                                                row.kind
-                                            ));
+                                        } else if row.kind == "ASK" {
+                                            status = Some(
+                                                "ASK: Esc to close, then answer from timeline"
+                                                    .to_string(),
+                                            );
+                                        } else if row.kind == "PLAN" {
+                                            let approve = key.code == KeyCode::Char('y');
+                                            let plan_key = row.id.clone();
+                                            let plan_id = plan_key.split(':').next().unwrap_or(&plan_key).to_string();
+                                            if approve {
+                                                match approve_plan_and_wake(
+                                                    client,
+                                                    root_session_id,
+                                                    &plan_id,
+                                                    target_agent_id.as_deref(),
+                                                ) {
+                                                    Ok(msg) => {
+                                                        mark_plan_version_resolved(
+                                                            &entries,
+                                                            &plan_id,
+                                                            &mut resolved,
+                                                            &mut acted,
+                                                        );
+                                                        status = Some(msg);
+                                                        follow = true;
+                                                        force_timeline_refresh = true;
+                                                        approvals_popup = None;
+                                                    }
+                                                    Err(e) => status = Some(e),
+                                                }
+                                            } else {
+                                                approvals_popup = None;
+                                                compose = Some(ComposeInput::with_prefill(
+                                                    &format!("Please revise plan {plan_id}: "),
+                                                ));
+                                                status = Some(
+                                                    "revision request — edit and Enter to send to planner"
+                                                        .to_string(),
+                                                );
+                                            }
                                         } else {
                                             let approve = key.code == KeyCode::Char('y');
                                             let row_id = row.id.clone();
@@ -4339,15 +4491,10 @@ pub fn run(
                 last_announced_plan_event = Some(event_id);
                 selected = row_idx;
                 follow = false;
-                if open_plan_review(
-                    client,
-                    root_session_id,
-                    &plan_id,
-                    &mut detail,
-                    &mut detail_scroll,
-                    &mut detail_h_scroll,
-                ) && !status.as_deref().is_some_and(|s| s.starts_with("✗"))
-                {
+                // Plans are critical gates and use the blocking GateModal (handled
+                // below). Keep the status hint so the operator knows why the modal
+                // appeared.
+                if !status.as_deref().is_some_and(|s| s.starts_with("✗")) {
                     status = Some(format!(
                         "⚠ Plan {plan_id} awaiting approval — y approve · n revise · Esc close"
                     ));
@@ -4385,7 +4532,7 @@ pub fn run(
                     info_panel_open = false;
                     artifact_viewer = None;
                     artifact_file_view = None;
-                    let inspect_lines = fetch_gate_inspect_detail(client, &gate_ref.id);
+                    let inspect_lines = gate_detail_for_modal(client, root_session_id, &gate_ref);
                     gate_modal = Some(GateModal {
                         gate: gate_ref,
                         scroll: 0,
@@ -6989,7 +7136,16 @@ fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> 
         GateKind::WikiProposal => " ⚠ WIKI PROPOSAL ".to_string(),
         GateKind::Escalation => " ⚠ ESCALATION ".to_string(),
         GateKind::Interaction => " ❓ QUESTION PENDING ".to_string(),
-        GateKind::Plan => " ⚠ ACTION REQUIRED ".to_string(),
+        GateKind::Plan => {
+            let title = entry
+                .and_then(|e| payload_field_str(e, "title"))
+                .unwrap_or_default();
+            if title.is_empty() {
+                " ⚠ PLAN AWAITING APPROVAL ".to_string()
+            } else {
+                format!(" ⚠ PLAN — {} ", render::one_line(&title, 48))
+            }
+        }
     }
 }
 
@@ -7112,13 +7268,23 @@ fn draw_gate_modal_peek_banner(
         .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(area);
+    let id_line = match modal.gate.kind {
+        GateKind::Interaction => {
+            "id: {id}  ·  g or Enter answer  ·  r reply  ·  Esc peek".to_string()
+        }
+        GateKind::Plan => {
+            "id: {id}  ·  g or Enter review  ·  y approve  ·  n revise".to_string()
+        }
+        _ => "id: {id}  ·  g or Enter resolve  ·  y approve  ·  n reject".to_string(),
+    };
+    let id_line = id_line.replace("{id}", &modal.gate.id);
     let text = vec![
         Line::from(Span::styled(
             summary,
             Style::default().fg(Color::Yellow),
         )),
         Line::from(Span::styled(
-            format!("id: {}  ·  g or Enter resolve  ·  y approve  ·  n reject", modal.gate.id),
+            id_line,
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -7192,6 +7358,18 @@ fn draw_gate_modal(
         }
     }
 
+    // For plan gates, always append the formatted plan detail (steps, validations,
+    // review hints) so the operator can read the full proposal inside the modal.
+    if modal.gate.kind == GateKind::Plan && !inspect_lines.is_empty() {
+        content_lines.push(Line::from(Span::styled(
+            "Plan details:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for line in inspect_lines {
+            content_lines.push(Line::from(line.clone()));
+        }
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -7259,7 +7437,9 @@ fn draw_gate_modal(
                 "y approve · n reject · j/k scroll details · Esc peek timeline"
             }
             GateKind::Interaction => "Enter/r answer · j/k scroll · Esc peek timeline",
-            GateKind::Plan => "",
+            GateKind::Plan => {
+                "y approve · n request changes · j/k scroll details · Esc peek timeline"
+            }
         };
         footer_lines.push(Line::from(Span::styled(
             action_hint,
@@ -7916,7 +8096,9 @@ mod tests {
         assert_eq!(gate.kind, GateKind::Approval);
         assert_eq!(gate.id, "apr-new");
         assert_eq!(event_id, "ev-appr");
-        assert!(!gate_modal_kind(&GateRef {
+        // Plans are critical gates and now use the same blocking modal as other
+        // operator approvals, so gate_modal_kind must include Plan.
+        assert!(gate_modal_kind(&GateRef {
             kind: GateKind::Plan,
             id: "plan-1".into(),
         }));
