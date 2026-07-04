@@ -90,7 +90,7 @@ impl NativeTool for AgentInspectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Inspect an installed agent's metadata, capabilities, I/O contract, and optionally its source code. Resolves the agent's current active revision. The `skill` object includes `io_accepts` / `io_returns` (when declared) and a `message_format` hint: `\"free_text\"` means spawn it directly with a plain natural-language `message` (reasoning agents — `io_accepts` is null and that is expected); `\"json_schema\"` means pass `message` as a JSON string matching `io_accepts`. Source code is only returned for locally-trusted agents. One inspect call returns the full contract — re-inspecting the same agent will not reveal new fields.".to_string(),
+            description: "Inspect an installed agent's metadata, capabilities, I/O contract, and optionally its source code. Resolves the agent's current active revision. **The agent must already be installed** — calling this on an agent that does not exist returns an error. The `skill` object includes `io_accepts` / `io_returns` (when declared) and a `message_format` hint: `\"free_text\"` means spawn it directly with a plain natural-language `message` (reasoning agents — `io_accepts` is null and that is expected); `\"json_schema\"` means pass `message` as a JSON string matching `io_accepts`. Source code is only returned for locally-trusted agents. One inspect call returns the full contract — re-inspecting the same agent will not reveal new fields.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
