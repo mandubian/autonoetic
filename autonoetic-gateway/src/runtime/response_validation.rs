@@ -1383,6 +1383,28 @@ impl GatewayExecutionService {
             }
 
             if policy_violations.is_empty() {
+                // Issue #752: extract_and_persist lives inside the
+                // `violations.is_empty()` block at line 1306, but the Advisory
+                // early-return here bypasses it. Persist curator decisions
+                // here too before returning.
+                if let (Some(store), Some(reply)) =
+                    (gateway_store.as_deref(), result.assistant_reply.as_deref())
+                {
+                    let revision_id = store
+                        .get_session_agent_binding(&result.session_id)
+                        .ok()
+                        .flatten()
+                        .map(|b| b.revision_id)
+                        .filter(|s| !s.is_empty());
+                    let _ = crate::runtime::curator_journal::extract_and_persist(
+                        store,
+                        "curator",
+                        agent_id,
+                        &result.session_id,
+                        revision_id.as_deref(),
+                        reply,
+                    );
+                }
                 return Ok(result);
             }
 

@@ -589,6 +589,98 @@ execution_mode: "reasoning"
 
 #[serial_test::serial]
 #[tokio::test]
+async fn test_curator_decision_persisted_under_io_returns_advisory_skip() -> anyhow::Result<()> {
+    // Issue #752: when io.returns enforcement is Advisory and the reply has a
+    // schema violation (missing required `status`), the response validator must
+    // still persist any `decision_journal` entries before returning Ok. The
+    // LLM reply is valid JSON but does not satisfy the declared returns schema.
+    let workspace = TestWorkspace::new()?;
+    let mut config = workspace.gateway_config();
+    config.response_validation.enabled = true;
+
+    install_validation_agent(
+        &workspace.agents_dir,
+        "curator.advisory.agent",
+        r#"io:
+  returns:
+    type: object
+    required:
+      - status
+    properties:
+      status:
+        type: string
+  returns_enforcement: advisory
+"#,
+    )?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "curator.advisory.agent")?;
+
+    let reply = r#"{"decision_journal":[{"target":"mem-abc","action":"retain","reason_code":"high_retrieval","reason_detail":"frequently retrieved","confidence":0.91}]}"#;
+    let stub = OpenAiStub::spawn(move |_raw, _body| {
+        let reply = reply.to_string();
+        async move {
+            serde_json::json!({
+                "choices": [{"message": {"content": reply}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4}
+            })
+        }
+    })
+    .await?;
+    let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
+    let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+
+    let execution = GatewayExecutionService::new(config, Some(store.clone()));
+    let result = execution
+        .spawn_agent_once(
+            "curator.advisory.agent",
+            "curate memory",
+            "sess-curator-advisory-1",
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "advisory io.returns must not block reply, got: {result:?}"
+    );
+
+    let events = store.search_causal_events(
+        Some("sess-curator-advisory-1"),
+        Some("curator.advisory.agent"),
+        100,
+    )?;
+    let decision_event = events
+        .iter()
+        .find(|e| e.category == "curator" && e.action == "decision")
+        .expect("expected curator.decision event to be persisted");
+    assert_eq!(decision_event.target.as_deref(), Some("mem-abc"));
+    let payload = decision_event
+        .payload
+        .as_ref()
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+        .expect("decision payload should be valid json");
+    assert_eq!(payload["action"], "retain");
+    assert_eq!(payload["reason_code"], "high_retrieval");
+
+    let summary_event = events
+        .iter()
+        .find(|e| e.category == "curator" && e.action == "decision_journal_recorded")
+        .expect("expected curator.decision_journal_recorded summary event");
+    assert_eq!(
+        summary_event.target.as_deref(),
+        Some("sess-curator-advisory-1")
+    );
+
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
 async fn test_response_validation_fails_when_artifact_build_evidence_missing() -> anyhow::Result<()>
 {
     let workspace = TestWorkspace::new()?;
