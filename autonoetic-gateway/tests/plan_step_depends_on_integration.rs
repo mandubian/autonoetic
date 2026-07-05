@@ -607,6 +607,118 @@ fn planframe_amend_rejects_step_updates_with_steps() {
     assert!(result["message"].as_str().unwrap().contains("Cannot use both"));
 }
 
+#[test]
+fn planframe_amend_accepts_status_alias_for_step_status() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-status-alias-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Step 1", "owner": "agent"}),
+        ],
+    );
+
+    // Use "status" instead of "step_status" — the LLM often guesses this name.
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "reason": "s1 done",
+        "steps": [
+            {"step_id": "s1", "title": "Step 1", "status": "completed"},
+        ],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest, &policy, dir.path(), Some(&gateway_dir),
+            &amend_args.to_string(), Some(session_id), Some("turn-2"),
+            Some(&config), Some(store.clone()), None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], true, "amend should accept 'status' alias: {result}");
+
+    let get_args = json!({"plan_id": &plan_id});
+    let result = registry
+        .execute(
+            "planframe_get", &manifest, &policy, dir.path(), Some(&gateway_dir),
+            &get_args.to_string(), Some(session_id), Some("turn-3"),
+            Some(&config), Some(store.clone()), None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let steps = result["plan"]["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["status"], "completed", "'status' alias should set step status: {result}");
+}
+
+#[test]
+fn planframe_amend_inherits_title_when_omitted() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-title-inherit-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Original Title", "owner": "agent"}),
+            json!({"step_id": "s2", "title": "Second Step", "owner": "agent", "depends_on": ["s1"]}),
+        ],
+    );
+
+    // Amend without providing title — should inherit from previous revision.
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "reason": "s1 done",
+        "steps": [
+            {"step_id": "s1", "step_status": "completed"},
+            {"step_id": "s2"},
+        ],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest, &policy, dir.path(), Some(&gateway_dir),
+            &amend_args.to_string(), Some(session_id), Some("turn-2"),
+            Some(&config), Some(store.clone()), None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], true, "amend should succeed without title: {result}");
+
+    let get_args = json!({"plan_id": &plan_id});
+    let result = registry
+        .execute(
+            "planframe_get", &manifest, &policy, dir.path(), Some(&gateway_dir),
+            &get_args.to_string(), Some(session_id), Some("turn-3"),
+            Some(&config), Some(store.clone()), None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let steps = result["plan"]["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["title"], "Original Title");
+    assert_eq!(steps[0]["status"], "completed");
+    assert_eq!(steps[1]["title"], "Second Step");
+}
+
 // ---------------------------------------------------------------------------
 // Layer 3: unsatisfied_dependencies logic
 // ---------------------------------------------------------------------------

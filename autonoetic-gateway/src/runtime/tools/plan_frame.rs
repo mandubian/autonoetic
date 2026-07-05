@@ -376,7 +376,7 @@ impl NativeTool for PlanFrameProposeTool {
                                 "depends_on": { "type": "array", "items": { "type": "string" } },
                                 "notes": { "type": "string" }
                             },
-                            "required": ["step_id", "title"]
+                            "required": ["step_id"]
                         }
                     },
                     "validation_policy": {
@@ -1168,23 +1168,6 @@ impl NativeTool for PlanFrameAmendTool {
                         "type": "string",
                         "description": "Updated objective (optional, defaults to current)"
                     },
-                    "steps": {
-                        "type": "array",
-                        "description": "Complete replacement step list (optional, defaults to current). For existing step_ids, omitted per-step fields inherit from the previous revision. Prefer step_updates for progress-only changes.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "step_id": { "type": "string" },
-                                "title": { "type": "string" },
-                                "owner": { "type": "string", "enum": ["planner", "agent", "operator", "shared"] },
-                                "agent_id": { "type": "string" },
-                                "depends_on": { "type": "array", "items": { "type": "string" } },
-                                "notes": { "type": "string" },
-                                "step_status": { "type": "string", "enum": ["pending", "in_progress", "completed", "failed", "skipped"], "description": "New execution status for this step" }
-                            },
-                            "required": ["step_id", "title"]
-                        }
-                    },
                     "step_updates": {
                         "type": "array",
                         "description": "Progress-only partial updates for existing steps. Cannot change owner, agent_id, or depends_on — use steps for accountability changes. Inherits all unmentioned accountability fields from the current revision.",
@@ -1198,6 +1181,23 @@ impl NativeTool for PlanFrameAmendTool {
                             },
                             "required": ["step_id"],
                             "additionalProperties": false
+                        }
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Complete replacement step list (optional, defaults to current). For existing step_ids, omitted per-step fields (title, owner, agent_id, depends_on, notes, step_status) inherit from the previous revision. Use step_updates for progress-only changes. 'status' is accepted as an alias for 'step_status'.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step_id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "owner": { "type": "string", "enum": ["planner", "agent", "operator", "shared"] },
+                                "agent_id": { "type": "string" },
+                                "depends_on": { "type": "array", "items": { "type": "string" } },
+                                "notes": { "type": "string" },
+                                "step_status": { "type": "string", "enum": ["pending", "in_progress", "completed", "failed", "skipped"], "description": "New execution status for this step" }
+                            },
+                            "required": ["step_id"]
                         }
                     },
                     "validation_policy": {
@@ -1255,12 +1255,13 @@ impl NativeTool for PlanFrameAmendTool {
         #[derive(Deserialize)]
         struct StepInput {
             step_id: String,
-            title: String,
+            #[serde(default)]
+            title: Option<String>,
             owner: Option<String>,
             agent_id: Option<String>,
             depends_on: Option<Vec<String>>,
             notes: Option<String>,
-            #[serde(default)]
+            #[serde(default, alias = "status")]
             step_status: Option<String>,
         }
 
@@ -1282,7 +1283,7 @@ impl NativeTool for PlanFrameAmendTool {
             step_id: String,
             title: Option<String>,
             notes: Option<String>,
-            #[serde(default)]
+            #[serde(default, alias = "status")]
             step_status: Option<String>,
         }
 
@@ -1409,8 +1410,11 @@ impl NativeTool for PlanFrameAmendTool {
                             _ => prev.map(|p| p.status).unwrap_or(StepStatus::Pending),
                         };
                         PlanStep {
-                            step_id: s.step_id,
-                            title: s.title,
+                            step_id: s.step_id.clone(),
+                            title: s.title.unwrap_or_else(|| {
+                                prev.map(|p| p.title.clone())
+                                    .unwrap_or_else(|| s.step_id.clone())
+                            }),
                             owner,
                             depends_on,
                             agent_id,
