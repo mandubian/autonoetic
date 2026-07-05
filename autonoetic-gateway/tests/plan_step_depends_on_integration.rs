@@ -330,8 +330,13 @@ fn planframe_amend_sets_step_status_completed() {
         .unwrap();
     let result: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(result["ok"], true, "amend should succeed: {result}");
-
-    // Verify the step status was persisted
+    // Marking a step completed is real progress: the result must signal it so
+    // the LoopGuard resets the no-progress counter (regression for the
+    // session-9d5b3ef1 amendment loop).
+    assert_eq!(
+        result["progress_recorded"], true,
+        "step-status change must set progress_recorded: {result}"
+    );
     let get_args = json!({"plan_id": &plan_id});
     let result = registry
         .execute(
@@ -352,6 +357,76 @@ fn planframe_amend_sets_step_status_completed() {
     let steps = result["plan"]["steps"].as_array().unwrap();
     assert_eq!(steps[0]["status"], "completed");
     assert_eq!(steps[1]["status"], "pending");
+}
+
+/// Regression for the `session-9d5b3ef1` amendment loop: a cosmetic-only
+/// amend (only the `reason` text changes — no step added/removed, no
+/// step-status transition, no envelope expansion) must report
+/// `progress_recorded: false` so the LoopGuard treats it as stagnant instead
+/// of resetting the no-progress counter on every call.
+#[test]
+fn planframe_amend_cosmetic_only_reports_no_progress() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-cosmetic-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Step 1", "owner": "agent"}),
+            json!({"step_id": "s2", "title": "Step 2", "owner": "agent", "depends_on": ["s1"]}),
+        ],
+    );
+
+    // Re-send the same steps verbatim with a reworded objective. No step
+    // status moves, no envelope expands → progress_recorded must be false.
+    // (We vary the objective rather than only the `reason` because the
+    // `plan_amend_identical` guard rejects fully-identical content; the
+    // objective is a cosmetic field that clears that guard without touching
+    // the envelope or any step status.)
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "objective": "Build the agent (reworded objective — nothing structural changed)",
+        "reason": "rewording the objective, nothing structural changed",
+        "steps": [
+            {"step_id": "s1", "title": "Step 1"},
+            {"step_id": "s2", "title": "Step 2", "depends_on": ["s1"]},
+        ],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &amend_args.to_string(),
+            Some(session_id),
+            Some("turn-2"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], true, "cosmetic amend should succeed: {result}");
+    assert_eq!(
+        result["progress_recorded"], false,
+        "cosmetic-only amend must NOT report progress: {result}"
+    );
+    assert_eq!(
+        result["requires_regate"], false,
+        "cosmetic amend must not expand the envelope: {result}"
+    );
 }
 
 #[test]
@@ -717,6 +792,64 @@ fn planframe_amend_inherits_title_when_omitted() {
     assert_eq!(steps[0]["title"], "Original Title");
     assert_eq!(steps[0]["status"], "completed");
     assert_eq!(steps[1]["title"], "Second Step");
+}
+
+#[test]
+fn planframe_amend_rejects_identical_revision() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-identical-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Step 1", "owner": "agent"}),
+            json!({"step_id": "s2", "title": "Step 2", "owner": "agent", "depends_on": ["s1"]}),
+        ],
+    );
+
+    // Amend with the exact same step content as the current revision.
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "reason": "resubmitting unchanged",
+        "steps": [
+            {"step_id": "s1", "title": "Step 1", "owner": "agent"},
+            {"step_id": "s2", "title": "Step 2", "owner": "agent", "depends_on": ["s1"]},
+        ],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest, &policy, dir.path(), Some(&gateway_dir),
+            &amend_args.to_string(), Some(session_id), Some("turn-2"),
+            Some(&config), Some(store.clone()), None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], false, "amend should reject identical revision: {result}");
+    assert_eq!(result["error"], "plan_amend_identical", "expected plan_amend_identical code: {result}");
+
+    // No new revision should have been created.
+    let history_args = json!({"plan_id": &plan_id});
+    let history = registry
+        .execute(
+            "planframe_history", &manifest, &policy, dir.path(), Some(&gateway_dir),
+            &history_args.to_string(), Some(session_id), Some("turn-3"),
+            Some(&config), Some(store.clone()), None,
+        )
+        .unwrap();
+    let history: serde_json::Value = serde_json::from_str(&history).unwrap();
+    let revisions = history["revisions"].as_array().unwrap();
+    assert_eq!(revisions.len(), 1, "only one revision should exist: {history}");
 }
 
 // ---------------------------------------------------------------------------

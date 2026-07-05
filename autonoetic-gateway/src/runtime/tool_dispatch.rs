@@ -82,23 +82,52 @@ pub(crate) fn tool_result_counts_as_progress(result: &str) -> bool {
     false
 }
 
-/// Returns `true` when the tool result is a stagnant no-op poll — a successful
+/// Returns `true` when the tool result is a stagnant no-op — a successful
 /// call that carries no new information and therefore should NOT reset the
 /// loop-guard's no-progress counter.
 ///
 /// Currently covers:
 /// - `workflow_wait` with `waited_secs == 0` and `join_satisfied == false`
 ///   (probe returned "still running" — the agent already knew this)
+/// - `planframe_amend` with `progress_recorded == false` and
+///   `requires_regate == false` (a cosmetic-only amend that changed nothing
+///   but title/objective/reason text — no step status moved, no envelope
+///   expanded). Observed in `session-9d5b3ef1`: the planner re-sent the same
+///   single step 11 times; every amend returned `ok: true` and reset the
+///   no-progress counter, so `max_loops_without_progress` never tripped.
+///   An amend that marks a step `completed` carries `progress_recorded: true`
+///   and is NOT stagnant.
 pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
-    if tool_name != "workflow_wait" {
+    if tool_name == "workflow_wait" {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+            let waited = parsed.get("waited_secs").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+            let satisfied = parsed.get("join_satisfied").and_then(|v| v.as_bool()).unwrap_or(false);
+            let failed = parsed.get("any_failed").and_then(|v| v.as_bool()).unwrap_or(false);
+            // A 0-second wait that didn't satisfy and didn't fail is a no-op probe.
+            return waited == 0 && !satisfied && !failed;
+        }
         return false;
     }
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
-        let waited = parsed.get("waited_secs").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
-        let satisfied = parsed.get("join_satisfied").and_then(|v| v.as_bool()).unwrap_or(false);
-        let failed = parsed.get("any_failed").and_then(|v| v.as_bool()).unwrap_or(false);
-        // A 0-second wait that didn't satisfy and didn't fail is a no-op probe.
-        return waited == 0 && !satisfied && !failed;
+    if tool_name == "planframe_amend" {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+            // Only a successful, cosmetic-only amend with no step-status
+            // transition is stagnant. Envelope-expanding amends
+            // (`requires_regate: true`) and progress-recording amends
+            // (`progress_recorded: true`) reset the counter as usual.
+            let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            let requires_regate = parsed
+                .get("requires_regate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let progress_recorded = parsed
+                .get("progress_recorded")
+                .and_then(|v| v.as_bool())
+                // Default to true when absent so older shards / partial
+                // results never get silently suppressed.
+                .unwrap_or(true);
+            return ok && !requires_regate && !progress_recorded;
+        }
+        return false;
     }
     false
 }
@@ -493,7 +522,7 @@ impl AgentExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::tool_result_counts_as_progress;
+    use super::{is_stagnant_poll, tool_result_counts_as_progress};
 
     #[test]
     fn test_tool_result_counts_as_progress_ok_true() {
@@ -553,6 +582,81 @@ mod tests {
     #[test]
     fn test_tool_result_counts_as_progress_invalid_json() {
         assert!(!tool_result_counts_as_progress("not json"));
+    }
+
+    // ── is_stagnant_poll: planframe_amend no-op detection ───────────────
+    // Regression for session-9d5b3ef1's amendment loop. A cosmetic-only
+    // amend (`progress_recorded: false`, `requires_regate: false`) is
+    // stagnant and must NOT reset the no-progress counter; an amend that
+    // records a step-status transition or expands the envelope is real
+    // progress and resets as usual.
+
+    #[test]
+    fn stagnant_planframe_amend_cosmetic_no_progress() {
+        let result = r#"{"ok":true,"inherited":true,"requires_regate":false,"progress_recorded":false,"grants_revoked":0,"diff_summary":"no envelope change"}"#;
+        assert!(
+            is_stagnant_poll("planframe_amend", result),
+            "cosmetic amend with no step-status change must be stagnant"
+        );
+    }
+
+    #[test]
+    fn not_stagnant_planframe_amend_records_step_status() {
+        // Marking a step completed is real progress — reset the counter.
+        let result = r#"{"ok":true,"inherited":true,"requires_regate":false,"progress_recorded":true,"grants_revoked":0,"diff_summary":"no envelope change"}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "amend that recorded a step-status change must NOT be stagnant"
+        );
+    }
+
+    #[test]
+    fn not_stagnant_planframe_amend_envelope_expanded() {
+        // Adding a step expands the envelope → requires_regate → not stagnant.
+        let result = r#"{"ok":true,"inherited":false,"requires_regate":true,"progress_recorded":false,"grants_revoked":0,"diff_summary":"+step s2"}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "envelope-expanding amend must NOT be stagnant"
+        );
+    }
+
+    #[test]
+    fn not_stagnant_planframe_amend_failed() {
+        // A failed amend (ok:false) is a failure, not a stagnant success —
+        // it must not be suppressed here (the failure path handles it).
+        let result = r#"{"ok":false,"error_type":"validation","message":"bad steps"}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "failed amend must not be classified as stagnant"
+        );
+    }
+
+    #[test]
+    fn stagnant_planframe_amend_defaults_progress_recorded_to_true_when_absent() {
+        // Backward safety: a result missing `progress_recorded` must NOT be
+        // suppressed (default to non-stagnant) so older shards never get
+        // silently masked.
+        let result = r#"{"ok":true,"inherited":true,"requires_regate":false,"grants_revoked":0}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "missing progress_recorded must default to NOT stagnant"
+        );
+    }
+
+    #[test]
+    fn workflow_wait_stagnant_still_detected_after_generalization() {
+        // The original workflow_wait stagnant-poll path still works.
+        let result = r#"{"ok":true,"waited_secs":0,"join_satisfied":false,"any_failed":false}"#;
+        assert!(is_stagnant_poll("workflow_wait", result));
+        let result = r#"{"ok":true,"waited_secs":5,"join_satisfied":false,"any_failed":false}"#;
+        assert!(!is_stagnant_poll("workflow_wait", result));
+    }
+
+    #[test]
+    fn unrelated_tool_is_never_stagnant() {
+        let result = r#"{"ok":true,"progress_recorded":false,"requires_regate":false}"#;
+        assert!(!is_stagnant_poll("content_write", result));
+        assert!(!is_stagnant_poll("agent_spawn", result));
     }
 }
 

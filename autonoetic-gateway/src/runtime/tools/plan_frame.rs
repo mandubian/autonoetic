@@ -1486,6 +1486,25 @@ impl NativeTool for PlanFrameAmendTool {
             (None, None) => current.steps.clone(),
         };
 
+        // Whether at least one step's `status` actually changed between the
+        // current revision and the resolved new one. Step-status transitions
+        // (pending → completed) are the only cosmetic amend that constitutes
+        // real progress; everything else cosmetic (reworded objective/title,
+        // a new `reason` note) is bookkeeping. Surfaced on the result as
+        // `progress_recorded` so the LoopGuard can treat status-only re-sends
+        // as stagnant and stop amendment loops (observed in session-9d5b3ef1:
+        // the planner re-sent the same single step 11 times, each amend
+        // returned `ok: true`, and `register_progress` reset the no-progress
+        // counter on every call).
+        let prev_status: std::collections::HashMap<&str, StepStatus> = current
+            .steps
+            .iter()
+            .map(|s| (s.step_id.as_str(), s.status))
+            .collect();
+        let step_status_changed = steps.iter().any(|s| {
+            prev_status.get(s.step_id.as_str()).is_some_and(|ps| *ps != s.status)
+        });
+
         // Validate the step dependency graph before persisting.
         if let Err(dag_err) = validate_step_dag(&steps) {
             return Ok(ToolError::validation(
@@ -1542,6 +1561,26 @@ impl NativeTool for PlanFrameAmendTool {
         };
 
         let now = now_rfc3339();
+
+        // Guard: reject amendments that are semantically identical to the
+        // current version. This prevents pointless version churn when the
+        // LLM re-sends the same content (observed in planner amendment loops).
+        // Compare the resolved fields (after inheritance) against current.
+        let resolved_title = args.title.clone().unwrap_or_else(|| current.title.clone());
+        let resolved_objective = args.objective.clone().unwrap_or_else(|| current.objective.clone());
+        if steps == current.steps
+            && resolved_title == current.title
+            && resolved_objective == current.objective
+            && validation_policy == current.validation_policy
+            && capability_envelope == current.capability_envelope
+        {
+            return Ok(ToolError::validation(
+                "Amendment is identical to the current version — no changes detected. Call planframe_get to see the current state, then make meaningful changes to steps, title, objective, validation policy, or capability envelope.",
+                Some("Use planframe_get to check the current plan before attempting to amend."),
+            )
+            .with_code("plan_amend_identical")
+            .to_error_response());
+        }
 
         // Decide whether the amendment inherits the prior approval or
         // re-opens the operator gate. An envelope expansion (new/removed step,
@@ -1802,6 +1841,12 @@ impl NativeTool for PlanFrameAmendTool {
             "diff_summary": envelope_diff.summary(),
             "requires_regate": envelope_diff.requires_regate(),
             "grants_revoked": grants_revoked,
+            // True iff this amend recorded real plan progress (a step-status
+            // transition) or expanded the envelope. False for cosmetic-only
+            // amends that changed nothing but title/objective/reason text.
+            // The LoopGuard uses this to avoid resetting the no-progress
+            // counter on stagnant amendment loops.
+            "progress_recorded": step_status_changed || envelope_diff.requires_regate(),
             "message": if inherit {
                 "Plan amended (no envelope change) — operator approval inherited from the prior revision."
             } else {
