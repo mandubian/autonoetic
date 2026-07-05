@@ -354,6 +354,259 @@ fn planframe_amend_sets_step_status_completed() {
     assert_eq!(steps[1]["status"], "pending");
 }
 
+#[test]
+fn planframe_amend_step_updates_preserves_owner_and_status() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-step-updates-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Step 1", "owner": "agent", "agent_id": "architect.default"}),
+            json!({"step_id": "s2", "title": "Step 2", "owner": "agent", "agent_id": "coder.default", "depends_on": ["s1"]}),
+        ],
+    );
+
+    // Use step_updates to mark s1 completed. Owner/agent_id/depends_on must be preserved.
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "reason": "s1 done",
+        "step_updates": [
+            {"step_id": "s1", "step_status": "completed"},
+        ],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &amend_args.to_string(),
+            Some(session_id),
+            Some("turn-2"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], true, "amend should succeed: {result}");
+    assert_eq!(result["requires_regate"], false, "progress update should inherit approval: {result}");
+
+    let get_args = json!({"plan_id": &plan_id});
+    let result = registry
+        .execute(
+            "planframe_get",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &get_args.to_string(),
+            Some(session_id),
+            Some("turn-3"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let steps = result["plan"]["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["status"], "completed");
+    assert_eq!(steps[0]["owner"], "agent");
+    assert_eq!(steps[0]["agent_id"], "architect.default");
+    assert_eq!(steps[1]["status"], "pending");
+    assert_eq!(steps[1]["owner"], "agent");
+    assert_eq!(steps[1]["agent_id"], "coder.default");
+    assert_eq!(steps[1]["depends_on"], json!(["s1"]));
+}
+
+#[test]
+fn planframe_amend_steps_preserves_omitted_owner() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-omit-owner-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Step 1", "owner": "agent", "agent_id": "architect.default"}),
+            json!({"step_id": "s2", "title": "Step 2", "owner": "agent", "agent_id": "coder.default", "depends_on": ["s1"]}),
+        ],
+    );
+
+    // Amend with steps but omit owner/agent_id/depends_on for existing steps.
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "reason": "s1 done",
+        "steps": [
+            {"step_id": "s1", "title": "Step 1", "step_status": "completed"},
+            {"step_id": "s2", "title": "Step 2"},
+        ],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &amend_args.to_string(),
+            Some(session_id),
+            Some("turn-2"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], true, "amend should succeed: {result}");
+    assert_eq!(result["requires_regate"], false, "omitted owner should be preserved: {result}");
+
+    let get_args = json!({"plan_id": &plan_id});
+    let result = registry
+        .execute(
+            "planframe_get",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &get_args.to_string(),
+            Some(session_id),
+            Some("turn-3"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let steps = result["plan"]["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["owner"], "agent");
+    assert_eq!(steps[0]["agent_id"], "architect.default");
+    assert_eq!(steps[1]["owner"], "agent");
+    assert_eq!(steps[1]["agent_id"], "coder.default");
+    assert_eq!(steps[1]["depends_on"], json!(["s1"]));
+}
+
+#[test]
+fn planframe_amend_explicit_owner_change_requires_regate() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-owner-change-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Step 1", "owner": "agent"}),
+            json!({"step_id": "s2", "title": "Step 2", "owner": "agent", "depends_on": ["s1"]}),
+        ],
+    );
+
+    // Explicitly change s2 owner to shared — this must trigger re-approval.
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "reason": "s1 done, moving s2 to shared review",
+        "steps": [
+            {"step_id": "s1", "title": "Step 1", "step_status": "completed"},
+            {"step_id": "s2", "title": "Step 2", "owner": "shared"},
+        ],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &amend_args.to_string(),
+            Some(session_id),
+            Some("turn-2"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], true, "amend should succeed: {result}");
+    assert_eq!(result["requires_regate"], true, "owner change must require re-approval: {result}");
+}
+
+#[test]
+fn planframe_amend_rejects_step_updates_with_steps() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let session_id = "root-amend-conflict-001/planner-001";
+    let plan_id = propose_and_approve(
+        &dir, &registry, &manifest, &policy, &config, &store, session_id,
+        &[
+            json!({"step_id": "s1", "title": "Step 1", "owner": "agent"}),
+        ],
+    );
+
+    let amend_args = json!({
+        "plan_id": &plan_id,
+        "reason": "conflicting inputs",
+        "steps": [{"step_id": "s1", "title": "Step 1", "step_status": "completed"}],
+        "step_updates": [{"step_id": "s1", "step_status": "completed"}],
+    });
+    let result = registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &amend_args.to_string(),
+            Some(session_id),
+            Some("turn-2"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["ok"], false, "amend should reject conflicting inputs: {result}");
+    assert!(result["message"].as_str().unwrap().contains("Cannot use both"));
+}
+
 // ---------------------------------------------------------------------------
 // Layer 3: unsatisfied_dependencies logic
 // ---------------------------------------------------------------------------

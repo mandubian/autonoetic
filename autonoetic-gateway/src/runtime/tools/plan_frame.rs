@@ -1170,7 +1170,7 @@ impl NativeTool for PlanFrameAmendTool {
                     },
                     "steps": {
                         "type": "array",
-                        "description": "Complete replacement step list (optional, defaults to current)",
+                        "description": "Complete replacement step list (optional, defaults to current). For existing step_ids, omitted per-step fields inherit from the previous revision. Prefer step_updates for progress-only changes.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -1179,9 +1179,25 @@ impl NativeTool for PlanFrameAmendTool {
                                 "owner": { "type": "string", "enum": ["planner", "agent", "operator", "shared"] },
                                 "agent_id": { "type": "string" },
                                 "depends_on": { "type": "array", "items": { "type": "string" } },
-                                "notes": { "type": "string" }
+                                "notes": { "type": "string" },
+                                "step_status": { "type": "string", "enum": ["pending", "in_progress", "completed", "failed", "skipped"], "description": "New execution status for this step" }
                             },
                             "required": ["step_id", "title"]
+                        }
+                    },
+                    "step_updates": {
+                        "type": "array",
+                        "description": "Progress-only partial updates for existing steps. Cannot change owner, agent_id, or depends_on — use steps for accountability changes. Inherits all unmentioned accountability fields from the current revision.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step_id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "notes": { "type": "string" },
+                                "step_status": { "type": "string", "enum": ["pending", "in_progress", "completed", "failed", "skipped"], "description": "New execution status for this step" }
+                            },
+                            "required": ["step_id"],
+                            "additionalProperties": false
                         }
                     },
                     "validation_policy": {
@@ -1262,11 +1278,21 @@ impl NativeTool for PlanFrameAmendTool {
         }
 
         #[derive(Deserialize)]
+        struct StepUpdateInput {
+            step_id: String,
+            title: Option<String>,
+            notes: Option<String>,
+            #[serde(default)]
+            step_status: Option<String>,
+        }
+
+        #[derive(Deserialize)]
         struct Args {
             plan_id: String,
             title: Option<String>,
             objective: Option<String>,
             steps: Option<Vec<StepInput>>,
+            step_updates: Option<Vec<StepUpdateInput>>,
             validation_policy: Option<ValidationPolicyInput>,
             capability_envelope: Option<Vec<serde_json::Value>>,
             reason: Option<String>,
@@ -1274,6 +1300,15 @@ impl NativeTool for PlanFrameAmendTool {
 
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        if args.steps.is_some() && args.step_updates.is_some() {
+            return Ok(ToolError::validation(
+                "Cannot use both `steps` and `step_updates` in the same amendment. Use `steps` to replace accountability (owner/agent_id/depends_on) and `step_updates` for progress-only changes.",
+                Some("Provide exactly one of `steps` or `step_updates`, or neither."),
+            )
+            .with_code("plan_amend_conflicting_step_inputs")
+            .to_error_response());
+        }
 
         let Some(store) = gateway_store else {
             return Ok(ToolError::execution(
@@ -1316,8 +1351,8 @@ impl NativeTool for PlanFrameAmendTool {
         let old_version = current.version;
         let new_version = old_version + 1;
 
-        let steps = match args.steps {
-            Some(steps) => {
+        let steps = match (args.steps, args.step_updates) {
+            (Some(steps), _) => {
                 let previous_by_id: std::collections::HashMap<&str, &PlanStep> = current
                     .steps
                     .iter()
@@ -1385,7 +1420,66 @@ impl NativeTool for PlanFrameAmendTool {
                     })
                     .collect()
             }
-            None => current.steps.clone(),
+            (_, Some(updates)) => {
+                const VALID_STATUSES: &[&str] =
+                    &["pending", "in_progress", "completed", "failed", "skipped"];
+                for u in &updates {
+                    if let Some(ref ss) = u.step_status {
+                        if !VALID_STATUSES.contains(&ss.as_str()) {
+                            return Ok(ToolError::validation(
+                                &format!(
+                                    "Unknown step_status `{}` for step `{}`. Valid values: {}",
+                                    ss,
+                                    u.step_id,
+                                    VALID_STATUSES.join(", "),
+                                ),
+                                Some("Use one of the valid step_status values."),
+                            )
+                            .with_code("invalid_step_status")
+                            .to_error_response());
+                        }
+                    }
+                }
+
+                let updates_by_id: std::collections::HashMap<&str, &StepUpdateInput> = updates
+                    .iter()
+                    .map(|u| (u.step_id.as_str(), u))
+                    .collect();
+
+                current
+                    .steps
+                    .iter()
+                    .map(|prev| {
+                        let u = updates_by_id.get(prev.step_id.as_str());
+                        let title = u
+                            .and_then(|u| u.title.clone())
+                            .unwrap_or_else(|| prev.title.clone());
+                        let notes = u
+                            .and_then(|u| u.notes.clone())
+                            .or_else(|| prev.notes.clone());
+                        let status = u
+                            .and_then(|u| u.step_status.as_deref())
+                            .map(|ss| match ss {
+                                "in_progress" => StepStatus::InProgress,
+                                "completed" => StepStatus::Completed,
+                                "failed" => StepStatus::Failed,
+                                "skipped" => StepStatus::Skipped,
+                                _ => StepStatus::Pending,
+                            })
+                            .unwrap_or(prev.status);
+                        PlanStep {
+                            step_id: prev.step_id.clone(),
+                            title,
+                            owner: prev.owner,
+                            depends_on: prev.depends_on.clone(),
+                            agent_id: prev.agent_id.clone(),
+                            notes,
+                            status,
+                        }
+                    })
+                    .collect()
+            }
+            (None, None) => current.steps.clone(),
         };
 
         // Validate the step dependency graph before persisting.
