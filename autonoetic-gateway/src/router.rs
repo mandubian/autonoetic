@@ -3688,6 +3688,104 @@ impl JsonRpcRouter {
                 }
             }
 
+            "workflow.task.retry" => {
+                #[derive(Deserialize)]
+                struct RetryTaskParams {
+                    task_id: String,
+                    workflow_id: Option<String>,
+                    #[serde(default)]
+                    root_session: Option<String>,
+                    #[serde(default)]
+                    note: Option<String>,
+                }
+
+                let params: RetryTaskParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for workflow.task.retry: {}", e),
+                        );
+                    }
+                };
+
+                if params.task_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "task_id must not be empty",
+                    );
+                }
+
+                let config = self.execution.config();
+                let store = self.execution.gateway_store();
+
+                // Resolve workflow_id: explicit > by root session.
+                let wf_id = match params.workflow_id {
+                    Some(w) => w,
+                    None => match params.root_session.as_deref() {
+                        Some(rsid) => {
+                            match crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                                config.as_ref(),
+                                rsid,
+                            ) {
+                                Ok(Some(id)) => id,
+                                Ok(None) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!(
+                                            "no workflow found for root session '{}'",
+                                            rsid
+                                        ),
+                                    );
+                                }
+                                Err(e) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!("workflow lookup failed: {}", e),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                "either workflow_id or root_session must be provided",
+                            );
+                        }
+                    },
+                };
+
+                match crate::scheduler::workflow_store::retry_workflow_task(
+                    config.as_ref(),
+                    store.as_deref(),
+                    &wf_id,
+                    params.task_id.trim(),
+                    params.note.as_deref(),
+                ) {
+                    Ok(task) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "task_id": task.task_id,
+                            "workflow_id": task.workflow_id,
+                            "agent_id": task.agent_id,
+                            "status": "runnable",
+                            "retry_count": task.retry_count,
+                            "result_summary": task.result_summary,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("workflow.task.retry failed: {}", e),
+                    ),
+                }
+            }
+
             "approvals.ask_agent" => {
                 #[derive(Deserialize)]
                 struct AskAgentParams {

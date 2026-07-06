@@ -177,6 +177,9 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Escalations { command } => {
                 cli::gateway::handle_gateway_escalations(&config_path, command).await?;
             }
+            cli::common::GatewayCommands::Workflow { command } => {
+                cli::gateway::handle_gateway_workflow(&config_path, command).await?;
+            }
         },
 
         Commands::Agent(args) => match &args.command {
