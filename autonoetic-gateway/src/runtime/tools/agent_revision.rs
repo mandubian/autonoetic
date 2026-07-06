@@ -2022,31 +2022,47 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 Some(detected_network_hosts),
             )
         } else {
-            // Pure reasoning agent — no artifact, no custom code.
-            // Validate that this path is safe: no script mode, no CodeExecution/AgentSpawn.
-            anyhow::ensure!(
-                    !matches!(args.execution_mode, Some(ExecutionMode::Script)),
-                    "execution_mode 'script' requires an artifact_ref or artifact_id — script agents must have source files"
-                );
-            anyhow::ensure!(
-                args.script_entry.is_none(),
-                "script_entry requires an artifact_ref or artifact_id — pure reasoning agents have no scripts"
-            );
-            anyhow::ensure!(
-                revision_declares_inference(&args),
-                "llm_preset or llm_config is required for pure reasoning agents (no artifact_ref/artifact_id)"
-            );
+            // No artifact_ref or artifact_id was provided (or it failed to resolve).
+            // Detect the caller's intent and produce ONE actionable error that
+            // names the exact missing field — instead of three separate confusing
+            // messages that send the model down the wrong recovery path.
+            let wants_script = matches!(args.execution_mode, Some(ExecutionMode::Script))
+                || args.script_entry.is_some();
             let forbidden_cap = args
                 .capabilities
                 .iter()
                 .find(|cap| crate::runtime::install_contract::requires_artifact_review(cap));
-            if let Some(cap) = forbidden_cap {
+
+            if wants_script || forbidden_cap.is_some() {
+                let mut hints: Vec<String> = Vec::new();
+                if matches!(args.execution_mode, Some(ExecutionMode::Script)) {
+                    hints.push("execution_mode: \"script\"".to_string());
+                }
+                if args.script_entry.is_some() {
+                    hints.push("script_entry".to_string());
+                }
+                if let Some(cap) = forbidden_cap {
+                    hints.push(format!("capability {:?}", cap));
+                }
                 return Ok(ToolError::validation(
                     format!(
-                        "Capability '{:?}' requires an artifact_ref or artifact_id for code review and promotion gating. \
-                         Pure reasoning agents (no artifact_id) may not use CodeExecution or AgentSpawn.",
-                        cap
+                        "Missing artifact_ref or artifact_id. You provided {} but no artifact reference. \
+                         Script/code agents require an artifact built via artifact_build. \
+                         Add \"artifact_ref\": \"ar.XXXX\" (the short ref returned by artifact_build \
+                         or artifact_inspect) to your arguments.",
+                        hints.join(", ")
                     ),
+                    None::<String>,
+                ).to_error_response());
+            }
+
+            if !revision_declares_inference(&args) {
+                return Ok(ToolError::validation(
+                    "Missing artifact_ref/artifact_id AND missing llm_preset/llm_config. \
+                     For a pure reasoning agent (no code), add \"llm_preset\": \"agentic\" \
+                     (or \"coding\"/\"smart\"). For a script/code agent, add \
+                     \"artifact_ref\": \"ar.XXXX\" (from artifact_build)."
+                        .to_string(),
                     None::<String>,
                 ).to_error_response());
             }
