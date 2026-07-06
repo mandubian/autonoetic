@@ -1013,8 +1013,13 @@ fn session_escalate_gate_card(entry: &SessionTimelineEntry) -> (String, Option<S
 fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     let p = parse_entry_payload(entry);
     let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
-    let synthesis = field("synthesis").unwrap_or_else(|| "operator decision requested".into());
-    let headline = format!("⏸ PROMOTION ESCALATION — {}", one_line(&synthesis, 88));
+    let synthesis_raw = field("synthesis").unwrap_or_else(|| "operator decision requested".into());
+    let synthesis_plain = if super::markdown::looks_like_markdown(&synthesis_raw) {
+        super::markdown::strip_markdown(&synthesis_raw)
+    } else {
+        synthesis_raw.clone()
+    };
+    let headline = format!("⏸ PROMOTION ESCALATION — {}", one_line(&synthesis_plain, 88));
     let mut lines = Vec::new();
     if let Some(id) = field("escalation_id") {
         lines.push(format!("  escalation: {id}"));
@@ -1035,7 +1040,7 @@ fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>
         lines.push(format!("  artifact: {artifact}"));
     }
     lines.push("  synthesis:".to_string());
-    for line in wrap_display_lines(&synthesis, 76) {
+    for line in wrap_display_lines(&synthesis_plain, 76) {
         lines.push(format!("    {line}"));
     }
     lines.push("  ↳ y approve · n reject · Esc peek timeline".to_string());

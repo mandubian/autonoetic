@@ -178,6 +178,17 @@ pub fn strip_markdown(input: &str) -> String {
     collapsed
 }
 
+/// Convenience: strip markdown formatting only when the input looks like
+/// markdown; otherwise return it unchanged. Keeps plain prose intact without
+/// forcing callers to call `looks_like_markdown` first.
+pub fn strip_markdown_if_markdown(input: &str) -> String {
+    if looks_like_markdown(input) {
+        strip_markdown(input)
+    } else {
+        input.to_string()
+    }
+}
+
 /// Break run-on section labels glued to preceding prose (`agents.What I do:Plan`).
 pub(crate) fn normalize_inline_section_labels(input: &str) -> String {
     let mut out = INLINE_SECTION_LABEL

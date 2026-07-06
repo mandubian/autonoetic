@@ -8,6 +8,7 @@
 
 use super::channel::{Channel, GateAction, GateKind, GateOption, GateRef, TuiChannel};
 use super::client::RoomClient;
+use super::markdown;
 use super::render::{self, ActorKind, RenderedRow, RowSource, RowSpec, RowTone};
 use super::slash::SlashCommand;
 use autonoetic_types::principal::Principal;
@@ -7150,7 +7151,10 @@ fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> 
                     .unwrap_or_else(|| "needs guidance".into());
                 return format!(
                     " ⚠ SESSION ESCALATION — {} ",
-                    render::one_line(&reason, 48)
+                    render::one_line(
+                        &markdown::strip_markdown_if_markdown(&reason),
+                        48
+                    )
                 );
             }
             _ => {}
@@ -7160,7 +7164,10 @@ fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> 
                 .unwrap_or_else(|| "operator decision".into());
             return format!(
                 " ⚠ PROMOTION ESCALATION — {} ",
-                render::one_line(&synthesis, 48)
+                render::one_line(
+                    &markdown::strip_markdown_if_markdown(&synthesis),
+                    48
+                )
             );
         }
     }
@@ -7185,7 +7192,14 @@ fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> 
 fn gate_modal_peek_summary(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
     if let Some(entry) = entry {
         let spec = render::render_spec(entry);
-        return render::one_line(&spec.headline, 72);
+        // Escalation synthesis often contains markdown (**bold**, lists, etc.) that
+        // looks jarring in a single-line title. Strip it when it looks structured.
+        let headline = if entry.event_type == "escalation.pending" {
+            markdown::strip_markdown_if_markdown(&spec.headline)
+        } else {
+            spec.headline
+        };
+        return render::one_line(&headline, 72);
     }
     format!("Gate {}", modal.gate.id)
 }
@@ -7356,42 +7370,95 @@ fn draw_gate_modal(
 
     let mut content_lines: Vec<Line<'static>> = Vec::new();
     if let Some(entry) = entry {
-        let spec = render::render_spec(entry);
-        content_lines.push(Line::from(Span::styled(
-            spec.headline,
-            Style::default()
-                .fg(border_color)
-                .add_modifier(Modifier::BOLD),
-        )));
-        // For plan gates the full proposal is rendered below under "Plan details:".
-        // The timeline entry's detail duplicates the same fields (objective, steps,
-        // version) and, after an amendment, can show a stale v1 summary next to the
-        // live v2 detail — which looks like two versions. Keep only non-redundant
-        // amendment context from the entry (diff_summary / reason) and let the plan
-        // detail section carry the canonical steps/validations.
-        if modal.gate.kind != GateKind::Plan {
-            if let Some(detail) = spec.detail {
-                for line in detail.lines() {
-                    content_lines.push(Line::from(line.to_string()));
-                }
+        if entry.event_type == "escalation.pending" {
+            let synthesis_raw = payload_field_str(entry, "synthesis")
+                .unwrap_or_else(|| "operator decision".into());
+            let synthesis_plain = markdown::strip_markdown_if_markdown(&synthesis_raw);
+
+            let field = |key: &str| payload_field_str(entry, key);
+            if let Some(id) = field("escalation_id") {
+                content_lines.push(Line::from(vec![
+                    Span::styled("escalation: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(id),
+                ]));
             }
+            if let Some(req) = entry
+                .refs
+                .approval_request_id
+                .clone()
+                .or_else(|| field("request_id"))
+            {
+                content_lines.push(Line::from(vec![
+                    Span::styled("approval: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(req),
+                ]));
+            }
+            if let Some(agent) = field("agent_id") {
+                content_lines.push(Line::from(vec![
+                    Span::styled("agent: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(agent),
+                ]));
+            }
+            if let Some(rev) = field("revision_id").filter(|r| !r.is_empty()) {
+                content_lines.push(Line::from(vec![
+                    Span::styled("revision: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(rev),
+                ]));
+            }
+            if let Some(kind) = field("escalation_type") {
+                content_lines.push(Line::from(vec![
+                    Span::styled("type: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(kind),
+                ]));
+            }
+            if let Some(artifact) = entry.refs.artifact_id.clone() {
+                content_lines.push(Line::from(vec![
+                    Span::styled("artifact: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(artifact),
+                ]));
+            }
+            content_lines.push(Line::from(Span::styled(
+                "synthesis:",
+                Style::default().fg(Color::DarkGray),
+            )));
         } else {
-            // Surface amendment context: diff_summary first, then reason.
-            // Either field can explain why v2 replaced v1.
-            if let Some(diff) = payload_field_str(entry, "diff_summary") {
-                if !diff.trim().is_empty() {
-                    content_lines.push(Line::from(Span::styled(
-                        format!("Amendment context: {diff}"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
+            let spec = render::render_spec(entry);
+            content_lines.push(Line::from(Span::styled(
+                spec.headline,
+                Style::default()
+                    .fg(border_color)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            // For plan gates the full proposal is rendered below under "Plan details:".
+            // The timeline entry's detail duplicates the same fields (objective, steps,
+            // version) and, after an amendment, can show a stale v1 summary next to the
+            // live v2 detail — which looks like two versions. Keep only non-redundant
+            // amendment context from the entry (diff_summary / reason) and let the plan
+            // detail section carry the canonical steps/validations.
+            if modal.gate.kind != GateKind::Plan {
+                if let Some(detail) = spec.detail {
+                    for line in detail.lines() {
+                        content_lines.push(Line::from(line.to_string()));
+                    }
                 }
-            }
-            if let Some(reason) = payload_field_str(entry, "reason") {
-                if !reason.trim().is_empty() {
-                    content_lines.push(Line::from(Span::styled(
-                        format!("Amendment reason: {reason}"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
+            } else {
+                // Surface amendment context: diff_summary first, then reason.
+                // Either field can explain why v2 replaced v1.
+                if let Some(diff) = payload_field_str(entry, "diff_summary") {
+                    if !diff.trim().is_empty() {
+                        content_lines.push(Line::from(Span::styled(
+                            format!("Amendment context: {diff}"),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+                if let Some(reason) = payload_field_str(entry, "reason") {
+                    if !reason.trim().is_empty() {
+                        content_lines.push(Line::from(Span::styled(
+                            format!("Amendment reason: {reason}"),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
                 }
             }
         }
@@ -7439,6 +7506,37 @@ fn draw_gate_modal(
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(area);
     let inner_width = inner.width;
+
+    // Render the promotion-escalation synthesis body as markdown now that we
+    // know the available width. This is done after block creation because the
+    // wrapped lines depend on the modal's inner width.
+    if entry.is_some_and(|e| e.event_type == "escalation.pending") {
+        let synthesis_raw = payload_field_str(entry.unwrap(), "synthesis")
+            .unwrap_or_else(|| "operator decision".into());
+        let synthesis_plain = markdown::strip_markdown_if_markdown(&synthesis_raw);
+        let content_w = inner_width.saturating_sub(4) as usize;
+        let normalized = markdown::normalize_narrative_prose(&synthesis_plain);
+        for md_line in markdown::render_markdown(&normalized) {
+            let text = line_display_text(&md_line);
+            if text.trim().is_empty() {
+                content_lines.push(Line::from("  ".to_string()));
+                continue;
+            }
+            let style = md_line
+                .spans
+                .iter()
+                .find(|s| !s.content.is_empty())
+                .map(|s| s.style)
+                .unwrap_or_default();
+            for (i, chunk) in word_wrap_text(text.trim_end(), content_w).into_iter().enumerate() {
+                let prefix = if i == 0 { "  " } else { "    " };
+                content_lines.push(Line::from(vec![
+                    Span::raw(prefix.to_string()),
+                    Span::styled(chunk, style),
+                ]));
+            }
+        }
+    }
 
     let preview_phrase = input
         .is_none()
