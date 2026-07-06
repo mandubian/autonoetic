@@ -62,6 +62,16 @@ pub(crate) fn retry_policy_from_metadata(
         .cloned()
 }
 
+/// Gateway default retry policy for spawned child tasks when the spawner did
+/// not provide one. Only covers transient infrastructure failures and timeouts,
+/// with a small blast radius (one retry each).
+pub(crate) fn default_child_retry_policy() -> Option<serde_json::Value> {
+    Some(serde_json::json!({
+        "transient_infra": { "max_retries": 1 },
+        "timeout": { "max_retries": 1 }
+    }))
+}
+
 fn retry_budget_for_failure(
     retry_policy: &serde_json::Value,
     failure_class: FailureClass,

@@ -721,7 +721,8 @@ the single join already does that."
                 last_failure_class: None,
                 retry_policy: crate::scheduler::workflow_store::retry_policy_from_metadata(
                     args.metadata.as_ref(),
-                ),
+                )
+                .or_else(crate::scheduler::workflow_store::default_child_retry_policy),
                 side_effect_state: None,
                 dedupe_key: durable_operation.as_ref().map(|spec| spec.dedupe_key.clone()),
             };
