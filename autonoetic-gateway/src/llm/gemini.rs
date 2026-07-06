@@ -227,6 +227,22 @@ impl LlmDriver for GeminiDriver {
                     }
                     anyhow::bail!("Gemini rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
                 }
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status,
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
+                    tracing::warn!(
+                        status,
+                        attempt,
+                        wait_ms,
+                        "LLM transient server error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
                 tracing::warn!(
                     target: "autonoetic::llm::gemini",
                     status,

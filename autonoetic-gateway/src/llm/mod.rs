@@ -71,6 +71,13 @@ pub const MAX_CONNECTION_RETRIES: u32 = 3;
 /// connection errors like refused/reset keep [`MAX_CONNECTION_RETRIES`]).
 pub const MAX_TIMEOUT_RETRIES: u32 = 1;
 
+/// Cap for transient server-error (HTTP 5xx with a response body) retries.
+/// These are rarer than connection blips but can happen when an upstream
+/// provider returns a malformed-structured-output 500 or an overloaded 503.
+/// We keep this lower than connection retries to avoid amplifying a genuinely
+/// broken upstream endpoint.
+pub const MAX_5XX_RETRIES: u32 = 2;
+
 /// Default per-request timeout for a non-streaming `complete()` call.
 /// Lowered from a previous 300s: 5 minutes per attempt let a slow/overloaded
 /// endpoint burn ~20 min/turn (timeout × retries) before failing. Override with
@@ -90,6 +97,12 @@ pub fn request_timeout() -> std::time::Duration {
 
 pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {
     (attempt as u64) * 1000
+}
+
+/// Backoff for transient server-error (HTTP 5xx) retries.
+/// Slightly longer than connection blips: upstream is usually under load.
+pub fn server_error_retry_backoff_ms(attempt: u32) -> u64 {
+    (attempt as u64 + 1) * 1500
 }
 
 /// Retry decision for a transient connection error on an LLM call.
@@ -145,6 +158,60 @@ pub(crate) fn retry_wait_decision(
     // Don't sleep past the deadline: if the backoff itself would push us to/over
     // the cap, stop now rather than sleep and then start an attempt that's
     // already late. (Keeps the cumulative wall-clock honest.)
+    if elapsed.saturating_add(std::time::Duration::from_millis(wait_ms)) >= deadline {
+        return None;
+    }
+    Some(wait_ms)
+}
+
+/// Whether a non-success HTTP status/body indicates a transient server error
+/// worth retrying.  Context-overflow errors are handled separately and must NOT
+/// be routed here.
+pub fn is_transient_server_error(status: u16, body: &str) -> bool {
+    if !matches!(status, 500 | 502 | 503 | 504) {
+        return false;
+    }
+    let lc = body.to_lowercase();
+    if lc.is_empty() {
+        return true;
+    }
+    const TRANSIENT_PHRASES: &[&str] = &[
+        "overloaded",
+        "temporarily unavailable",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "peg-native",
+        "server_error",
+        "try again",
+        "try again later",
+    ];
+    TRANSIENT_PHRASES.iter().any(|phrase| lc.contains(phrase))
+}
+
+/// Retry decision for a transient server-error (HTTP 5xx) response.
+///
+/// Returns `Some(wait_ms)` to retry after a backoff, or `None` to stop. Uses the
+/// same wall-clock deadline discipline as [`next_connection_retry_wait`] but with
+/// a separate retry cap ([`MAX_5XX_RETRIES`]) and a longer backoff.
+pub fn next_server_error_retry_wait(
+    status: u16,
+    body: &str,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    if !is_transient_server_error(status, body) {
+        return None;
+    }
+    if elapsed >= deadline {
+        return None;
+    }
+    if attempt >= MAX_5XX_RETRIES {
+        return None;
+    }
+    let wait_ms = server_error_retry_backoff_ms(attempt);
     if elapsed.saturating_add(std::time::Duration::from_millis(wait_ms)) >= deadline {
         return None;
     }
