@@ -7375,18 +7375,32 @@ fn draw_gate_modal(
                     content_lines.push(Line::from(line.to_string()));
                 }
             }
-        } else if let Some(diff) = payload_field_str(entry, "diff_summary") {
-            if !diff.trim().is_empty() {
-                content_lines.push(Line::from(Span::styled(
-                    format!("Amendment context: {diff}"),
-                    Style::default().fg(Color::DarkGray),
-                )));
+        } else {
+            // Surface amendment context: diff_summary first, then reason.
+            // Either field can explain why v2 replaced v1.
+            if let Some(diff) = payload_field_str(entry, "diff_summary") {
+                if !diff.trim().is_empty() {
+                    content_lines.push(Line::from(Span::styled(
+                        format!("Amendment context: {diff}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            if let Some(reason) = payload_field_str(entry, "reason") {
+                if !reason.trim().is_empty() {
+                    content_lines.push(Line::from(Span::styled(
+                        format!("Amendment reason: {reason}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
             }
         }
     } else {
         content_lines.push(Line::from(format!("Gate id: {}", modal.gate.id)));
     }
-    if content_lines.len() <= 2 && !inspect_lines.is_empty() {
+    // Plan gates render the canonical plan detail in a dedicated section below;
+    // do not auto-inject inspect_lines here or the plan would appear twice.
+    if content_lines.len() <= 2 && !inspect_lines.is_empty() && modal.gate.kind != GateKind::Plan {
         content_lines.push(Line::from(Span::styled(
             "From approval record:",
             Style::default().fg(Color::DarkGray),
