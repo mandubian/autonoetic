@@ -1476,6 +1476,9 @@ struct GateModal {
     scroll: u16,
     peek_timeline: bool,
     inspect_lines: Vec<String>,
+    /// For plan gates, the plan version the inspect_lines were fetched from.
+    /// Refetch when the live pending revision changes (e.g. v1 → v2 amend).
+    plan_version: Option<u64>,
 }
 
 struct ApprovalsPopup {
@@ -4533,11 +4536,14 @@ pub fn run(
                     artifact_viewer = None;
                     artifact_file_view = None;
                     let inspect_lines = gate_detail_for_modal(client, root_session_id, &gate_ref);
+                    let plan_version = gate_entry_for_ref(&entries, &gate_ref)
+                        .and_then(|e| plan_version_for(e));
                     gate_modal = Some(GateModal {
                         gate: gate_ref,
                         scroll: 0,
                         peek_timeline: false,
                         inspect_lines,
+                        plan_version,
                     });
                 }
             }
@@ -4547,6 +4553,22 @@ pub fn run(
                 .is_some_and(|g| g.id == modal.gate.id);
             if !still_active {
                 gate_modal = None;
+            } else if modal.gate.kind == GateKind::Plan {
+                // A plan amendment can replace v1 with v2 while the modal is open
+                // (same plan_id, higher version). Refresh inspect_lines so the
+                // operator always reviews the live pending revision.
+                let live_version = gate_entry_for_ref(&entries, &modal.gate)
+                    .and_then(|e| plan_version_for(e));
+                if live_version != modal.plan_version {
+                    let refreshed = gate_detail_for_modal(client, root_session_id, &modal.gate);
+                    gate_modal = Some(GateModal {
+                        gate: modal.gate.clone(),
+                        scroll: modal.scroll,
+                        peek_timeline: modal.peek_timeline,
+                        inspect_lines: refreshed,
+                        plan_version: live_version,
+                    });
+                }
             }
         }
 
@@ -6015,7 +6037,18 @@ fn format_plan_frame_lines(plan: &autonoetic_types::plan_frame::PlanFrame, for_r
             .resolved_agent_id()
             .map(|a| format!(" → {a}"))
             .unwrap_or_default();
-        lines.push(format!("{indent}  {}. {}{}", i + 1, step.title, agent));
+        let status_label = if step.status == autonoetic_types::plan_frame::StepStatus::Pending {
+            String::new()
+        } else {
+            format!(" [{}]", step.status.as_str())
+        };
+        lines.push(format!(
+            "{indent}  {}. {}{}{}",
+            i + 1,
+            step.title,
+            agent,
+            status_label
+        ));
         if let Some(notes) = &step.notes {
             if !notes.trim().is_empty() {
                 lines.push(format!("{indent}     notes: {}", render::one_line(notes, 120)));
@@ -7330,9 +7363,24 @@ fn draw_gate_modal(
                 .fg(border_color)
                 .add_modifier(Modifier::BOLD),
         )));
-        if let Some(detail) = spec.detail {
-            for line in detail.lines() {
-                content_lines.push(Line::from(line.to_string()));
+        // For plan gates the full proposal is rendered below under "Plan details:".
+        // The timeline entry's detail duplicates the same fields (objective, steps,
+        // version) and, after an amendment, can show a stale v1 summary next to the
+        // live v2 detail — which looks like two versions. Keep only non-redundant
+        // amendment context from the entry (diff_summary / reason) and let the plan
+        // detail section carry the canonical steps/validations.
+        if modal.gate.kind != GateKind::Plan {
+            if let Some(detail) = spec.detail {
+                for line in detail.lines() {
+                    content_lines.push(Line::from(line.to_string()));
+                }
+            }
+        } else if let Some(diff) = payload_field_str(entry, "diff_summary") {
+            if !diff.trim().is_empty() {
+                content_lines.push(Line::from(Span::styled(
+                    format!("Amendment context: {diff}"),
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
         }
     } else {
