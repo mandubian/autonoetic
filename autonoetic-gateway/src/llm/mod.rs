@@ -171,7 +171,9 @@ pub fn is_transient_server_error(status: u16, body: &str) -> bool {
     if !matches!(status, 500 | 502 | 503 | 504) {
         return false;
     }
-    let lc = body.to_lowercase();
+    // Trim first: some providers return whitespace/newline-only bodies on 5xx,
+    // which should be treated the same as an empty (transient) body.
+    let lc = body.trim().to_lowercase();
     if lc.is_empty() {
         return true;
     }

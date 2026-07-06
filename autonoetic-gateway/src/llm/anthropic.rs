@@ -295,6 +295,10 @@ impl LlmDriver for AnthropicDriver {
         use futures::StreamExt;
 
         let body = self.build_body(req, true);
+
+        let complete_timeout = crate::llm::request_timeout();
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
         for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
@@ -344,13 +348,13 @@ impl LlmDriver for AnthropicDriver {
                         "context_overflow: provider=anthropic status={} detail={}", status, text
                     );
                 }
-                // The stream path has no wall-clock deadline object in scope; use the
-                // same linear backoff as connection errors for consistency with the
-                // older stream code.
-                if attempt < crate::llm::MAX_5XX_RETRIES
-                    && crate::llm::is_transient_server_error(status, &text)
-                {
-                    let wait_ms = crate::llm::server_error_retry_backoff_ms(attempt);
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status,
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
                     tracing::warn!(
                         status,
                         attempt,

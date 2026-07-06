@@ -795,6 +795,21 @@ mod tests {
         }
 
         #[test]
+        fn whitespace_only_body_treated_as_empty() {
+            // Some providers return whitespace/newline-only 5xx bodies; these
+            // should be treated the same as a truly empty (transient) body.
+            for body in [" ", "\n", "  \n\t ", "\r\n"] {
+                for status in [500, 502, 503, 504] {
+                    assert!(
+                        is_transient_server_error(status, body),
+                        "status {status} body {:?} should be transient",
+                        body
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn allowed_5xx_statuses_are_transient_for_known_phrases() {
             let bodies = [
                 "overloaded",
