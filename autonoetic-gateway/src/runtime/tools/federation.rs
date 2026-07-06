@@ -86,11 +86,14 @@ impl NativeTool for FederationEscalateTool {
                             'rev_<short>' / bare '<short>' (the short form from \
                             agent_revision_create's short_ref, e.g. \
                             'planner.default@rev_abc12345' → pass 'rev_abc12345'). \
-                            OMIT this field entirely for a NEW agent whose artifact has not \
-                            been seeded into a revision yet: the review then binds to the \
-                            artifact (pass artifact_ref) and capabilities are read from the \
-                            artifact's SKILL.md. Do not invent placeholder ids like \
-                            'rev-initial'."
+                            RECOMMENDED: call agent_revision_create first and pass the returned \
+                            revision_id here for BOTH new and existing agents — this routes the \
+                            escalation through the seeded path (capabilities read from the \
+                            revision record). FALLBACK (not recommended): for a NEW agent that \
+                            cannot be seeded yet, omit revision_id and pass artifact_ref; the \
+                            review then binds to the artifact and capabilities are read from its \
+                            SKILL.md (fails opaquely if the frontmatter is missing/invalid). \
+                            Do not invent placeholder ids like 'rev-initial'."
                     },
                     "role_verdicts": {
                         "type": "array",

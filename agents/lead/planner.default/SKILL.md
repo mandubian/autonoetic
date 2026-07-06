@@ -387,10 +387,20 @@ libraries, coder declares them in `requirements.txt` / `package.json` and may re
 `status: "needs_packager"`. Spawn **`packager.default`** before federation gates so
 `unit_test_runner` can import deps via mounted layers.
 
-**Order:** coder → packager (if needed) → federation gates → `federation.escalate` → agent-factory.
+**Order:** coder → packager (if needed) → federation gates → `agent_revision_create` (seed) → `federation.escalate` (pass the seeded `revision_id`) → agent-factory.
 
 Gating an unpackaged artifact then packaging invalidates every `promotion_record` (new digest).
 Always pass the **post-packager** `artifact_ref` to federation roles and to agent-factory.
+
+**Seed the revision before escalating.** Once all federation roles pass, call
+`agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` and pass
+the returned `revision_id` (`rev_sha256:...`) to `federation.escalate`. This routes the
+escalation through the robust **seeded** path (capabilities read from the revision
+record) instead of the fragile **unseeded** path that parses the artifact's `SKILL.md`
+frontmatter at escalate time — a missing/invalid frontmatter then fails fast at seed
+time, before the operator is ever bothered. If `agent_revision_create` returns
+`promotion_gate_content_digest_would_change`, the artifact changed since the gates ran —
+re-run federation on the current `artifact_ref` rather than reseeding.
 
 ---
 
@@ -423,19 +433,23 @@ Use `promotion_query` records — not child reply JSON — as the source of trut
 
 **Step 3: Escalate to operator**
 
-Bundle all evaluation reports and escalate to the operator using `federation.escalate`:
+Bundle all evaluation reports and escalate to the operator using `federation.escalate`.
 
-For `revision_id`: a **new agent** has no seeded revision at this point (agent-factory
-creates it after approval) — **omit `revision_id` entirely**; the gateway binds the review
-to the artifact and reads capabilities from the artifact's SKILL.md. Do **not** invent a
-revision id. For an **existing agent**, pass the real revision id returned by
-`agent_revision_create` (full `rev_sha256:...` or its short `rev_*` form).
+**Seed the revision first**, then pass its id. Before escalating, call
+`agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})`. It returns
+`{revision_id: "rev_sha256:...", short_ref: "<agent>@rev_<short>", status: "created" | "already_exists" | "reactivated"}`
+— `"already_exists"`/`"reactivated"` means a candidate revision with the same content
+digest was reused (the `revision_id` is still valid to pass on). Pass that `revision_id`
+to `federation.escalate` — for **both new and existing agents**. This avoids the
+unseeded-escalation path, which reads capabilities from the artifact's `SKILL.md` at
+escalate time and fails opaquely if the frontmatter is missing or invalid. Do **not** omit
+`revision_id` and do **not** invent a placeholder.
 
 ```json
 federation.escalate({
-  "artifact_id": "<artifact_ref>",
+  "artifact_ref": "<ar.* ref>",
   "agent_id": "<agent_id>",
-  "revision_id": "<rev_sha256:... — existing agents only; OMIT for a new agent>",
+  "revision_id": "<rev_sha256:... from agent_revision_create>",
   "root_session_id": "<root_session_id>",
   "role_verdicts": [
     {"role": "auditor", "agent_id": "auditor.default", "passed": true, "findings_summary": "...", "recorded_at": "..."},
