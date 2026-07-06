@@ -762,4 +762,145 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Transient server-error (HTTP 5xx body) retry
+    // -----------------------------------------------------------------------
+    mod server_error_retry {
+        use crate::llm::{
+            is_transient_server_error, next_server_error_retry_wait,
+            server_error_retry_backoff_ms, MAX_5XX_RETRIES,
+        };
+        use std::time::Duration;
+
+        const DEADLINE: Duration = Duration::from_secs(240);
+
+        #[test]
+        fn statuses_outside_5xx_range_are_not_transient() {
+            assert!(!is_transient_server_error(400, "internal server error"));
+            assert!(!is_transient_server_error(401, "unauthorized"));
+            assert!(!is_transient_server_error(429, "rate limited"));
+            assert!(!is_transient_server_error(529, "overloaded"));
+            assert!(!is_transient_server_error(599, "server error"));
+        }
+
+        #[test]
+        fn allowed_5xx_statuses_are_transient_when_body_empty() {
+            for status in [500, 502, 503, 504] {
+                assert!(
+                    is_transient_server_error(status, ""),
+                    "status {status} with empty body should be transient"
+                );
+            }
+        }
+
+        #[test]
+        fn allowed_5xx_statuses_are_transient_for_known_phrases() {
+            let bodies = [
+                "overloaded",
+                "Temporarily Unavailable",
+                "Internal Server Error",
+                "Bad Gateway",
+                "Service Unavailable",
+                "Gateway Timeout",
+                "peg-native",
+                "server_error",
+                "try again",
+                "Please try again later",
+            ];
+            for body in bodies {
+                for status in [500, 502, 503, 504] {
+                    assert!(
+                        is_transient_server_error(status, body),
+                        "status {status} body '{body}' should be transient"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn non_matching_5xx_body_is_not_transient() {
+            assert!(!is_transient_server_error(500, "{\"error\": \"invalid_request\"}"));
+            assert!(!is_transient_server_error(500, "validation failed"));
+            assert!(!is_transient_server_error(500, "permission denied"));
+        }
+
+        #[test]
+        fn backoff_increases_linearly() {
+            assert_eq!(server_error_retry_backoff_ms(0), 1500);
+            assert_eq!(server_error_retry_backoff_ms(1), 3000);
+            assert_eq!(server_error_retry_backoff_ms(2), 4500);
+        }
+
+        #[test]
+        fn retries_up_to_max_5xx_retries() {
+            assert_eq!(MAX_5XX_RETRIES, 2);
+            for attempt in 0..MAX_5XX_RETRIES {
+                assert!(
+                    next_server_error_retry_wait(
+                        500,
+                        "internal server error",
+                        attempt,
+                        Duration::ZERO,
+                        DEADLINE,
+                    )
+                    .is_some(),
+                    "attempt {attempt} should retry"
+                );
+            }
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "internal server error",
+                    MAX_5XX_RETRIES,
+                    Duration::ZERO,
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn non_transient_5xx_never_retries() {
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "{\"error\": \"invalid_request\"}",
+                    0,
+                    Duration::ZERO,
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn deadline_stops_5xx_retries() {
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "internal server error",
+                    0,
+                    Duration::from_secs(241),
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn backoff_crossing_deadline_stops_now() {
+            // attempt 1 backoff is 3000ms; at 238s elapsed it would cross 240s.
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "internal server error",
+                    1,
+                    Duration::from_millis(238_500),
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+    }
 }

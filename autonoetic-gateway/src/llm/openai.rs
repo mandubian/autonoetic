@@ -488,6 +488,22 @@ impl LlmDriver for OpenAiDriver {
                         "context_overflow: provider=openai status={} detail={}", status, text
                     );
                 }
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status.as_u16(),
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        attempt,
+                        wait_ms,
+                        "LLM transient server error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
                 tracing::warn!(
                     target: "llm::openai",
                     status = %status,
@@ -542,6 +558,9 @@ impl LlmDriver for OpenAiDriver {
 
         let body = self.build_body(req, true);
 
+        let complete_timeout = crate::llm::request_timeout();
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
         for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
@@ -569,6 +588,27 @@ impl LlmDriver for OpenAiDriver {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
+                if crate::llm::is_context_overflow_error(status.as_u16(), &text) {
+                    anyhow::bail!(
+                        "context_overflow: provider=openai status={} detail={}", status, text
+                    );
+                }
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status.as_u16(),
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        attempt,
+                        wait_ms,
+                        "LLM transient server error in stream, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
                 tracing::warn!(
                     target: "autonoetic::llm::openai",
                     status = %status,
