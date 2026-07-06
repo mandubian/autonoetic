@@ -2413,6 +2413,11 @@ impl GatewayExecutionService {
                     }
                     checkpoint.restore_into(runtime);
                     let mut history = checkpoint.history.clone();
+                    inject_session_context_after_system_message(
+                        &runtime.agent_dir,
+                        session_id,
+                        &mut history,
+                    );
                     let operator = req.decided_by.as_deref().unwrap_or("operator");
                     let guidance_note = req.decision_reason.as_deref().unwrap_or("");
                     let escalation_msg = if guidance_note.is_empty() {
@@ -2460,6 +2465,11 @@ impl GatewayExecutionService {
             checkpoint.restore_into(runtime);
 
             let mut history = checkpoint.history.clone();
+            inject_session_context_after_system_message(
+                &runtime.agent_dir,
+                session_id,
+                &mut history,
+            );
             let (turn_start_messages, resume_message) =
                 gateway_signal_turn_start_context(
                     message,
@@ -3154,6 +3164,11 @@ impl GatewayExecutionService {
                         // If the incoming message is already the last user message in
                         // the checkpoint history, don't duplicate it.
                         let mut history = checkpoint.history.clone();
+                        inject_session_context_after_system_message(
+                            &runtime.agent_dir,
+                            session_id,
+                            &mut history,
+                        );
                         let last_user = history.iter().rev().find(|m| m.role == crate::llm::Role::User);
                         let should_append = match last_user {
                             Some(last) => last.content != message,
@@ -4407,6 +4422,41 @@ pub fn sha256_hex(input: &str) -> String {
 }
 
 
+fn inject_session_context_after_system_message(
+    agent_dir: &std::path::Path,
+    session_id: &str,
+    history: &mut Vec<Message>,
+) {
+    let injected: Vec<Message> = match SessionContext::load(agent_dir, session_id).and_then(
+        |context| {
+            Ok(context
+                .render_prompt()
+                .map(Message::system)
+                .into_iter()
+                .collect::<Vec<_>>())
+        },
+    ) {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_id,
+                "Failed to load session context for checkpoint resume"
+            );
+            return;
+        }
+    };
+    if injected.is_empty() {
+        return;
+    }
+    // Match build_initial_history: context sits between the agent's system
+    // instructions (first message) and the conversation transcript.
+    let insert_pos = if history.first().is_some() { 1 } else { 0 };
+    for (offset, msg) in injected.into_iter().enumerate() {
+        history.insert(insert_pos + offset, msg);
+    }
+}
+
 fn build_initial_history(
     agent_dir: &std::path::Path,
     instructions: &str,
@@ -4891,6 +4941,40 @@ mod tests {
         let body = std::fs::read_to_string(path).expect("session context file should exist");
         assert!(body.contains("\"last_user_message\": \"real user message\""));
         assert!(body.contains("\"last_assistant_reply\": \"reply two\""));
+    }
+
+    #[test]
+    fn test_inject_session_context_into_checkpoint_history_after_system_message() {
+        use crate::runtime::session_context::{SessionContext, SessionFact};
+
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let mut context = SessionContext::empty("session-ctx-inject");
+        context.set_current_topic("fibonacci-next (installed)".to_string());
+        context.add_fact(SessionFact {
+            label: "installed_agent".to_string(),
+            value: "fibonacci-next".to_string(),
+            source: "promotion".to_string(),
+        });
+        context.save(temp.path()).expect("context should save");
+
+        let mut history = vec![
+            Message::system("You are a helpful planner.".to_string()),
+            Message::user("call it 5 times".to_string()),
+        ];
+        inject_session_context_after_system_message(
+            temp.path(),
+            "session-ctx-inject",
+            &mut history,
+        );
+
+        assert_eq!(history.len(), 3);
+        assert!(matches!(history[0].role, crate::llm::Role::System));
+        assert!(history[0].content.contains("You are a helpful planner"));
+        assert!(matches!(history[1].role, crate::llm::Role::System));
+        assert!(history[1].content.contains("Current focus: fibonacci-next (installed)"));
+        assert!(history[1].content.contains("installed_agent: fibonacci-next"));
+        assert!(matches!(history[2].role, crate::llm::Role::User));
+        assert_eq!(history[2].content, "call it 5 times");
     }
 
     #[test]
