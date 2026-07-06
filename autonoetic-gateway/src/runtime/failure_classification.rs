@@ -266,6 +266,7 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
         || lower.contains("503")
         || lower.contains("504")
         || lower.contains("500")
+        || lower.contains("529")
         || lower.contains("api error 5")
         || lower.contains("overloaded")
         || lower.contains("peg-native")
@@ -381,6 +382,7 @@ pub(crate) fn classify_task_status(
                 || summary.contains("503")
                 || summary.contains("504")
                 || summary.contains("500")
+                || summary.contains("529")
                 || summary.contains("api error 5")
                 || summary.contains("overloaded")
                 || summary.contains("peg-native")
@@ -534,15 +536,14 @@ mod tests {
         );
     }
 
-    // P-5.14: prose is the last-resort fallback for error types without an
-    // unambiguous type-only mapping. An `Execution` error whose message says
-    // "active revision exists" still resolves to install_conflict via the
-    // string heuristics.
+    // Classification tests for LLM/server-style transient infrastructure
+    // failures. These exercise the prose fallback string heuristics that map
+    // HTTP 5xx and related overload phrases to TransientInfra.
     #[test]
     fn llm_5xx_task_status_is_transient_infra() {
         let cases = [
             "OpenAI API error 500: internal server error",
-            "Anthropic API error 529: overloaded",
+            "Anthropic API error 529",
             "model produced output that does not match the expected peg-native format",
             "upstream returned api error 500",
             "connection refused",
@@ -568,7 +569,7 @@ mod tests {
     fn llm_5xx_message_is_transient_infra() {
         let cases = [
             "OpenAI API error 500: internal server error",
-            "Anthropic API error 529: overloaded",
+            "Anthropic API error 529",
             "model produced output that does not match the expected peg-native format",
             "upstream returned api error 5xx",
         ];

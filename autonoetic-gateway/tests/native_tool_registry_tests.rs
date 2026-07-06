@@ -1578,10 +1578,15 @@ fn test_agent_spawn_injects_default_retry_policy() {
         .and_then(|v| v.as_str())
         .expect("queued response should include task_id");
 
+    let workflow_id = parsed
+        .get("workflow_id")
+        .and_then(|v| v.as_str())
+        .expect("queued response should include workflow_id");
+
     let task = autonoetic_gateway::scheduler::workflow_store::load_task_run(
         &config,
         Some(gateway_store.as_ref()),
-        parsed.get("workflow_id").and_then(|v| v.as_str()).unwrap_or(""),
+        workflow_id,
         task_id,
     )
     .expect("load task run")
@@ -1659,10 +1664,15 @@ fn test_agent_spawn_preserves_explicit_retry_policy() {
         .and_then(|v| v.as_str())
         .expect("queued response should include task_id");
 
+    let workflow_id = parsed
+        .get("workflow_id")
+        .and_then(|v| v.as_str())
+        .expect("queued response should include workflow_id");
+
     let task = autonoetic_gateway::scheduler::workflow_store::load_task_run(
         &config,
         Some(gateway_store.as_ref()),
-        parsed.get("workflow_id").and_then(|v| v.as_str()).unwrap_or(""),
+        workflow_id,
         task_id,
     )
     .expect("load task run")
