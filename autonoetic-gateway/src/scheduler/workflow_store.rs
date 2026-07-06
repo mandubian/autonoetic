@@ -1484,7 +1484,12 @@ pub fn retry_workflow_task(
         }
     }
 
-    append_workflow_event(
+    // Event emission is best-effort: by this point the task and (optionally)
+    // workflow-run state have been durably mutated and the retry has succeeded.
+    // Returning an error here would mislead the operator (the retry *did* work)
+    // and could cause a double-retry (retry_count bumped again). Log and
+    // continue returning the updated task.
+    if let Err(e) = append_workflow_event(
         config,
         store,
         &WorkflowEventRecord {
@@ -1501,9 +1506,47 @@ pub fn retry_workflow_task(
             }),
             occurred_at: now_rfc3339(),
         },
-    )?;
+    ) {
+        tracing::warn!(
+            target: "workflow_store",
+            workflow_id,
+            task_id,
+            error = %e,
+            "retry_workflow_task: failed to append task.updated event (state already mutated; retry succeeded)",
+        );
+    }
 
     Ok(task)
+}
+
+/// Resolve a workflow id from operator-supplied `workflow_id` / `root_session`
+/// parameters, applying consistent normalization (trim; whitespace-only treated
+/// as absent). Used by both the CLI handler and the `workflow.task.retry` RPC
+/// arm so the resolution ladder and error messages stay identical.
+///
+/// Resolution order: explicit `workflow_id` > lookup by `root_session` > error.
+pub fn resolve_workflow_id_for_operator_retry(
+    config: &GatewayConfig,
+    workflow_id: Option<&str>,
+    root_session: Option<&str>,
+) -> anyhow::Result<String> {
+    let wf = workflow_id.map(str::trim).filter(|s| !s.is_empty());
+    let rs = root_session.map(str::trim).filter(|s| !s.is_empty());
+    match wf {
+        Some(w) => Ok(w.to_string()),
+        None => match rs {
+            Some(rsid) => resolve_workflow_id_for_root_session(config, rsid)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no workflow found for root session '{}'; pass --workflow-id explicitly",
+                        rsid
+                    )
+                }),
+            None => anyhow::bail!(
+                "either workflow_id or root_session must be provided to locate the workflow"
+            ),
+        },
+    }
 }
 
 /// Gather child-state summaries for all terminal tasks in a join group.
@@ -5114,6 +5157,40 @@ mod tests {
         assert!(
             err.to_string().contains("only Failed or Aborted"),
             "non-terminal task should be rejected; got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_workflow_id_for_operator_retry_normalizes_and_prefers_explicit() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "resolve-root", None).unwrap();
+
+        // Explicit workflow_id wins (and trims surrounding whitespace).
+        let resolved = resolve_workflow_id_for_operator_retry(
+            &cfg,
+            Some(&format!("  {}  ", wf.workflow_id)),
+            Some("resolve-root"),
+        )
+        .unwrap();
+        assert_eq!(resolved, wf.workflow_id);
+
+        // root_session resolves when workflow_id is absent/whitespace.
+        let resolved_by_root = resolve_workflow_id_for_operator_retry(
+            &cfg,
+            Some("   "),
+            Some("resolve-root"),
+        )
+        .unwrap();
+        assert_eq!(resolved_by_root, wf.workflow_id);
+
+        // Neither provided (both whitespace/None) → error.
+        let err = resolve_workflow_id_for_operator_retry(&cfg, Some("  "), None).unwrap_err();
+        assert!(
+            err.to_string().contains("either workflow_id or root_session"),
+            "missing both should error; got: {err}"
         );
     }
 

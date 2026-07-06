@@ -2989,25 +2989,15 @@ pub async fn handle_gateway_workflow(
                         &gateway_dir,
                     )?;
 
-                // Resolve the workflow id: explicit > by root session > error.
-                let wf_id = if let Some(w) = workflow_id {
-                    w.clone()
-                } else if let Some(rsid) = root_session {
-                    autonoetic_gateway::scheduler::workflow_store::resolve_workflow_id_for_root_session(
-                        &config, rsid,
-                    )?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no workflow found for root session '{}'; pass --workflow-id explicitly",
-                            rsid
-                        )
-                    })?
-                } else {
-                    anyhow::bail!(
-                        "task '{}' could not be retried: pass either --workflow-id or --root-session to locate its workflow",
-                        task_id
-                    );
-                };
+                // Resolve the workflow id with the shared helper so the
+                // (explicit workflow_id > root_session > error) ladder and the
+                // trim/empty-as-None normalization stay identical to the RPC arm.
+                let wf_id =
+                    autonoetic_gateway::scheduler::workflow_store::resolve_workflow_id_for_operator_retry(
+                        &config,
+                        workflow_id.as_deref(),
+                        root_session.as_deref(),
+                    )?;
 
                 let task =
                     autonoetic_gateway::scheduler::workflow_store::retry_workflow_task(

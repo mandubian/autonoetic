@@ -3721,43 +3721,22 @@ impl JsonRpcRouter {
                 let config = self.execution.config();
                 let store = self.execution.gateway_store();
 
-                // Resolve workflow_id: explicit > by root session.
-                let wf_id = match params.workflow_id {
-                    Some(w) => w,
-                    None => match params.root_session.as_deref() {
-                        Some(rsid) => {
-                            match crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
-                                config.as_ref(),
-                                rsid,
-                            ) {
-                                Ok(Some(id)) => id,
-                                Ok(None) => {
-                                    return JsonRpcResponse::error(
-                                        req.id,
-                                        -32000,
-                                        format!(
-                                            "no workflow found for root session '{}'",
-                                            rsid
-                                        ),
-                                    );
-                                }
-                                Err(e) => {
-                                    return JsonRpcResponse::error(
-                                        req.id,
-                                        -32000,
-                                        format!("workflow lookup failed: {}", e),
-                                    );
-                                }
-                            }
-                        }
-                        None => {
-                            return JsonRpcResponse::error(
-                                req.id,
-                                -32602,
-                                "either workflow_id or root_session must be provided",
-                            );
-                        }
-                    },
+                // Resolve workflow_id with the shared helper so the
+                // (explicit workflow_id > root_session > error) ladder and the
+                // trim/empty-as-None normalization stay identical to the CLI.
+                let wf_id = match crate::scheduler::workflow_store::resolve_workflow_id_for_operator_retry(
+                    config.as_ref(),
+                    params.workflow_id.as_deref(),
+                    params.root_session.as_deref(),
+                ) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("workflow lookup failed: {}", e),
+                        );
+                    }
                 };
 
                 match crate::scheduler::workflow_store::retry_workflow_task(

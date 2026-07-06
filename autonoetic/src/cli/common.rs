@@ -631,13 +631,12 @@ pub enum GatewayTaskCommands {
     Retry {
         /// Task ID (e.g. task-xxxxxxxx).
         task_id: String,
-        /// Workflow ID. If omitted, the task is looked up by task_id across
-        /// workflows under the given --root-session (or all workflows if that
-        /// is also omitted).
+        /// Workflow ID (wf-*). One of --workflow-id / --root-session is
+        /// required to locate the workflow. Takes precedence over --root-session.
         #[arg(long)]
         workflow_id: Option<String>,
-        /// Root session ID, used to locate the workflow when --workflow-id is
-        /// omitted.
+        /// Root session ID, used to resolve the workflow when --workflow-id is
+        /// omitted. One of --workflow-id / --root-session is required.
         #[arg(long)]
         root_session: Option<String>,
         /// Optional note stamped on the task's result_summary (default:
