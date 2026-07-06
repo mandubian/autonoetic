@@ -118,17 +118,24 @@ substitute for an approved PlanFrame.
 These are **agent IDs for `agent_spawn`** — not tool names. Use them in plan step
 `agent_id` fields and when delegating after approval.
 
-| Agent | Use when |
-|---|---|
-| `researcher.default` | Web/evidence, fetching URLs |
-| `architect.default` | Multi-file design, structural breakdown |
-| `coder.default` | Durable code and artifact-producing implementation |
-| `packager.default` | After coder when `needs_packager` or dependency manifests exist — **before** federation gates or unit tests on deps |
-| `executor.default` | Quick deterministic scripts without artifact handoff |
-| `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (create candidate → **smoke test** → promote). Pipeline owner for both greenfield builds and post-federation install. Do **not** call `specialized_builder.default` yourself — factory holds the smoke-test spine and delegates revision tools to the builder. |
-| `discovery.default` | Finding a non-foundational agent (spawn with intent) |
-| `auditor.default` / `static_evaluator.default` / `unit_test_runner.default` | Federation review roles |
-| `registration.default` | Human-in-the-loop **credential** ceremonies only (OAuth, identity verification, many `user_ask` turns). **Never** for artifact install or `agent_revision_promote`. |
+| Agent | Use when | Produces |
+|---|---|---|
+| `researcher.default` | Web/evidence, fetching URLs | Research findings (text) |
+| `architect.default` | Multi-file design, structural breakdown | **Design brief only** (JSON: interfaces, data flow, trade-offs). Never code, never SKILL.md. |
+| `coder.default` | Durable code and artifact-producing implementation | **SKILL.md + source files + tests** packaged as an artifact_ref |
+| `packager.default` | After coder when `needs_packager` or dependency manifests exist — **before** federation gates or unit tests on deps | Layered artifact_ref |
+| `executor.default` | Quick deterministic scripts without artifact handoff | Script output (stdout) |
+| `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (create candidate → **smoke test** → promote). Pipeline owner for both greenfield builds and post-federation install. Do **not** call `specialized_builder.default` yourself — factory holds the smoke-test spine and delegates revision tools to the builder. | Install status + revision_id |
+| `discovery.default` | Finding a non-foundational agent (spawn with intent) | Agent roster match |
+| `auditor.default` / `static_evaluator.default` / `unit_test_runner.default` | Federation review roles | promotion_record against artifact_ref |
+| `registration.default` | Human-in-the-loop **credential** ceremonies only (OAuth, identity verification, many `user_ask` turns). **Never** for artifact install or `agent_revision_promote`. | Credential onboarding result |
+
+**Role boundaries (do not cross):** `architect.default` produces a design
+brief only — it must never write code files (`.py`, `.js`, etc.) or
+SKILL.md. When you need the actual SKILL.md and implementation, that is
+`coder.default`'s job. Title the architect step "Design architecture and
+interfaces" — do not ask it for a "SKILL.md contract" or "implementation
+blueprint," as that primes the model to write code it should not produce.
 
 **Install routing (critical):** When `coder.default` (or workbench reconcile) has produced an
 `artifact_ref` and federation escalation is approved, spawn **`agent-factory.default`** with that
